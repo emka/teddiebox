@@ -377,4 +377,52 @@ mod tests {
         // packet out of the lacing entries that followed the oversized one.
         assert_eq!(r.next_packet(&mut buf), Err(TafError::NotAnOggPage));
     }
+
+    const CHAPTERS_FIXTURE: &[u8] = include_bytes!("../tests/data/chapters.taf");
+
+    #[test]
+    fn the_multi_chapter_fixture_has_three_chapters() {
+        let r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        assert_eq!(r.chapter_count(), 3);
+    }
+
+    #[test]
+    fn multi_chapter_pages_are_strictly_increasing() {
+        let r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        let pages = r.header().chapter_pages.as_slice();
+        for w in pages.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "chapter pages must be strictly increasing: {pages:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn seeking_to_each_chapter_succeeds_and_lands_on_different_audio() {
+        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+
+        r.seek_to_chapter(0).unwrap();
+        let mut chapter0_buf = [0u8; MAX_PACKET];
+        let n0 = r.next_packet(&mut chapter0_buf).unwrap().expect("a packet");
+
+        for chapter in 1..r.chapter_count() {
+            r.seek_to_chapter(chapter).unwrap();
+            let mut buf = [0u8; MAX_PACKET];
+            let n = r.next_packet(&mut buf).unwrap().expect("a packet");
+            assert!(n > 0);
+            assert_ne!(
+                &buf[..n],
+                &chapter0_buf[..n0],
+                "chapter {chapter}'s first packet should differ from chapter 0's"
+            );
+        }
+    }
+
+    #[test]
+    fn seeking_past_the_last_chapter_of_the_multi_chapter_fixture_is_an_error() {
+        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        let n = r.chapter_count();
+        assert_eq!(r.seek_to_chapter(n), Err(TafError::PageOutOfRange));
+    }
 }
