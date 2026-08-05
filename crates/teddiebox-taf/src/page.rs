@@ -40,6 +40,11 @@ impl<'a> OggPage<'a> {
     }
 
     /// Yields each complete packet in this page.
+    ///
+    /// A trailing packet whose lacing runs out before a terminating value
+    /// (below 255) is not complete within this page — it continues onto the
+    /// next one — and is silently dropped rather than handed to the caller
+    /// as a truncated packet.
     pub fn packets(&self) -> Packets<'a> {
         Packets {
             page: self.page,
@@ -84,6 +89,11 @@ impl<'a> Iterator for Packets<'a> {
         }
         let end = start.checked_add(len)?;
         if end > PAGE_SIZE {
+            // Fail closed, exactly as the continuation branch does. Returning
+            // None without exhausting the lacing table would let a later call
+            // resume from a stale `start` and hand the decoder an in-bounds
+            // slice that is not a real packet.
+            self.lacing = self.lacing_end;
             return None;
         }
         self.payload = end;
@@ -152,5 +162,75 @@ mod tests {
         page[6..14].copy_from_slice(&960u64.to_le_bytes());
         let parsed = OggPage::parse(&page).unwrap();
         assert_eq!(parsed.granule_position(), 960);
+    }
+
+    #[test]
+    fn yields_a_packet_of_exactly_255_bytes() {
+        // Lacing [255, 0]: a length that is an exact multiple of 255 is
+        // terminated by an explicit zero segment, not folded into the 255.
+        let page = ogg_page(&[&[0xCC; 255]]);
+        let parsed = OggPage::parse(&page).unwrap();
+        let packets: heapless::Vec<&[u8], 8> = parsed.packets().collect();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0], &[0xCC; 255][..]);
+    }
+
+    #[test]
+    fn drops_a_packet_whose_lacing_runs_out_without_a_terminator() {
+        // A single lacing entry of 255 with no follow-up value below 255:
+        // the packet is not complete within this page, so it must be
+        // dropped rather than handed to the decoder as a truncated packet.
+        let mut page = [0u8; PAGE_SIZE];
+        page[0..4].copy_from_slice(CAPTURE_PATTERN);
+        page[26] = 1;
+        page[27] = 255;
+        let parsed = OggPage::parse(&page).unwrap();
+        let mut packets = parsed.packets();
+        assert_eq!(packets.next(), None);
+        // Terminality: once the lacing table is exhausted, further calls
+        // must keep returning None rather than re-reading stale state.
+        assert_eq!(packets.next(), None);
+    }
+
+    #[test]
+    fn stops_yielding_after_an_oversized_packet_even_with_lacing_entries_remaining() {
+        // 20 segments: the first 17 (sixteen 255s plus a terminating 1)
+        // declare a 4081-byte packet starting at payload offset 47, which
+        // overruns the 4096-byte page. Three lacing entries remain after
+        // it. A corrupt/malicious page must not let those remaining
+        // entries be interpreted starting from a stale payload offset.
+        let mut page = [0u8; PAGE_SIZE];
+        page[0..4].copy_from_slice(CAPTURE_PATTERN);
+        let segment_count: usize = 20;
+        page[26] = segment_count as u8;
+        for i in 0..16 {
+            page[27 + i] = 255;
+        }
+        page[27 + 16] = 1; // terminator: total declared length 16*255+1 = 4081
+        page[27 + 17] = 10; // remaining lacing entries after the oversized packet
+        page[27 + 18] = 0;
+        page[27 + 19] = 0;
+
+        let parsed = OggPage::parse(&page).unwrap();
+        let mut packets = parsed.packets();
+        assert_eq!(packets.next(), None);
+        // Must not resume from a stale `start` and hand back a bogus
+        // in-bounds slice built from the remaining lacing entries.
+        assert_eq!(packets.next(), None);
+    }
+
+    #[test]
+    fn is_continuation_reports_true_when_the_flag_is_set() {
+        let mut page = ogg_page(&[&[1]]);
+        page[5] |= 0x01;
+        let parsed = OggPage::parse(&page).unwrap();
+        assert!(parsed.is_continuation());
+    }
+
+    #[test]
+    fn is_continuation_reports_false_when_the_flag_is_clear() {
+        let page = ogg_page(&[&[1]]);
+        let parsed = OggPage::parse(&page).unwrap();
+        assert!(!parsed.is_continuation());
     }
 }
