@@ -1,9 +1,13 @@
 #![no_std]
 
 mod header;
+mod page;
+mod source;
 mod varint;
 
 pub use header::TonieHeader;
+pub use page::OggPage;
+pub use source::{PageSource, SlicePages};
 
 /// Every structure in a Tonie audio file is aligned to this boundary: the
 /// header occupies page 0, and each Ogg page occupies exactly one page
