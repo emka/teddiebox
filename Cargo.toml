@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/teddiebox-taf"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+heapless = { version = "0.8", default-features = false }
