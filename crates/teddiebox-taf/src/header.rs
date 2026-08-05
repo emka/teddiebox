@@ -1,5 +1,10 @@
-//! The TAF header: a big-endian length prefix, a protobuf message, and
-//! 0xFF padding out to the end of page 0.
+//! The TAF header: a big-endian length prefix followed by a protobuf message
+//! that fills the remainder of page 0.
+//!
+//! The message is padded to the page boundary from the inside, by a
+//! zero-filled length-delimited field, rather than by trailing bytes after it.
+//! The generic unknown-field skip handles that field like any other; no
+//! special case is needed or wanted.
 
 use crate::varint::read_varint;
 use crate::{TafError, MAX_CHAPTERS, PAGE_SIZE};
@@ -123,7 +128,7 @@ mod tests {
 
     #[test]
     fn parses_packed_chapter_pages() {
-        // field 4, wire type 2, length 3, values 1, 50, 120
+        // field 4, wire type 2, payload length 4, values 1, 50, 120, 1
         let fields = [0x22, 0x04, 0x01, 0x32, 0x78, 0x01];
         let h = TonieHeader::parse(&header_page(&fields)).unwrap();
         assert_eq!(h.chapter_pages.as_slice(), &[1, 50, 120, 1]);
