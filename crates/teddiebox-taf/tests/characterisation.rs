@@ -66,3 +66,11 @@ fn every_page_after_the_header_is_an_ogg_page() {
         assert_eq!(&page[0..4], b"OggS", "page {i} is not an Ogg page");
     }
 }
+
+#[test]
+fn the_real_fixture_header_parses() {
+    let page: &[u8; PAGE_SIZE] = FIXTURE[0..PAGE_SIZE].try_into().unwrap();
+    let h = teddiebox_taf::TonieHeader::parse(page).expect("header should parse");
+    assert_eq!(h.audio_id, 0x1234_5678, "audio id set by fixturegen");
+    assert!(h.data_length > 0);
+}
