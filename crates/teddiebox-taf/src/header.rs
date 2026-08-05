@@ -81,6 +81,13 @@ impl TonieHeader {
                             .push(v)
                             .map_err(|_| TafError::TooManyChapters)?;
                     }
+                    // A varint whose continuation bytes cross `end` is only
+                    // caught here: `read_varint` itself isn't bounded by
+                    // `end`, so it would otherwise read on into whatever
+                    // follows the packed field instead of being rejected.
+                    if pos != end {
+                        return Err(TafError::MalformedHeader);
+                    }
                 }
                 // Unknown field: skip by wire type.
                 (_, 0) => {
@@ -94,8 +101,22 @@ impl TonieHeader {
                         return Err(TafError::MalformedHeader);
                     }
                 }
-                (_, 5) => pos += 4,
-                (_, 1) => pos += 8,
+                // Fixed-width unknown fields must be bounds-checked like the
+                // length-delimited case. Advancing past the end would leave the
+                // `while pos < body.len()` loop simply false, returning Ok on a
+                // truncated message instead of rejecting it.
+                (_, 5) => {
+                    pos = pos.checked_add(4).ok_or(TafError::MalformedHeader)?;
+                    if pos > body.len() {
+                        return Err(TafError::MalformedHeader);
+                    }
+                }
+                (_, 1) => {
+                    pos = pos.checked_add(8).ok_or(TafError::MalformedHeader)?;
+                    if pos > body.len() {
+                        return Err(TafError::MalformedHeader);
+                    }
+                }
                 _ => return Err(TafError::MalformedHeader),
             }
         }
@@ -155,5 +176,40 @@ mod tests {
         let mut page = [0xFFu8; PAGE_SIZE];
         page[0..4].copy_from_slice(&(PAGE_SIZE as u32).to_be_bytes());
         assert_eq!(TonieHeader::parse(&page), Err(TafError::MalformedHeader));
+    }
+
+    #[test]
+    fn rejects_truncated_fixed32_field() {
+        // field 9, wire type 5 (fixed32): declares a 4-byte payload but only
+        // 2 bytes remain in the body.
+        let fields = [0x4D, 0x00, 0x00];
+        assert_eq!(
+            TonieHeader::parse(&header_page(&fields)),
+            Err(TafError::MalformedHeader)
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_fixed64_field() {
+        // field 9, wire type 1 (fixed64): declares an 8-byte payload but only
+        // 2 bytes remain in the body.
+        let fields = [0x49, 0x00, 0x00];
+        assert_eq!(
+            TonieHeader::parse(&header_page(&fields)),
+            Err(TafError::MalformedHeader)
+        );
+    }
+
+    #[test]
+    fn rejects_packed_field_whose_final_varint_overruns_its_declared_length() {
+        // field 4, wire type 2, declared length 2, payload [0x80, 0x80]: both
+        // bytes carry a continuation bit, so the varint is unterminated
+        // within the declared length and only resolves by reading the extra
+        // trailing byte that follows the field.
+        let fields = [0x22, 0x02, 0x80, 0x80, 0x00];
+        assert_eq!(
+            TonieHeader::parse(&header_page(&fields)),
+            Err(TafError::MalformedHeader)
+        );
     }
 }
