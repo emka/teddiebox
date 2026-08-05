@@ -31,7 +31,16 @@
             pkgs.pkg-config
             pkgs.cmake
             pkgs.libopus
+            # toniefile's build script shells out to protoc via prost-build.
+            # The crate vendors a prebuilt protoc binary that NixOS can't
+            # run (it's dynamically linked against a generic glibc), so we
+            # supply one from nixpkgs instead.
+            pkgs.protobuf
           ];
+
+          # Tell prost-build to use the nixpkgs protoc rather than its
+          # vendored binary.
+          PROTOC = "${pkgs.protobuf}/bin/protoc";
         };
       });
 }
