@@ -71,6 +71,13 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
     }
 
     /// Decodes the next audio packet. `Ok(None)` at end of stream.
+    ///
+    /// Retry semantics differ by error, and callers need to know which they
+    /// got. A [`AudioError::Container`] leaves the packet unconsumed, so
+    /// retrying re-attempts the same packet. A [`AudioError::Decode`] arrives
+    /// *after* the packet has been taken from the container, so that frame's
+    /// audio is gone: a retry resumes at the following packet. Treat a decode
+    /// error as a dropped frame, not as a repeatable failure.
     pub fn next_frame(&mut self, pcm: &mut [i16]) -> Result<Option<usize>, AudioError> {
         if pcm.len() < MAX_FRAME_SAMPLES {
             return Err(AudioError::BufferTooSmall);
@@ -221,6 +228,62 @@ mod tests {
             &expected[..expected_len],
             "expected chapter 1's first packet, got a different one \
              (the positional header skip re-triggered after a seek)"
+        );
+    }
+
+    #[test]
+    fn a_decode_error_consumes_the_packet_so_the_next_call_resumes_after_it() {
+        // Independently determine what the second real audio packet is.
+        let mut direct = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
+        let mut scratch = [0u8; MAX_PACKET];
+        direct.next_packet(&mut scratch).unwrap(); // OpusHead
+        direct.next_packet(&mut scratch).unwrap(); // OpusTags
+        direct.next_packet(&mut scratch).unwrap(); // first audio packet
+        let mut expected = [0u8; MAX_PACKET];
+        let expected_len = direct.next_packet(&mut expected).unwrap().unwrap();
+
+        /// Fails to decode the first packet it sees, then records the next.
+        struct FlakyDecoder {
+            calls: usize,
+            second_packet: Option<([u8; MAX_PACKET], usize)>,
+        }
+        impl OpusDecode for FlakyDecoder {
+            fn decode(&mut self, packet: &[u8], pcm: &mut [i16]) -> Result<usize, AudioError> {
+                self.calls += 1;
+                if self.calls == 1 {
+                    return Err(AudioError::Decode);
+                }
+                let mut buf = [0u8; MAX_PACKET];
+                buf[..packet.len()].copy_from_slice(packet);
+                self.second_packet = Some((buf, packet.len()));
+                let n = 960 * CHANNELS;
+                pcm[..n].fill(0);
+                Ok(n)
+            }
+        }
+
+        let mut dec = TafDecoder::open(
+            SlicePages::new(FIXTURE).unwrap(),
+            FlakyDecoder {
+                calls: 0,
+                second_packet: None,
+            },
+        )
+        .unwrap();
+        let mut pcm = [0i16; MAX_FRAME_SAMPLES];
+
+        assert_eq!(dec.next_frame(&mut pcm), Err(AudioError::Decode));
+        assert!(dec.next_frame(&mut pcm).unwrap().is_some());
+
+        let (buf, len) = dec
+            .decoder
+            .second_packet
+            .expect("second call should have decoded a packet");
+        assert_eq!(
+            &buf[..len],
+            &expected[..expected_len],
+            "a decode error should consume the failed packet, so the next \
+             call must resume at the following packet, not repeat it"
         );
     }
 }
