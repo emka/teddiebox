@@ -13,6 +13,9 @@ const MIN_HEADER_LEN: usize = 27;
 pub struct TafReader<S: PageSource> {
     source: S,
     header: TonieHeader,
+    /// Index of the currently-buffered *container block*, not of a real Ogg
+    /// page: the nested-page scan in `next_packet` can walk several real Ogg
+    /// pages within one buffered block without this changing.
     page_index: u32,
     page: [u8; PAGE_SIZE],
     /// Byte offset of the next packet within `page`, and the lacing cursor.
@@ -57,16 +60,26 @@ impl<S: PageSource> TafReader<S> {
         if index >= self.source.page_count() {
             return Err(TafError::PageOutOfRange);
         }
+        // Read and validate into a scratch buffer before touching any of the
+        // reader's own state. Committing `self.page` (or `self.page_index`
+        // and the cursors) before `OggPage::parse` succeeds would leave the
+        // buffer holding new, unvalidated bytes while the cursors still
+        // describe the previous, valid page on a validation failure -- a
+        // subsequent `next_packet` would then read the new bytes at offsets
+        // computed for the old page and could silently return nonsense
+        // instead of an error.
+        let mut candidate = [0u8; PAGE_SIZE];
         self.source
-            .read_page(index, &mut self.page)
+            .read_page(index, &mut candidate)
             .map_err(|_| TafError::PageOutOfRange)?;
-        let parsed = OggPage::parse(&self.page)?;
-        let segment_count = self.page[26] as usize;
+        OggPage::parse(&candidate)?;
+        let segment_count = candidate[26] as usize;
+
+        self.page = candidate;
         self.page_index = index;
         self.lacing_cursor = MIN_HEADER_LEN;
         self.lacing_end = MIN_HEADER_LEN + segment_count;
         self.packet_cursor = MIN_HEADER_LEN + segment_count;
-        let _ = parsed;
         Ok(())
     }
 
@@ -89,26 +102,43 @@ impl<S: PageSource> TafReader<S> {
         loop {
             if self.lacing_cursor < self.lacing_end {
                 let start = self.packet_cursor;
+                // Scan using a local cursor rather than mutating
+                // `self.lacing_cursor` directly: an error below must leave
+                // the reader exactly as it was before this call, so a retry
+                // can't resume from a half-advanced cursor and fabricate a
+                // packet out of whatever lacing entries happen to follow.
+                let mut cursor = self.lacing_cursor;
                 let mut len = 0usize;
                 let mut complete = false;
-                while self.lacing_cursor < self.lacing_end {
-                    let v = self.page[self.lacing_cursor] as usize;
-                    self.lacing_cursor += 1;
+                while cursor < self.lacing_end {
+                    let v = self.page[cursor] as usize;
+                    cursor += 1;
                     len += v;
                     if v < 255 {
                         complete = true;
                         break;
                     }
                 }
+
                 if complete {
                     let end = start + len;
                     if end > PAGE_SIZE || len > out.len() {
                         return Err(TafError::NotAnOggPage);
                     }
+                    self.lacing_cursor = cursor;
                     self.packet_cursor = end;
                     out[..len].copy_from_slice(&self.page[start..end]);
                     return Ok(Some(len));
                 }
+
+                // Packet continues past this page's lacing table; TAF pages
+                // are built so this doesn't happen, so drop the fragment
+                // rather than handing a truncated packet to the decoder.
+                // The lacing table is exhausted either way (`cursor` has
+                // reached `self.lacing_end`), so commit it now -- otherwise
+                // the outer loop would rescan the same exhausted range
+                // forever.
+                self.lacing_cursor = cursor;
             }
 
             // This Ogg page's lacing table is exhausted. A single
@@ -206,8 +236,13 @@ mod tests {
         r.seek_to_chapter(0).unwrap();
         let mut buf = [0u8; MAX_PACKET];
         let n = r.next_packet(&mut buf).unwrap().expect("a packet");
-        // The header page is not an Ogg page, so landing on it would fail to
-        // parse rather than yield a packet. Guard the off-by-one explicitly.
+        // The off-by-one is already caught above: without the `+1`,
+        // `seek_to_chapter(0)` would load the TAF header page, `OggPage::parse`
+        // would reject it, and the `.unwrap()` on the line above would panic.
+        // This assertion guards a different regression: that the packet
+        // returned is real payload content skipped past the page header and
+        // lacing table, not a raw, unparsed page starting with the page's
+        // own capture pattern.
         assert!(n > 0);
         assert_ne!(
             &buf[..n.min(4)],
@@ -221,5 +256,103 @@ mod tests {
         let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
         let n = r.chapter_count();
         assert_eq!(r.seek_to_chapter(n), Err(TafError::PageOutOfRange));
+    }
+
+    /// Builds a minimal TAF header page carrying the given protobuf field
+    /// bytes, mirroring `header.rs`'s own test helper (private to that
+    /// module, so duplicated here rather than reused).
+    fn header_page(fields: &[u8]) -> [u8; PAGE_SIZE] {
+        let mut page = [0u8; PAGE_SIZE];
+        page[0..4].copy_from_slice(&(fields.len() as u32).to_be_bytes());
+        page[4..4 + fields.len()].copy_from_slice(fields);
+        page
+    }
+
+    /// Assembles a minimal valid Ogg page carrying the given packets,
+    /// mirroring `page.rs`'s own test helper (private to that module, so
+    /// duplicated here rather than reused).
+    fn ogg_page(packets: &[&[u8]]) -> [u8; PAGE_SIZE] {
+        let mut page = [0u8; PAGE_SIZE];
+        page[0..4].copy_from_slice(b"OggS");
+
+        let mut off = 27usize;
+        for p in packets {
+            let mut remaining = p.len();
+            while remaining >= 255 {
+                page[off] = 255;
+                off += 1;
+                remaining -= 255;
+            }
+            page[off] = remaining as u8;
+            off += 1;
+        }
+        let segment_count = off - 27;
+        page[26] = segment_count as u8;
+
+        for p in packets {
+            page[off..off + p.len()].copy_from_slice(p);
+            off += p.len();
+        }
+        page
+    }
+
+    #[test]
+    fn a_failed_seek_leaves_the_reader_positioned_where_it_was() {
+        // Chapter 0 at ogg page 0 (file page 1, holding two packets);
+        // chapter 1 at ogg page 1 (file page 2, deliberately not a real Ogg
+        // page at all).
+        let mut file = [0u8; PAGE_SIZE * 3];
+        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x22, 0x02, 0x00, 0x01]));
+        file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&ogg_page(&[b"AAAA", b"BBBB"]));
+        // file[PAGE_SIZE * 2..] is left all zero: not "OggS", not a page.
+
+        let mut r = TafReader::open(SlicePages::new(&file).unwrap()).unwrap();
+        let mut buf = [0u8; MAX_PACKET];
+
+        let n = r.next_packet(&mut buf).unwrap().unwrap();
+        assert_eq!(&buf[..n], b"AAAA");
+
+        assert_eq!(
+            r.seek_to_chapter(1),
+            Err(TafError::NotAnOggPage),
+            "chapter 1 points at a page that isn't a real Ogg page"
+        );
+
+        // The failed seek must not have clobbered the buffer or the
+        // cursors: the reader should still be exactly where the last
+        // successful read left it, not reading garbage assembled from a
+        // buffer that no longer matches its own position.
+        let n2 = r.next_packet(&mut buf).unwrap().unwrap();
+        assert_eq!(&buf[..n2], b"BBBB");
+    }
+
+    #[test]
+    fn an_oversized_packet_does_not_leave_stale_state_for_a_retry() {
+        let mut file = [0u8; PAGE_SIZE * 2];
+        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x18, 0x07]));
+
+        // 20 segments: the first 17 (sixteen 255s plus a terminating 1)
+        // declare a 4081-byte packet starting at payload offset 47, which
+        // overruns the 4096-byte page. Three lacing entries remain after it
+        // (mirrors page.rs's equivalent test for `OggPage::packets`).
+        let mut page = [0u8; PAGE_SIZE];
+        page[0..4].copy_from_slice(b"OggS");
+        page[26] = 20;
+        for i in 0..16 {
+            page[27 + i] = 255;
+        }
+        page[27 + 16] = 1;
+        page[27 + 17] = 10;
+        page[27 + 18] = 0;
+        page[27 + 19] = 0;
+        file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&page);
+
+        let mut r = TafReader::open(SlicePages::new(&file).unwrap()).unwrap();
+        let mut buf = [0u8; MAX_PACKET];
+
+        assert_eq!(r.next_packet(&mut buf), Err(TafError::NotAnOggPage));
+        // A retry must not resume from a stale cursor and fabricate a
+        // packet out of the lacing entries that followed the oversized one.
+        assert_eq!(r.next_packet(&mut buf), Err(TafError::NotAnOggPage));
     }
 }
