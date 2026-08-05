@@ -25,7 +25,7 @@ impl<'a> SlicePages<'a> {
     /// Fails if `data` is not a whole number of pages.
     pub fn new(data: &'a [u8]) -> Result<Self, TafError> {
         if data.is_empty() || !data.len().is_multiple_of(PAGE_SIZE) {
-            return Err(TafError::MalformedHeader);
+            return Err(TafError::TruncatedFile);
         }
         Ok(Self { data })
     }
@@ -77,6 +77,9 @@ mod tests {
 
     #[test]
     fn rejects_a_partial_page_file() {
-        assert!(SlicePages::new(&[0u8; 100]).is_err());
+        assert!(matches!(
+            SlicePages::new(&[0u8; 100]),
+            Err(TafError::TruncatedFile)
+        ));
     }
 }

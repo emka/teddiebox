@@ -23,4 +23,9 @@ pub enum TafError {
     TooManyChapters,
     NotAnOggPage,
     PageOutOfRange,
+    /// The file is empty or not a whole number of pages. Distinct from
+    /// `MalformedHeader`: this is a whole-file length problem detected before
+    /// any header byte is read, and conflating the two misdirects debugging
+    /// when a torn write leaves a partial trailing page.
+    TruncatedFile,
 }
