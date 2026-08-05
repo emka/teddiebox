@@ -2,11 +2,13 @@
 
 mod header;
 mod page;
+mod reader;
 mod source;
 mod varint;
 
 pub use header::TonieHeader;
 pub use page::OggPage;
+pub use reader::{TafReader, MAX_PACKET};
 pub use source::{PageSource, SlicePages};
 
 /// Every structure in a Tonie audio file is aligned to this boundary: the
