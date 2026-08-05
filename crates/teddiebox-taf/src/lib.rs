@@ -25,6 +25,10 @@ pub enum TafError {
     TooManyChapters,
     NotAnOggPage,
     PageOutOfRange,
+    /// A well-formed packet is larger than the buffer the caller supplied.
+    /// Distinct from `NotAnOggPage`: the file is fine and the caller should
+    /// retry with a bigger buffer, whereas a malformed page means stop.
+    BufferTooSmall,
     /// The file is empty or not a whole number of pages. Distinct from
     /// `MalformedHeader`: this is a whole-file length problem detected before
     /// any header byte is read, and conflating the two misdirects debugging

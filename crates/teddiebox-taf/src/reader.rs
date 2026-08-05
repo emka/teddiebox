@@ -103,10 +103,13 @@ impl<S: PageSource> TafReader<S> {
             if self.lacing_cursor < self.lacing_end {
                 let start = self.packet_cursor;
                 // Scan using a local cursor rather than mutating
-                // `self.lacing_cursor` directly: an error below must leave
-                // the reader exactly as it was before this call, so a retry
-                // can't resume from a half-advanced cursor and fabricate a
-                // packet out of whatever lacing entries happen to follow.
+                // `self.lacing_cursor` directly. An error below (either
+                // variant) must leave the reader exactly as it was before
+                // this call: `BufferTooSmall` promises the caller a retry
+                // with a bigger buffer will get this same packet, and
+                // `NotAnOggPage` must not let a retry resume from a
+                // half-advanced cursor and fabricate a packet out of
+                // whatever lacing entries happen to follow.
                 let mut cursor = self.lacing_cursor;
                 let mut len = 0usize;
                 let mut complete = false;
@@ -122,8 +125,11 @@ impl<S: PageSource> TafReader<S> {
 
                 if complete {
                     let end = start + len;
-                    if end > PAGE_SIZE || len > out.len() {
+                    if end > PAGE_SIZE {
                         return Err(TafError::NotAnOggPage);
+                    }
+                    if len > out.len() {
+                        return Err(TafError::BufferTooSmall);
                     }
                     self.lacing_cursor = cursor;
                     self.packet_cursor = end;
@@ -256,6 +262,22 @@ mod tests {
         let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
         let n = r.chapter_count();
         assert_eq!(r.seek_to_chapter(n), Err(TafError::PageOutOfRange));
+    }
+
+    #[test]
+    fn a_packet_too_large_for_the_buffer_can_be_retried_with_a_bigger_one() {
+        let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
+
+        // "OpusHead" is 19 bytes; 4 bytes surely doesn't fit.
+        let mut too_small = [0u8; 4];
+        assert_eq!(r.next_packet(&mut too_small), Err(TafError::BufferTooSmall));
+
+        // The failed attempt must not have consumed the packet: retrying
+        // with a big-enough buffer gets the very same packet, not the one
+        // after it.
+        let mut big_enough = [0u8; MAX_PACKET];
+        let n = r.next_packet(&mut big_enough).unwrap().unwrap();
+        assert_eq!(&big_enough[..n.min(8)], b"OpusHead");
     }
 
     /// Builds a minimal TAF header page carrying the given protobuf field
