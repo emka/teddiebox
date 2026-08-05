@@ -32,3 +32,30 @@ impl OpusDecode for LibOpus {
         Ok(n)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use teddiebox_taf::{SlicePages, TafReader, MAX_PACKET};
+
+    const FIXTURE: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/sine.taf");
+
+    #[test]
+    fn decodes_the_first_real_audio_packet_to_a_full_stereo_frame() {
+        let mut reader = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
+        let mut scratch = [0u8; MAX_PACKET];
+        reader.next_packet(&mut scratch).unwrap(); // OpusHead
+        reader.next_packet(&mut scratch).unwrap(); // OpusTags
+        let len = reader.next_packet(&mut scratch).unwrap().unwrap();
+
+        let mut decoder = LibOpus::new().unwrap();
+        let mut pcm = [0i16; crate::MAX_FRAME_SAMPLES];
+        let n = decoder.decode(&scratch[..len], &mut pcm).unwrap();
+
+        // 60 ms of stereo audio at 48 kHz: 2880 samples/channel x 2 channels.
+        // This is the real adapter, not the stub — it pins the no-double-
+        // scaling contract (`opus-embedded`'s `decode` already returns the
+        // interleaved total) against genuine libopus output.
+        assert_eq!(n, 5760);
+    }
+}
