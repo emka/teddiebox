@@ -23,7 +23,9 @@ jobs:
       # the firmware actually runs on rather than a bare-metal stand-in.
       # rustc ships no prebuilt core for xtensa, so core is built from source.
       - name: Cross-compile check
-        run: nix develop --command cargo check -p teddiebox-taf --target xtensa-esp32s3-none-elf -Z build-std=core
+        run: |
+          nix develop --command cargo check -p teddiebox-taf --target xtensa-esp32s3-none-elf -Z build-std=core
+          nix develop --command cargo check -p teddiebox-core --target xtensa-esp32s3-none-elf -Z build-std=core
 
       # Catches an FFI mismatch or a libopus dependency the device's C
       # library cannot satisfy — neither of which a host test or a
