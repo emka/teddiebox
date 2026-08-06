@@ -2,14 +2,18 @@
 //! `fixturegen` encoded. This is the same assertion Phase B step 9 runs on
 //! device, so a device regression is comparable against a known-good host run.
 
-use teddiebox_audio::{LibOpus, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE};
+use teddiebox_audio::{LibOpus, OpusState, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE};
 use teddiebox_taf::SlicePages;
 
 const FIXTURE: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/sine.taf");
 
 fn decode_all() -> Vec<i16> {
-    let mut dec =
-        TafDecoder::open(SlicePages::new(FIXTURE).unwrap(), LibOpus::new().unwrap()).unwrap();
+    let mut state = OpusState::new();
+    let mut dec = TafDecoder::open(
+        SlicePages::new(FIXTURE).unwrap(),
+        LibOpus::new(&mut state).unwrap(),
+    )
+    .unwrap();
     let mut pcm = [0i16; MAX_FRAME_SAMPLES];
     let mut out = Vec::new();
     while let Some(n) = dec.next_frame(&mut pcm).unwrap() {

@@ -125,13 +125,6 @@
             pkgs.pkg-config
             pkgs.libopus
             pkgs.cmake
-            # opus-embedded-sys vendors its own libopus copy, configures it
-            # with autoreconf, and generates its bindings with bindgen. All
-            # four of these go away with it.
-            pkgs.autoconf
-            pkgs.automake
-            pkgs.libtool
-            pkgs.libclang
             # toniefile's build script shells out to protoc via prost-build.
             # The crate vendors a prebuilt protoc binary that NixOS can't
             # run (it's dynamically linked against a generic glibc), so we
@@ -142,10 +135,6 @@
           # Tell prost-build to use the nixpkgs protoc rather than its
           # vendored binary.
           PROTOC = "${pkgs.protobuf}/bin/protoc";
-
-          # bindgen (via opus-embedded-sys) links libclang at build time and
-          # cannot find it without an explicit path on NixOS.
-          LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         }
         // builtins.listToAttrs [
           (opusEnv hostTarget opusHost)

@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use teddiebox_audio::{LibOpus, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE};
+use teddiebox_audio::{LibOpus, OpusState, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE};
 use teddiebox_taf::SlicePages;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,7 +15,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let data = fs::read(&input).map_err(|e| format!("reading {input}: {e}"))?;
     let source = SlicePages::new(&data).map_err(|e| format!("opening {input}: {e}"))?;
-    let opus = LibOpus::new().map_err(|e| format!("initializing Opus decoder: {e}"))?;
+    // The decoder state is ~27 KB and the decoder borrows it, so it has to
+    // outlive `decoder`. On device this is a static; here, main's stack.
+    let mut state = OpusState::new();
+    let opus = LibOpus::new(&mut state).map_err(|e| format!("initializing Opus decoder: {e}"))?;
     let mut decoder =
         TafDecoder::open(source, opus).map_err(|e| format!("opening {input}: {e}"))?;
 

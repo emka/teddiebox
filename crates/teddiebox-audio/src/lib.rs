@@ -1,7 +1,7 @@
 #![no_std]
 
 mod opus;
-pub use opus::LibOpus;
+pub use opus::{LibOpus, OpusState, OPUS_STATE_BYTES};
 
 use teddiebox_taf::{PageSource, TafError, TafReader, TonieHeader, MAX_PACKET};
 

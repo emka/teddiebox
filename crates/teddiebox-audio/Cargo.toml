@@ -6,6 +6,4 @@ license.workspace = true
 
 [dependencies]
 teddiebox-taf = { path = "../teddiebox-taf" }
-# TAF audio is always 48 kHz stereo; without the "stereo" feature,
-# opus-embedded's Decoder::new rejects Channels::Stereo at runtime.
-opus-embedded = { version = "0.1", features = ["stereo"] }
+teddiebox-opus-sys = { path = "../teddiebox-opus-sys" }
