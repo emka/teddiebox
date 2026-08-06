@@ -1,7 +1,10 @@
 #![no_std]
 
 mod types;
+mod volume;
+
 pub use types::*;
+pub use volume::VolumeModel;
 
 use heapless::Vec;
 
