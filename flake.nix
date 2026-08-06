@@ -78,6 +78,12 @@
           "-DOPUS_ENABLE_DEEP_PLC=OFF"
           "-DOPUS_DRED=OFF"
           "-DOPUS_OSCE=OFF"
+          # The host build is a stand-in for the device, which has no SIMD,
+          # so timing it against hand-written NEON or SSE kernels would
+          # measure the wrong machine. It also keeps the build off the
+          # architecture-specific assembly paths, which is what makes one
+          # recipe work for every host CI might run on.
+          "-DOPUS_DISABLE_INTRINSICS=ON"
         ];
 
         mkOpus = { pname, extraFlags ? [ ] }: pkgs.stdenv.mkDerivation {

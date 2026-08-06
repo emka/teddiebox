@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/teddiebox-audio",
+    "crates/teddiebox-opus-sys",
     "crates/teddiebox-taf",
     "tools/fixturegen",
     "tools/taf2wav",
