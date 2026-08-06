@@ -1,10 +1,12 @@
 #![no_std]
 
 mod battery;
+mod led;
 mod types;
 mod volume;
 
 pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
+pub use led::{led_for, PlaybackKind};
 pub use types::*;
 pub use volume::VolumeModel;
 
