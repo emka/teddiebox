@@ -6,20 +6,44 @@ use teddiebox_audio::{LibOpus, OpusState, TafDecoder, CHANNELS, MAX_FRAME_SAMPLE
 use teddiebox_taf::SlicePages;
 
 const FIXTURE: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/sine.taf");
+const CHAPTERS: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
 
 fn decode_all() -> Vec<i16> {
+    decode_from(FIXTURE, None)
+}
+
+/// Decodes `taf` to the end, optionally seeking to a chapter first.
+fn decode_from(taf: &[u8], chapter: Option<usize>) -> Vec<i16> {
     let mut state = OpusState::new();
     let mut dec = TafDecoder::open(
-        SlicePages::new(FIXTURE).unwrap(),
+        SlicePages::new(taf).unwrap(),
         LibOpus::new(&mut state).unwrap(),
     )
     .unwrap();
+    if let Some(n) = chapter {
+        dec.seek_to_chapter(n).unwrap();
+    }
     let mut pcm = [0i16; MAX_FRAME_SAMPLES];
     let mut out = Vec::new();
     while let Some(n) = dec.next_frame(&mut pcm).unwrap() {
         out.extend_from_slice(&pcm[..n]);
     }
     out
+}
+
+/// Zero crossings on the left channel over one second, starting `skip`
+/// seconds in. A 440 Hz sine crosses zero 880 times.
+fn crossings_over_one_second(pcm: &[i16], skip_seconds: usize) -> usize {
+    let left: Vec<i16> = pcm
+        .as_chunks::<CHANNELS>()
+        .0
+        .iter()
+        .skip(skip_seconds * SAMPLE_RATE as usize)
+        .take(SAMPLE_RATE as usize)
+        .map(|f| f[0])
+        .collect();
+
+    left.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count()
 }
 
 #[test]
@@ -35,23 +59,41 @@ fn decodes_approximately_five_seconds_of_stereo_audio() {
 
 #[test]
 fn the_decoded_signal_is_a_440_hz_tone() {
-    let pcm = decode_all();
-    // Skip the encoder's warm-up, then count zero crossings on the left
-    // channel over one second. A 440 Hz sine crosses zero 880 times.
-    let left: Vec<i16> = pcm
-        .as_chunks::<CHANNELS>()
-        .0
-        .iter()
-        .skip(SAMPLE_RATE as usize)
-        .take(SAMPLE_RATE as usize)
-        .map(|f| f[0])
-        .collect();
-
-    let crossings = left.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
-
+    // Skip the encoder's warm-up before measuring.
+    let crossings = crossings_over_one_second(&decode_all(), 1);
     assert!(
         (860..=900).contains(&crossings),
         "expected ~880 zero crossings for 440 Hz, got {crossings}"
+    );
+}
+
+/// Track skip is the box's primary interaction, and until now every seek
+/// test used a stub decoder while the only tests that produced real audio
+/// never seeked. Between them sat the case that matters: seeking and then
+/// actually hearing something.
+#[test]
+fn seeking_to_a_chapter_yields_audible_audio_from_that_chapter_onward() {
+    let whole = decode_from(CHAPTERS, None);
+    let from_second = decode_from(CHAPTERS, Some(1));
+
+    let peak = from_second.iter().map(|s| s.unsigned_abs()).max().unwrap();
+    assert!(peak > 1000, "audio after the seek is silent, peak {peak}");
+
+    let crossings = crossings_over_one_second(&from_second, 0);
+    assert!(
+        (860..=900).contains(&crossings),
+        "expected ~880 zero crossings for 440 Hz after the seek, got {crossings}"
+    );
+
+    // Chapter 1 of 3 starts roughly a third in, so seeking there must drop
+    // roughly a third of the audio. Asserting it is *shorter* would pass on a
+    // decoder that seeked to the end and produced almost nothing.
+    let dropped = whole.len() as f64 - from_second.len() as f64;
+    let fraction = dropped / whole.len() as f64;
+    assert!(
+        (0.25..=0.42).contains(&fraction),
+        "seeking to chapter 1 of 3 should skip about a third of the audio, skipped {:.0}%",
+        fraction * 100.0
     );
 }
 
