@@ -44,6 +44,17 @@ pub enum TafError {
     /// any header byte is read, and conflating the two misdirects debugging
     /// when a torn write leaves a partial trailing page.
     TruncatedFile,
+    /// The [`PageSource`] could not read a page that is within range.
+    ///
+    /// Says nothing about the file, only that the medium would not produce
+    /// it: on device this is an SD I/O fault, a CRC failure, or a card
+    /// timeout. Distinct from `PageOutOfRange` and `MalformedHeader`
+    /// because those accuse the file of being wrong, and following that
+    /// accusation is wasted effort when the file is fine and the card is
+    /// not. The source's own error is deliberately not carried here — this
+    /// type is `Copy` and source-agnostic — so a driver with more to say
+    /// should log it before returning.
+    Io,
 }
 
 impl core::fmt::Display for TafError {
@@ -55,6 +66,7 @@ impl core::fmt::Display for TafError {
             TafError::PageOutOfRange => "page out of range",
             TafError::BufferTooSmall => "buffer too small for packet",
             TafError::TruncatedFile => "file is truncated or not a whole number of pages",
+            TafError::Io => "could not read a page from the source",
         };
         f.write_str(s)
     }

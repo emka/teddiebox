@@ -52,9 +52,7 @@ impl<S: PageSource> TafReader<S> {
             return Err(TafError::MalformedHeader);
         }
         let mut page = [0u8; PAGE_SIZE];
-        source
-            .read_page(0, &mut page)
-            .map_err(|_| TafError::MalformedHeader)?;
+        source.read_page(0, &mut page).map_err(|_| TafError::Io)?;
         let header = TonieHeader::parse(&page)?;
 
         // The header declares how many bytes of Ogg stream follow it. Fewer
@@ -111,9 +109,12 @@ impl<S: PageSource> TafReader<S> {
         // computed for the old page and could silently return nonsense
         // instead of an error.
         let mut candidate = [0u8; PAGE_SIZE];
+        // The range check above already rejected an index the source does not
+        // have, so anything it refuses now is a failure of the medium rather
+        // than of the request.
         self.source
             .read_page(index, &mut candidate)
-            .map_err(|_| TafError::PageOutOfRange)?;
+            .map_err(|_| TafError::Io)?;
         OggPage::parse(&candidate)?;
         let segment_count = candidate[26] as usize;
 
@@ -644,5 +645,56 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// What a card that is present, correctly sized, and failing looks like:
+    /// every page is in range, but one of them will not read.
+    struct FailingPages<'a> {
+        inner: SlicePages<'a>,
+        unreadable: u32,
+    }
+
+    /// A source's own error type, deliberately nothing to do with `TafError`
+    /// — a real one reports CRC failures and timeouts, which this layer has
+    /// no vocabulary for.
+    #[derive(Debug)]
+    struct CardFault;
+
+    impl PageSource for FailingPages<'_> {
+        type Error = CardFault;
+
+        fn read_page(&mut self, index: u32, buf: &mut [u8; PAGE_SIZE]) -> Result<(), CardFault> {
+            if index == self.unreadable {
+                return Err(CardFault);
+            }
+            self.inner.read_page(index, buf).map_err(|_| CardFault)
+        }
+
+        fn page_count(&self) -> u32 {
+            self.inner.page_count()
+        }
+    }
+
+    fn failing_at(page: u32) -> FailingPages<'static> {
+        FailingPages {
+            inner: SlicePages::new(FIXTURE).unwrap(),
+            unreadable: page,
+        }
+    }
+
+    #[test]
+    fn a_page_that_cannot_be_read_is_an_io_error_not_a_range_error() {
+        // Page 1 is well within the file. Reporting this as `PageOutOfRange`
+        // would send anyone debugging it looking for a seek bug in a reader
+        // that is behaving perfectly.
+        assert_eq!(TafReader::open(failing_at(1)).err(), Some(TafError::Io));
+    }
+
+    #[test]
+    fn a_header_that_cannot_be_read_is_an_io_error_not_a_malformed_header() {
+        // The header may be perfectly well-formed; nobody managed to look at
+        // it. Blaming the file's contents for a failure of the medium sends
+        // debugging after the wrong artefact entirely.
+        assert_eq!(TafReader::open(failing_at(0)).err(), Some(TafError::Io));
     }
 }
