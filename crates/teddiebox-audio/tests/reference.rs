@@ -35,7 +35,9 @@ fn the_decoded_signal_is_a_440_hz_tone() {
     // Skip the encoder's warm-up, then count zero crossings on the left
     // channel over one second. A 440 Hz sine crosses zero 880 times.
     let left: Vec<i16> = pcm
-        .chunks_exact(CHANNELS)
+        .as_chunks::<CHANNELS>()
+        .0
+        .iter()
         .skip(SAMPLE_RATE as usize)
         .take(SAMPLE_RATE as usize)
         .map(|f| f[0])

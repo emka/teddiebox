@@ -62,7 +62,13 @@ fn header_tail_is_zero_padded_inside_the_protobuf_message() {
 
 #[test]
 fn every_page_after_the_header_is_an_ogg_page() {
-    for (i, page) in FIXTURE.chunks_exact(PAGE_SIZE).enumerate().skip(1) {
+    for (i, page) in FIXTURE
+        .as_chunks::<PAGE_SIZE>()
+        .0
+        .iter()
+        .enumerate()
+        .skip(1)
+    {
         assert_eq!(&page[0..4], b"OggS", "page {i} is not an Ogg page");
     }
 }
