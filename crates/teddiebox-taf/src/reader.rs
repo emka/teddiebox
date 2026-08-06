@@ -257,7 +257,16 @@ mod tests {
     }
 
     #[test]
-    fn seeking_to_chapter_zero_lands_on_audio_not_the_header() {
+    // Renamed from `seeking_to_chapter_zero_lands_on_audio_not_the_header`:
+    // that name claimed to distinguish landing on real audio from landing on
+    // a header, but the assertion below only ever checked that the returned
+    // bytes aren't a raw, unparsed page (i.e. that the packet parser skipped
+    // past the page header and lacing table). It says nothing about audio
+    // versus Opus-header packets -- the first packet chapter 0 actually
+    // yields is `OpusHead`, not audio. A misleading name here already misled
+    // a reviewer about unrelated code; this name now matches what the test
+    // checks instead of overstating it.
+    fn seeking_to_chapter_zero_returns_packet_payload_not_a_raw_unparsed_page() {
         let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
         r.seek_to_chapter(0).unwrap();
         let mut buf = [0u8; MAX_PACKET];
@@ -420,22 +429,59 @@ mod tests {
 
     #[test]
     fn seeking_to_each_chapter_succeeds_and_lands_on_different_audio() {
-        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        // Regression note: the previous version of this test reused one
+        // reader across iterations and compared every chapter only against
+        // a chapter-0 baseline captured up front. A `seek_to_chapter` that
+        // merely bounds-checked its argument without actually repositioning
+        // would still pass that version, because the shared reader would
+        // already be correctly positioned from whichever seek last actually
+        // ran. This matters beyond the test itself: chapter seeking is what
+        // track-skip compiles down to.
+        //
+        // Strengthened: for each chapter, seek two *independent*, freshly
+        // opened readers to it and require their first packets to agree
+        // (proving the seek is reproducible, not an accident of the
+        // reader's prior position), then require all chapters' first
+        // packets to be pairwise different from each other. A no-op seek
+        // fails this: every chapter would land on the same page the reader
+        // opens onto by default, making all "first packets" identical.
+        let chapter_count = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap())
+            .unwrap()
+            .chapter_count();
 
-        r.seek_to_chapter(0).unwrap();
-        let mut chapter0_buf = [0u8; MAX_PACKET];
-        let n0 = r.next_packet(&mut chapter0_buf).unwrap().expect("a packet");
+        let mut first_packets: heapless::Vec<([u8; MAX_PACKET], usize), 8> = heapless::Vec::new();
 
-        for chapter in 1..r.chapter_count() {
-            r.seek_to_chapter(chapter).unwrap();
-            let mut buf = [0u8; MAX_PACKET];
-            let n = r.next_packet(&mut buf).unwrap().expect("a packet");
-            assert!(n > 0);
-            assert_ne!(
-                &buf[..n],
-                &chapter0_buf[..n0],
-                "chapter {chapter}'s first packet should differ from chapter 0's"
+        for chapter in 0..chapter_count {
+            let mut a = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+            a.seek_to_chapter(chapter).unwrap();
+            let mut buf_a = [0u8; MAX_PACKET];
+            let len_a = a.next_packet(&mut buf_a).unwrap().expect("a packet");
+
+            let mut b = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+            b.seek_to_chapter(chapter).unwrap();
+            let mut buf_b = [0u8; MAX_PACKET];
+            let len_b = b.next_packet(&mut buf_b).unwrap().expect("a packet");
+
+            assert_eq!(
+                &buf_a[..len_a],
+                &buf_b[..len_b],
+                "two independent fresh readers seeking to chapter {chapter} must land \
+                 on the same packet"
             );
+
+            first_packets.push((buf_a, len_a)).unwrap();
+        }
+
+        for i in 0..first_packets.len() {
+            for j in (i + 1)..first_packets.len() {
+                let (buf_i, len_i) = &first_packets[i];
+                let (buf_j, len_j) = &first_packets[j];
+                assert_ne!(
+                    &buf_i[..*len_i],
+                    &buf_j[..*len_j],
+                    "chapters {i} and {j}'s first packets must differ from each other"
+                );
+            }
         }
     }
 
