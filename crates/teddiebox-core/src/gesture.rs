@@ -46,6 +46,8 @@ impl Default for GestureConfig {
 pub struct GestureDetector {
     config: GestureConfig,
     last_slap: Option<Millis>,
+    tilt_since: Option<(SeekDir, Millis)>,
+    tilt_reported: bool,
 }
 
 impl GestureDetector {
@@ -53,11 +55,13 @@ impl GestureDetector {
         Self {
             config,
             last_slap: None,
+            tilt_since: None,
+            tilt_reported: false,
         }
     }
 
     pub fn feed(&mut self, x: i16, y: i16, z: i16, at: Millis) -> Option<Gesture> {
-        let _ = (y, z);
+        let _ = z;
 
         // `unsigned_abs`, not `abs`: the sensor can report i16::MIN, which has
         // no positive counterpart and would overflow.
@@ -70,6 +74,43 @@ impl GestureDetector {
                 self.last_slap = Some(at);
                 return Some(Gesture::Slap(if x > 0 { Side::Right } else { Side::Left }));
             }
+        }
+
+        let tilted = if y >= self.config.tilt_threshold_mg {
+            Some(SeekDir::Forward)
+        } else if y <= -self.config.tilt_threshold_mg {
+            Some(SeekDir::Backward)
+        } else {
+            None
+        };
+
+        match (tilted, self.tilt_since) {
+            // Newly tilted, or tilted the other way: restart the hold timer.
+            (Some(dir), None) => {
+                self.tilt_since = Some((dir, at));
+                self.tilt_reported = false;
+            }
+            (Some(dir), Some((held, _))) if held != dir => {
+                self.tilt_since = Some((dir, at));
+                self.tilt_reported = false;
+            }
+            // Still tilted the same way: report once the hold elapses.
+            (Some(dir), Some((_, since))) => {
+                if !self.tilt_reported && at.saturating_sub(since) >= self.config.tilt_hold_ms {
+                    self.tilt_reported = true;
+                    return Some(Gesture::Tilt(dir));
+                }
+            }
+            // Back to level.
+            (None, Some(_)) => {
+                let was_reported = self.tilt_reported;
+                self.tilt_since = None;
+                self.tilt_reported = false;
+                if was_reported {
+                    return Some(Gesture::TiltEnded);
+                }
+            }
+            (None, None) => {}
         }
 
         None
@@ -135,5 +176,59 @@ mod tests {
             Some(Gesture::Slap(Side::Left)),
             "negating i16::MIN must not overflow"
         );
+    }
+
+    #[test]
+    fn a_brief_tilt_does_not_seek() {
+        let mut d = detector();
+        d.feed(0, 600, 800, 0);
+        assert_eq!(
+            d.feed(0, 600, 800, 100),
+            None,
+            "not held long enough to be deliberate"
+        );
+    }
+
+    #[test]
+    fn a_held_forward_tilt_seeks_forward() {
+        let mut d = detector();
+        d.feed(0, 600, 800, 0);
+        assert_eq!(
+            d.feed(0, 600, 800, 400),
+            Some(Gesture::Tilt(SeekDir::Forward))
+        );
+    }
+
+    #[test]
+    fn a_held_backward_tilt_seeks_backward() {
+        let mut d = detector();
+        d.feed(0, -600, 800, 0);
+        assert_eq!(
+            d.feed(0, -600, 800, 400),
+            Some(Gesture::Tilt(SeekDir::Backward))
+        );
+    }
+
+    #[test]
+    fn a_sustained_tilt_is_reported_once_not_repeatedly() {
+        let mut d = detector();
+        d.feed(0, 600, 800, 0);
+        assert!(d.feed(0, 600, 800, 400).is_some());
+        assert_eq!(d.feed(0, 600, 800, 500), None);
+    }
+
+    #[test]
+    fn returning_to_level_ends_the_seek() {
+        let mut d = detector();
+        d.feed(0, 600, 800, 0);
+        d.feed(0, 600, 800, 400);
+        assert_eq!(d.feed(0, 0, 1000, 600), Some(Gesture::TiltEnded));
+    }
+
+    #[test]
+    fn returning_to_level_without_having_sought_reports_nothing() {
+        let mut d = detector();
+        d.feed(0, 600, 800, 0);
+        assert_eq!(d.feed(0, 0, 1000, 100), None);
     }
 }
