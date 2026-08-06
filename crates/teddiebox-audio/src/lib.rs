@@ -45,11 +45,15 @@ pub struct TafDecoder<S: PageSource, D: OpusDecode> {
 impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
     /// Opens a source and takes ownership of the reader.
     ///
-    /// Deliberately does **not** accept a pre-built `TafReader`: the header
-    /// skip below is positional, so a reader that had already been seeked or
-    /// partially consumed would have its first two audio packets silently
-    /// eaten as if they were OpusHead and OpusTags. Owning the reader from
-    /// the start makes that state unreachable rather than merely discouraged.
+    /// Deliberately does **not** accept a pre-built `TafReader`, so that the
+    /// container position and the decoder's own packet buffer cannot drift
+    /// apart: a caller holding its own handle could advance the reader behind
+    /// the decoder's back. Owning it from the start makes that unreachable
+    /// rather than merely discouraged.
+    ///
+    /// Note this is no longer what protects the Opus header packets — those
+    /// are identified by magic in [`Self::next_frame`], which is correct from
+    /// any starting position.
     pub fn open(source: S, decoder: D) -> Result<Self, AudioError> {
         Ok(Self {
             reader: TafReader::open(source)?,
