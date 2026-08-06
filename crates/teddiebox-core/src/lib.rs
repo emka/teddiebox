@@ -3,12 +3,14 @@
 mod battery;
 mod gesture;
 mod led;
+mod playback;
 mod types;
 mod volume;
 
 pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
 pub use gesture::{Gesture, GestureConfig, GestureDetector};
 pub use led::{led_for, PlaybackKind};
+pub use playback::{ContentIndex, Playback};
 pub use types::*;
 pub use volume::VolumeModel;
 
