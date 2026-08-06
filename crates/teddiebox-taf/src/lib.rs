@@ -43,6 +43,15 @@ pub enum TafError {
     /// any header byte is read, and conflating the two misdirects debugging
     /// when a torn write leaves a partial trailing page.
     TruncatedFile,
+    /// A structurally valid Ogg page that belongs to a different stream.
+    ///
+    /// Distinct from `NotAnOggPage`, which says the bytes are not a page at
+    /// all. These bytes are a perfectly good page — it is simply not part of
+    /// this file's stream, which is what a torn write leaving a block from a
+    /// previous, longer recording looks like. Nothing about its shape gives
+    /// it away, so without this check it decodes cleanly and the child hears
+    /// the end of the previous story.
+    WrongStream,
     /// The [`PageSource`] could not read a page that is within range.
     ///
     /// Says nothing about the file, only that the medium would not produce
@@ -65,6 +74,7 @@ impl core::fmt::Display for TafError {
             TafError::PageOutOfRange => "page out of range",
             TafError::BufferTooSmall => "buffer too small for packet",
             TafError::TruncatedFile => "file is truncated or not a whole number of pages",
+            TafError::WrongStream => "Ogg page belongs to a different stream",
             TafError::Io => "could not read a page from the source",
         };
         f.write_str(s)

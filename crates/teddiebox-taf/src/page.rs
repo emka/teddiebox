@@ -23,6 +23,7 @@ pub(crate) struct PacketCursor {
     lacing: usize,
     lacing_end: usize,
     payload: usize,
+    serial: u32,
 }
 
 impl PacketCursor {
@@ -32,6 +33,7 @@ impl PacketCursor {
         lacing: 0,
         lacing_end: 0,
         payload: 0,
+        serial: 0,
     };
 
     /// Positions at the first packet of the Ogg page beginning at `offset`.
@@ -59,7 +61,23 @@ impl PacketCursor {
             lacing,
             lacing_end,
             payload: lacing_end,
+            // Bytes 14..18, little-endian, well inside the fixed header the
+            // bounds check above already guaranteed.
+            serial: u32::from_le_bytes([
+                page[offset + 14],
+                page[offset + 15],
+                page[offset + 16],
+                page[offset + 17],
+            ]),
         }))
+    }
+
+    /// Which Ogg stream this page claims to belong to.
+    ///
+    /// Read here rather than by the reader poking at raw offsets, so that
+    /// the page layout stays knowledge of this module alone.
+    pub(crate) fn serial(&self) -> u32 {
+        self.serial
     }
 
     /// Offset where this page's remaining payload starts, and so the

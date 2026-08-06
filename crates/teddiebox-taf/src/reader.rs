@@ -39,6 +39,16 @@ pub struct TafReader<S: PageSource> {
     /// treats reaching past this index as end of stream, the same way it
     /// treats reaching the end of `source` itself.
     last_usable_page: u32,
+    /// Serial of the Ogg stream this file carries, latched from the first
+    /// page loaded. `None` only during `open`, before that page is read.
+    ///
+    /// Taken from the stream rather than from the header's `audio_id`
+    /// deliberately. Both fixtures set the two equal, but that convention
+    /// rests on `toniefile` alone — no commercial file has been examined —
+    /// and enforcing it would reject every real `.taf` if it turns out not
+    /// to hold. Self-consistency needs no such assumption and still catches
+    /// the failure that matters: a block belonging to some other recording.
+    stream_serial: Option<u32>,
 }
 
 impl<S: PageSource> TafReader<S> {
@@ -76,6 +86,7 @@ impl<S: PageSource> TafReader<S> {
             page,
             cursor: PacketCursor::EMPTY,
             last_usable_page: declared_pages,
+            stream_serial: None,
         };
         reader.load_page(1)?;
         Ok(reader)
@@ -109,11 +120,30 @@ impl<S: PageSource> TafReader<S> {
             .read_page(index, &mut candidate)
             .map_err(|_| TafError::Io)?;
         let cursor = PacketCursor::at_page(&candidate, 0)?.ok_or(TafError::NotAnOggPage)?;
+        self.check_stream(cursor.serial())?;
 
         self.page = candidate;
         self.page_index = index;
         self.cursor = cursor;
         Ok(())
+    }
+
+    /// Adopts the stream of the first page seen, and rejects any later page
+    /// that does not belong to it.
+    ///
+    /// Called at every site that positions onto a page, including the scan
+    /// for a page packed in behind another: a stale block is just as
+    /// reachable there, and this is exactly the kind of obligation the two
+    /// packet scanners drifted apart on before they were unified.
+    fn check_stream(&mut self, serial: u32) -> Result<(), TafError> {
+        match self.stream_serial {
+            None => {
+                self.stream_serial = Some(serial);
+                Ok(())
+            }
+            Some(expected) if serial == expected => Ok(()),
+            Some(_) => Err(TafError::WrongStream),
+        }
     }
 
     /// Positions the reader at the first packet of chapter `n` (zero-based).
@@ -180,6 +210,7 @@ impl<S: PageSource> TafReader<S> {
             // behind the first page in a block instead of erroring: it
             // looks like a clean end-of-page and just advances past them.
             if let Some(nested) = PacketCursor::at_page(&self.page, self.cursor.payload_start())? {
+                self.check_stream(nested.serial())?;
                 self.cursor = nested;
                 continue;
             }
@@ -316,8 +347,15 @@ mod tests {
     /// mirroring `page.rs`'s own test helper (private to that module, so
     /// duplicated here rather than reused).
     fn ogg_page(packets: &[&[u8]]) -> [u8; PAGE_SIZE] {
+        ogg_page_with_serial(0, packets)
+    }
+
+    /// As `ogg_page`, but stamped with a stream serial. Only the tests that
+    /// care about stream identity need to say which stream a page belongs to.
+    fn ogg_page_with_serial(serial: u32, packets: &[&[u8]]) -> [u8; PAGE_SIZE] {
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(b"OggS");
+        page[14..18].copy_from_slice(&serial.to_le_bytes());
 
         let mut off = 27usize;
         for p in packets {
@@ -338,6 +376,73 @@ mod tests {
             off += p.len();
         }
         page
+    }
+
+    #[test]
+    fn a_block_belonging_to_another_stream_is_rejected_rather_than_decoded() {
+        // The torn-write failure mode: page 2 is a structurally perfect Ogg
+        // page sitting at a perfectly valid offset, left over from a
+        // previous, longer recording. Nothing about its shape gives it away
+        // — only that it belongs to a different stream. Decoding it is how a
+        // child ends up hearing the end of the previous story.
+        //
+        // data_length (field 2) = 8192, declaring both pages as stream.
+        let mut file = [0u8; PAGE_SIZE * 3];
+        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x40]));
+        file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&ogg_page_with_serial(0xAAAA, &[b"AAAA"]));
+        file[PAGE_SIZE * 2..].copy_from_slice(&ogg_page_with_serial(0xBBBB, &[b"BBBB"]));
+
+        let mut r = TafReader::open(SlicePages::new(&file).unwrap()).unwrap();
+        let mut buf = [0u8; MAX_PACKET];
+
+        let n = r.next_packet(&mut buf).unwrap().unwrap();
+        assert_eq!(&buf[..n], b"AAAA");
+        assert_eq!(r.next_packet(&mut buf), Err(TafError::WrongStream));
+    }
+
+    #[test]
+    fn a_page_packed_behind_another_is_checked_against_the_stream_too() {
+        // The same stale page, but packed in behind a good one inside a
+        // single block rather than starting one. That is a second
+        // positioning site, and it is where the two packet scanners drifted
+        // apart before they were unified — so it gets its own test rather
+        // than trusting that one check covers both.
+        let mut file = [0u8; PAGE_SIZE * 2];
+        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
+
+        let block = &mut file[PAGE_SIZE..];
+        block[..PAGE_SIZE].copy_from_slice(&ogg_page_with_serial(0xAAAA, &[b"AAAA"]));
+
+        // A second page immediately behind the first one's payload.
+        const SECOND: usize = 27 + 1 + 4;
+        let foreign = ogg_page_with_serial(0xBBBB, &[b"BBBB"]);
+        block[SECOND..SECOND + 32].copy_from_slice(&foreign[..32]);
+
+        let mut r = TafReader::open(SlicePages::new(&file).unwrap()).unwrap();
+        let mut buf = [0u8; MAX_PACKET];
+
+        let n = r.next_packet(&mut buf).unwrap().unwrap();
+        assert_eq!(&buf[..n], b"AAAA");
+        assert_eq!(r.next_packet(&mut buf), Err(TafError::WrongStream));
+    }
+
+    #[test]
+    fn seeking_onto_a_block_from_another_stream_is_rejected() {
+        // Trailing padding may itself be leftover `OggS` pages from a longer
+        // previous recording, and a chapter index inside the declared range
+        // can point straight at one. `last_usable_page` does not help here:
+        // the page is declared stream, it just isn't this stream's.
+        //
+        // data_length = 8192; chapter_pages (field 4, packed) = [0, 1].
+        let mut file = [0u8; PAGE_SIZE * 3];
+        file[0..PAGE_SIZE]
+            .copy_from_slice(&header_page(&[0x10, 0x80, 0x40, 0x22, 0x02, 0x00, 0x01]));
+        file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&ogg_page_with_serial(0xAAAA, &[b"AAAA"]));
+        file[PAGE_SIZE * 2..].copy_from_slice(&ogg_page_with_serial(0xBBBB, &[b"BBBB"]));
+
+        let mut r = TafReader::open(SlicePages::new(&file).unwrap()).unwrap();
+
+        assert_eq!(r.seek_to_chapter(1), Err(TafError::WrongStream));
     }
 
     #[test]

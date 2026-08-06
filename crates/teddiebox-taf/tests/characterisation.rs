@@ -73,6 +73,44 @@ fn every_page_after_the_header_is_an_ogg_page() {
     }
 }
 
+/// Every Ogg page in the file — including the small ones packed in behind
+/// another inside a single block — carries one stream serial, and it equals
+/// the header's `audio_id`.
+///
+/// The reader enforces only the first half: pages must agree with each
+/// other. The equality is recorded here rather than checked in the parser
+/// because it rests on `toniefile` alone, and a real Toniebox file has never
+/// been examined. Enforcing it would make every commercial `.taf` fail to
+/// open if the convention turns out to be `toniefile`'s rather than
+/// Boxine's. If a real file confirms it, tightening the reader is one line.
+#[test]
+fn every_ogg_page_carries_the_audio_id_as_its_stream_serial() {
+    let mut serials = Vec::new();
+    let mut offset = PAGE_SIZE;
+    while let Some(found) = find_capture_pattern(FIXTURE, offset) {
+        serials.push(u32::from_le_bytes(
+            FIXTURE[found + 14..found + 18].try_into().unwrap(),
+        ));
+        offset = found + 1;
+    }
+
+    assert!(
+        serials.len() > 1,
+        "expected several pages, found {serials:?}"
+    );
+    assert!(
+        serials.iter().all(|&s| s == 0x1234_5678),
+        "expected every page to carry audio_id 0x12345678 as its serial, got {serials:?}"
+    );
+}
+
+fn find_capture_pattern(data: &[u8], from: usize) -> Option<usize> {
+    data.get(from..)?
+        .windows(4)
+        .position(|w| w == b"OggS")
+        .map(|p| from + p)
+}
+
 #[test]
 fn the_real_fixture_header_parses() {
     let page: &[u8; PAGE_SIZE] = FIXTURE[0..PAGE_SIZE].try_into().unwrap();

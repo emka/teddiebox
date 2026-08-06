@@ -340,6 +340,11 @@ mod tests {
         let packet_len = MAX_PACKET + 25;
         let mut ogg_page = [0u8; teddiebox_taf::PAGE_SIZE];
         ogg_page[0..4].copy_from_slice(b"OggS");
+        // Spliced into a real fixture, so it has to belong to that fixture's
+        // stream. A page carrying any other serial is rejected as foreign
+        // before its oversized packet is ever reached, which would leave this
+        // testing stream identity rather than buffer recovery.
+        ogg_page[14..18].copy_from_slice(&0x1234_5678u32.to_le_bytes());
         let mut off = 27usize;
         let mut remaining = packet_len;
         while remaining >= 255 {
