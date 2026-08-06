@@ -18,10 +18,13 @@ pub struct Position {
     pub page: u32,
 }
 
+/// The discriminants are explicit because the reducer indexes its
+/// press-timestamp array by ear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
 pub enum Ear {
-    Left,
-    Right,
+    Left = 0,
+    Right = 1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

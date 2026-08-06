@@ -79,17 +79,166 @@ pub enum Action {
     PowerOff,
 }
 
-#[derive(Debug, Default)]
-pub struct Core {}
+#[derive(Debug, Clone, Copy)]
+pub struct CoreConfig {
+    pub volume_limit: u8,
+    pub gesture: GestureConfig,
+    pub battery: BatteryConfig,
+    /// Milliseconds an ear must be held to count as a long press rather than
+    /// a tap.
+    pub long_press_ms: Millis,
+}
+
+impl Default for CoreConfig {
+    fn default() -> Self {
+        Self {
+            volume_limit: MAX_VOLUME,
+            gesture: GestureConfig::default(),
+            battery: BatteryConfig::default(),
+            long_press_ms: 600,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Core {
+    config: CoreConfig,
+    volume: VolumeModel,
+    gestures: GestureDetector,
+    battery: BatteryModel,
+    playback: Playback,
+    charging: bool,
+    ear_down: [Option<Millis>; 2],
+    led: LedState,
+}
 
 impl Core {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(config: CoreConfig) -> Self {
+        Self {
+            config,
+            volume: VolumeModel::new(config.volume_limit),
+            gestures: GestureDetector::new(config.gesture),
+            battery: BatteryModel::new(config.battery),
+            playback: Playback::new(),
+            charging: false,
+            ear_down: [None, None],
+            led: LedState::Booting,
+        }
     }
 
-    pub fn handle(&mut self, event: Event) -> Actions {
-        let _ = event;
-        Actions::new()
+    pub fn volume(&self) -> Volume {
+        self.volume.current()
+    }
+
+    pub fn handle<I: ContentIndex>(&mut self, event: Event, index: &I) -> Actions {
+        let mut actions = Actions::new();
+
+        match event {
+            Event::Tick(_) => {}
+
+            Event::EarDown(ear, at) => {
+                self.ear_down[ear as usize] = Some(at);
+            }
+
+            Event::EarUp(ear, at) => {
+                let Some(down_at) = self.ear_down[ear as usize].take() else {
+                    return actions;
+                };
+                let held = at.saturating_sub(down_at);
+                if held >= self.config.long_press_ms {
+                    let _ = actions.push(match ear {
+                        Ear::Right => Action::NextTrack,
+                        Ear::Left => Action::PrevTrack,
+                    });
+                } else {
+                    let changed = match ear {
+                        Ear::Right => self.volume.up(),
+                        Ear::Left => self.volume.down(),
+                    };
+                    match changed {
+                        Some(v) => {
+                            let _ = actions.push(Action::SetVolume(v));
+                        }
+                        None => {
+                            let _ = actions.push(Action::PlayPrompt(Prompt::VolumeLimit));
+                        }
+                    }
+                }
+            }
+
+            Event::TagPresent(tag) => {
+                let a = self.playback.on_tag_present(tag, index);
+                for act in a {
+                    let _ = actions.push(act);
+                }
+            }
+
+            Event::TagAbsent => {
+                let a = self.playback.on_tag_absent();
+                for act in a {
+                    let _ = actions.push(act);
+                }
+            }
+
+            Event::ContentReady(tag) => {
+                let a = self.playback.on_content_ready(tag, index);
+                for act in a {
+                    let _ = actions.push(act);
+                }
+            }
+
+            Event::ContentMissing(tag) => {
+                let a = self.playback.on_content_missing(tag);
+                for act in a {
+                    let _ = actions.push(act);
+                }
+            }
+
+            Event::Motion { x, y, z, at } => {
+                if let Some(g) = self.gestures.feed(x, y, z, at) {
+                    let _ = actions.push(match g {
+                        Gesture::Slap(Side::Right) => Action::NextTrack,
+                        Gesture::Slap(Side::Left) => Action::PrevTrack,
+                        Gesture::Tilt(dir) => Action::Seek(dir),
+                        Gesture::TiltEnded => Action::SeekEnd,
+                    });
+                }
+            }
+
+            Event::Battery {
+                pack_mv,
+                under_load,
+            } => {
+                if self.battery.update(pack_mv, under_load).is_some()
+                    && self.battery.level() == BatteryLevel::Low
+                {
+                    let _ = actions.push(Action::PlayPrompt(Prompt::BatteryLow));
+                }
+                if self.battery.must_shut_down() {
+                    let _ = actions.push(Action::PowerOff);
+                }
+            }
+
+            Event::Charger(on) => {
+                self.charging = on;
+            }
+
+            Event::TrackFinished => {
+                let _ = actions.push(Action::NextTrack);
+            }
+        }
+
+        self.refresh_led(&mut actions);
+        actions
+    }
+
+    /// Appends a `SetLed` action when the indicator should change.
+    fn refresh_led(&mut self, actions: &mut Actions) {
+        let want = led_for(self.playback.kind(), self.battery.level(), self.charging);
+        if want != self.led {
+            self.led = want;
+            let _ = actions.push(Action::SetLed(want));
+        }
     }
 }
 
@@ -97,9 +246,156 @@ impl Core {
 mod tests {
     use super::*;
 
+    const TAG: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
+
+    struct Index;
+    impl ContentIndex for Index {
+        fn is_available(&self, _tag: TagUid) -> bool {
+            true
+        }
+        fn saved_position(&self, _tag: TagUid) -> Position {
+            Position { page: 1 }
+        }
+    }
+
+    fn core() -> Core {
+        Core::new(CoreConfig::default())
+    }
+
+    fn contains(actions: &Actions, wanted: Action) -> bool {
+        actions.contains(&wanted)
+    }
+
     #[test]
-    fn an_unremarkable_tick_produces_no_actions() {
-        let mut core = Core::new();
-        assert!(core.handle(Event::Tick(1_000)).is_empty());
+    fn a_right_ear_tap_raises_the_volume() {
+        let mut c = core();
+        let before = c.volume();
+        c.handle(Event::EarDown(Ear::Right, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Right, 100), &Index);
+        assert!(c.volume() > before);
+        assert!(contains(&actions, Action::SetVolume(c.volume())));
+    }
+
+    #[test]
+    fn a_left_ear_tap_lowers_the_volume() {
+        let mut c = core();
+        let before = c.volume();
+        c.handle(Event::EarDown(Ear::Left, 0), &Index);
+        c.handle(Event::EarUp(Ear::Left, 100), &Index);
+        assert!(c.volume() < before);
+    }
+
+    #[test]
+    fn a_tap_at_the_volume_ceiling_prompts_instead_of_changing_volume() {
+        let mut c = core();
+        for i in 0..10 {
+            c.handle(Event::EarDown(Ear::Right, i * 200), &Index);
+            c.handle(Event::EarUp(Ear::Right, i * 200 + 100), &Index);
+        }
+        c.handle(Event::EarDown(Ear::Right, 5_000), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Right, 5_100), &Index);
+        assert!(contains(&actions, Action::PlayPrompt(Prompt::VolumeLimit)));
+    }
+
+    #[test]
+    fn a_long_press_on_the_right_ear_skips_forward() {
+        let mut c = core();
+        c.handle(Event::EarDown(Ear::Right, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Right, 900), &Index);
+        assert!(contains(&actions, Action::NextTrack));
+        assert!(!contains(&actions, Action::SetVolume(c.volume())));
+    }
+
+    #[test]
+    fn a_long_press_on_the_left_ear_skips_backward() {
+        let mut c = core();
+        c.handle(Event::EarDown(Ear::Left, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Left, 900), &Index);
+        assert!(contains(&actions, Action::PrevTrack));
+    }
+
+    #[test]
+    fn a_release_without_a_press_is_ignored() {
+        let mut c = core();
+        assert!(c.handle(Event::EarUp(Ear::Right, 100), &Index).is_empty());
+    }
+
+    #[test]
+    fn a_slap_on_the_right_skips_to_the_next_track() {
+        let mut c = core();
+        c.handle(
+            Event::Motion {
+                x: 0,
+                y: 0,
+                z: 1000,
+                at: 0,
+            },
+            &Index,
+        );
+        let actions = c.handle(
+            Event::Motion {
+                x: 900,
+                y: 0,
+                z: 1000,
+                at: 20,
+            },
+            &Index,
+        );
+        assert!(contains(&actions, Action::NextTrack));
+    }
+
+    #[test]
+    fn placing_a_figure_starts_playback_and_updates_the_indicator() {
+        let mut c = core();
+        let actions = c.handle(Event::TagPresent(TAG), &Index);
+        assert!(contains(
+            &actions,
+            Action::Play {
+                tag: TAG,
+                from: Position { page: 1 }
+            }
+        ));
+        assert!(contains(&actions, Action::SetLed(LedState::Playing)));
+    }
+
+    #[test]
+    fn returning_the_box_to_level_ends_the_seek() {
+        let mut c = core();
+        c.handle(
+            Event::Motion {
+                x: 0,
+                y: 600,
+                z: 800,
+                at: 0,
+            },
+            &Index,
+        );
+        c.handle(
+            Event::Motion {
+                x: 0,
+                y: 600,
+                z: 800,
+                at: 400,
+            },
+            &Index,
+        );
+        let actions = c.handle(
+            Event::Motion {
+                x: 0,
+                y: 0,
+                z: 1000,
+                at: 600,
+            },
+            &Index,
+        );
+        assert!(contains(&actions, Action::SeekEnd));
+    }
+
+    #[test]
+    fn the_indicator_is_not_reset_when_nothing_changed() {
+        let mut c = core();
+        c.handle(Event::TagPresent(TAG), &Index);
+        let actions = c.handle(Event::Tick(1_000), &Index);
+        assert!(!actions.iter().any(|a| matches!(a, Action::SetLed(_))));
     }
 }
