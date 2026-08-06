@@ -1,8 +1,10 @@
 #![no_std]
 
+mod battery;
 mod types;
 mod volume;
 
+pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
 pub use types::*;
 pub use volume::VolumeModel;
 
