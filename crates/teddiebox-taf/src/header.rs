@@ -49,17 +49,18 @@ impl TonieHeader {
             match (field, wire) {
                 // data_length
                 (2, 0) => {
-                    header.data_length =
-                        read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)? as u32;
+                    let v = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
+                    header.data_length = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
                 }
                 // audio_id
                 (3, 0) => {
-                    header.audio_id =
-                        read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)? as u32;
+                    let v = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
+                    header.audio_id = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
                 }
                 // chapter_pages, unpacked
                 (4, 0) => {
-                    let v = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)? as u32;
+                    let v = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
+                    let v = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
                     header
                         .chapter_pages
                         .push(v)
@@ -74,8 +75,8 @@ impl TonieHeader {
                         return Err(TafError::MalformedHeader);
                     }
                     while pos < end {
-                        let v =
-                            read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)? as u32;
+                        let v = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
+                        let v = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
                         header
                             .chapter_pages
                             .push(v)
@@ -194,6 +195,40 @@ mod tests {
         // field 9, wire type 1 (fixed64): declares an 8-byte payload but only
         // 2 bytes remain in the body.
         let fields = [0x49, 0x00, 0x00];
+        assert_eq!(
+            TonieHeader::parse(&header_page(&fields)),
+            Err(TafError::MalformedHeader)
+        );
+    }
+
+    #[test]
+    fn rejects_a_data_length_that_overflows_u32() {
+        // field 2 (data_length), varint 4295024640 (> u32::MAX). `as u32`
+        // would silently truncate this to 57344 instead of rejecting it --
+        // and `data_length` is exactly the value `last_usable_page` is
+        // computed from, so a wrapped value directly changes how much of
+        // the file is treated as real stream content.
+        let fields = [0x10, 0x80, 0xC0, 0x83, 0x80, 0x10];
+        assert_eq!(
+            TonieHeader::parse(&header_page(&fields)),
+            Err(TafError::MalformedHeader)
+        );
+    }
+
+    #[test]
+    fn rejects_an_audio_id_that_overflows_u32() {
+        // field 3 (audio_id), varint 4294967338 (u32::MAX + 43).
+        let fields = [0x18, 0xAA, 0x80, 0x80, 0x80, 0x10];
+        assert_eq!(
+            TonieHeader::parse(&header_page(&fields)),
+            Err(TafError::MalformedHeader)
+        );
+    }
+
+    #[test]
+    fn rejects_a_chapter_page_that_overflows_u32() {
+        // field 4 (chapter_pages), unpacked, varint 4294967297 (u32::MAX + 2).
+        let fields = [0x20, 0x81, 0x80, 0x80, 0x80, 0x10];
         assert_eq!(
             TonieHeader::parse(&header_page(&fields)),
             Err(TafError::MalformedHeader)
