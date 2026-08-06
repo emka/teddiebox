@@ -22,6 +22,12 @@ pub struct TafReader<S: PageSource> {
     packet_cursor: usize,
     lacing_cursor: usize,
     lacing_end: usize,
+    /// File-page index of the last page the header's `data_length` declares
+    /// as real Ogg stream. Trailing pages beyond this (e.g. benign padding)
+    /// exist in `source` but must not be read as stream content: `next_packet`
+    /// treats reaching past this index as end of stream, the same way it
+    /// treats reaching the end of `source` itself.
+    last_usable_page: u32,
 }
 
 impl<S: PageSource> TafReader<S> {
@@ -35,6 +41,15 @@ impl<S: PageSource> TafReader<S> {
             .map_err(|_| TafError::MalformedHeader)?;
         let header = TonieHeader::parse(&page)?;
 
+        // The header declares how many bytes of Ogg stream follow it. Fewer
+        // pages than that means the file was truncated -- decoding the prefix
+        // would just stop the story early with nothing reporting it.
+        let declared_pages = header.data_length.div_ceil(PAGE_SIZE as u32);
+        let available_pages = source.page_count() - 1;
+        if available_pages < declared_pages {
+            return Err(TafError::TruncatedFile);
+        }
+
         let mut reader = Self {
             source,
             header,
@@ -43,6 +58,7 @@ impl<S: PageSource> TafReader<S> {
             packet_cursor: 0,
             lacing_cursor: 0,
             lacing_end: 0,
+            last_usable_page: declared_pages,
         };
         reader.load_page(1)?;
         Ok(reader)
@@ -176,9 +192,13 @@ impl<S: PageSource> TafReader<S> {
             }
 
             // No further real Ogg page in this block: advance to the next
-            // container block, or report end of stream.
+            // container block, or report end of stream. Bounded by
+            // `last_usable_page`, not `source.page_count()`: a page-aligned
+            // truncated file is rejected in `open`, but a file with benign
+            // trailing padding past the declared data must still stop here
+            // rather than reading that padding as stream content.
             let next = self.page_index + 1;
-            if next >= self.source.page_count() {
+            if next > self.last_usable_page {
                 return Ok(None);
             }
             self.load_page(next)?;
@@ -424,5 +444,67 @@ mod tests {
         let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
         let n = r.chapter_count();
         assert_eq!(r.seek_to_chapter(n), Err(TafError::PageOutOfRange));
+    }
+
+    #[test]
+    fn a_file_with_fewer_pages_than_the_header_declares_is_rejected_as_truncated() {
+        // sine.taf declares data_length 57344 = 14 pages of Ogg stream
+        // (page_count 15, header included). Slicing to just the first 10
+        // blocks is page-aligned -- so without checking `data_length` this
+        // would otherwise open and decode to a valid, silently shorter file.
+        let truncated = &FIXTURE[..PAGE_SIZE * 10];
+        assert!(matches!(
+            TafReader::open(SlicePages::new(truncated).unwrap()),
+            Err(TafError::TruncatedFile)
+        ));
+    }
+
+    #[test]
+    fn both_real_fixtures_still_open_and_yield_their_existing_packet_counts() {
+        let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
+        let mut buf = [0u8; MAX_PACKET];
+        let mut count = 0usize;
+        while r.next_packet(&mut buf).unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 85, "sine.taf's packet count must be unaffected");
+
+        let mut r2 = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        let mut count2 = 0usize;
+        while r2.next_packet(&mut buf).unwrap().is_some() {
+            count2 += 1;
+        }
+        assert_eq!(count2, 97, "chapters.taf's packet count must be unaffected");
+    }
+
+    #[test]
+    fn an_extra_all_zero_trailing_block_is_accepted_as_padding_and_ignored() {
+        // Page-aligned padding after the declared data must stay acceptable
+        // (unlike an actually truncated file): a real device may leave
+        // trailing zero blocks from a previous, longer recording.
+        let mut padded = [0u8; PAGE_SIZE * 16];
+        padded[..FIXTURE.len()].copy_from_slice(FIXTURE);
+        // padded[FIXTURE.len()..] is left all zero by initialization.
+
+        let mut original = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
+        let mut padded_reader = TafReader::open(SlicePages::new(&padded).unwrap()).unwrap();
+
+        let mut buf_a = [0u8; MAX_PACKET];
+        let mut buf_b = [0u8; MAX_PACKET];
+        loop {
+            let a = original.next_packet(&mut buf_a).unwrap();
+            let b = padded_reader.next_packet(&mut buf_b).unwrap();
+            match (a, b) {
+                (None, None) => break,
+                (Some(na), Some(nb)) => assert_eq!(
+                    &buf_a[..na],
+                    &buf_b[..nb],
+                    "padded file must yield exactly the same packets as the original"
+                ),
+                _ => {
+                    panic!("packet stream length differs between the original and the padded file")
+                }
+            }
+        }
     }
 }
