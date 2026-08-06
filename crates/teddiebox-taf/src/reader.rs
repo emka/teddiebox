@@ -49,6 +49,16 @@ impl<S: PageSource> TafReader<S> {
         if available_pages < declared_pages {
             return Err(TafError::TruncatedFile);
         }
+        // A header declaring zero bytes of stream leaves no page for `open`
+        // to position onto: file page 1, which must hold OpusHead, would be
+        // beyond `last_usable_page` (0). This is a defect in the header's
+        // own declared content, detectable without reference to how many
+        // pages physically exist, so it is `MalformedHeader` rather than
+        // `TruncatedFile` (which flags a mismatch between the declaration
+        // and the physical file).
+        if declared_pages == 0 {
+            return Err(TafError::MalformedHeader);
+        }
 
         let mut reader = Self {
             source,
@@ -109,6 +119,17 @@ impl<S: PageSource> TafReader<S> {
         // Chapter indices are Ogg-stream-relative; file page 0 is the header.
         // Without the +1, chapter 0 would load the header instead of audio.
         let file_page = ogg_page.checked_add(1).ok_or(TafError::PageOutOfRange)?;
+        // Bounded by `last_usable_page`, not just `source.page_count()`
+        // (which `load_page` already checks): a chapter index can point at
+        // a page that physically exists and parses as a real Ogg page --
+        // benign trailing padding may itself be leftover `OggS` pages from
+        // a previous, longer recording -- but which the header's
+        // `data_length` does not declare as part of this stream. Without
+        // this check, such a chapter would seek onto and decode that
+        // undeclared page instead of failing.
+        if file_page > self.last_usable_page {
+            return Err(TafError::PageOutOfRange);
+        }
         self.load_page(file_page)
     }
 
@@ -352,8 +373,15 @@ mod tests {
         // Chapter 0 at ogg page 0 (file page 1, holding two packets);
         // chapter 1 at ogg page 1 (file page 2, deliberately not a real Ogg
         // page at all).
+        //
+        // data_length (field 2) = 8192 = two pages, declaring both page 1
+        // and page 2 as usable: chapter 1 must fail because page 2 isn't a
+        // real Ogg page, not merely because it's out of the declared range
+        // (that distinct failure mode is covered by the "beyond the
+        // declared stream" tests above).
         let mut file = [0u8; PAGE_SIZE * 3];
-        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x22, 0x02, 0x00, 0x01]));
+        file[0..PAGE_SIZE]
+            .copy_from_slice(&header_page(&[0x10, 0x80, 0x40, 0x22, 0x02, 0x00, 0x01]));
         file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&ogg_page(&[b"AAAA", b"BBBB"]));
         // file[PAGE_SIZE * 2..] is left all zero: not "OggS", not a page.
 
@@ -379,8 +407,10 @@ mod tests {
 
     #[test]
     fn an_oversized_packet_does_not_leave_stale_state_for_a_retry() {
+        // data_length (field 2) = 4096 = one page, declaring the single Ogg
+        // page below as usable.
         let mut file = [0u8; PAGE_SIZE * 2];
-        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x18, 0x07]));
+        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20, 0x18, 0x07]));
 
         // 20 segments: the first 17 (sixteen 255s plus a terminating 1)
         // declare a 4081-byte packet starting at payload offset 47, which
@@ -521,6 +551,52 @@ mod tests {
             count2 += 1;
         }
         assert_eq!(count2, 97, "chapters.taf's packet count must be unaffected");
+    }
+
+    #[test]
+    fn a_header_declaring_zero_data_length_is_rejected_not_opened() {
+        // sine.taf's data_length varint lives at file offsets 27..30, encoded
+        // canonically as [0x80, 0xC0, 0x03] (57344). Overwrite it with a
+        // non-canonical 3-byte encoding of zero ([0x80, 0x80, 0x00]) so the
+        // field keeps the same byte width and every following field's offset
+        // is undisturbed -- only the decoded value changes.
+        //
+        // A header declaring zero bytes of Ogg stream has no page for
+        // `open` to position onto: `last_usable_page` would be 0, meaning
+        // even file page 1 (which must hold OpusHead) is out of bounds.
+        // Before this was enforced, `open` positioned onto page 1
+        // unconditionally and happily decoded it as if it were declared
+        // stream content.
+        let mut file = [0u8; PAGE_SIZE * 15];
+        file.copy_from_slice(FIXTURE);
+        file[27..30].copy_from_slice(&[0x80, 0x80, 0x00]);
+
+        assert!(
+            TafReader::open(SlicePages::new(&file).unwrap()).is_err(),
+            "a header declaring zero data_length must not open"
+        );
+    }
+
+    #[test]
+    fn seeking_to_a_chapter_beyond_the_declared_stream_is_rejected_not_decoded() {
+        // chapters.taf's data_length varint lives at the same file offsets
+        // (27..30), encoded canonically as [0x80, 0x80, 0x04] (65536, 16
+        // pages). Overwrite it with [0x80, 0xC0, 0x01] (24576, 6 pages): a
+        // same-width, still-canonical 3-byte varint, so nothing else in the
+        // header shifts.
+        //
+        // Chapter 2 (ogg page 11, file page 12) is a real, valid Ogg page
+        // physically present in the file -- it is genuine leftover stream
+        // data, not zeroed padding -- but with the shrunk data_length it is
+        // no longer part of the declared stream. Seeking there must fail,
+        // not silently decode that undeclared page as if it were this
+        // file's audio.
+        let mut file = [0u8; PAGE_SIZE * 17];
+        file.copy_from_slice(CHAPTERS_FIXTURE);
+        file[27..30].copy_from_slice(&[0x80, 0xC0, 0x01]);
+
+        let mut r = TafReader::open(SlicePages::new(&file).unwrap()).unwrap();
+        assert_eq!(r.seek_to_chapter(2), Err(TafError::PageOutOfRange));
     }
 
     #[test]
