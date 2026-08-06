@@ -1,5 +1,13 @@
 /target
 /tools/xtensa-linkcheck/target
 /.direnv
+
+# `nix build` output symlinks.
+/result
+/result-*
+
+# Generated audio, except the committed fixtures — those are the evidence
+# base for every format claim in the parser and belong in the repo.
 *.taf
 *.wav
+!/crates/teddiebox-taf/tests/data/*.taf

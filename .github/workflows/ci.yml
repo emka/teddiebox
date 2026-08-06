@@ -30,3 +30,14 @@ jobs:
       # cross-compile check can see.
       - name: Link check
         run: nix develop --command ./scripts/xtensa-link-check.sh
+
+      # Every format claim the parser is built on rests on these committed
+      # fixtures, so a generator that has drifted from them quietly
+      # invalidates the evidence. Generation is byte-reproducible, which is
+      # what makes this a plain diff rather than a fuzzy comparison.
+      - name: Fixtures match their generator
+        run: |
+          out="$(mktemp -d)"
+          nix develop --command cargo run -q -p fixturegen -- "$out/sine.taf"
+          diff "$out/sine.taf" crates/teddiebox-taf/tests/data/sine.taf
+          diff "$out/chapters.taf" crates/teddiebox-taf/tests/data/chapters.taf
