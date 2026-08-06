@@ -87,6 +87,8 @@ pub struct CoreConfig {
     /// Milliseconds an ear must be held to count as a long press rather than
     /// a tap.
     pub long_press_ms: Millis,
+    /// Milliseconds of inactivity after which the box powers itself off.
+    pub idle_timeout_ms: Millis,
 }
 
 impl Default for CoreConfig {
@@ -96,6 +98,7 @@ impl Default for CoreConfig {
             gesture: GestureConfig::default(),
             battery: BatteryConfig::default(),
             long_press_ms: 600,
+            idle_timeout_ms: 5 * 60 * 1_000,
         }
     }
 }
@@ -110,6 +113,8 @@ pub struct Core {
     charging: bool,
     ear_down: [Option<Millis>; 2],
     led: LedState,
+    last_activity: Millis,
+    last_tick: Millis,
 }
 
 impl Core {
@@ -123,6 +128,8 @@ impl Core {
             charging: false,
             ear_down: [None, None],
             led: LedState::Booting,
+            last_activity: 0,
+            last_tick: 0,
         }
     }
 
@@ -133,8 +140,34 @@ impl Core {
     pub fn handle<I: ContentIndex>(&mut self, event: Event, index: &I) -> Actions {
         let mut actions = Actions::new();
 
+        // Timestamped events date themselves; untimestamped ones are dated by
+        // the most recent tick, which is the only clock the core ever sees.
+        // Battery and charger events deliberately do not count as activity: a
+        // box sitting on the shelf still samples its pack, and treating that
+        // as use would keep it awake forever.
         match event {
-            Event::Tick(_) => {}
+            Event::Tick(now) => self.last_tick = now,
+            Event::EarDown(_, at) | Event::EarUp(_, at) | Event::Motion { at, .. } => {
+                self.last_activity = at;
+            }
+            Event::TagPresent(_)
+            | Event::TagAbsent
+            | Event::ContentReady(_)
+            | Event::ContentMissing(_) => {
+                self.last_activity = self.last_tick;
+            }
+            Event::Battery { .. } | Event::Charger(_) | Event::TrackFinished => {}
+        }
+
+        match event {
+            Event::Tick(now) => {
+                let idle = now.saturating_sub(self.last_activity);
+                if self.playback.kind() != PlaybackKind::Playing
+                    && idle >= self.config.idle_timeout_ms
+                {
+                    let _ = actions.push(Action::PowerOff);
+                }
+            }
 
             Event::EarDown(ear, at) => {
                 self.ear_down[ear as usize] = Some(at);
@@ -356,6 +389,30 @@ mod tests {
             }
         ));
         assert!(contains(&actions, Action::SetLed(LedState::Playing)));
+    }
+
+    #[test]
+    fn the_box_powers_off_after_a_long_idle() {
+        let mut c = core();
+        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        assert!(contains(&actions, Action::PowerOff));
+    }
+
+    #[test]
+    fn the_box_does_not_power_off_while_playing() {
+        let mut c = core();
+        c.handle(Event::TagPresent(TAG), &Index);
+        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        assert!(!contains(&actions, Action::PowerOff));
+    }
+
+    #[test]
+    fn activity_defers_the_power_off() {
+        let mut c = core();
+        c.handle(Event::EarDown(Ear::Right, 4 * 60 * 1_000), &Index);
+        c.handle(Event::EarUp(Ear::Right, 4 * 60 * 1_000 + 100), &Index);
+        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        assert!(!contains(&actions, Action::PowerOff));
     }
 
     #[test]
