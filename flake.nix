@@ -186,8 +186,15 @@
             xtensaGcc
             # toniefile (fixturegen only) links libopus through pkg-config,
             # and falls back to a cmake build of its own if it can't find it.
+            #
+            # It gets the same fixed-point, intrinsics-free build the decoder
+            # uses, not the nixpkgs one. nixpkgs builds libopus float with
+            # run-time CPU detection, so its encoder picks NEON or AVX kernels
+            # by host and the same input encodes to different bytes on
+            # different machines — which is not a codec that can produce a
+            # fixture the repository commits and CI re-derives.
             pkgs.pkg-config
-            pkgs.libopus
+            opusHost
             pkgs.cmake
             # toniefile's build script shells out to protoc via prost-build.
             # The crate vendors a prebuilt protoc binary that NixOS can't
@@ -199,14 +206,6 @@
           # Tell prost-build to use the nixpkgs protoc rather than its
           # vendored binary.
           PROTOC = "${pkgs.protobuf}/bin/protoc";
-
-          # fixturegen links libopus dynamically, and `cargo run` — unlike
-          # `cargo test` — does not put the library's directory on the
-          # loader's path. On NixOS the ld wrapper bakes an rpath into the
-          # binary and hides that; anywhere else, including CI, the binary
-          # cannot find libopus at run time. Naming the directory here makes
-          # the shell behave the same way on every host.
-          LD_LIBRARY_PATH = "${pkgs.libopus}/lib";
         }
         // builtins.listToAttrs [
           (opusEnv hostTarget opusHost)
