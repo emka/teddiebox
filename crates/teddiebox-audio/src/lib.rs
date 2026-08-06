@@ -30,11 +30,16 @@ pub trait OpusDecode {
     fn decode(&mut self, packet: &[u8], pcm: &mut [i16]) -> Result<usize, AudioError>;
 }
 
+/// True for the two Opus stream-header packets, which carry ASCII magic that
+/// no audio frame realistically begins with.
+fn is_opus_header(packet: &[u8]) -> bool {
+    packet.starts_with(b"OpusHead") || packet.starts_with(b"OpusTags")
+}
+
 pub struct TafDecoder<S: PageSource, D: OpusDecode> {
     reader: TafReader<S>,
     decoder: D,
     packet: [u8; MAX_PACKET],
-    headers_skipped: bool,
 }
 
 impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
@@ -50,7 +55,6 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
             reader: TafReader::open(source)?,
             decoder,
             packet: [0u8; MAX_PACKET],
-            headers_skipped: false,
         })
     }
 
@@ -65,8 +69,6 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
     /// Seeks to a chapter and resumes decoding from there.
     pub fn seek_to_chapter(&mut self, n: usize) -> Result<(), AudioError> {
         self.reader.seek_to_chapter(n)?;
-        // Past the headers by definition: they live only in the first block.
-        self.headers_skipped = true;
         Ok(())
     }
 
@@ -83,22 +85,21 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
             return Err(AudioError::BufferTooSmall);
         }
 
-        // OpusHead and OpusTags precede the audio and must not reach libopus.
-        if !self.headers_skipped {
-            let mut scratch = [0u8; MAX_PACKET];
-            for _ in 0..2 {
-                if self.reader.next_packet(&mut scratch)?.is_none() {
-                    return Ok(None);
+        // OpusHead and OpusTags must not reach libopus. Identify them by
+        // their magic rather than by position: a positional skip is wrong
+        // after a seek, because chapter 0 legitimately starts *at* OpusHead —
+        // the headers and the first audio page share the first container
+        // block. Skipping by position would drop real audio from chapter 0,
+        // and a "already skipped" flag set on seek would feed OpusHead to
+        // libopus as audio. Matching the magic is correct in every position.
+        loop {
+            match self.reader.next_packet(&mut self.packet)? {
+                None => return Ok(None),
+                Some(len) if is_opus_header(&self.packet[..len]) => continue,
+                Some(len) => {
+                    let n = self.decoder.decode(&self.packet[..len], pcm)?;
+                    return Ok(Some(n));
                 }
-            }
-            self.headers_skipped = true;
-        }
-
-        match self.reader.next_packet(&mut self.packet)? {
-            None => Ok(None),
-            Some(len) => {
-                let n = self.decoder.decode(&self.packet[..len], pcm)?;
-                Ok(Some(n))
             }
         }
     }
@@ -284,6 +285,71 @@ mod tests {
             &expected[..expected_len],
             "a decode error should consume the failed packet, so the next \
              call must resume at the following packet, not repeat it"
+        );
+    }
+
+    #[test]
+    fn seeking_to_chapter_zero_decodes_its_first_real_audio_packet_not_opus_head() {
+        // Chapter 0 begins at the same container block as OpusHead and OpusTags,
+        // so positional header skipping fails: it would either skip real audio
+        // or feed OpusHead to the decoder depending on how the seek was entered.
+        // This test ensures we identify headers by magic, not by position.
+
+        // Independently determine what the first real audio packet of chapter 0 is.
+        let mut direct = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
+        direct.seek_to_chapter(0).unwrap();
+        let mut expected = [0u8; MAX_PACKET];
+        let expected_len;
+        // Skip OpusHead and OpusTags by their magic.
+        loop {
+            match direct.next_packet(&mut expected).unwrap() {
+                None => panic!("unexpected end of stream"),
+                Some(len)
+                    if expected[..len].starts_with(b"OpusHead")
+                        || expected[..len].starts_with(b"OpusTags") =>
+                {
+                    continue;
+                }
+                Some(len) => {
+                    expected_len = len;
+                    break;
+                }
+            }
+        }
+
+        /// Records the first packet it is asked to decode.
+        struct CapturingDecoder {
+            first_packet: Option<([u8; MAX_PACKET], usize)>,
+        }
+        impl OpusDecode for CapturingDecoder {
+            fn decode(&mut self, packet: &[u8], pcm: &mut [i16]) -> Result<usize, AudioError> {
+                if self.first_packet.is_none() {
+                    let mut buf = [0u8; MAX_PACKET];
+                    buf[..packet.len()].copy_from_slice(packet);
+                    self.first_packet = Some((buf, packet.len()));
+                }
+                let n = 960 * CHANNELS;
+                pcm[..n].fill(0);
+                Ok(n)
+            }
+        }
+
+        let mut dec = TafDecoder::open(
+            SlicePages::new(FIXTURE).unwrap(),
+            CapturingDecoder { first_packet: None },
+        )
+        .unwrap();
+        dec.seek_to_chapter(0).unwrap();
+        let mut pcm = [0i16; MAX_FRAME_SAMPLES];
+        dec.next_frame(&mut pcm).unwrap();
+
+        let (buf, len) = dec.decoder.first_packet.expect("decode was called");
+        assert_eq!(
+            &buf[..len],
+            &expected[..expected_len],
+            "chapter 0 begins at the same container block as OpusHead and OpusTags; \
+             seeking there must decode the first real audio packet, identified by \
+             magic (OpusHead/OpusTags), not by positional skip logic"
         );
     }
 }
