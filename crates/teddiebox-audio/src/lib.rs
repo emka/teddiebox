@@ -159,7 +159,11 @@ mod tests {
         .unwrap();
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
 
-        dec.next_frame(&mut pcm).unwrap();
+        // A single call only proves the *first* decoded packet isn't a
+        // header -- the name says "never". Drive the decoder over the
+        // whole stream, as the neighbouring test does, so the assertion
+        // actually matches what the name claims.
+        while dec.next_frame(&mut pcm).unwrap().is_some() {}
         assert!(!dec.decoder.saw_opus_header);
     }
 
