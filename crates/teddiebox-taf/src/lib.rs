@@ -38,10 +38,18 @@ pub enum TafError {
     /// retry with and must treat this as terminal. See `MAX_PACKET`'s doc
     /// for why that fixed size was chosen and how much headroom it has.
     BufferTooSmall,
-    /// The file is empty or not a whole number of pages. Distinct from
-    /// `MalformedHeader`: this is a whole-file length problem detected before
-    /// any header byte is read, and conflating the two misdirects debugging
-    /// when a torn write leaves a partial trailing page.
+    /// The file is shorter than the header page, or shorter than the stream
+    /// the header declares. Distinct from `MalformedHeader`: this is a
+    /// length problem rather than a content one, and conflating the two
+    /// misdirects debugging when a torn write cuts a file short.
+    ///
+    /// Detection is page-granular, which is the limit of a page-indexed
+    /// source: [`PageSource`] reports how many pages exist, not how many
+    /// bytes, so a file cut partway through its *final* page still looks
+    /// complete. Closing that would mean giving the trait a byte length,
+    /// which is a file-system notion this abstraction deliberately does not
+    /// have. A real file's final page is legitimately short, so the length
+    /// alone cannot distinguish the two cases anyway.
     TruncatedFile,
     /// A structurally valid Ogg page that belongs to a different stream.
     ///
