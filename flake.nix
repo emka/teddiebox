@@ -4,36 +4,97 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    fenix = {
-      url = "github:nix-community/fenix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     # Packages the ESP-IDF toolchain releases, which is where the only
     # xtensa C compiler comes from. Deliberately *not* following our nixpkgs:
     # its tool derivations still ask for python310, which unstable dropped.
     nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
   };
 
-  outputs = { self, nixpkgs, flake-utils, fenix, nixpkgs-esp-dev }:
+  outputs = { self, nixpkgs, flake-utils, nixpkgs-esp-dev }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        fx = fenix.packages.${system};
 
         hostTarget = pkgs.stdenv.hostPlatform.rust.rustcTarget;
         deviceTarget = "xtensa-esp32s3-none-elf";
 
-        # Nightly, because rustc has no prebuilt core for any xtensa target:
-        # it has to be built from source with -Z build-std, which needs
-        # rust-src and an unstable cargo. The exact nightly is pinned by
-        # flake.lock, so this is reproducible despite the channel name.
-        toolchain = fx.complete.withComponents [
-          "cargo"
-          "rustc"
-          "rust-src"
-          "clippy"
-          "rustfmt"
-        ];
+        # Espressif's Rust fork, as espup would install it.
+        #
+        # Upstream rustc can compile for xtensa but cannot produce an image:
+        # its LLVM emits literal pools at offsets the ESP linker rejects as
+        # "dangerous relocation", `core` itself included, and lld has no
+        # Xtensa support to fall back on. This fork carries the Xtensa
+        # patches that make the output linkable, and the CPU model for the
+        # S3 — so it also stops silently discarding the chip's own
+        # instructions, native atomics among them.
+        #
+        # It is nightly, which -Z build-std needs anyway, and it is a
+        # complete toolchain: host builds use it too, rather than running two
+        # compilers of different vintages against one Cargo.lock.
+        espRustVersion = "1.95.0.0";
+
+        espRustTarballs = {
+          x86_64-linux = {
+            arch = "x86_64-unknown-linux-gnu";
+            hash = "sha256-qtL7JLrqtq1hxB8ALxNv4LQW7zmlAdKXUKtmwYpplDM=";
+          };
+          aarch64-linux = {
+            arch = "aarch64-unknown-linux-gnu";
+            hash = "sha256-DH2I5oBfm3egSPMH/LHfDGWGOjBsJ4Ej3HcanLbShEw=";
+          };
+        };
+
+        espRustTarball = espRustTarballs.${system} or (throw
+          "no esp-rs Rust build published for ${system}");
+
+        toolchain = pkgs.stdenv.mkDerivation {
+          pname = "rust-esp";
+          version = espRustVersion;
+
+          src = pkgs.fetchurl {
+            url = "https://github.com/esp-rs/rust-build/releases/download/"
+              + "v${espRustVersion}/rust-${espRustVersion}-${espRustTarball.arch}.tar.xz";
+            inherit (espRustTarball) hash;
+          };
+
+          # Shipped separately from the compiler, and -Z build-std needs it:
+          # there is no prebuilt `core` for any xtensa target to download.
+          rustSrc = pkgs.fetchurl {
+            url = "https://github.com/esp-rs/rust-build/releases/download/"
+              + "v${espRustVersion}/rust-src-${espRustVersion}.tar.xz";
+            hash = "sha256-cIvuM3rC1BwOhhr5MEe//skaBS+8tJV5JdhApB8ydxc=";
+          };
+
+          nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+          buildInputs = [ pkgs.zlib pkgs.stdenv.cc.cc.lib ];
+
+          # Prebuilt binaries: nothing to configure, build, or strip.
+          dontConfigure = true;
+          dontBuild = true;
+          dontStrip = true;
+
+          installPhase = ''
+            runHook preInstall
+
+            patchShebangs install.sh
+
+            # Skipping rust-docs keeps a 100 MB manual out of the closure.
+            ./install.sh \
+              --prefix=$out \
+              --disable-ldconfig \
+              --components=rustc,cargo,rustfmt-preview,clippy-preview,rust-std-${hostTarget}
+
+            tar -xf $rustSrc
+            patchShebangs rust-src-nightly/install.sh
+            ./rust-src-nightly/install.sh --prefix=$out --disable-ldconfig
+
+            rm -rf $out/lib/rustlib/{components,manifest-*,install.log,uninstall.sh,rust-installer-version}
+
+            runHook postInstall
+          '';
+
+          passthru.rustSrcPath = "lib/rustlib/src/rust/library";
+        };
 
         # The xtensa GCC ships as a propagated input of the ESP-IDF bundle
         # rather than as a package of its own. We want the compiler and not
