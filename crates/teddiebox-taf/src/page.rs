@@ -5,14 +5,32 @@ use crate::{TafError, PAGE_SIZE};
 const CAPTURE_PATTERN: &[u8; 4] = b"OggS";
 const MIN_HEADER_LEN: usize = 27;
 
-pub struct OggPage<'a> {
+/// Not part of the public API: `Packets` (returned by [`OggPage::packets`])
+/// terminates on an oversized packet rather than reporting it -- `None`
+/// there is indistinguishable from "page finished". That's the right
+/// behaviour for `TafReader::next_packet`, which layers its own
+/// `TafError::NotAnOggPage` on top after seeing the page-level iterator end
+/// early, but it would be a fail-open trap for any other caller reading
+/// straight from `OggPage`: a corrupt or malicious page would look like a
+/// page that simply ran out of packets. Keeping both `pub(crate)` removes
+/// that surface instead of documenting around it.
+///
+/// `granule_position`, `is_continuation`, and `packets` (with `Packets`
+/// itself) have no caller left inside the crate either: `TafReader` scans
+/// lacing tables with its own inline copy of this same logic rather than
+/// calling back into this iterator. They stay `#[allow(dead_code)]` as
+/// tested, load-bearing-by-parity primitives -- `page.rs`'s own tests pin
+/// their behaviour independently of `reader.rs`'s copy -- rather than being
+/// deleted as part of a visibility-only change.
+#[allow(dead_code)]
+pub(crate) struct OggPage<'a> {
     page: &'a [u8; PAGE_SIZE],
     segment_count: usize,
     payload_start: usize,
 }
 
 impl<'a> OggPage<'a> {
-    pub fn parse(page: &'a [u8; PAGE_SIZE]) -> Result<Self, TafError> {
+    pub(crate) fn parse(page: &'a [u8; PAGE_SIZE]) -> Result<Self, TafError> {
         if &page[0..4] != CAPTURE_PATTERN {
             return Err(TafError::NotAnOggPage);
         }
@@ -30,12 +48,14 @@ impl<'a> OggPage<'a> {
 
     /// Sample position at the end of this page, used for seeking and for
     /// reporting playback position.
-    pub fn granule_position(&self) -> u64 {
+    #[allow(dead_code)]
+    pub(crate) fn granule_position(&self) -> u64 {
         u64::from_le_bytes(self.page[6..14].try_into().unwrap())
     }
 
     /// True when this page's first packet continues from the previous page.
-    pub fn is_continuation(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn is_continuation(&self) -> bool {
         self.page[5] & 0x01 != 0
     }
 
@@ -45,7 +65,8 @@ impl<'a> OggPage<'a> {
     /// (below 255) is not complete within this page — it continues onto the
     /// next one — and is silently dropped rather than handed to the caller
     /// as a truncated packet.
-    pub fn packets(&self) -> Packets<'a> {
+    #[allow(dead_code)]
+    pub(crate) fn packets(&self) -> Packets<'a> {
         Packets {
             page: self.page,
             lacing: MIN_HEADER_LEN,
@@ -55,7 +76,8 @@ impl<'a> OggPage<'a> {
     }
 }
 
-pub struct Packets<'a> {
+#[allow(dead_code)]
+pub(crate) struct Packets<'a> {
     page: &'a [u8; PAGE_SIZE],
     lacing: usize,
     lacing_end: usize,

@@ -7,8 +7,13 @@ mod source;
 mod varint;
 
 pub use header::TonieHeader;
-pub use page::OggPage;
 pub use reader::{TafReader, MAX_PACKET};
+
+// `OggPage` (and its `Packets` iterator) is used only internally, by
+// `reader::TafReader`. It stays `pub(crate)`: see the doc comment on
+// `page::OggPage` for why this is a public-API safety boundary, not just
+// tidiness.
+pub(crate) use page::OggPage;
 pub use source::{PageSource, SlicePages};
 
 /// Every structure in a Tonie audio file is aligned to this boundary: the
