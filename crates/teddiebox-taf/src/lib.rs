@@ -35,3 +35,19 @@ pub enum TafError {
     /// when a torn write leaves a partial trailing page.
     TruncatedFile,
 }
+
+impl core::fmt::Display for TafError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let s = match self {
+            TafError::MalformedHeader => "malformed TAF header",
+            TafError::TooManyChapters => "too many chapters",
+            TafError::NotAnOggPage => "not an Ogg page",
+            TafError::PageOutOfRange => "page out of range",
+            TafError::BufferTooSmall => "buffer too small for packet",
+            TafError::TruncatedFile => "file is truncated or not a whole number of pages",
+        };
+        f.write_str(s)
+    }
+}
+
+impl core::error::Error for TafError {}

@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/teddiebox-audio", "crates/teddiebox-taf", "tools/fixturegen"]
+members = [
+    "crates/teddiebox-audio",
+    "crates/teddiebox-taf",
+    "tools/fixturegen",
+    "tools/taf2wav",
+]
 
 [workspace.package]
 edition = "2021"

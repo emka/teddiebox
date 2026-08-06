@@ -24,6 +24,18 @@ impl From<TafError> for AudioError {
     }
 }
 
+impl core::fmt::Display for AudioError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AudioError::Container(e) => write!(f, "container error: {e}"),
+            AudioError::Decode => f.write_str("Opus decode failed"),
+            AudioError::BufferTooSmall => f.write_str("PCM buffer too small for one frame"),
+        }
+    }
+}
+
+impl core::error::Error for AudioError {}
+
 /// Decodes one Opus packet into interleaved 16-bit PCM.
 pub trait OpusDecode {
     /// Returns the number of samples written (frames × channels).
