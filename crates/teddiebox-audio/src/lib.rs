@@ -51,19 +51,11 @@ fn is_opus_header(packet: &[u8]) -> bool {
 pub struct TafDecoder<S: PageSource, D: OpusDecode> {
     reader: TafReader<S>,
     decoder: D,
-    /// Fixed-size: see `MAX_PACKET`'s doc for what size was chosen and why
-    /// a packet that doesn't fit here is unrecoverable, not just this call's
-    /// problem.
+    /// Sized so that every packet a TAF file can contain fits — see
+    /// [`MAX_PACKET`], which is derived from the page size rather than from
+    /// the codec, so "too big for this buffer" is not a state this decoder
+    /// can reach.
     packet: [u8; MAX_PACKET],
-    /// Set once `next_packet` reports `TafError::BufferTooSmall` against
-    /// `packet`. `packet`'s size is fixed for the lifetime of this decoder,
-    /// so the error is terminal *at the reader's current position*: without
-    /// an intervening seek, every later call must keep reporting the same
-    /// error instead of re-asking the reader for a packet it already told
-    /// us doesn't fit. A successful `seek_to_chapter` clears the flag,
-    /// because it moves the reader to a different packet, which may well
-    /// fit the buffer even though the one that tripped this didn't.
-    buffer_exhausted: bool,
 }
 
 impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
@@ -83,7 +75,6 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
             reader: TafReader::open(source)?,
             decoder,
             packet: [0u8; MAX_PACKET],
-            buffer_exhausted: false,
         })
     }
 
@@ -97,30 +88,17 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
 
     /// Seeks to a chapter and resumes decoding from there.
     ///
-    /// Clears a latched `BufferTooSmall` on success: that error is terminal
-    /// only for the packet at the position that produced it, and a
-    /// successful seek moves to a different position. On failure, leaves
-    /// `buffer_exhausted` (and every other field) untouched, mirroring
-    /// `TafReader::seek_to_chapter`'s own contract that a failed seek must
-    /// not change where the reader is positioned.
+    /// A failed seek leaves the reader positioned exactly where it was,
+    /// mirroring `TafReader::seek_to_chapter`'s own contract.
     pub fn seek_to_chapter(&mut self, n: usize) -> Result<(), AudioError> {
         self.reader.seek_to_chapter(n)?;
-        self.buffer_exhausted = false;
         Ok(())
     }
 
     /// Decodes the next audio packet. `Ok(None)` at end of stream.
     ///
     /// Retry semantics differ by error, and callers need to know which they
-    /// got. A [`TafError::BufferTooSmall`] wrapped in [`AudioError::Container`]
-    /// is the one exception to "container errors are retryable" *at a fixed
-    /// position*: `packet` is a fixed-size buffer, so the packet at the
-    /// reader's current position that didn't fit it never will, however many
-    /// times this is called without an intervening seek. Every such call
-    /// reports that same error immediately without asking the reader again.
-    /// It is not permanent, though: [`Self::seek_to_chapter`] moves the
-    /// reader to a different packet, which may well fit, so a successful
-    /// seek clears it. Any other [`AudioError::Container`] leaves the packet unconsumed, so
+    /// got. An [`AudioError::Container`] leaves the packet unconsumed, so
     /// retrying re-attempts it. A [`AudioError::Decode`] arrives *after* the
     /// packet has been taken from the container, so that frame's audio is
     /// gone: a retry resumes at the following packet. Treat a decode error
@@ -129,10 +107,6 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
         if pcm.len() < MAX_FRAME_SAMPLES {
             return Err(AudioError::BufferTooSmall);
         }
-        if self.buffer_exhausted {
-            return Err(AudioError::Container(TafError::BufferTooSmall));
-        }
-
         // OpusHead and OpusTags must not reach libopus. Identify them by
         // their magic rather than by position: a positional skip is wrong
         // after a seek, because chapter 0 legitimately starts *at* OpusHead —
@@ -147,10 +121,6 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
                 Ok(Some(len)) => {
                     let n = self.decoder.decode(&self.packet[..len], pcm)?;
                     return Ok(Some(n));
-                }
-                Err(TafError::BufferTooSmall) => {
-                    self.buffer_exhausted = true;
-                    return Err(AudioError::Container(TafError::BufferTooSmall));
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -240,151 +210,6 @@ mod tests {
         .unwrap();
         let mut pcm = [0i16; 8];
         assert_eq!(dec.next_frame(&mut pcm), Err(AudioError::BufferTooSmall));
-    }
-
-    /// Builds a minimal TAF header page declaring `data_length` bytes of
-    /// stream, mirroring `teddiebox-taf`'s own private test helper of the
-    /// same name (duplicated here rather than reused, since it's private to
-    /// that crate).
-    fn header_page(data_length: u32) -> [u8; teddiebox_taf::PAGE_SIZE] {
-        let mut page = [0u8; teddiebox_taf::PAGE_SIZE];
-        // field 2 (data_length), wire type 0 (varint): key byte 0x10,
-        // followed by however many varint bytes `data_length` needs.
-        let mut fields = [0u8; 8];
-        let mut n = 0usize;
-        fields[n] = 0x10;
-        n += 1;
-        let mut v = data_length;
-        loop {
-            let mut byte = (v & 0x7F) as u8;
-            v >>= 7;
-            if v != 0 {
-                byte |= 0x80;
-            }
-            fields[n] = byte;
-            n += 1;
-            if v == 0 {
-                break;
-            }
-        }
-        page[0..4].copy_from_slice(&(n as u32).to_be_bytes());
-        page[4..4 + n].copy_from_slice(&fields[..n]);
-        page
-    }
-
-    #[test]
-    fn a_packet_too_large_for_the_decoders_fixed_buffer_is_a_terminal_error() {
-        // One packet larger than `MAX_PACKET`: `TafDecoder` has no bigger
-        // buffer to retry with, however many times it's called, unlike a
-        // caller that owns a resizable buffer.
-        let packet_len = MAX_PACKET + 25;
-        let mut ogg_page = [0u8; teddiebox_taf::PAGE_SIZE];
-        ogg_page[0..4].copy_from_slice(b"OggS");
-        let mut off = 27usize;
-        let mut remaining = packet_len;
-        while remaining >= 255 {
-            ogg_page[off] = 255;
-            off += 1;
-            remaining -= 255;
-        }
-        ogg_page[off] = remaining as u8;
-        off += 1;
-        ogg_page[26] = (off - 27) as u8;
-        let payload_start = off;
-        ogg_page[payload_start..payload_start + packet_len].fill(0xAB);
-
-        let mut file = [0u8; teddiebox_taf::PAGE_SIZE * 2];
-        file[..teddiebox_taf::PAGE_SIZE]
-            .copy_from_slice(&header_page(teddiebox_taf::PAGE_SIZE as u32));
-        file[teddiebox_taf::PAGE_SIZE..].copy_from_slice(&ogg_page);
-
-        let mut dec = TafDecoder::open(
-            SlicePages::new(&file).unwrap(),
-            StubDecoder {
-                calls: 0,
-                saw_opus_header: false,
-            },
-        )
-        .unwrap();
-        let mut pcm = [0i16; MAX_FRAME_SAMPLES];
-
-        assert_eq!(
-            dec.next_frame(&mut pcm),
-            Err(AudioError::Container(TafError::BufferTooSmall))
-        );
-        // Terminal: a second call must report the same error again, not
-        // panic, not decode stale bytes, and not hang retrying a buffer
-        // size that will never change.
-        assert_eq!(
-            dec.next_frame(&mut pcm),
-            Err(AudioError::Container(TafError::BufferTooSmall))
-        );
-        assert_eq!(dec.decoder.calls, 0, "decode must never be reached");
-    }
-
-    #[test]
-    fn seeking_after_a_buffer_too_small_error_recovers_at_the_new_chapter() {
-        // Reproduces the regression this test guards against: once some
-        // packet trips the decoder's terminal `BufferTooSmall`, seeking to a
-        // *different* chapter whose own packets fit fine must still recover,
-        // rather than keep reporting the old, position-specific error forever.
-        const CHAPTERS_FIXTURE: &[u8] =
-            include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
-
-        // Corrupt file page 1 (chapter 0's start, right after the header
-        // page) with a single packet larger than `MAX_PACKET`, following the
-        // same construction as
-        // `a_packet_too_large_for_the_decoders_fixed_buffer_is_a_terminal_error`.
-        // Chapter 1 (file page 6, ogg page 5) is untouched real audio and
-        // still fits the buffer.
-        let packet_len = MAX_PACKET + 25;
-        let mut ogg_page = [0u8; teddiebox_taf::PAGE_SIZE];
-        ogg_page[0..4].copy_from_slice(b"OggS");
-        // Spliced into a real fixture, so it has to belong to that fixture's
-        // stream. A page carrying any other serial is rejected as foreign
-        // before its oversized packet is ever reached, which would leave this
-        // testing stream identity rather than buffer recovery.
-        ogg_page[14..18].copy_from_slice(&0x1234_5678u32.to_le_bytes());
-        let mut off = 27usize;
-        let mut remaining = packet_len;
-        while remaining >= 255 {
-            ogg_page[off] = 255;
-            off += 1;
-            remaining -= 255;
-        }
-        ogg_page[off] = remaining as u8;
-        off += 1;
-        ogg_page[26] = (off - 27) as u8;
-        let payload_start = off;
-        ogg_page[payload_start..payload_start + packet_len].fill(0xAB);
-
-        let mut file = [0u8; teddiebox_taf::PAGE_SIZE * 17];
-        file.copy_from_slice(CHAPTERS_FIXTURE);
-        file[teddiebox_taf::PAGE_SIZE..teddiebox_taf::PAGE_SIZE * 2].copy_from_slice(&ogg_page);
-
-        let mut dec = TafDecoder::open(
-            SlicePages::new(&file).unwrap(),
-            StubDecoder {
-                calls: 0,
-                saw_opus_header: false,
-            },
-        )
-        .unwrap();
-        let mut pcm = [0i16; MAX_FRAME_SAMPLES];
-
-        assert_eq!(
-            dec.next_frame(&mut pcm),
-            Err(AudioError::Container(TafError::BufferTooSmall))
-        );
-
-        dec.seek_to_chapter(1)
-            .expect("chapter 1's own packets fit; the seek itself must succeed");
-
-        assert!(
-            dec.next_frame(&mut pcm).unwrap().is_some(),
-            "a seek to a chapter whose packets fit must clear the terminal \
-             BufferTooSmall left over from a different position in the file"
-        );
     }
 
     #[test]

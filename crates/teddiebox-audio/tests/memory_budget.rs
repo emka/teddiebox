@@ -8,16 +8,23 @@
 use teddiebox_audio::{LibOpus, OpusState, TafDecoder, OPUS_STATE_BYTES};
 use teddiebox_taf::{SlicePages, PAGE_SIZE};
 
-/// `TafDecoder` is 5 848 bytes: the reader, plus its own maximum-sized
-/// packet buffer. It owns the reader, so this is the figure that matters
-/// for placement, not the reader's alone.
-const DECODER_BYTES: usize = 6 * 1024;
+/// `TafDecoder` is 8 680 bytes: the reader, plus its own packet buffer. It
+/// owns the reader, so this is the figure that matters for placement, not
+/// the reader's alone.
+///
+/// It grew by 2 821 bytes when `MAX_PACKET` was raised to the page size,
+/// which a real Toniebox file forced. The packet buffer is now the same
+/// size as the reader's page buffer, and the packet is copied between them
+/// — so a `next_packet` that borrowed from the page instead of copying
+/// would give all 4 KB back. Worth doing if M4 finds RAM tight; not worth
+/// the API churn on speculation.
+const DECODER_BYTES: usize = 9 * 1024;
 
 /// What has to be live at once to decode a frame: the decoder, the codec
 /// state it borrows, and the page `TafReader::load_page` validates into
 /// before committing it. That last one is transient stack rather than a
 /// field, which is exactly why it is easy to forget and worth naming here.
-const DECODE_PATH_BYTES: usize = 40 * 1024;
+const DECODE_PATH_BYTES: usize = 43 * 1024;
 
 #[test]
 fn the_decoder_stays_within_its_memory_budget() {

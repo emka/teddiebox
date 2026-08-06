@@ -2,24 +2,27 @@
 
 use crate::{PacketCursor, PageSource, TafError, TonieHeader, PAGE_SIZE};
 
-/// Largest Opus packet `next_packet` will copy into a caller's buffer.
+/// Buffer size that can hold any packet a TAF file can contain.
 ///
-/// This is RFC 6716's maximum *frame* size (1275 bytes: the largest a
-/// single Opus frame can be at maximum bitrate), not the maximum *packet*
-/// size. TAF's 60 ms packets are code-3 (multi-frame) packets, which RFC
-/// 6716 permits up to roughly 3830 bytes -- several frames' worth. This
-/// value was picked against, and only verified against, this crate's own
-/// two fixtures, whose packets measure at most 719 bytes; it is not a
-/// guaranteed bound for every commercial `.taf` file, particularly one
-/// encoded at a higher bitrate.
+/// Derived from the container rather than from the codec. Every Ogg page in
+/// a TAF file occupies at most one [`PAGE_SIZE`] block, and a packet lies
+/// entirely within its own page's payload — so no packet can exceed
+/// `PAGE_SIZE` minus the 27-byte page header and its lacing table,
+/// whatever bitrate it was encoded at. A buffer of `PAGE_SIZE` is therefore
+/// provably always enough.
 ///
-/// A packet larger than this returns `TafError::BufferTooSmall` rather
-/// than truncating it. That error is genuinely retryable *if* the caller
-/// can supply a bigger buffer on the next call -- the packet is not
-/// consumed. A caller stuck with a fixed-size buffer, such as
-/// `teddiebox-audio`'s `TafDecoder`, has no bigger buffer to retry with and
-/// must treat the error as terminal instead.
-pub const MAX_PACKET: usize = 1275;
+/// The previous value, 1275, was RFC 6716's maximum *frame* size, and TAF's
+/// 60 ms packets carry several frames each. It happened to hold for both
+/// fixtures, whose packets reach 719 bytes, and its own documentation
+/// flagged that this was not a guarantee. A real Toniebox file settled it:
+/// of 67 107 packets, 179 exceed 1275 bytes and the largest is 4053, so
+/// playback stopped 112 seconds in.
+///
+/// A packet larger than the caller's buffer still returns
+/// `TafError::BufferTooSmall` rather than being truncated, and is left
+/// unconsumed so a retry with a bigger buffer gets that same packet. That
+/// remains reachable for a caller that supplies a smaller buffer than this.
+pub const MAX_PACKET: usize = PAGE_SIZE;
 
 pub struct TafReader<S: PageSource> {
     source: S,
@@ -315,6 +318,27 @@ mod tests {
         let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
         let n = r.chapter_count();
         assert_eq!(r.seek_to_chapter(n), Err(TafError::PageOutOfRange));
+    }
+
+    #[test]
+    fn reads_a_packet_as_large_as_a_page_can_hold() {
+        // 4053 bytes is the largest packet measured in a real Toniebox file,
+        // and it is more than three times the old buffer. Nothing in either
+        // fixture comes close — their packets peak at 719 — so only a
+        // synthetic page can pin this.
+        //
+        // data_length (field 2) = 4096: one Ogg page of stream.
+        let packet_len = 4053usize;
+        let mut file = [0u8; PAGE_SIZE * 2];
+        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
+        file[PAGE_SIZE..].copy_from_slice(&ogg_page(&[&[0xAB; 4053]]));
+
+        let mut r = TafReader::open(SlicePages::new(&file).unwrap()).unwrap();
+        let mut buf = [0u8; MAX_PACKET];
+
+        let n = r.next_packet(&mut buf).unwrap().unwrap();
+        assert_eq!(n, packet_len);
+        assert!(buf[..n].iter().all(|&b| b == 0xAB));
     }
 
     #[test]
