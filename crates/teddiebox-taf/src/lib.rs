@@ -31,8 +31,13 @@ pub enum TafError {
     NotAnOggPage,
     PageOutOfRange,
     /// A well-formed packet is larger than the buffer the caller supplied.
-    /// Distinct from `NotAnOggPage`: the file is fine and the caller should
-    /// retry with a bigger buffer, whereas a malformed page means stop.
+    /// Distinct from `NotAnOggPage`: the file is fine, and the packet is
+    /// left unconsumed, so a caller that can supply a *bigger* buffer on
+    /// the next call will get this same packet rather than losing it.
+    /// That promise is about the file and this reader, not about every
+    /// caller: one stuck with a fixed-size buffer has no bigger buffer to
+    /// retry with and must treat this as terminal. See `MAX_PACKET`'s doc
+    /// for why that fixed size was chosen and how much headroom it has.
     BufferTooSmall,
     /// The file is empty or not a whole number of pages. Distinct from
     /// `MalformedHeader`: this is a whole-file length problem detected before

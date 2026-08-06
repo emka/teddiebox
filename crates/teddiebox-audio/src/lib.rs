@@ -51,7 +51,16 @@ fn is_opus_header(packet: &[u8]) -> bool {
 pub struct TafDecoder<S: PageSource, D: OpusDecode> {
     reader: TafReader<S>,
     decoder: D,
+    /// Fixed-size: see `MAX_PACKET`'s doc for what size was chosen and why
+    /// a packet that doesn't fit here is unrecoverable, not just this call's
+    /// problem.
     packet: [u8; MAX_PACKET],
+    /// Set once `next_packet` reports `TafError::BufferTooSmall` against
+    /// `packet`. That can never un-happen -- `packet`'s size is fixed for
+    /// the lifetime of this decoder -- so every call after the first must
+    /// keep reporting the same terminal error instead of re-asking the
+    /// reader for a packet it already told us doesn't fit.
+    buffer_exhausted: bool,
 }
 
 impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
@@ -71,6 +80,7 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
             reader: TafReader::open(source)?,
             decoder,
             packet: [0u8; MAX_PACKET],
+            buffer_exhausted: false,
         })
     }
 
@@ -91,14 +101,22 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
     /// Decodes the next audio packet. `Ok(None)` at end of stream.
     ///
     /// Retry semantics differ by error, and callers need to know which they
-    /// got. A [`AudioError::Container`] leaves the packet unconsumed, so
-    /// retrying re-attempts the same packet. A [`AudioError::Decode`] arrives
-    /// *after* the packet has been taken from the container, so that frame's
-    /// audio is gone: a retry resumes at the following packet. Treat a decode
-    /// error as a dropped frame, not as a repeatable failure.
+    /// got. A [`TafError::BufferTooSmall`] wrapped in [`AudioError::Container`]
+    /// is the one exception to "container errors are retryable": `packet` is
+    /// a fixed-size buffer, so a packet that doesn't fit it never will, on
+    /// this or any later call. Every call after the first `BufferTooSmall`
+    /// reports that same error immediately without asking the reader again.
+    /// Any other [`AudioError::Container`] leaves the packet unconsumed, so
+    /// retrying re-attempts it. A [`AudioError::Decode`] arrives *after* the
+    /// packet has been taken from the container, so that frame's audio is
+    /// gone: a retry resumes at the following packet. Treat a decode error
+    /// as a dropped frame, not as a repeatable failure.
     pub fn next_frame(&mut self, pcm: &mut [i16]) -> Result<Option<usize>, AudioError> {
         if pcm.len() < MAX_FRAME_SAMPLES {
             return Err(AudioError::BufferTooSmall);
+        }
+        if self.buffer_exhausted {
+            return Err(AudioError::Container(TafError::BufferTooSmall));
         }
 
         // OpusHead and OpusTags must not reach libopus. Identify them by
@@ -109,13 +127,18 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
         // and a "already skipped" flag set on seek would feed OpusHead to
         // libopus as audio. Matching the magic is correct in every position.
         loop {
-            match self.reader.next_packet(&mut self.packet)? {
-                None => return Ok(None),
-                Some(len) if is_opus_header(&self.packet[..len]) => continue,
-                Some(len) => {
+            match self.reader.next_packet(&mut self.packet) {
+                Ok(None) => return Ok(None),
+                Ok(Some(len)) if is_opus_header(&self.packet[..len]) => continue,
+                Ok(Some(len)) => {
                     let n = self.decoder.decode(&self.packet[..len], pcm)?;
                     return Ok(Some(n));
                 }
+                Err(TafError::BufferTooSmall) => {
+                    self.buffer_exhausted = true;
+                    return Err(AudioError::Container(TafError::BufferTooSmall));
+                }
+                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -203,6 +226,86 @@ mod tests {
         .unwrap();
         let mut pcm = [0i16; 8];
         assert_eq!(dec.next_frame(&mut pcm), Err(AudioError::BufferTooSmall));
+    }
+
+    /// Builds a minimal TAF header page declaring `data_length` bytes of
+    /// stream, mirroring `teddiebox-taf`'s own private test helper of the
+    /// same name (duplicated here rather than reused, since it's private to
+    /// that crate).
+    fn header_page(data_length: u32) -> [u8; teddiebox_taf::PAGE_SIZE] {
+        let mut page = [0u8; teddiebox_taf::PAGE_SIZE];
+        // field 2 (data_length), wire type 0 (varint): key byte 0x10,
+        // followed by however many varint bytes `data_length` needs.
+        let mut fields = [0u8; 8];
+        let mut n = 0usize;
+        fields[n] = 0x10;
+        n += 1;
+        let mut v = data_length;
+        loop {
+            let mut byte = (v & 0x7F) as u8;
+            v >>= 7;
+            if v != 0 {
+                byte |= 0x80;
+            }
+            fields[n] = byte;
+            n += 1;
+            if v == 0 {
+                break;
+            }
+        }
+        page[0..4].copy_from_slice(&(n as u32).to_be_bytes());
+        page[4..4 + n].copy_from_slice(&fields[..n]);
+        page
+    }
+
+    #[test]
+    fn a_packet_too_large_for_the_decoders_fixed_buffer_is_a_terminal_error() {
+        // One packet larger than `MAX_PACKET`: `TafDecoder` has no bigger
+        // buffer to retry with, however many times it's called, unlike a
+        // caller that owns a resizable buffer.
+        let packet_len = MAX_PACKET + 25;
+        let mut ogg_page = [0u8; teddiebox_taf::PAGE_SIZE];
+        ogg_page[0..4].copy_from_slice(b"OggS");
+        let mut off = 27usize;
+        let mut remaining = packet_len;
+        while remaining >= 255 {
+            ogg_page[off] = 255;
+            off += 1;
+            remaining -= 255;
+        }
+        ogg_page[off] = remaining as u8;
+        off += 1;
+        ogg_page[26] = (off - 27) as u8;
+        let payload_start = off;
+        ogg_page[payload_start..payload_start + packet_len].fill(0xAB);
+
+        let mut file = [0u8; teddiebox_taf::PAGE_SIZE * 2];
+        file[..teddiebox_taf::PAGE_SIZE]
+            .copy_from_slice(&header_page(teddiebox_taf::PAGE_SIZE as u32));
+        file[teddiebox_taf::PAGE_SIZE..].copy_from_slice(&ogg_page);
+
+        let mut dec = TafDecoder::open(
+            SlicePages::new(&file).unwrap(),
+            StubDecoder {
+                calls: 0,
+                saw_opus_header: false,
+            },
+        )
+        .unwrap();
+        let mut pcm = [0i16; MAX_FRAME_SAMPLES];
+
+        assert_eq!(
+            dec.next_frame(&mut pcm),
+            Err(AudioError::Container(TafError::BufferTooSmall))
+        );
+        // Terminal: a second call must report the same error again, not
+        // panic, not decode stale bytes, and not hang retrying a buffer
+        // size that will never change.
+        assert_eq!(
+            dec.next_frame(&mut pcm),
+            Err(AudioError::Container(TafError::BufferTooSmall))
+        );
+        assert_eq!(dec.decoder.calls, 0, "decode must never be reached");
     }
 
     #[test]

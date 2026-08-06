@@ -2,7 +2,23 @@
 
 use crate::{OggPage, PageSource, TafError, TonieHeader, PAGE_SIZE};
 
-/// Largest Opus packet we will hand to the decoder.
+/// Largest Opus packet `next_packet` will copy into a caller's buffer.
+///
+/// This is RFC 6716's maximum *frame* size (1275 bytes: the largest a
+/// single Opus frame can be at maximum bitrate), not the maximum *packet*
+/// size. TAF's 60 ms packets are code-3 (multi-frame) packets, which RFC
+/// 6716 permits up to roughly 3830 bytes -- several frames' worth. This
+/// value was picked against, and only verified against, this crate's own
+/// two fixtures, whose packets measure at most 719 bytes; it is not a
+/// guaranteed bound for every commercial `.taf` file, particularly one
+/// encoded at a higher bitrate.
+///
+/// A packet larger than this returns `TafError::BufferTooSmall` rather
+/// than truncating it. That error is genuinely retryable *if* the caller
+/// can supply a bigger buffer on the next call -- the packet is not
+/// consumed. A caller stuck with a fixed-size buffer, such as
+/// `teddiebox-audio`'s `TafDecoder`, has no bigger buffer to retry with and
+/// must treat the error as terminal instead.
 pub const MAX_PACKET: usize = 1275;
 
 /// Bytes in a fixed Ogg page header, up to and including the segment count,
