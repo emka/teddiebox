@@ -199,6 +199,14 @@
           # Tell prost-build to use the nixpkgs protoc rather than its
           # vendored binary.
           PROTOC = "${pkgs.protobuf}/bin/protoc";
+
+          # fixturegen links libopus dynamically, and `cargo run` — unlike
+          # `cargo test` — does not put the library's directory on the
+          # loader's path. On NixOS the ld wrapper bakes an rpath into the
+          # binary and hides that; anywhere else, including CI, the binary
+          # cannot find libopus at run time. Naming the directory here makes
+          # the shell behave the same way on every host.
+          LD_LIBRARY_PATH = "${pkgs.libopus}/lib";
         }
         // builtins.listToAttrs [
           (opusEnv hostTarget opusHost)
