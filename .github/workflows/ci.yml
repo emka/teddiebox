@@ -19,6 +19,8 @@ jobs:
       - name: Test
         run: nix develop --command cargo test --workspace
 
-      # Proves the library crates are genuinely no_std.
-      - name: no_std check
-        run: nix develop --command cargo check -p teddiebox-taf --target thumbv7em-none-eabihf
+      # Proves the library crates are genuinely no_std, against the target
+      # the firmware actually runs on rather than a bare-metal stand-in.
+      # rustc ships no prebuilt core for xtensa, so core is built from source.
+      - name: Cross-compile check
+        run: nix develop --command cargo check -p teddiebox-taf --target xtensa-esp32s3-none-elf -Z build-std=core
