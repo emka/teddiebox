@@ -1,6 +1,11 @@
-//! Decodes the fixture and checks the result really is the tone that
-//! `fixturegen` encoded. This is the same assertion Phase B step 9 runs on
-//! device, so a device regression is comparable against a known-good host run.
+//! Decodes the fixtures and checks the result really is what `fixturegen`
+//! encoded: 440 Hz on the left, 660 Hz on the right. This is the same
+//! assertion Phase B step 9 runs on device, so a device regression is
+//! comparable against a known-good host run.
+//!
+//! The windows here are deliberately wide, and a device producing subtly
+//! wrong audio would still pass all of them. Phase B step 9 needs
+//! sample-accurate golden PCM if it is to be planned around this file.
 
 use teddiebox_audio::{LibOpus, OpusState, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE};
 use teddiebox_taf::SlicePages;
@@ -31,19 +36,22 @@ fn decode_from(taf: &[u8], chapter: Option<usize>) -> Vec<i16> {
     out
 }
 
-/// Zero crossings on the left channel over one second, starting `skip`
-/// seconds in. A 440 Hz sine crosses zero 880 times.
-fn crossings_over_one_second(pcm: &[i16], skip_seconds: usize) -> usize {
-    let left: Vec<i16> = pcm
+/// Zero crossings on one channel over one second, starting `skip_seconds`
+/// in. A sine of `f` Hz crosses zero `2f` times per second.
+fn crossings_over_one_second(pcm: &[i16], channel: usize, skip_seconds: usize) -> usize {
+    let samples: Vec<i16> = pcm
         .as_chunks::<CHANNELS>()
         .0
         .iter()
         .skip(skip_seconds * SAMPLE_RATE as usize)
         .take(SAMPLE_RATE as usize)
-        .map(|f| f[0])
+        .map(|f| f[channel])
         .collect();
 
-    left.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count()
+    samples
+        .windows(2)
+        .filter(|w| (w[0] < 0) != (w[1] < 0))
+        .count()
 }
 
 #[test]
@@ -60,10 +68,31 @@ fn decodes_approximately_five_seconds_of_stereo_audio() {
 #[test]
 fn the_decoded_signal_is_a_440_hz_tone() {
     // Skip the encoder's warm-up before measuring.
-    let crossings = crossings_over_one_second(&decode_all(), 1);
+    let crossings = crossings_over_one_second(&decode_all(), 0, 1);
     assert!(
         (860..=900).contains(&crossings),
         "expected ~880 zero crossings for 440 Hz, got {crossings}"
+    );
+}
+
+/// The channels carry different tones, so this fails on a channel swap, a
+/// mono downmix, and an interleaving mistake alike. None of those were
+/// detectable while the fixture put identical samples in both channels:
+/// every one of them produced output identical to correct output.
+#[test]
+fn the_left_and_right_channels_carry_their_own_tones() {
+    let pcm = decode_all();
+
+    let left = crossings_over_one_second(&pcm, 0, 1);
+    let right = crossings_over_one_second(&pcm, 1, 1);
+
+    assert!(
+        (860..=900).contains(&left),
+        "expected ~880 zero crossings for 440 Hz on the left, got {left}"
+    );
+    assert!(
+        (1300..=1340).contains(&right),
+        "expected ~1320 zero crossings for 660 Hz on the right, got {right}"
     );
 }
 
@@ -79,7 +108,7 @@ fn seeking_to_a_chapter_yields_audible_audio_from_that_chapter_onward() {
     let peak = from_second.iter().map(|s| s.unsigned_abs()).max().unwrap();
     assert!(peak > 1000, "audio after the seek is silent, peak {peak}");
 
-    let crossings = crossings_over_one_second(&from_second, 0);
+    let crossings = crossings_over_one_second(&from_second, 0, 0);
     assert!(
         (860..=900).contains(&crossings),
         "expected ~880 zero crossings for 440 Hz after the seek, got {crossings}"

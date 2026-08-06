@@ -4,7 +4,8 @@
 //! parser is built on ever stop holding.
 //!
 //! The fixture was generated with `tools/fixturegen` from the `toniefile`
-//! crate (audio_id `0x1234_5678`, a 5 s 440 Hz stereo sine tone). Two of the
+//! crate (audio_id `0x1234_5678`, 5 s of stereo tone: 440 Hz left, 660 Hz
+//! right, so a channel error is detectable at all). Two of the
 //! four claims in the original plan did not survive contact with the real
 //! file -- see the doc comments below on the two tests that replace them.
 

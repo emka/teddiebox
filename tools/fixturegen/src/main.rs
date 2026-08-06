@@ -8,7 +8,13 @@ use std::path::{Path, PathBuf};
 
 const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: u32 = 2;
-const TONE_HZ: f32 = 440.0;
+/// Left channel. The reference tests measure this one.
+const LEFT_HZ: f32 = 440.0;
+/// Right channel, a perfect fifth above. A different tone per channel is
+/// what makes a channel swap, a mono downmix or an interleaving mistake
+/// detectable at all: with the same samples in both, every such defect
+/// produces output identical to correct output.
+const RIGHT_HZ: f32 = 660.0;
 const SECONDS: u32 = 5;
 const CHAPTER_SECONDS: u32 = 2;
 
@@ -65,16 +71,15 @@ fn write_multi_chapter(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// A 440 Hz tone, interleaved stereo, identical in both channels.
+/// Interleaved stereo: [`LEFT_HZ`] on the left, [`RIGHT_HZ`] on the right.
 /// Deterministic so the fixture is reproducible byte-for-byte.
 fn sine_interleaved(frames: u32) -> Vec<i16> {
     let mut out = Vec::with_capacity((frames * CHANNELS) as usize);
     for n in 0..frames {
         let t = n as f32 / SAMPLE_RATE as f32;
-        let v = (2.0 * PI * TONE_HZ * t).sin();
-        let s = (v * i16::MAX as f32 * 0.5) as i16;
-        for _ in 0..CHANNELS {
-            out.push(s);
+        for hz in [LEFT_HZ, RIGHT_HZ] {
+            let v = (2.0 * PI * hz * t).sin();
+            out.push((v * i16::MAX as f32 * 0.5) as i16);
         }
     }
     out
