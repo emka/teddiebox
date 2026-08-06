@@ -1,125 +1,121 @@
-//! Ogg page header parsing, restricted to what a TAF file contains.
+//! Ogg page structure, restricted to what a TAF file contains.
+//!
+//! This is the only implementation of the lacing walk. It used to be two —
+//! one here and one inlined into `TafReader::next_packet` — which agreed
+//! only because their tests agreed, and had already drifted on what to do
+//! with a dropped fragment.
+//!
+//! The position is a value rather than an iterator because `TafReader` has
+//! to keep it between calls, and it cannot hold an iterator borrowing its
+//! own page buffer.
 
 use crate::{TafError, PAGE_SIZE};
 
 const CAPTURE_PATTERN: &[u8; 4] = b"OggS";
+
+/// Bytes of fixed Ogg page header before the segment table.
 const MIN_HEADER_LEN: usize = 27;
 
-/// Not part of the public API: `Packets` (returned by [`OggPage::packets`])
-/// terminates on an oversized packet rather than reporting it -- `None`
-/// there is indistinguishable from "page finished". That's the right
-/// behaviour for `TafReader::next_packet`, which layers its own
-/// `TafError::NotAnOggPage` on top after seeing the page-level iterator end
-/// early, but it would be a fail-open trap for any other caller reading
-/// straight from `OggPage`: a corrupt or malicious page would look like a
-/// page that simply ran out of packets. Keeping both `pub(crate)` removes
-/// that surface instead of documenting around it.
-///
-/// `granule_position`, `is_continuation`, and `packets` (with `Packets`
-/// itself) have no caller left inside the crate either: `TafReader` scans
-/// lacing tables with its own inline copy of this same logic rather than
-/// calling back into this iterator. They stay `#[allow(dead_code)]` as
-/// tested, load-bearing-by-parity primitives -- `page.rs`'s own tests pin
-/// their behaviour independently of `reader.rs`'s copy -- rather than being
-/// deleted as part of a visibility-only change.
-#[allow(dead_code)]
-pub(crate) struct OggPage<'a> {
-    page: &'a [u8; PAGE_SIZE],
-    segment_count: usize,
-    payload_start: usize,
-}
-
-impl<'a> OggPage<'a> {
-    pub(crate) fn parse(page: &'a [u8; PAGE_SIZE]) -> Result<Self, TafError> {
-        if &page[0..4] != CAPTURE_PATTERN {
-            return Err(TafError::NotAnOggPage);
-        }
-        let segment_count = page[26] as usize;
-        let payload_start = MIN_HEADER_LEN + segment_count;
-        if payload_start > PAGE_SIZE {
-            return Err(TafError::NotAnOggPage);
-        }
-        Ok(Self {
-            page,
-            segment_count,
-            payload_start,
-        })
-    }
-
-    /// Sample position at the end of this page, used for seeking and for
-    /// reporting playback position.
-    #[allow(dead_code)]
-    pub(crate) fn granule_position(&self) -> u64 {
-        u64::from_le_bytes(self.page[6..14].try_into().unwrap())
-    }
-
-    /// True when this page's first packet continues from the previous page.
-    #[allow(dead_code)]
-    pub(crate) fn is_continuation(&self) -> bool {
-        self.page[5] & 0x01 != 0
-    }
-
-    /// Yields each complete packet in this page.
-    ///
-    /// A trailing packet whose lacing runs out before a terminating value
-    /// (below 255) is not complete within this page — it continues onto the
-    /// next one — and is silently dropped rather than handed to the caller
-    /// as a truncated packet.
-    #[allow(dead_code)]
-    pub(crate) fn packets(&self) -> Packets<'a> {
-        Packets {
-            page: self.page,
-            lacing: MIN_HEADER_LEN,
-            lacing_end: MIN_HEADER_LEN + self.segment_count,
-            payload: self.payload_start,
-        }
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) struct Packets<'a> {
-    page: &'a [u8; PAGE_SIZE],
+/// A position within one container block: how far through a page's lacing
+/// table, and where the next packet's bytes start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PacketCursor {
     lacing: usize,
     lacing_end: usize,
     payload: usize,
 }
 
-impl<'a> Iterator for Packets<'a> {
-    type Item = &'a [u8];
+impl PacketCursor {
+    /// A cursor with nothing left to yield, for a reader that has not
+    /// positioned itself on a page yet.
+    pub(crate) const EMPTY: Self = Self {
+        lacing: 0,
+        lacing_end: 0,
+        payload: 0,
+    };
 
-    fn next(&mut self) -> Option<&'a [u8]> {
-        if self.lacing >= self.lacing_end {
-            return None;
+    /// Positions at the first packet of the Ogg page beginning at `offset`.
+    ///
+    /// `Ok(None)` means no page begins there. `toniefile` packs the tiny
+    /// OpusHead and OpusTags pages into the same 4096-byte block as the
+    /// start of the audio, so a caller walking a block has to ask this
+    /// question repeatedly, and "nothing more in this block" is a normal
+    /// answer rather than corruption.
+    ///
+    /// `Err` is reserved for a page that does begin there and then does not
+    /// fit the block. That distinction has to survive: folding it into
+    /// `Ok(None)` would let a corrupt page read as a finished one, which
+    /// fails open.
+    pub(crate) fn at_page(page: &[u8; PAGE_SIZE], offset: usize) -> Result<Option<Self>, TafError> {
+        if offset + MIN_HEADER_LEN > PAGE_SIZE || page[offset..offset + 4] != *CAPTURE_PATTERN {
+            return Ok(None);
         }
+        let lacing = offset + MIN_HEADER_LEN;
+        let lacing_end = lacing + page[offset + 26] as usize;
+        if lacing_end > PAGE_SIZE {
+            return Err(TafError::NotAnOggPage);
+        }
+        Ok(Some(Self {
+            lacing,
+            lacing_end,
+            payload: lacing_end,
+        }))
+    }
+
+    /// Offset where this page's remaining payload starts, and so the
+    /// earliest point another page could be packed in behind it.
+    pub(crate) fn payload_start(&self) -> usize {
+        self.payload
+    }
+
+    /// Yields the next complete packet, advancing past it.
+    ///
+    /// `Ok(None)` means this page has no more complete packets. That covers
+    /// a trailing packet whose lacing runs out without a terminator: it
+    /// continues onto a following page, so it is dropped rather than handed
+    /// on truncated — but its declared bytes are still stepped over, because
+    /// they occupy the payload and anything packed in behind starts after
+    /// them.
+    ///
+    /// `Err` means the page declares a packet that overruns the block. The
+    /// cursor is left exhausted so that a caller which ignores the error
+    /// cannot resume from a stale offset and manufacture an in-bounds slice
+    /// that is not a packet.
+    pub(crate) fn next<'a>(
+        &mut self,
+        page: &'a [u8; PAGE_SIZE],
+    ) -> Result<Option<&'a [u8]>, TafError> {
+        if self.lacing >= self.lacing_end {
+            return Ok(None);
+        }
+
         let start = self.payload;
         let mut len = 0usize;
+        let mut complete = false;
         // A packet ends at the first lacing value below 255.
-        loop {
-            if self.lacing >= self.lacing_end {
-                // Packet continues onto the next page; TAF pages are built so
-                // this does not occur, so drop the fragment rather than
-                // returning a truncated packet to the decoder.
-                self.payload = start + len;
-                return None;
-            }
-            let v = self.page[self.lacing] as usize;
+        while self.lacing < self.lacing_end {
+            let v = page[self.lacing] as usize;
             self.lacing += 1;
             len += v;
             if v < 255 {
+                complete = true;
                 break;
             }
         }
-        let end = start.checked_add(len)?;
-        if end > PAGE_SIZE {
-            // Fail closed, exactly as the continuation branch does. Returning
-            // None without exhausting the lacing table would let a later call
-            // resume from a stale `start` and hand the decoder an in-bounds
-            // slice that is not a real packet.
-            self.lacing = self.lacing_end;
-            return None;
+
+        if !complete {
+            self.payload = (start + len).min(PAGE_SIZE);
+            return Ok(None);
         }
+
+        let end = start + len;
+        if end > PAGE_SIZE {
+            self.lacing = self.lacing_end;
+            return Err(TafError::NotAnOggPage);
+        }
+
         self.payload = end;
-        Some(&self.page[start..end])
+        Ok(Some(&page[start..end]))
     }
 }
 
@@ -153,37 +149,50 @@ mod tests {
         page
     }
 
+    /// Every packet the cursor yields from `offset`, or the error it stops on.
+    fn collect(page: &[u8; PAGE_SIZE], offset: usize) -> Result<heapless::Vec<&[u8], 8>, TafError> {
+        let mut cursor = PacketCursor::at_page(page, offset).unwrap().unwrap();
+        let mut out = heapless::Vec::new();
+        while let Some(p) = cursor.next(page)? {
+            out.push(p).unwrap();
+        }
+        Ok(out)
+    }
+
     #[test]
-    fn rejects_a_page_without_the_capture_pattern() {
+    fn reports_no_page_where_the_capture_pattern_is_absent() {
         let page = [0u8; PAGE_SIZE];
-        assert!(matches!(OggPage::parse(&page), Err(TafError::NotAnOggPage)));
+        assert!(PacketCursor::at_page(&page, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_a_page_whose_segment_table_overruns_the_block() {
+        // A page header that starts 10 bytes before the end of the block:
+        // its segment table cannot fit, so this is corruption rather than
+        // an absent page.
+        let mut page = [0u8; PAGE_SIZE];
+        let offset = PAGE_SIZE - MIN_HEADER_LEN;
+        page[offset..offset + 4].copy_from_slice(CAPTURE_PATTERN);
+        page[offset + 26] = 1;
+        assert_eq!(
+            PacketCursor::at_page(&page, offset),
+            Err(TafError::NotAnOggPage)
+        );
     }
 
     #[test]
     fn yields_a_single_packet() {
         let page = ogg_page(&[&[1, 2, 3, 4]]);
-        let parsed = OggPage::parse(&page).unwrap();
-        let packets: heapless::Vec<&[u8], 8> = parsed.packets().collect();
-        assert_eq!(packets.len(), 1);
-        assert_eq!(packets[0], &[1, 2, 3, 4]);
+        assert_eq!(collect(&page, 0).unwrap().as_slice(), &[&[1, 2, 3, 4][..]]);
     }
 
     #[test]
     fn yields_multiple_packets_in_order() {
         let page = ogg_page(&[&[0xAA; 3], &[0xBB; 7]]);
-        let parsed = OggPage::parse(&page).unwrap();
-        let packets: heapless::Vec<&[u8], 8> = parsed.packets().collect();
+        let packets = collect(&page, 0).unwrap();
         assert_eq!(packets.len(), 2);
         assert_eq!(packets[0], &[0xAA; 3]);
         assert_eq!(packets[1], &[0xBB; 7]);
-    }
-
-    #[test]
-    fn reads_the_granule_position() {
-        let mut page = ogg_page(&[&[1]]);
-        page[6..14].copy_from_slice(&960u64.to_le_bytes());
-        let parsed = OggPage::parse(&page).unwrap();
-        assert_eq!(parsed.granule_position(), 960);
     }
 
     #[test]
@@ -191,10 +200,25 @@ mod tests {
         // Lacing [255, 0]: a length that is an exact multiple of 255 is
         // terminated by an explicit zero segment, not folded into the 255.
         let page = ogg_page(&[&[0xCC; 255]]);
-        let parsed = OggPage::parse(&page).unwrap();
-        let packets: heapless::Vec<&[u8], 8> = parsed.packets().collect();
-        assert_eq!(packets.len(), 1);
-        assert_eq!(packets[0], &[0xCC; 255][..]);
+        assert_eq!(collect(&page, 0).unwrap().as_slice(), &[&[0xCC; 255][..]]);
+    }
+
+    #[test]
+    fn finds_a_page_packed_in_behind_another() {
+        // What `toniefile` actually writes: OpusHead's page is far smaller
+        // than a block, and the next page starts immediately after it.
+        let mut page = ogg_page(&[b"first"]);
+        let second = 27 + 1 + 5;
+        page[second..second + 4].copy_from_slice(CAPTURE_PATTERN);
+        page[second + 26] = 1;
+        page[second + 27] = 6;
+        page[second + 28..second + 34].copy_from_slice(b"second");
+
+        assert_eq!(collect(&page, 0).unwrap().as_slice(), &[&b"first"[..]]);
+        assert_eq!(
+            collect(&page, second).unwrap().as_slice(),
+            &[&b"second"[..]]
+        );
     }
 
     #[test]
@@ -206,12 +230,27 @@ mod tests {
         page[0..4].copy_from_slice(CAPTURE_PATTERN);
         page[26] = 1;
         page[27] = 255;
-        let parsed = OggPage::parse(&page).unwrap();
-        let mut packets = parsed.packets();
-        assert_eq!(packets.next(), None);
+
+        let mut cursor = PacketCursor::at_page(&page, 0).unwrap().unwrap();
+        assert_eq!(cursor.next(&page), Ok(None));
         // Terminality: once the lacing table is exhausted, further calls
         // must keep returning None rather than re-reading stale state.
-        assert_eq!(packets.next(), None);
+        assert_eq!(cursor.next(&page), Ok(None));
+    }
+
+    #[test]
+    fn steps_over_a_dropped_fragments_bytes_rather_than_stopping_on_them() {
+        // The dropped packet's 255 bytes are declared and occupy the
+        // payload. A page packed in behind it starts after them, so a
+        // cursor that stops at the fragment's start hides it.
+        let mut page = [0u8; PAGE_SIZE];
+        page[0..4].copy_from_slice(CAPTURE_PATTERN);
+        page[26] = 1;
+        page[27] = 255;
+
+        let mut cursor = PacketCursor::at_page(&page, 0).unwrap().unwrap();
+        assert_eq!(cursor.next(&page), Ok(None));
+        assert_eq!(cursor.payload_start(), 28 + 255);
     }
 
     #[test]
@@ -223,8 +262,7 @@ mod tests {
         // entries be interpreted starting from a stale payload offset.
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(CAPTURE_PATTERN);
-        let segment_count: usize = 20;
-        page[26] = segment_count as u8;
+        page[26] = 20;
         for i in 0..16 {
             page[27 + i] = 255;
         }
@@ -233,26 +271,10 @@ mod tests {
         page[27 + 18] = 0;
         page[27 + 19] = 0;
 
-        let parsed = OggPage::parse(&page).unwrap();
-        let mut packets = parsed.packets();
-        assert_eq!(packets.next(), None);
+        let mut cursor = PacketCursor::at_page(&page, 0).unwrap().unwrap();
+        assert_eq!(cursor.next(&page), Err(TafError::NotAnOggPage));
         // Must not resume from a stale `start` and hand back a bogus
         // in-bounds slice built from the remaining lacing entries.
-        assert_eq!(packets.next(), None);
-    }
-
-    #[test]
-    fn is_continuation_reports_true_when_the_flag_is_set() {
-        let mut page = ogg_page(&[&[1]]);
-        page[5] |= 0x01;
-        let parsed = OggPage::parse(&page).unwrap();
-        assert!(parsed.is_continuation());
-    }
-
-    #[test]
-    fn is_continuation_reports_false_when_the_flag_is_clear() {
-        let page = ogg_page(&[&[1]]);
-        let parsed = OggPage::parse(&page).unwrap();
-        assert!(!parsed.is_continuation());
+        assert_eq!(cursor.next(&page), Ok(None));
     }
 }

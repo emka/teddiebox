@@ -1,6 +1,6 @@
 //! Sequential and chapter-addressed reading over a `PageSource`.
 
-use crate::{OggPage, PageSource, TafError, TonieHeader, PAGE_SIZE};
+use crate::{PacketCursor, PageSource, TafError, TonieHeader, PAGE_SIZE};
 
 /// Largest Opus packet `next_packet` will copy into a caller's buffer.
 ///
@@ -21,11 +21,6 @@ use crate::{OggPage, PageSource, TafError, TonieHeader, PAGE_SIZE};
 /// must treat the error as terminal instead.
 pub const MAX_PACKET: usize = 1275;
 
-/// Bytes in a fixed Ogg page header, up to and including the segment count,
-/// before the (variable-length) segment table. Mirrors `page::MIN_HEADER_LEN`,
-/// which is private to that module.
-const MIN_HEADER_LEN: usize = 27;
-
 pub struct TafReader<S: PageSource> {
     source: S,
     header: TonieHeader,
@@ -34,10 +29,10 @@ pub struct TafReader<S: PageSource> {
     /// pages within one buffered block without this changing.
     page_index: u32,
     page: [u8; PAGE_SIZE],
-    /// Byte offset of the next packet within `page`, and the lacing cursor.
-    packet_cursor: usize,
-    lacing_cursor: usize,
-    lacing_end: usize,
+    /// Where the next packet starts within `page`. Held as a value rather
+    /// than an iterator because it has to survive between calls, and this
+    /// struct cannot borrow its own `page`.
+    cursor: PacketCursor,
     /// File-page index of the last page the header's `data_length` declares
     /// as real Ogg stream. Trailing pages beyond this (e.g. benign padding)
     /// exist in `source` but must not be read as stream content: `next_packet`
@@ -79,9 +74,7 @@ impl<S: PageSource> TafReader<S> {
             header,
             page_index: 0,
             page,
-            packet_cursor: 0,
-            lacing_cursor: 0,
-            lacing_end: 0,
+            cursor: PacketCursor::EMPTY,
             last_usable_page: declared_pages,
         };
         reader.load_page(1)?;
@@ -115,14 +108,11 @@ impl<S: PageSource> TafReader<S> {
         self.source
             .read_page(index, &mut candidate)
             .map_err(|_| TafError::Io)?;
-        OggPage::parse(&candidate)?;
-        let segment_count = candidate[26] as usize;
+        let cursor = PacketCursor::at_page(&candidate, 0)?.ok_or(TafError::NotAnOggPage)?;
 
         self.page = candidate;
         self.page_index = index;
-        self.lacing_cursor = MIN_HEADER_LEN;
-        self.lacing_end = MIN_HEADER_LEN + segment_count;
-        self.packet_cursor = MIN_HEADER_LEN + segment_count;
+        self.cursor = cursor;
         Ok(())
     }
 
@@ -154,78 +144,43 @@ impl<S: PageSource> TafReader<S> {
     /// `Ok(None)` means end of stream.
     pub fn next_packet(&mut self, out: &mut [u8]) -> Result<Option<usize>, TafError> {
         loop {
-            if self.lacing_cursor < self.lacing_end {
-                let start = self.packet_cursor;
-                // Scan using a local cursor rather than mutating
-                // `self.lacing_cursor` directly. An error below (either
-                // variant) must leave the reader exactly as it was before
-                // this call: `BufferTooSmall` promises the caller a retry
-                // with a bigger buffer will get this same packet, and
-                // `NotAnOggPage` must not let a retry resume from a
-                // half-advanced cursor and fabricate a packet out of
-                // whatever lacing entries happen to follow.
-                let mut cursor = self.lacing_cursor;
-                let mut len = 0usize;
-                let mut complete = false;
-                while cursor < self.lacing_end {
-                    let v = self.page[cursor] as usize;
-                    cursor += 1;
-                    len += v;
-                    if v < 255 {
-                        complete = true;
-                        break;
-                    }
-                }
-
-                if complete {
-                    let end = start + len;
-                    if end > PAGE_SIZE {
-                        return Err(TafError::NotAnOggPage);
-                    }
+            // Both failures below must leave the reader exactly as it was:
+            // `BufferTooSmall` promises a retry with a bigger buffer gets
+            // this same packet, and a corrupt page must not let a retry
+            // resume half-advanced and fabricate a packet out of whatever
+            // lacing entries happen to follow. Rewinding to a saved position
+            // states that directly, where an un-advanced local cursor only
+            // implied it.
+            let saved = self.cursor;
+            match self.cursor.next(&self.page) {
+                Ok(Some(packet)) => {
+                    let len = packet.len();
                     if len > out.len() {
+                        self.cursor = saved;
                         return Err(TafError::BufferTooSmall);
                     }
-                    self.lacing_cursor = cursor;
-                    self.packet_cursor = end;
-                    out[..len].copy_from_slice(&self.page[start..end]);
+                    out[..len].copy_from_slice(packet);
                     return Ok(Some(len));
                 }
-
-                // Packet continues past this page's lacing table; TAF pages
-                // are built so this doesn't happen, so drop the fragment
-                // rather than handing a truncated packet to the decoder.
-                // The lacing table is exhausted either way (`cursor` has
-                // reached `self.lacing_end`), so commit it now -- otherwise
-                // the outer loop would rescan the same exhausted range
-                // forever.
-                self.lacing_cursor = cursor;
+                Ok(None) => {}
+                Err(e) => {
+                    self.cursor = saved;
+                    return Err(e);
+                }
             }
 
-            // This Ogg page's lacing table is exhausted. A single
-            // PAGE_SIZE-byte container block can hold more than one real
-            // Ogg page back to back: `toniefile` packs the tiny OpusHead
-            // and OpusTags pages together with the start of the audio
-            // stream rather than leaving the rest of the block empty. Look
-            // for another real Ogg page immediately following the one we
-            // just finished, still inside the buffered block, before
-            // reading a new block from the source.
+            // This Ogg page is exhausted. A single PAGE_SIZE-byte container
+            // block can hold more than one real Ogg page back to back:
+            // `toniefile` packs the tiny OpusHead and OpusTags pages
+            // together with the start of the audio stream rather than
+            // leaving the rest of the block empty. Look for another page
+            // behind this one before reading a new block from the source.
             //
             // Without this, the reader silently drops every packet packed
             // behind the first page in a block instead of erroring: it
             // looks like a clean end-of-page and just advances past them.
-            let candidate = self.packet_cursor;
-            if candidate + MIN_HEADER_LEN <= PAGE_SIZE
-                && self.page[candidate..candidate + 4] == *b"OggS"
-            {
-                let segment_count = self.page[candidate + 26] as usize;
-                let lacing_start = candidate + MIN_HEADER_LEN;
-                let lacing_end = lacing_start + segment_count;
-                if lacing_end > PAGE_SIZE {
-                    return Err(TafError::NotAnOggPage);
-                }
-                self.lacing_cursor = lacing_start;
-                self.lacing_end = lacing_end;
-                self.packet_cursor = lacing_end;
+            if let Some(nested) = PacketCursor::at_page(&self.page, self.cursor.payload_start())? {
+                self.cursor = nested;
                 continue;
             }
 
@@ -645,6 +600,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_dropped_fragment_does_not_hide_a_page_packed_in_behind_it() {
+        // One container block holding two real Ogg pages. The first ends
+        // with a lacing entry of 255 and no terminator, so its last packet
+        // continues onto a page that does not exist and gets dropped. Those
+        // 255 bytes are still declared, still occupy the payload, and the
+        // second page starts after them.
+        //
+        // A reader that drops the fragment without stepping over its bytes
+        // looks for the next page at the fragment's own start, does not find
+        // one, and silently loses every packet behind it.
+        let mut file = [0u8; PAGE_SIZE * 2];
+        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
+
+        let block = &mut file[PAGE_SIZE..];
+        block[0..4].copy_from_slice(b"OggS");
+        block[26] = 1;
+        block[27] = 255; // unterminated: 255 bytes at 28..283, no more lacing
+
+        const SECOND: usize = 283;
+        block[SECOND..SECOND + 4].copy_from_slice(b"OggS");
+        block[SECOND + 26] = 1;
+        block[SECOND + 27] = 4;
+        block[SECOND + 28..SECOND + 32].copy_from_slice(b"CCCC");
+
+        let mut r = TafReader::open(SlicePages::new(&file).unwrap()).unwrap();
+        let mut buf = [0u8; MAX_PACKET];
+
+        let n = r.next_packet(&mut buf).unwrap().unwrap();
+        assert_eq!(&buf[..n], b"CCCC");
     }
 
     /// What a card that is present, correctly sized, and failing looks like:
