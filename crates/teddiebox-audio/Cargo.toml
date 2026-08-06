@@ -7,3 +7,14 @@ license.workspace = true
 [dependencies]
 teddiebox-taf = { path = "../teddiebox-taf" }
 teddiebox-opus-sys = { path = "../teddiebox-opus-sys" }
+
+[dev-dependencies]
+# No plotting or rayon: this is run to read a number, not to produce a
+# report, and both pull in a lot of build for nothing.
+criterion = { version = "0.8", default-features = false, features = [
+    "cargo_bench_support",
+] }
+
+[[bench]]
+name = "decode"
+harness = false
