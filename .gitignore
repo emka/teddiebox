@@ -1,4 +1,5 @@
 /target
+/tools/xtensa-linkcheck/target
 /.direnv
 *.taf
 *.wav

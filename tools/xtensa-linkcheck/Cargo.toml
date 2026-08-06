@@ -1,0 +1,22 @@
+[package]
+name = "xtensa-linkcheck"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: this crate only ever builds for the device, and a
+# no_std staticlib with its own panic handler cannot also be built for the
+# host as part of `cargo test --workspace`.
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+test = false
+
+[dependencies]
+teddiebox-audio = { path = "../../crates/teddiebox-audio" }
+teddiebox-taf = { path = "../../crates/teddiebox-taf" }
+
+[profile.release]
+# No unwinder on the device, and nothing here should need one.
+panic = "abort"

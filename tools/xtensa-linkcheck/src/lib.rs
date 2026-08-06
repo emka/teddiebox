@@ -1,0 +1,59 @@
+//! Gives the xtensa linker a reason to pull in the whole decode path.
+//!
+//! `cargo check` proves the Rust compiles for the device; it does not prove
+//! that rustc's calls into libopus resolve, or that libopus's own references
+//! — `memcpy`, the libm entry points — can be satisfied by the ESP
+//! toolchain's C library. Those only surface at link time, which needs
+//! something that actually calls the code. This is that something.
+//!
+//! It is not firmware and is never flashed. `scripts/xtensa-link-check.sh`
+//! builds it and links it; nothing else depends on it.
+
+#![no_std]
+
+use core::panic::PanicInfo;
+use core::slice;
+
+use teddiebox_audio::{LibOpus, OpusState, TafDecoder, MAX_FRAME_SAMPLES};
+use teddiebox_taf::SlicePages;
+
+/// Decodes the first audio frame of an in-memory TAF image.
+///
+/// Returns the interleaved sample count, 0 at end of stream, or a negative
+/// code identifying which layer refused.
+///
+/// # Safety
+///
+/// `taf` must be valid for `taf_len` bytes, `pcm` writable for
+/// [`MAX_FRAME_SAMPLES`] samples, and `state` a valid [`OpusState`].
+#[no_mangle]
+pub unsafe extern "C" fn teddiebox_decode_first_frame(
+    taf: *const u8,
+    taf_len: usize,
+    pcm: *mut i16,
+    state: *mut OpusState,
+) -> i32 {
+    let taf = slice::from_raw_parts(taf, taf_len);
+    let pcm = slice::from_raw_parts_mut(pcm, MAX_FRAME_SAMPLES);
+
+    let Ok(source) = SlicePages::new(taf) else {
+        return -1;
+    };
+    let Ok(opus) = LibOpus::new(&mut *state) else {
+        return -2;
+    };
+    let Ok(mut decoder) = TafDecoder::open(source, opus) else {
+        return -3;
+    };
+
+    match decoder.next_frame(pcm) {
+        Ok(Some(n)) => n as i32,
+        Ok(None) => 0,
+        Err(_) => -4,
+    }
+}
+
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! {
+    loop {}
+}

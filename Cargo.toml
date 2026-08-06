@@ -7,6 +7,8 @@ members = [
     "tools/fixturegen",
     "tools/taf2wav",
 ]
+# Device-only, and its own workspace: see its Cargo.toml.
+exclude = ["tools/xtensa-linkcheck"]
 
 [workspace.package]
 edition = "2021"

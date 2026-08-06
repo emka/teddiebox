@@ -84,6 +84,9 @@
           # architecture-specific assembly paths, which is what makes one
           # recipe work for every host CI might run on.
           "-DOPUS_DISABLE_INTRINSICS=ON"
+          # Bare metal has nothing to initialise the stack guard, and a
+          # check that reads an uninitialised canary is worse than no check.
+          "-DOPUS_STACK_PROTECTOR=OFF"
         ];
 
         mkOpus = { pname, extraFlags ? [ ] }: pkgs.stdenv.mkDerivation {
