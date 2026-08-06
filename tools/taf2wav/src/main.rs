@@ -13,8 +13,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     };
 
-    let data = fs::read(&input)?;
-    let mut decoder = TafDecoder::open(SlicePages::new(&data)?, LibOpus::new()?)?;
+    let data = fs::read(&input).map_err(|e| format!("reading {input}: {e}"))?;
+    let source = SlicePages::new(&data).map_err(|e| format!("opening {input}: {e}"))?;
+    let opus = LibOpus::new().map_err(|e| format!("initializing Opus decoder: {e}"))?;
+    let mut decoder =
+        TafDecoder::open(source, opus).map_err(|e| format!("opening {input}: {e}"))?;
 
     println!(
         "audio id {:#010x}, {} chapters",
@@ -28,17 +31,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut wav = hound::WavWriter::create(&output, spec)?;
+    let mut wav =
+        hound::WavWriter::create(&output, spec).map_err(|e| format!("creating {output}: {e}"))?;
 
     let mut pcm = [0i16; MAX_FRAME_SAMPLES];
     let mut total = 0usize;
-    while let Some(n) = decoder.next_frame(&mut pcm)? {
+    loop {
+        let n = match decoder.next_frame(&mut pcm) {
+            Ok(Some(n)) => n,
+            Ok(None) => break,
+            Err(e) => return Err(format!("decoding {input}: {e}").into()),
+        };
         for &s in &pcm[..n] {
-            wav.write_sample(s)?;
+            wav.write_sample(s)
+                .map_err(|e| format!("writing {output}: {e}"))?;
         }
         total += n;
     }
-    wav.finalize()?;
+    wav.finalize()
+        .map_err(|e| format!("finalizing {output}: {e}"))?;
 
     println!(
         "wrote {output}: {:.2} s",
