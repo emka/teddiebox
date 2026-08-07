@@ -109,6 +109,45 @@ pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
     (0, page0::DAC_MUTE_CTRL, 0x00),
 ];
 
+/// Volume register step size, in half-decibels.
+const VOLUME_MIN_CODE: i16 = -127; // -63.5 dB
+const VOLUME_MAX_CODE: i16 = 48; //  +24 dB
+/// Bit 5 of the headphone-detect register is set while a jack is inserted.
+const HP_DETECT_INSERTED: u8 = 0x20;
+
+impl<I2C, E> Tlv320Dac3100<I2C>
+where
+    I2C: I2c<Error = E>,
+{
+    fn read_reg(&mut self, page: u8, reg: u8) -> Result<u8, Error<E>> {
+        self.select_page(page)?;
+        let mut buf = [0u8; 1];
+        self.i2c
+            .write_read(self.address, &[reg], &mut buf)
+            .map_err(Error::Bus)?;
+        Ok(buf[0])
+    }
+
+    /// Sets the digital volume on both DAC channels.
+    pub fn set_volume_db(&mut self, db: i8) -> Result<(), Error<E>> {
+        let code = (i16::from(db) * 2).clamp(VOLUME_MIN_CODE, VOLUME_MAX_CODE) as i8 as u8;
+        self.write_reg(0, page0::DAC_LEFT_VOLUME, code)?;
+        self.write_reg(0, page0::DAC_RIGHT_VOLUME, code)
+    }
+
+    pub fn set_muted(&mut self, muted: bool) -> Result<(), Error<E>> {
+        // Bits 3 and 2 mute the left and right DAC channels.
+        let value = if muted { 0x0C } else { 0x00 };
+        self.write_reg(0, page0::DAC_MUTE_CTRL, value)
+    }
+
+    /// True while a jack is inserted. The firmware mutes the speaker on this.
+    pub fn headphones_connected(&mut self) -> Result<bool, Error<E>> {
+        let v = self.read_reg(1, page1::HP_DETECT)?;
+        Ok(v & HP_DETECT_INSERTED != 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -185,5 +224,76 @@ mod tests {
             amp_at < mute_at,
             "unmuting before the amp is powered produces an audible pop"
         );
+    }
+
+    #[test]
+    fn zero_decibels_writes_the_zero_code_to_both_channels() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_LEFT_VOLUME, 0x00]),
+            Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_RIGHT_VOLUME, 0x00]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        dac.set_volume_db(0).unwrap();
+        dac.release().done();
+    }
+
+    #[test]
+    fn negative_decibels_are_encoded_as_twos_complement_half_steps() {
+        // The register is 0.5 dB per step, two's complement. -6 dB is -12 steps.
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_LEFT_VOLUME, 0xF4]),
+            Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_RIGHT_VOLUME, 0xF4]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        dac.set_volume_db(-6).unwrap();
+        dac.release().done();
+    }
+
+    #[test]
+    fn volume_is_clamped_to_the_registers_range() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_LEFT_VOLUME, 0x81]),
+            Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_RIGHT_VOLUME, 0x81]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        // -100 dB is below the -63.5 dB floor, so it must clamp to 0x81.
+        dac.set_volume_db(-100).unwrap();
+        dac.release().done();
+    }
+
+    #[test]
+    fn muting_sets_both_mute_bits() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_MUTE_CTRL, 0x0C]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        dac.set_muted(true).unwrap();
+        dac.release().done();
+    }
+
+    #[test]
+    fn headphone_detect_reads_the_flag_bit_on_page_one() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x01]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![page1::HP_DETECT], vec![0x20]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        assert!(dac.headphones_connected().unwrap());
+        dac.release().done();
+    }
+
+    #[test]
+    fn headphone_detect_reports_absence_when_the_flag_is_clear() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x01]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![page1::HP_DETECT], vec![0x00]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        assert!(!dac.headphones_connected().unwrap());
+        dac.release().done();
     }
 }
