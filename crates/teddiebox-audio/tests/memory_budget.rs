@@ -1,8 +1,8 @@
 //! Pins what the whole decode path costs in RAM.
 //!
-//! Phase B has to place this somewhere on a chip that may not have PSRAM
-//! fitted at all, so the total is a number the firmware is designed around
-//! rather than a detail. Measured on a 64-bit host, which over-states the
+//! Phase B has to place this in internal SRAM — the board carries no PSRAM —
+//! so the total is a number the firmware is designed around rather than a
+//! detail. Measured on a 64-bit host, which over-states the
 //! 32-bit device — a bound that holds here holds there.
 
 use teddiebox_audio::{LibOpus, OpusState, TafDecoder, OPUS_STATE_BYTES};
