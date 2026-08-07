@@ -21,6 +21,8 @@ pub enum Error<E> {
     Timeout,
     /// A tag responded, but the response was not the expected shape.
     BadResponse,
+    /// The reader's FIFO overflowed, so the bytes in it cannot be trusted.
+    FifoOverflow,
 }
 
 pub struct Trf7962a<SPI> {
@@ -90,6 +92,10 @@ pub const INIT_SEQUENCE: &[(u8, u8)] = &[
 /// Longest ISO 15693 response this driver handles.
 pub const MAX_RESPONSE: usize = 32;
 
+/// FIFO status register: bit 7 flags overflow, bits 6:0 hold the byte count.
+const FIFO_OVERFLOW: u8 = 0x80;
+const FIFO_COUNT_MASK: u8 = 0x7F;
+
 impl<SPI, E> Trf7962a<SPI>
 where
     SPI: SpiDevice<Error = E>,
@@ -108,7 +114,14 @@ where
         }
         self.send_command(regs::cmd::TRANSMIT_WITH_CRC)?;
 
-        let available = self.read_register(regs::FIFO_STATUS)? as usize;
+        // Bit 7 is the overflow flag, bits 6:0 the unread byte count. Reading
+        // the raw byte as a count turns an overflow into a plausible-looking
+        // 128-plus bytes and hands the caller fabricated data.
+        let status = self.read_register(regs::FIFO_STATUS)?;
+        if status & FIFO_OVERFLOW != 0 {
+            return Err(Error::FifoOverflow);
+        }
+        let available = (status & FIFO_COUNT_MASK) as usize;
         let n = available.min(response.len());
         for slot in response.iter_mut().take(n) {
             *slot = self.read_register(regs::FIFO)?;
@@ -342,6 +355,26 @@ mod tests {
     const GET_RANDOM_NUMBER: [u8; 3] = [0x22, 0xB2, 0x04];
     /// SET PASSWORD for privacy, password 0 masked with random number 0xABCD.
     const SET_PASSWORD_0: [u8; 8] = [0x22, 0xB3, 0x04, 0x04, 0xCD, 0xAB, 0xCD, 0xAB];
+
+    #[test]
+    fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
+        // Bit 7 is the overflow flag; the count is bits 6:0. Taking the raw
+        // byte as a count reads 0x8A as 138 bytes available and fabricates a
+        // UID out of whatever the FIFO returns.
+        let request = [0x26u8, 0x01, 0x00];
+        let mut expected = spi_write(vec![0x8F]);
+        expected.extend(spi_write(vec![0x1D, 0x00]));
+        expected.extend(spi_write(vec![0x1E, 0x30]));
+        for b in request {
+            expected.extend(spi_write(vec![0x1F, b]));
+        }
+        expected.extend(spi_write(vec![0x91]));
+        expected.extend(spi_read(0x5C, 0x8A));
+
+        let mut r = Trf7962a::new(SpiMock::new(&expected));
+        assert_eq!(r.inventory(), Err(Error::FifoOverflow));
+        r.release().done();
+    }
 
     #[test]
     fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
