@@ -7,6 +7,7 @@ members = [
     "crates/teddiebox-opus-sys",
     "crates/teddiebox-taf",
     "crates/tlv320dac3100",
+    "crates/trf7962a",
     "tools/fixturegen",
     "tools/taf2wav",
 ]
