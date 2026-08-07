@@ -39,6 +39,18 @@ where
         self.i2c
     }
 
+    /// Forgets which page is selected, so the next access selects one again.
+    ///
+    /// The page cache is the driver's belief about state it does not own. Call
+    /// this after anything that resets the codec behind its back — the RESET
+    /// line on GPIO26, or the board's power gate cycling on idle. A stale
+    /// cache does not fail: it silently writes the right value to the wrong
+    /// page, which is why this is on the public surface rather than a rule to
+    /// remember.
+    pub fn invalidate_page(&mut self) {
+        self.page = None;
+    }
+
     /// Selects `page`, skipping the write when it is already active.
     fn select_page(&mut self, page: u8) -> Result<(), Error<E>> {
         if self.page == Some(page) {
@@ -298,6 +310,24 @@ mod tests {
             Transaction::write_read(DEFAULT_ADDRESS, vec![page1::HP_DETECT], vec![0x20]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        assert!(dac.headphones_connected().unwrap());
+        dac.release().done();
+    }
+
+    #[test]
+    fn invalidating_the_page_makes_the_next_access_select_it_again() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x01]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![page1::HP_DETECT], vec![0x00]),
+            // The caller has since driven the RESET line, or the board's power
+            // gate cycled, so the codec is back on page 0 and the cache lies.
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x01]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![page1::HP_DETECT], vec![0x20]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+
+        dac.headphones_connected().unwrap();
+        dac.invalidate_page();
         assert!(dac.headphones_connected().unwrap());
         dac.release().done();
     }
