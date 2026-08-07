@@ -82,6 +82,57 @@ pub const INIT_SEQUENCE: &[(u8, u8)] = &[
     (regs::CHIP_STATUS_CONTROL, regs::CHIP_STATUS_RF_ON),
 ];
 
+/// Longest ISO 15693 response this driver handles.
+pub const MAX_RESPONSE: usize = 32;
+
+impl<SPI, E> Trf7962a<SPI>
+where
+    SPI: SpiDevice<Error = E>,
+{
+    /// Sends `request` and collects the tag's reply. Returns the number of
+    /// bytes received, which is zero when no tag answered.
+    pub fn transceive(&mut self, request: &[u8], response: &mut [u8]) -> Result<usize, Error<E>> {
+        self.send_command(regs::cmd::RESET_FIFO)?;
+
+        // The length is split across two registers as a 12-bit field.
+        self.write_register(regs::TX_LENGTH_BYTE1, (request.len() >> 4) as u8)?;
+        self.write_register(regs::TX_LENGTH_BYTE2, ((request.len() << 4) & 0xF0) as u8)?;
+
+        for &b in request {
+            self.write_register(regs::FIFO, b)?;
+        }
+        self.send_command(regs::cmd::TRANSMIT_WITH_CRC)?;
+
+        let available = self.read_register(regs::FIFO_STATUS)? as usize;
+        let n = available.min(response.len());
+        for slot in response.iter_mut().take(n) {
+            *slot = self.read_register(regs::FIFO)?;
+        }
+        Ok(n)
+    }
+
+    /// Runs a single-slot inventory. `Ok(None)` means nothing answered, which
+    /// includes the case of a tag held in privacy mode.
+    pub fn inventory(&mut self) -> Result<Option<[u8; 8]>, Error<E>> {
+        const REQUEST: [u8; 3] = [0x26, 0x01, 0x00];
+        let mut buf = [0u8; MAX_RESPONSE];
+        let n = self.transceive(&REQUEST, &mut buf)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        // flags(1) + DSFID(1) + UID(8)
+        if n < 10 {
+            return Err(Error::BadResponse);
+        }
+        let mut uid = [0u8; 8];
+        // The tag sends the UID least-significant byte first.
+        for (i, slot) in uid.iter_mut().enumerate() {
+            *slot = buf[9 - i];
+        }
+        Ok(Some(uid))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -144,6 +195,77 @@ mod tests {
 
         let mut r = Trf7962a::new(SpiMock::new(&expected));
         r.init_iso15693().unwrap();
+        r.release().done();
+    }
+
+    /// Builds the SPI transactions for a transceive of `request` that returns
+    /// `response`, so tests describe intent rather than bus mechanics.
+    fn transceive_transactions(request: &[u8], response: &[u8]) -> Vec<Transaction<u8>> {
+        let mut t = vec![
+            Transaction::transaction_start(),
+            Transaction::write_vec(vec![0x80 | regs::cmd::RESET_FIFO]),
+            Transaction::transaction_end(),
+            Transaction::transaction_start(),
+            Transaction::write_vec(vec![regs::TX_LENGTH_BYTE1, (request.len() >> 4) as u8]),
+            Transaction::transaction_end(),
+            Transaction::transaction_start(),
+            Transaction::write_vec(vec![
+                regs::TX_LENGTH_BYTE2,
+                ((request.len() << 4) & 0xF0) as u8,
+            ]),
+            Transaction::transaction_end(),
+        ];
+        for &b in request {
+            t.push(Transaction::transaction_start());
+            t.push(Transaction::write_vec(vec![regs::FIFO, b]));
+            t.push(Transaction::transaction_end());
+        }
+        t.push(Transaction::transaction_start());
+        t.push(Transaction::write_vec(vec![
+            0x80 | regs::cmd::TRANSMIT_WITH_CRC,
+        ]));
+        t.push(Transaction::transaction_end());
+        t.push(Transaction::transaction_start());
+        t.push(Transaction::transfer(
+            vec![regs::FIFO_STATUS | 0x40],
+            vec![response.len() as u8],
+        ));
+        t.push(Transaction::transaction_end());
+        for &b in response {
+            t.push(Transaction::transaction_start());
+            t.push(Transaction::transfer(vec![regs::FIFO | 0x40], vec![b]));
+            t.push(Transaction::transaction_end());
+        }
+        t
+    }
+
+    #[test]
+    fn inventory_returns_the_uid_a_tag_reported() {
+        // Flags 0x26 = high data rate, inventory, one slot. Command 0x01,
+        // mask length 0x00.
+        let request = [0x26u8, 0x01, 0x00];
+        // Response: flags, DSFID, then the UID least-significant byte first.
+        let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+        let expected = transceive_transactions(&request, &response);
+
+        let mut r = Trf7962a::new(SpiMock::new(&expected));
+        let uid = r.inventory().unwrap().expect("a tag answered");
+        // Reported most-significant byte first, the order printed on a figure.
+        assert_eq!(uid, [1, 2, 3, 4, 5, 6, 7, 8]);
+        r.release().done();
+    }
+
+    #[test]
+    fn inventory_reports_no_tag_when_the_fifo_stays_empty() {
+        let request = [0x26u8, 0x01, 0x00];
+        let expected = transceive_transactions(&request, &[]);
+
+        let mut r = Trf7962a::new(SpiMock::new(&expected));
+        assert_eq!(
+            r.inventory().unwrap(),
+            None,
+            "an empty FIFO means no tag, or a tag still in privacy mode"
+        );
         r.release().done();
     }
 
