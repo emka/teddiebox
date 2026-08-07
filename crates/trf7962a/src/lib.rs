@@ -209,7 +209,8 @@ mod tests {
     fn a_register_read_sets_the_read_bit() {
         let expected = [
             Transaction::transaction_start(),
-            Transaction::transfer(vec![regs::ISO_CONTROL | 0x40], vec![0x02]),
+            // Address 0x01 with the read bit set.
+            Transaction::transfer(vec![0x41], vec![0x02]),
             Transaction::transaction_end(),
         ];
         let mut r = Trf7962a::new(SpiMock::new(&expected));
@@ -229,64 +230,71 @@ mod tests {
         r.release().done();
     }
 
+    /// One SPI transaction carrying `bytes`.
+    fn spi_write(bytes: Vec<u8>) -> Vec<Transaction<u8>> {
+        vec![
+            Transaction::transaction_start(),
+            Transaction::write_vec(bytes),
+            Transaction::transaction_end(),
+        ]
+    }
+
+    /// One SPI transaction reading a register: address out, value back.
+    fn spi_read(address: u8, value: u8) -> Vec<Transaction<u8>> {
+        vec![
+            Transaction::transaction_start(),
+            Transaction::transfer(vec![address], vec![value]),
+            Transaction::transaction_end(),
+        ]
+    }
+
+    /// Every byte `init_iso15693` puts on the wire, written out by hand.
+    ///
+    /// Deliberately not derived from `INIT_SEQUENCE`: a test that loops over
+    /// the table under test asserts only that the driver iterates a slice, and
+    /// cannot tell a correct register map from a shifted one. These literals
+    /// are what a datasheet gets diffed against.
     #[test]
-    fn initialisation_soft_resets_then_applies_the_sequence() {
-        let mut expected: Vec<Transaction<u8>> = vec![
-            Transaction::transaction_start(),
-            Transaction::write_vec(vec![0x80 | regs::cmd::SOFT_INIT]),
-            Transaction::transaction_end(),
-            Transaction::transaction_start(),
-            Transaction::write_vec(vec![0x80 | regs::cmd::IDLE]),
-            Transaction::transaction_end(),
-        ];
-        for &(reg, val) in INIT_SEQUENCE {
-            expected.push(Transaction::transaction_start());
-            expected.push(Transaction::write_vec(vec![reg, val]));
-            expected.push(Transaction::transaction_end());
-        }
+    fn initialisation_puts_exactly_this_sequence_on_the_bus() {
+        let mut expected = Vec::new();
+        expected.extend(spi_write(vec![0x83])); // command: soft init
+        expected.extend(spi_write(vec![0x80])); // command: idle
+        expected.extend(spi_write(vec![0x01, 0x02])); // ISO control: 15693 high rate
+        expected.extend(spi_write(vec![0x0A, 0x80])); // TX pulse length
+        expected.extend(spi_write(vec![0x0B, 0x14])); // RX no-response wait
+        expected.extend(spi_write(vec![0x0F, 0x40])); // RX special settings
+        expected.extend(spi_write(vec![0x00, 0x21])); // chip status: RF on, last
 
         let mut r = Trf7962a::new(SpiMock::new(&expected));
         r.init_iso15693().unwrap();
         r.release().done();
     }
 
-    /// Builds the SPI transactions for a transceive of `request` that returns
-    /// `response`, so tests describe intent rather than bus mechanics.
-    fn transceive_transactions(request: &[u8], response: &[u8]) -> Vec<Transaction<u8>> {
-        let mut t = vec![
-            Transaction::transaction_start(),
-            Transaction::write_vec(vec![0x80 | regs::cmd::RESET_FIFO]),
-            Transaction::transaction_end(),
-            Transaction::transaction_start(),
-            Transaction::write_vec(vec![regs::TX_LENGTH_BYTE1, (request.len() >> 4) as u8]),
-            Transaction::transaction_end(),
-            Transaction::transaction_start(),
-            Transaction::write_vec(vec![
-                regs::TX_LENGTH_BYTE2,
-                ((request.len() << 4) & 0xF0) as u8,
-            ]),
-            Transaction::transaction_end(),
-        ];
+    /// Builds the SPI transactions for one transceive.
+    ///
+    /// `tx_length` is the two-register length field, stated literally by the
+    /// caller rather than recomputed here. Recomputing it would mean a wrong
+    /// length encoding agreed with itself and passed — the encoding is the
+    /// thing under test, so the test has to spell it out.
+    /// `fifo_status` is likewise the raw status byte the reader returns, so a
+    /// caller can set the overflow flag independently of the byte count.
+    fn transceive_transactions(
+        request: &[u8],
+        tx_length: [u8; 2],
+        fifo_status: u8,
+        response: &[u8],
+    ) -> Vec<Transaction<u8>> {
+        let mut t = Vec::new();
+        t.extend(spi_write(vec![0x8F])); // command: reset FIFO
+        t.extend(spi_write(vec![0x1D, tx_length[0]])); // TX length, high nibbles
+        t.extend(spi_write(vec![0x1E, tx_length[1]])); // TX length, low nibble
         for &b in request {
-            t.push(Transaction::transaction_start());
-            t.push(Transaction::write_vec(vec![regs::FIFO, b]));
-            t.push(Transaction::transaction_end());
+            t.extend(spi_write(vec![0x1F, b])); // byte into the FIFO
         }
-        t.push(Transaction::transaction_start());
-        t.push(Transaction::write_vec(vec![
-            0x80 | regs::cmd::TRANSMIT_WITH_CRC,
-        ]));
-        t.push(Transaction::transaction_end());
-        t.push(Transaction::transaction_start());
-        t.push(Transaction::transfer(
-            vec![regs::FIFO_STATUS | 0x40],
-            vec![response.len() as u8],
-        ));
-        t.push(Transaction::transaction_end());
+        t.extend(spi_write(vec![0x91])); // command: transmit with CRC
+        t.extend(spi_read(0x5C, fifo_status)); // FIFO status, read bit set
         for &b in response {
-            t.push(Transaction::transaction_start());
-            t.push(Transaction::transfer(vec![regs::FIFO | 0x40], vec![b]));
-            t.push(Transaction::transaction_end());
+            t.extend(spi_read(0x5F, b)); // FIFO, read bit set
         }
         t
     }
@@ -298,7 +306,8 @@ mod tests {
         let request = [0x26u8, 0x01, 0x00];
         // Response: flags, DSFID, then the UID least-significant byte first.
         let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
-        let expected = transceive_transactions(&request, &response);
+        // Three bytes: the 12-bit length field splits as 0x00 / 0x30.
+        let expected = transceive_transactions(&request, [0x00, 0x30], 10, &response);
 
         let mut r = Trf7962a::new(SpiMock::new(&expected));
         let uid = r.inventory().unwrap().expect("a tag answered");
@@ -310,7 +319,7 @@ mod tests {
     #[test]
     fn inventory_reports_no_tag_when_the_fifo_stays_empty() {
         let request = [0x26u8, 0x01, 0x00];
-        let expected = transceive_transactions(&request, &[]);
+        let expected = transceive_transactions(&request, [0x00, 0x30], 0, &[]);
 
         let mut r = Trf7962a::new(SpiMock::new(&expected));
         assert_eq!(
@@ -321,14 +330,21 @@ mod tests {
         r.release().done();
     }
 
+    /// GET RANDOM NUMBER, spelled out rather than taken from `slix`.
+    const GET_RANDOM_NUMBER: [u8; 3] = [0x22, 0xB2, 0x04];
+    /// SET PASSWORD for privacy, password 0 masked with random number 0xABCD.
+    const SET_PASSWORD_0: [u8; 8] = [0x22, 0xB3, 0x04, 0x04, 0xCD, 0xAB, 0xCD, 0xAB];
+
     #[test]
     fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
         let random_response = [0x00u8, 0xCD, 0xAB]; // flags, then RN low, high
         let mut expected =
-            transceive_transactions(&slix::get_random_number_request(), &random_response);
-        // Password 0 masked with RN 0xABCD.
+            transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 3, &random_response);
+        // Eight bytes: the length field splits as 0x00 / 0x80.
         expected.extend(transceive_transactions(
-            &slix::set_password_request(0, 0xABCD),
+            &SET_PASSWORD_0,
+            [0x00, 0x80],
+            1,
             &[0x00],
         ));
 
@@ -339,7 +355,7 @@ mod tests {
 
     #[test]
     fn unlocking_fails_cleanly_when_no_tag_answers() {
-        let expected = transceive_transactions(&slix::get_random_number_request(), &[]);
+        let expected = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 0, &[]);
         let mut r = Trf7962a::new(SpiMock::new(&expected));
         assert_eq!(r.unlock_privacy(0), Err(Error::Timeout));
         r.release().done();

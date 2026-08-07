@@ -181,31 +181,47 @@ mod tests {
         let mut dac = Tlv320Dac3100::new(i2c, DEFAULT_ADDRESS);
 
         dac.reset().unwrap();
-        dac.write_reg(0, page0::DAC_MUTE_CTRL, 0x00).unwrap();
+        dac.set_muted(false).unwrap();
         dac.release().done();
     }
 
+    /// Every byte `init` puts on the wire, written out by hand.
+    ///
+    /// This is the only artefact in the crate that a datasheet can be diffed
+    /// against, so it must not be derived from `INIT_SEQUENCE` — a test that
+    /// reads the same table as the code cannot disagree with it, and that is
+    /// precisely how a shifted register map ships green. Changing the driver
+    /// means changing these literals deliberately, in the same commit.
     #[test]
-    fn init_writes_every_entry_of_the_sequence_in_order() {
-        let mut expected: Vec<Transaction> = vec![];
-        // Reset leaves page 0 selected, which is the state init starts from.
-        let mut page = Some(0);
-        for &(p, reg, val) in INIT_SEQUENCE {
-            if page != Some(p) {
-                expected.push(Transaction::write(
-                    DEFAULT_ADDRESS,
-                    vec![REG_PAGE_SELECT, p],
-                ));
-                page = Some(p);
-            }
-            expected.push(Transaction::write(DEFAULT_ADDRESS, vec![reg, val]));
-        }
+    fn init_puts_exactly_this_sequence_on_the_bus() {
+        let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
+        let expected = [
+            w(vec![0x00, 0x00]), // select page 0
+            w(vec![0x04, 0x07]), // clock gen mux: PLL from BCLK
+            w(vec![0x05, 0x91]), // PLL P/R: on, P=1, R=1
+            w(vec![0x06, 0x20]), // PLL J=32
+            w(vec![0x07, 0x00]), // PLL D, MSB
+            w(vec![0x08, 0x00]), // PLL D, LSB
+            w(vec![0x0B, 0x88]), // NDAC on, /8
+            w(vec![0x0C, 0x82]), // MDAC on, /2
+            w(vec![0x0D, 0x00]), // DOSR MSB
+            w(vec![0x0E, 0x80]), // DOSR LSB = 128
+            w(vec![0x1B, 0x00]), // interface: I2S, 16-bit, slave
+            w(vec![0x3C, 0x08]), // DAC processing block
+            w(vec![0x00, 0x01]), // select page 1
+            w(vec![0x1F, 0x04]), // headphone drivers
+            w(vec![0x23, 0x44]), // DAC to output mixer routing
+            w(vec![0x24, 0x40]), // left analog volume
+            w(vec![0x28, 0x06]), // HPL driver gain
+            w(vec![0x29, 0x06]), // HPR driver gain
+            w(vec![0x2A, 0x0C]), // speaker driver gain
+            w(vec![0x20, 0x86]), // speaker amp on
+            w(vec![0x00, 0x00]), // back to page 0
+            w(vec![0x3F, 0xD4]), // DAC data path: on, both channels
+            w(vec![0x40, 0x00]), // unmute
+        ];
 
-        let i2c = I2cMock::new(&expected);
-        let mut dac = Tlv320Dac3100::new(i2c, DEFAULT_ADDRESS);
-        // Start from a known page so the expectation above matches.
-        dac.page = Some(0);
-
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         dac.init().unwrap();
         dac.release().done();
     }
