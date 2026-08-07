@@ -12,11 +12,17 @@ pub struct ResponseHead {
 /// Parses the head of a response. Returns the parsed fields and the offset at
 /// which the body starts.
 pub fn parse_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
-    let text = core::str::from_utf8(buf).map_err(|_| CloudError::MalformedResponse)?;
-    let head_end = text.find("\r\n\r\n").ok_or(CloudError::MalformedResponse)?;
+    // The body is arbitrary bytes — Opus, not text — so the terminator is
+    // found on the raw slice and only the head is validated as UTF-8.
+    let head_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or(CloudError::MalformedResponse)?;
     let body_at = head_end + 4;
 
-    let mut lines = text[..head_end].split("\r\n");
+    let text = core::str::from_utf8(&buf[..head_end]).map_err(|_| CloudError::MalformedResponse)?;
+
+    let mut lines = text.split("\r\n");
 
     let status_line = lines.next().ok_or(CloudError::MalformedResponse)?;
     let mut parts = status_line.split(' ');
@@ -58,6 +64,9 @@ pub fn parse_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use std::vec::Vec;
+
     use super::*;
 
     #[test]
@@ -68,6 +77,18 @@ mod tests {
         assert_eq!(head.content_length, Some(4096));
         assert_eq!(head.etag.as_deref(), Some("\"v1\""));
         assert_eq!(&raw[body_at..], b"body");
+    }
+
+    #[test]
+    fn a_body_that_is_not_text_does_not_make_the_response_malformed() {
+        // Opus data is arbitrary bytes. Validating the body as UTF-8 would
+        // reject every real download.
+        let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
+        raw.extend_from_slice(&[0xFF, 0x00, 0x80, 0x13]);
+
+        let (head, body_at) = parse_head(&raw).unwrap();
+        assert_eq!(head.status, 200);
+        assert_eq!(&raw[body_at..], &[0xFF, 0x00, 0x80, 0x13]);
     }
 
     #[test]
