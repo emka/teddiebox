@@ -865,6 +865,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-config"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+]
+
+[[package]]
 name = "teddiebox-core"
 version = "0.1.0"
 dependencies = [
