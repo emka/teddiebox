@@ -47,12 +47,16 @@ where
     }
 
     /// Reads one register.
+    ///
+    /// Two bytes are clocked. The reader is still receiving the address during
+    /// the first, so it can only drive the value out on the second; a one-byte
+    /// transfer returns whatever MISO happened to be carrying.
     pub fn read_register(&mut self, reg: u8) -> Result<u8, Error<E>> {
-        let mut buf = [0u8; 1];
+        let mut buf = [0u8; 2];
         self.spi
-            .transfer(&mut buf, &[(reg & ADDRESS_MASK) | READ_BIT])
+            .transfer(&mut buf, &[(reg & ADDRESS_MASK) | READ_BIT, 0])
             .map_err(Error::Bus)?;
-        Ok(buf[0])
+        Ok(buf[1])
     }
 
     /// Issues a direct command.
@@ -209,8 +213,9 @@ mod tests {
     fn a_register_read_sets_the_read_bit() {
         let expected = [
             Transaction::transaction_start(),
-            // Address 0x01 with the read bit set.
-            Transaction::transfer(vec![0x41], vec![0x02]),
+            // Address 0x01 with the read bit set, then a second byte clocked
+            // out so the reader has somewhere to put the value.
+            Transaction::transfer(vec![0x41, 0x00], vec![0x00, 0x02]),
             Transaction::transaction_end(),
         ];
         let mut r = Trf7962a::new(SpiMock::new(&expected));
@@ -239,11 +244,14 @@ mod tests {
         ]
     }
 
-    /// One SPI transaction reading a register: address out, value back.
+    /// One SPI transaction reading a register.
+    ///
+    /// Two bytes are clocked: the reader cannot answer during the address
+    /// byte, so the value only appears on the second.
     fn spi_read(address: u8, value: u8) -> Vec<Transaction<u8>> {
         vec![
             Transaction::transaction_start(),
-            Transaction::transfer(vec![address], vec![value]),
+            Transaction::transfer(vec![address, 0x00], vec![0x00, value]),
             Transaction::transaction_end(),
         ]
     }
