@@ -6,6 +6,8 @@
 pub mod regs;
 pub mod slix;
 
+use embedded_hal::delay::DelayNs;
+use embedded_hal::digital::InputPin;
 use embedded_hal::spi::SpiDevice;
 
 /// Command word bits. Getting these wrong turns a register read into a direct
@@ -17,6 +19,8 @@ const ADDRESS_MASK: u8 = 0x1F;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error<E> {
     Bus(E),
+    /// The IRQ line could not be read.
+    Pin,
     /// The reader did not respond within the expected window.
     Timeout,
     /// A tag responded, but the response was not the expected shape.
@@ -46,20 +50,61 @@ fn tag_error<E>(response: &[u8]) -> Result<(), Error<E>> {
     Ok(())
 }
 
-pub struct Trf7962a<SPI> {
+/// Reader configuration applied at startup, as `(register, value)`.
+pub const INIT_SEQUENCE: &[(u8, u8)] = &[
+    (regs::ISO_CONTROL, regs::ISO_CONTROL_15693_HIGH),
+    (regs::TX_PULSE_LENGTH, 0x80),
+    (regs::RX_NO_RESPONSE_WAIT, 0x14),
+    (regs::RX_SPECIAL_SETTINGS, 0x40),
+    // The field goes on last, once the protocol is configured.
+    (regs::CHIP_STATUS_CONTROL, regs::CHIP_STATUS_RF_ON),
+];
+
+/// Longest ISO 15693 response this driver handles.
+pub const MAX_RESPONSE: usize = 32;
+
+/// FIFO status register: bit 7 flags overflow, bits 6:0 hold the byte count.
+const FIFO_OVERFLOW: u8 = 0x80;
+const FIFO_COUNT_MASK: u8 = 0x7F;
+
+/// How long the reader is given to signal that an exchange finished.
+///
+/// An ISO 15693 exchange at high bit rate runs roughly 5–6 ms end to end:
+/// transmit, then t1 of about 320 µs, then the tag's reply at 26.48 kbit/s.
+/// The budget is deliberately generous, because being too short makes a tag
+/// on the plate read as no tag — the one failure that cannot be told apart
+/// from a wiring fault. **Retune against a real exchange at bench step 10.**
+pub const IRQ_POLL_INTERVAL_US: u32 = 200;
+/// Poll count, giving a 20 ms window at the interval above.
+pub const IRQ_POLL_ATTEMPTS: u32 = 100;
+
+/// Settling time after a soft init, before the reader accepts configuration.
+pub const SOFT_INIT_SETTLE_MS: u32 = 1;
+
+pub struct Trf7962a<SPI, D, IRQ> {
     spi: SPI,
+    delay: D,
+    irq: IRQ,
 }
 
-impl<SPI, E> Trf7962a<SPI>
+impl<SPI, D, IRQ, E> Trf7962a<SPI, D, IRQ>
 where
     SPI: SpiDevice<Error = E>,
+    D: DelayNs,
+    IRQ: InputPin,
 {
-    pub fn new(spi: SPI) -> Self {
-        Self { spi }
+    /// `irq` is the reader's interrupt line, GPIO13 on the Toniebox.
+    ///
+    /// The reader needs several milliseconds to complete an exchange, so a
+    /// driver without a clock and an interrupt line cannot tell "no tag" from
+    /// "not finished yet" — it always reads too early and reports an empty
+    /// plate.
+    pub fn new(spi: SPI, delay: D, irq: IRQ) -> Self {
+        Self { spi, delay, irq }
     }
 
-    pub fn release(self) -> SPI {
-        self.spi
+    pub fn release(self) -> (SPI, D, IRQ) {
+        (self.spi, self.delay, self.irq)
     }
 
     /// Writes one register.
@@ -92,35 +137,30 @@ where
     /// Brings the reader up for ISO 15693 and turns the field on.
     pub fn init_iso15693(&mut self) -> Result<(), Error<E>> {
         self.send_command(regs::cmd::SOFT_INIT)?;
+        self.delay.delay_ms(SOFT_INIT_SETTLE_MS);
         self.send_command(regs::cmd::IDLE)?;
+        self.delay.delay_ms(SOFT_INIT_SETTLE_MS);
         for &(reg, value) in INIT_SEQUENCE {
             self.write_register(reg, value)?;
         }
         Ok(())
     }
-}
 
-/// Reader configuration applied at startup, as `(register, value)`.
-pub const INIT_SEQUENCE: &[(u8, u8)] = &[
-    (regs::ISO_CONTROL, regs::ISO_CONTROL_15693_HIGH),
-    (regs::TX_PULSE_LENGTH, 0x80),
-    (regs::RX_NO_RESPONSE_WAIT, 0x14),
-    (regs::RX_SPECIAL_SETTINGS, 0x40),
-    // The field goes on last, once the protocol is configured.
-    (regs::CHIP_STATUS_CONTROL, regs::CHIP_STATUS_RF_ON),
-];
+    /// Waits for the reader to raise its interrupt line.
+    ///
+    /// `Ok(false)` means the window elapsed with no assertion, which is the
+    /// ordinary "nothing on the plate" case rather than a fault — the firmware
+    /// polls an empty plate continuously, so that must not be an error.
+    fn wait_for_response(&mut self) -> Result<bool, Error<E>> {
+        for _ in 0..IRQ_POLL_ATTEMPTS {
+            if self.irq.is_high().map_err(|_| Error::Pin)? {
+                return Ok(true);
+            }
+            self.delay.delay_us(IRQ_POLL_INTERVAL_US);
+        }
+        Ok(false)
+    }
 
-/// Longest ISO 15693 response this driver handles.
-pub const MAX_RESPONSE: usize = 32;
-
-/// FIFO status register: bit 7 flags overflow, bits 6:0 hold the byte count.
-const FIFO_OVERFLOW: u8 = 0x80;
-const FIFO_COUNT_MASK: u8 = 0x7F;
-
-impl<SPI, E> Trf7962a<SPI>
-where
-    SPI: SpiDevice<Error = E>,
-{
     /// Sends `request` and collects the tag's reply. Returns the number of
     /// bytes received, which is zero when no tag answered.
     pub fn transceive(&mut self, request: &[u8], response: &mut [u8]) -> Result<usize, Error<E>> {
@@ -134,6 +174,15 @@ where
             self.write_register(regs::FIFO, b)?;
         }
         self.send_command(regs::cmd::TRANSMIT_WITH_CRC)?;
+
+        if !self.wait_for_response()? {
+            return Ok(0);
+        }
+        // Reading the status register clears the interrupt. Leaving it set
+        // would make the next exchange return instantly on a stale assertion.
+        // The individual bits are not interpreted yet — see the register map
+        // note in `regs`, and confirm them at bench step 10.
+        let _ = self.read_register(regs::IRQ_STATUS)?;
 
         // Bit 7 is the overflow flag, bits 6:0 the unread byte count. Reading
         // the raw byte as a count turns an overflow into a plausible-looking
@@ -171,12 +220,7 @@ where
         }
         Ok(Some(uid))
     }
-}
 
-impl<SPI, E> Trf7962a<SPI>
-where
-    SPI: SpiDevice<Error = E>,
-{
     /// Fetches the tag's random number, needed to mask the password.
     pub fn get_random_number(&mut self) -> Result<u16, Error<E>> {
         let mut buf = [0u8; MAX_RESPONSE];
@@ -230,243 +274,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    extern crate std;
-    use std::{vec, vec::Vec};
-
-    use super::*;
-    use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction};
-
-    #[test]
-    fn a_register_write_sends_the_bare_address() {
-        let expected = [
-            Transaction::transaction_start(),
-            Transaction::write_vec(vec![regs::ISO_CONTROL, 0x02]),
-            Transaction::transaction_end(),
-        ];
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        r.write_register(regs::ISO_CONTROL, 0x02).unwrap();
-        r.release().done();
-    }
-
-    #[test]
-    fn a_register_read_sets_the_read_bit() {
-        let expected = [
-            Transaction::transaction_start(),
-            // Address 0x01 with the read bit set, then a second byte clocked
-            // out so the reader has somewhere to put the value.
-            Transaction::transfer(vec![0x41, 0x00], vec![0x00, 0x02]),
-            Transaction::transaction_end(),
-        ];
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        assert_eq!(r.read_register(regs::ISO_CONTROL).unwrap(), 0x02);
-        r.release().done();
-    }
-
-    #[test]
-    fn a_direct_command_sets_the_command_bit() {
-        let expected = [
-            Transaction::transaction_start(),
-            Transaction::write_vec(vec![0x80 | regs::cmd::SOFT_INIT]),
-            Transaction::transaction_end(),
-        ];
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        r.send_command(regs::cmd::SOFT_INIT).unwrap();
-        r.release().done();
-    }
-
-    /// One SPI transaction carrying `bytes`.
-    fn spi_write(bytes: Vec<u8>) -> Vec<Transaction<u8>> {
-        vec![
-            Transaction::transaction_start(),
-            Transaction::write_vec(bytes),
-            Transaction::transaction_end(),
-        ]
-    }
-
-    /// One SPI transaction reading a register.
-    ///
-    /// Two bytes are clocked: the reader cannot answer during the address
-    /// byte, so the value only appears on the second.
-    fn spi_read(address: u8, value: u8) -> Vec<Transaction<u8>> {
-        vec![
-            Transaction::transaction_start(),
-            Transaction::transfer(vec![address, 0x00], vec![0x00, value]),
-            Transaction::transaction_end(),
-        ]
-    }
-
-    /// Every byte `init_iso15693` puts on the wire, written out by hand.
-    ///
-    /// Deliberately not derived from `INIT_SEQUENCE`: a test that loops over
-    /// the table under test asserts only that the driver iterates a slice, and
-    /// cannot tell a correct register map from a shifted one. These literals
-    /// are what a datasheet gets diffed against.
-    #[test]
-    fn initialisation_puts_exactly_this_sequence_on_the_bus() {
-        let mut expected = Vec::new();
-        expected.extend(spi_write(vec![0x83])); // command: soft init
-        expected.extend(spi_write(vec![0x80])); // command: idle
-        expected.extend(spi_write(vec![0x01, 0x02])); // ISO control: 15693 high rate
-        expected.extend(spi_write(vec![0x0A, 0x80])); // TX pulse length
-        expected.extend(spi_write(vec![0x0B, 0x14])); // RX no-response wait
-        expected.extend(spi_write(vec![0x0F, 0x40])); // RX special settings
-        expected.extend(spi_write(vec![0x00, 0x21])); // chip status: RF on, last
-
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        r.init_iso15693().unwrap();
-        r.release().done();
-    }
-
-    /// Builds the SPI transactions for one transceive.
-    ///
-    /// `tx_length` is the two-register length field, stated literally by the
-    /// caller rather than recomputed here. Recomputing it would mean a wrong
-    /// length encoding agreed with itself and passed — the encoding is the
-    /// thing under test, so the test has to spell it out.
-    /// `fifo_status` is likewise the raw status byte the reader returns, so a
-    /// caller can set the overflow flag independently of the byte count.
-    fn transceive_transactions(
-        request: &[u8],
-        tx_length: [u8; 2],
-        fifo_status: u8,
-        response: &[u8],
-    ) -> Vec<Transaction<u8>> {
-        let mut t = Vec::new();
-        t.extend(spi_write(vec![0x8F])); // command: reset FIFO
-        t.extend(spi_write(vec![0x1D, tx_length[0]])); // TX length, high nibbles
-        t.extend(spi_write(vec![0x1E, tx_length[1]])); // TX length, low nibble
-        for &b in request {
-            t.extend(spi_write(vec![0x1F, b])); // byte into the FIFO
-        }
-        t.extend(spi_write(vec![0x91])); // command: transmit with CRC
-        t.extend(spi_read(0x5C, fifo_status)); // FIFO status, read bit set
-        for &b in response {
-            t.extend(spi_read(0x5F, b)); // FIFO, read bit set
-        }
-        t
-    }
-
-    #[test]
-    fn inventory_returns_the_uid_a_tag_reported() {
-        // Flags 0x26 = high data rate, inventory, one slot. Command 0x01,
-        // mask length 0x00.
-        let request = [0x26u8, 0x01, 0x00];
-        // Response: flags, DSFID, then the UID least-significant byte first.
-        let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
-        // Three bytes: the 12-bit length field splits as 0x00 / 0x30.
-        let expected = transceive_transactions(&request, [0x00, 0x30], 10, &response);
-
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        let uid = r.inventory().unwrap().expect("a tag answered");
-        // Reported most-significant byte first, the order printed on a figure.
-        assert_eq!(uid, [1, 2, 3, 4, 5, 6, 7, 8]);
-        r.release().done();
-    }
-
-    #[test]
-    fn inventory_reports_no_tag_when_the_fifo_stays_empty() {
-        let request = [0x26u8, 0x01, 0x00];
-        let expected = transceive_transactions(&request, [0x00, 0x30], 0, &[]);
-
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        assert_eq!(
-            r.inventory().unwrap(),
-            None,
-            "an empty FIFO means no tag, or a tag still in privacy mode"
-        );
-        r.release().done();
-    }
-
-    /// GET RANDOM NUMBER, spelled out rather than taken from `slix`.
-    const GET_RANDOM_NUMBER: [u8; 3] = [0x22, 0xB2, 0x04];
-    /// SET PASSWORD for privacy, password 0 masked with random number 0xABCD.
-    const SET_PASSWORD_0: [u8; 8] = [0x22, 0xB3, 0x04, 0x04, 0xCD, 0xAB, 0xCD, 0xAB];
-
-    #[test]
-    fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
-        // Bit 7 is the overflow flag; the count is bits 6:0. Taking the raw
-        // byte as a count reads 0x8A as 138 bytes available and fabricates a
-        // UID out of whatever the FIFO returns.
-        let request = [0x26u8, 0x01, 0x00];
-        let mut expected = spi_write(vec![0x8F]);
-        expected.extend(spi_write(vec![0x1D, 0x00]));
-        expected.extend(spi_write(vec![0x1E, 0x30]));
-        for b in request {
-            expected.extend(spi_write(vec![0x1F, b]));
-        }
-        expected.extend(spi_write(vec![0x91]));
-        expected.extend(spi_read(0x5C, 0x8A));
-
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        assert_eq!(r.inventory(), Err(Error::FifoOverflow));
-        r.release().done();
-    }
-
-    #[test]
-    fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
-        let random_response = [0x00u8, 0xCD, 0xAB]; // flags, then RN low, high
-        let mut expected =
-            transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 3, &random_response);
-        // Eight bytes: the length field splits as 0x00 / 0x80.
-        expected.extend(transceive_transactions(
-            &SET_PASSWORD_0,
-            [0x00, 0x80],
-            1,
-            &[0x00],
-        ));
-
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        r.unlock_privacy(0).unwrap();
-        r.release().done();
-    }
-
-    #[test]
-    fn a_rejected_password_is_reported_rather_than_read_as_success() {
-        // ISO 15693-3 §7.4: bit 0 of the response flags means the payload is
-        // an error code. A SLIX refusing the privacy password answers
-        // [0x01, 0x0F] — two bytes, so a bare length check calls it a success.
-        let mut expected =
-            transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 3, &[0x00, 0xCD, 0xAB]);
-        expected.extend(transceive_transactions(
-            &SET_PASSWORD_0,
-            [0x00, 0x80],
-            2,
-            &[0x01, 0x0F],
-        ));
-
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        assert_eq!(
-            r.unlock_privacy(0),
-            Err(Error::TagError(0x0F)),
-            "a wrong password must not look like an unlocked tag"
-        );
-        r.release().done();
-    }
-
-    #[test]
-    fn an_error_response_is_not_mistaken_for_a_random_number() {
-        let expected = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &[0x01, 0x03]);
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        assert_eq!(r.get_random_number(), Err(Error::TagError(0x03)));
-        r.release().done();
-    }
-
-    #[test]
-    fn unlocking_fails_cleanly_when_no_tag_answers() {
-        let expected = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 0, &[]);
-        let mut r = Trf7962a::new(SpiMock::new(&expected));
-        assert_eq!(r.unlock_privacy(0), Err(Error::Timeout));
-        r.release().done();
-    }
-
-    #[test]
-    fn the_field_is_turned_on_last() {
-        let last = INIT_SEQUENCE.last().unwrap();
-        assert_eq!(
-            last.0,
-            regs::CHIP_STATUS_CONTROL,
-            "enabling the field before the protocol is configured radiates noise"
-        );
-    }
-}
+mod tests;
