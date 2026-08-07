@@ -33,30 +33,57 @@ pub fn fetch<T: Read + Write>(
         .map_err(|_| CloudError::Transport)?;
     transport.flush().map_err(|_| CloudError::Transport)?;
 
+    // Read only until the head is complete. Draining to EOF instead would
+    // hand control of when this returns to the peer, and a server honouring
+    // keep-alive never hangs up — which would wedge playback, not just the
+    // fetch.
     let mut received = 0usize;
-    loop {
-        if received == buf.len() {
-            break;
+    let (head, body_at) = loop {
+        match parse_head(&buf[..received]) {
+            Ok(parsed) => break parsed,
+            Err(CloudError::MalformedResponse) if received < buf.len() => {}
+            Err(e) => return Err(e),
         }
         let n = transport
             .read(&mut buf[received..])
             .map_err(|_| CloudError::Transport)?;
         if n == 0 {
-            break;
+            // Gone before even the head arrived.
+            return Err(CloudError::MalformedResponse);
+        }
+        received += n;
+    };
+
+    match head.status {
+        // These carry no body, so there is nothing further to wait for.
+        304 => return Ok(Outcome::Unchanged),
+        404 => return Ok(Outcome::NotFound),
+        200 => {}
+        other => return Err(CloudError::UnexpectedStatus(other)),
+    }
+
+    let length = head.content_length.ok_or(CloudError::LengthRequired)? as usize;
+    let body_end = body_at
+        .checked_add(length)
+        .ok_or(CloudError::ResponseTooLong)?;
+    if body_end > buf.len() {
+        return Err(CloudError::ResponseTooLong);
+    }
+
+    while received < body_end {
+        let n = transport
+            .read(&mut buf[received..body_end])
+            .map_err(|_| CloudError::Transport)?;
+        if n == 0 {
+            return Err(CloudError::BodyTruncated);
         }
         received += n;
     }
 
-    let (head, body_at) = parse_head(&buf[..received])?;
-    match head.status {
-        200 => Ok(Outcome::Updated {
-            etag: head.etag,
-            content_length: head.content_length,
-            body_at,
-            received,
-        }),
-        304 => Ok(Outcome::Unchanged),
-        404 => Ok(Outcome::NotFound),
-        other => Err(CloudError::UnexpectedStatus(other)),
-    }
+    Ok(Outcome::Updated {
+        etag: head.etag,
+        content_length: head.content_length,
+        body_at,
+        received,
+    })
 }
