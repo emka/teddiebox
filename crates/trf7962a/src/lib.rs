@@ -4,6 +4,7 @@
 //! operations the Toniebox needs.
 
 pub mod regs;
+pub mod slix;
 
 use embedded_hal::spi::SpiDevice;
 
@@ -130,6 +131,57 @@ where
             *slot = buf[9 - i];
         }
         Ok(Some(uid))
+    }
+}
+
+impl<SPI, E> Trf7962a<SPI>
+where
+    SPI: SpiDevice<Error = E>,
+{
+    /// Fetches the tag's random number, needed to mask the password.
+    pub fn get_random_number(&mut self) -> Result<u16, Error<E>> {
+        let mut buf = [0u8; MAX_RESPONSE];
+        let n = self.transceive(&slix::get_random_number_request(), &mut buf)?;
+        if n == 0 {
+            return Err(Error::Timeout);
+        }
+        // flags(1) + RN low + RN high
+        if n < 3 {
+            return Err(Error::BadResponse);
+        }
+        Ok(u16::from_le_bytes([buf[1], buf[2]]))
+    }
+
+    /// Sends the privacy password, masked with `random`.
+    pub fn set_password(&mut self, password: u32, random: u16) -> Result<(), Error<E>> {
+        let mut buf = [0u8; MAX_RESPONSE];
+        let n = self.transceive(&slix::set_password_request(password, random), &mut buf)?;
+        if n == 0 {
+            return Err(Error::Timeout);
+        }
+        Ok(())
+    }
+
+    /// Takes a tag out of privacy mode so it will answer inventory.
+    pub fn unlock_privacy(&mut self, password: u32) -> Result<(), Error<E>> {
+        let random = self.get_random_number()?;
+        self.set_password(password, random)
+    }
+
+    /// Unlocks, then inventories. This is the operation the firmware calls;
+    /// a locked tag is invisible to `inventory` alone.
+    pub fn inventory_unlocked(&mut self, password: u32) -> Result<Option<[u8; 8]>, Error<E>> {
+        // A tag already out of privacy mode answers inventory directly, so try
+        // that first and only pay for the unlock exchange when it is needed.
+        if let Some(uid) = self.inventory()? {
+            return Ok(Some(uid));
+        }
+        match self.unlock_privacy(password) {
+            Ok(()) => self.inventory(),
+            // Nothing on the plate at all.
+            Err(Error::Timeout) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -266,6 +318,30 @@ mod tests {
             None,
             "an empty FIFO means no tag, or a tag still in privacy mode"
         );
+        r.release().done();
+    }
+
+    #[test]
+    fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
+        let random_response = [0x00u8, 0xCD, 0xAB]; // flags, then RN low, high
+        let mut expected =
+            transceive_transactions(&slix::get_random_number_request(), &random_response);
+        // Password 0 masked with RN 0xABCD.
+        expected.extend(transceive_transactions(
+            &slix::set_password_request(0, 0xABCD),
+            &[0x00],
+        ));
+
+        let mut r = Trf7962a::new(SpiMock::new(&expected));
+        r.unlock_privacy(0).unwrap();
+        r.release().done();
+    }
+
+    #[test]
+    fn unlocking_fails_cleanly_when_no_tag_answers() {
+        let expected = transceive_transactions(&slix::get_random_number_request(), &[]);
+        let mut r = Trf7962a::new(SpiMock::new(&expected));
+        assert_eq!(r.unlock_privacy(0), Err(Error::Timeout));
         r.release().done();
     }
 
