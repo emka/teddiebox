@@ -23,6 +23,27 @@ pub enum Error<E> {
     BadResponse,
     /// The reader's FIFO overflowed, so the bytes in it cannot be trusted.
     FifoOverflow,
+    /// The tag answered with the error flag set, carrying this error code.
+    /// A refused privacy password arrives this way.
+    TagError(u8),
+}
+
+/// ISO 15693-3 §7.4: bit 0 of the response flags marks an error response,
+/// whose payload is a one-byte error code rather than the expected data.
+const RESPONSE_ERROR_FLAG: u8 = 0x01;
+
+/// Returns the tag's error when `response` is an error response.
+///
+/// Without this every rejection reads as a success of the wrong shape, and a
+/// wrong password becomes indistinguishable from an empty plate.
+fn tag_error<E>(response: &[u8]) -> Result<(), Error<E>> {
+    if response
+        .first()
+        .is_some_and(|f| f & RESPONSE_ERROR_FLAG != 0)
+    {
+        return Err(Error::TagError(response.get(1).copied().unwrap_or(0)));
+    }
+    Ok(())
 }
 
 pub struct Trf7962a<SPI> {
@@ -138,6 +159,7 @@ where
         if n == 0 {
             return Ok(None);
         }
+        tag_error(&buf[..n])?;
         // flags(1) + DSFID(1) + UID(8)
         if n < 10 {
             return Err(Error::BadResponse);
@@ -162,6 +184,7 @@ where
         if n == 0 {
             return Err(Error::Timeout);
         }
+        tag_error(&buf[..n])?;
         // flags(1) + RN low + RN high
         if n < 3 {
             return Err(Error::BadResponse);
@@ -176,7 +199,7 @@ where
         if n == 0 {
             return Err(Error::Timeout);
         }
-        Ok(())
+        tag_error(&buf[..n])
     }
 
     /// Takes a tag out of privacy mode so it will answer inventory.
@@ -190,8 +213,12 @@ where
     pub fn inventory_unlocked(&mut self, password: u32) -> Result<Option<[u8; 8]>, Error<E>> {
         // A tag already out of privacy mode answers inventory directly, so try
         // that first and only pay for the unlock exchange when it is needed.
-        if let Some(uid) = self.inventory()? {
-            return Ok(Some(uid));
+        // A locked tag is silent, and a tag mid-exchange can answer garbled —
+        // both mean "try unlocking", so neither aborts the operation.
+        match self.inventory() {
+            Ok(Some(uid)) => return Ok(Some(uid)),
+            Ok(None) | Err(Error::BadResponse) | Err(Error::TagError(_)) => {}
+            Err(e) => return Err(e),
         }
         match self.unlock_privacy(password) {
             Ok(()) => self.inventory(),
@@ -391,6 +418,37 @@ mod tests {
 
         let mut r = Trf7962a::new(SpiMock::new(&expected));
         r.unlock_privacy(0).unwrap();
+        r.release().done();
+    }
+
+    #[test]
+    fn a_rejected_password_is_reported_rather_than_read_as_success() {
+        // ISO 15693-3 §7.4: bit 0 of the response flags means the payload is
+        // an error code. A SLIX refusing the privacy password answers
+        // [0x01, 0x0F] — two bytes, so a bare length check calls it a success.
+        let mut expected =
+            transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 3, &[0x00, 0xCD, 0xAB]);
+        expected.extend(transceive_transactions(
+            &SET_PASSWORD_0,
+            [0x00, 0x80],
+            2,
+            &[0x01, 0x0F],
+        ));
+
+        let mut r = Trf7962a::new(SpiMock::new(&expected));
+        assert_eq!(
+            r.unlock_privacy(0),
+            Err(Error::TagError(0x0F)),
+            "a wrong password must not look like an unlocked tag"
+        );
+        r.release().done();
+    }
+
+    #[test]
+    fn an_error_response_is_not_mistaken_for_a_random_number() {
+        let expected = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &[0x01, 0x03]);
+        let mut r = Trf7962a::new(SpiMock::new(&expected));
+        assert_eq!(r.get_random_number(), Err(Error::TagError(0x03)));
         r.release().done();
     }
 
