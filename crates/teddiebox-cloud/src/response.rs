@@ -60,7 +60,12 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
             continue;
         };
         let value = value.trim();
-        if name.eq_ignore_ascii_case("etag") {
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            // "identity" is the one encoding that leaves the body alone.
+            if !value.eq_ignore_ascii_case("identity") {
+                return Err(CloudError::UnsupportedTransferEncoding);
+            }
+        } else if name.eq_ignore_ascii_case("etag") {
             // Too long to store: drop it. The cost is one re-download.
             etag = ETag::try_from(value).ok();
         } else if name.eq_ignore_ascii_case("content-length") {
@@ -95,6 +100,15 @@ mod tests {
         assert_eq!(head.status, 200);
         assert_eq!(head.content_length, Some(4));
         assert_eq!(&raw[body_at..], b"body");
+    }
+
+    /// Chunked bodies carry their own framing. Nothing here removes it, so
+    /// accepting one would splice chunk sizes into the Opus stream — a
+    /// corruption that surfaces as noise rather than as an error.
+    #[test]
+    fn a_chunked_body_is_refused_rather_than_decoded_as_audio() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n";
+        assert_eq!(parse_head(raw), Err(CloudError::UnsupportedTransferEncoding));
     }
 
     #[test]

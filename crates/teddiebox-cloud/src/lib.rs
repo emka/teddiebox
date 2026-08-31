@@ -24,4 +24,8 @@ pub enum CloudError {
     /// way to know where the body ends without reading until the peer hangs
     /// up — which a keep-alive peer never does.
     LengthRequired,
+    /// The body is chunked, and nothing here strips the chunk framing. Failing
+    /// is the only honest answer: the alternative is handing chunk sizes to
+    /// the Opus decoder as if they were audio.
+    UnsupportedTransferEncoding,
 }
