@@ -7,6 +7,7 @@ mod gesture;
 pub mod input;
 mod led;
 mod playback;
+pub mod power;
 mod types;
 mod volume;
 

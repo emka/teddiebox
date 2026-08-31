@@ -6,12 +6,14 @@ mod pins;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
+use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
-use teddiebox_core::board::{Colour, Gates, Rail};
+use teddiebox_core::board::{self, Colour, Gates, Rail};
 use teddiebox_core::console::CommandWatch;
 use teddiebox_core::input::{self, Debounced, Edge};
+use teddiebox_core::power::{self, PackState};
 
 use crate::pins::BoardPins;
 
@@ -110,6 +112,39 @@ async fn inputs(left: Input<'static>, right: Input<'static>, wake: Input<'static
     }
 }
 
+/// Reports the pack and charger voltages.
+///
+/// Bench step 3 compares these against a multimeter across a real charge and
+/// discharge; until it has, treat them as indicative. The conversion is a
+/// straight line through the nominal endpoints and the ESP32-S3's ADC is not
+/// linear.
+#[embassy_executor::task]
+async fn sense(
+    mut adc: Adc<'static, esp_hal::peripherals::ADC1<'static>, esp_hal::Blocking>,
+    mut battery: esp_hal::analog::adc::AdcPin<
+        esp_hal::peripherals::GPIO9<'static>,
+        esp_hal::peripherals::ADC1<'static>,
+    >,
+    mut charger: esp_hal::analog::adc::AdcPin<
+        esp_hal::peripherals::GPIO8<'static>,
+        esp_hal::peripherals::ADC1<'static>,
+    >,
+) {
+    loop {
+        let pack_mv = power::battery_mv(adc.read_blocking(&mut battery));
+        let charger_mv = power::charger_mv(adc.read_blocking(&mut charger));
+
+        let state = match power::pack_state(pack_mv) {
+            PackState::Healthy => "healthy",
+            PackState::Low => "LOW",
+            PackState::Critical => "CRITICAL",
+        };
+        esp_println::println!("teddiebox: pack {pack_mv} mV ({state}), charger {charger_mv} mV");
+
+        Timer::after(Duration::from_secs(10)).await;
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -142,6 +177,11 @@ async fn main(spawner: Spawner) {
         .unwrap(),
     );
 
+    let mut adc_config = AdcConfig::new();
+    let battery = adc_config.enable_pin(p.GPIO9, Attenuation::_11dB);
+    let charger = adc_config.enable_pin(p.GPIO8, Attenuation::_11dB);
+    spawner.spawn(sense(Adc::new(p.ADC1, adc_config), battery, charger).unwrap());
+
     // The LED is on this rail, so it has to come up first.
     board.apply(gates.power(Rail::Peripherals, true));
 
@@ -152,22 +192,33 @@ async fn main(spawner: Spawner) {
     let mut watch = CommandWatch::new();
     esp_println::println!("teddiebox: type dl<enter> to reboot into download mode");
 
-    loop {
-        for colour in [Colour::Red, Colour::Green, Colour::Blue] {
-            match gates.led(colour) {
-                Ok(levels) => board.apply_all(&levels),
-                Err(_) => esp_println::println!("teddiebox: LED rail is down"),
-            }
+    // A dim green breath, software PWM at 200 Hz. Bright enough to say the
+    // firmware is alive, dim enough to live in a child's room.
+    const PWM_PERIOD_US: u64 = 5_000;
+    let lit = gates.led(Colour::Green).expect("the rail is up");
+    let dark = gates.led(Colour::Off).expect("the rail is up");
+    let mut since_poll = 0u32;
 
-            // Show the colour for half a second, staying responsive to the
-            // console throughout rather than only between colours.
-            for _ in 0..10 {
-                Timer::after(Duration::from_millis(50)).await;
-                let mut buf = [0u8; 16];
-                if let Ok(n) = console.read_buffered(&mut buf) {
-                    if buf[..n].iter().any(|&b| watch.feed(b)) {
-                        reboot_to_download(&mut board, &mut gates);
-                    }
+    loop {
+        let duty = board::breathing_duty(Instant::now().as_millis() as u32);
+        let on_us = PWM_PERIOD_US * duty as u64 / 255;
+
+        if on_us > 0 {
+            board.apply_all(&lit);
+            Timer::after(Duration::from_micros(on_us)).await;
+        }
+        board.apply_all(&dark);
+        Timer::after(Duration::from_micros(PWM_PERIOD_US - on_us)).await;
+
+        // Roughly twice a second is responsive enough for a typed command and
+        // cheap enough not to disturb the breath.
+        since_poll += 1;
+        if since_poll >= 100 {
+            since_poll = 0;
+            let mut buf = [0u8; 16];
+            if let Ok(n) = console.read_buffered(&mut buf) {
+                if buf[..n].iter().any(|&b| watch.feed(b)) {
+                    reboot_to_download(&mut board, &mut gates);
                 }
             }
         }
