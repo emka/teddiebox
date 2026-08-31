@@ -69,10 +69,16 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
                 return Err(CloudError::UnsupportedTransferEncoding);
             }
         } else if name.eq_ignore_ascii_case("etag") {
-            // Too long to store: drop it. The cost is one re-download.
-            etag = ETag::try_from(value).ok();
+            // The first usable value wins. Assigning unconditionally let a
+            // later unusable copy write `None` straight over a good one.
+            if etag.is_none() {
+                // Too long to store: drop it. The cost is one re-download.
+                etag = ETag::try_from(value).ok();
+            }
         } else if name.eq_ignore_ascii_case("content-length") {
-            content_length = value.parse().ok();
+            if content_length.is_none() {
+                content_length = value.parse().ok();
+            }
         }
     }
 
@@ -180,6 +186,20 @@ mod tests {
         const RAW: &[u8] = b"HTTP/1.1 200 OK\r\nETag: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n\r\n";
         let (head, _) = parse_head(RAW).unwrap();
         assert_eq!(head.etag, None, "a re-download is better than an error");
+    }
+
+    /// Each header was assigned with `.ok()`, so a second copy that failed to
+    /// parse wrote `None` over a value already read correctly.
+    #[test]
+    fn a_repeated_unusable_header_does_not_erase_the_value_already_parsed() {
+        const RAW: &[u8] = b"HTTP/1.1 200 OK\r\n\
+ETag: \"v1\"\r\n\
+Content-Length: 4\r\n\
+ETag: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n\
+Content-Length: banana\r\n\r\nbody";
+        let (head, _) = parse_head(RAW).unwrap();
+        assert_eq!(head.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(head.content_length, Some(4));
     }
 
     #[test]
