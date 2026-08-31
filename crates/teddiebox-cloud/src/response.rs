@@ -59,6 +59,9 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
+        // Whitespace around the colon is malformed but harmless, and a client
+        // that drops a header over it loses real information for no gain.
+        let name = name.trim();
         let value = value.trim();
         if name.eq_ignore_ascii_case("transfer-encoding") {
             // "identity" is the one encoding that leaves the body alone.
@@ -109,6 +112,14 @@ mod tests {
     fn a_chunked_body_is_refused_rather_than_decoded_as_audio() {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n";
         assert_eq!(parse_head(raw), Err(CloudError::UnsupportedTransferEncoding));
+    }
+
+    #[test]
+    fn a_header_name_padded_with_space_is_still_recognised() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length : 4\r\nETag : \"v1\"\r\n\r\nbody";
+        let (head, _) = parse_head(raw).unwrap();
+        assert_eq!(head.content_length, Some(4));
+        assert_eq!(head.etag.as_deref(), Some("\"v1\""));
     }
 
     #[test]
