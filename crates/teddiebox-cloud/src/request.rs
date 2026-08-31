@@ -24,7 +24,7 @@ pub fn build_content_request(
     server: &str,
     out: &mut [u8],
 ) -> Result<usize, CloudError> {
-    let mut buf: String<512> = String::new();
+    let mut buf = SliceWriter { out, used: 0 };
 
     write!(buf, "GET /content/").map_err(|_| CloudError::RequestTooLong)?;
     for b in uid {
@@ -38,12 +38,29 @@ pub fn build_content_request(
 
     write!(buf, "Connection: close\r\n\r\n").map_err(|_| CloudError::RequestTooLong)?;
 
-    let bytes = buf.as_bytes();
-    if bytes.len() > out.len() {
-        return Err(CloudError::RequestTooLong);
+    Ok(buf.used)
+}
+
+/// Formats straight into the caller's buffer.
+///
+/// The request used to be built in a `String<512>` and copied out, which cost
+/// the stack both buffers and capped the request at 512 bytes however large
+/// `out` was. Running out of room is the caller's `RequestTooLong` either way.
+struct SliceWriter<'a> {
+    out: &'a mut [u8],
+    used: usize,
+}
+
+impl Write for SliceWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let end = self.used + s.len();
+        if end > self.out.len() {
+            return Err(core::fmt::Error);
+        }
+        self.out[self.used..end].copy_from_slice(s.as_bytes());
+        self.used = end;
+        Ok(())
     }
-    out[..bytes.len()].copy_from_slice(bytes);
-    Ok(bytes.len())
 }
 
 #[cfg(test)]
@@ -89,6 +106,17 @@ mod tests {
     #[test]
     fn the_request_ends_with_a_blank_line() {
         assert!(build(None).ends_with("\r\n\r\n"));
+    }
+
+    /// The old builder copied through a fixed 512-byte string, so a request
+    /// longer than that failed however much room the caller offered.
+    #[test]
+    fn the_request_length_is_bounded_by_the_callers_buffer_alone() {
+        let server = "x".repeat(600);
+        let mut out = [0u8; 1024];
+        let n = build_content_request(UID, None, &server, &mut out).unwrap();
+        assert!(n > 512, "built {n} bytes");
+        assert!(out[..n].ends_with(b"\r\n\r\n"));
     }
 
     #[test]
