@@ -174,7 +174,8 @@ pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
     (0, page0::DAC_MUTE_CTRL, 0x00),
 ];
 
-/// Volume register step size, in half-decibels.
+// The volume register counts in half-decibel steps, two's complement, which
+// is why the codes below are twice the decibel figures beside them.
 const VOLUME_MIN_CODE: i16 = -127; // -63.5 dB
 const VOLUME_MAX_CODE: i16 = 48; //  +24 dB
 /// D6-D5 of the headset-detection register report what is plugged in: 00 for
