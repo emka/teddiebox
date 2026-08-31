@@ -134,15 +134,23 @@ async fn sense(
     >,
 ) {
     loop {
-        let pack_mv = power::battery_mv(adc.read_blocking(&mut battery));
-        let charger_mv = power::charger_mv(adc.read_blocking(&mut charger));
+        // Raw counts as well as millivolts. The conversion rests on an
+        // assumed attenuation and on GPIO9 measuring the pack rather than
+        // something downstream of it, and a millivolt figure alone cannot
+        // tell a wrong assumption from a flat battery.
+        let pack_raw = adc.read_blocking(&mut battery);
+        let charger_raw = adc.read_blocking(&mut charger);
+        let pack_mv = power::battery_mv(pack_raw);
+        let charger_mv = power::charger_mv(charger_raw);
 
         let state = match power::pack_state(pack_mv) {
             PackState::Healthy => "healthy",
             PackState::Low => "LOW",
             PackState::Critical => "CRITICAL",
         };
-        esp_println::println!("teddiebox: pack {pack_mv} mV ({state}), charger {charger_mv} mV");
+        esp_println::println!(
+            "teddiebox: pack {pack_mv} mV ({state}, raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
+        );
 
         Timer::after(Duration::from_secs(10)).await;
     }
