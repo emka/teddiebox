@@ -31,7 +31,11 @@ pub struct PinLevel {
 }
 
 /// Which rails are on, and what driving them costs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Deliberately not `Copy`: this is the one authoritative record of what the
+/// board's rails are doing. `Copy` would let two tasks each hold a value
+/// that believes itself authoritative, and only one of them would be right.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gates {
     peripherals_on: bool,
     storage_on: bool,
