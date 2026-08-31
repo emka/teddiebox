@@ -4,6 +4,7 @@ mod battery;
 pub mod board;
 pub mod console;
 mod gesture;
+pub mod input;
 mod led;
 mod playback;
 mod types;

@@ -4,12 +4,14 @@
 mod pins;
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
+use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
 use teddiebox_core::board::{Colour, Gates, Rail};
 use teddiebox_core::console::CommandWatch;
+use teddiebox_core::input::{self, Debounced, Edge};
 
 use crate::pins::BoardPins;
 
@@ -65,6 +67,49 @@ fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_hal::system::software_reset()
 }
 
+/// Reports settled presses on the ears and the wake line.
+///
+/// Also counts the raw flips seen while each change settled: bench step 2 wants
+/// the bounce duration of these particular switches measured, and a flip count
+/// beside a known poll interval is the cheapest way to see it.
+#[embassy_executor::task]
+async fn inputs(left: Input<'static>, right: Input<'static>, wake: Input<'static>) {
+    const POLL_MS: u64 = 2;
+
+    let mut state = [
+        ("left ear", Debounced::released(), 0u32),
+        ("right ear", Debounced::released(), 0u32),
+        ("wake", Debounced::released(), 0u32),
+    ];
+
+    loop {
+        let now = Instant::now().as_millis() as u32;
+        let raw = [
+            input::ear_pressed(left.is_high()),
+            input::ear_pressed(right.is_high()),
+            input::wake_asserted(wake.is_high()),
+        ];
+
+        for ((name, button, flips), &pressed) in state.iter_mut().zip(raw.iter()) {
+            let was = button.is_pressed();
+            match button.update(pressed, now) {
+                Some(edge) => {
+                    let label = match edge {
+                        Edge::Pressed => "pressed",
+                        Edge::Released => "released",
+                    };
+                    esp_println::println!("teddiebox: {name} {label} after {flips} bounces");
+                    *flips = 0;
+                }
+                None if pressed != was => *flips += 1,
+                None => {}
+            }
+        }
+
+        Timer::after(Duration::from_millis(POLL_MS)).await;
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -83,6 +128,19 @@ async fn main(spawner: Spawner) {
     let mut gates = Gates::at_reset();
 
     spawner.spawn(heartbeat().unwrap());
+
+    // Ears and wake are all active low, so they are read with a pull-up: an
+    // unconnected input then reads as "not pressed" rather than floating into
+    // phantom presses.
+    let up = InputConfig::default().with_pull(Pull::Up);
+    spawner.spawn(
+        inputs(
+            Input::new(p.GPIO20, up),
+            Input::new(p.GPIO21, up),
+            Input::new(p.GPIO7, up),
+        )
+        .unwrap(),
+    );
 
     // The LED is on this rail, so it has to come up first.
     board.apply(gates.power(Rail::Peripherals, true));
