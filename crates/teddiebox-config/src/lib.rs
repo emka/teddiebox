@@ -62,10 +62,16 @@ impl Config {
             }
         }
 
+        // A key present but empty is the same mistake as a key left out. An
+        // empty password is not: an open network is a real thing.
         Ok(Config {
-            ssid: ssid.ok_or(ConfigError::MissingSsid)?,
+            ssid: ssid
+                .filter(|s| !s.is_empty())
+                .ok_or(ConfigError::MissingSsid)?,
             password,
-            server: server.ok_or(ConfigError::MissingServer)?,
+            server: server
+                .filter(|s| !s.is_empty())
+                .ok_or(ConfigError::MissingServer)?,
         })
     }
 }
@@ -73,6 +79,28 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key with nothing after the `=` is the same mistake as leaving the key
+    /// out: there is no network called "". Accepting it turned a typo into a
+    /// WiFi failure diagnosed at the box rather than at the config file.
+    #[test]
+    fn an_ssid_with_no_value_is_missing_rather_than_empty() {
+        let err = Config::parse("ssid =\nserver = box.lan:8080\n").unwrap_err();
+        assert_eq!(err, ConfigError::MissingSsid);
+    }
+
+    #[test]
+    fn a_server_with_no_value_is_missing_rather_than_empty() {
+        let err = Config::parse("ssid = home\nserver =   \n").unwrap_err();
+        assert_eq!(err, ConfigError::MissingServer);
+    }
+
+    /// An open network is a real thing, so this one stays permitted.
+    #[test]
+    fn an_empty_password_is_allowed() {
+        let c = Config::parse("ssid = home\npassword =\nserver = box.lan:8080\n").unwrap();
+        assert_eq!(c.password.as_str(), "");
+    }
 
     #[test]
     fn parses_a_minimal_file() {
