@@ -121,6 +121,9 @@ pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
     // Interface: I2S, 16-bit, slave.
     (0, page0::CODEC_IF_CTRL1, 0x00),
     (0, page0::DAC_PROCESSING_BLOCK, 0x08),
+    // Headset detection is off after reset, so without this the jack reads as
+    // permanently empty. 16 ms debounce, the reset default.
+    (0, page0::HEADSET_DETECT, 0x80),
     // Analog: power the output stages before unmuting.
     (1, page1::HP_DRIVERS, 0x04),
     (1, page1::OUTPUT_MIXER_ROUTING, 0x44),
@@ -141,8 +144,10 @@ pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
 /// Volume register step size, in half-decibels.
 const VOLUME_MIN_CODE: i16 = -127; // -63.5 dB
 const VOLUME_MAX_CODE: i16 = 48; //  +24 dB
-/// Bit 5 of the headphone-detect register is set while a jack is inserted.
-const HP_DETECT_INSERTED: u8 = 0x20;
+/// D6-D5 of the headset-detection register report what is plugged in: 00 for
+/// nothing, 01 for a headset without a microphone, 11 for one with. Anything
+/// non-zero is a jack, which is all this driver needs to know.
+const HEADSET_DETECTED: u8 = 0x60;
 
 impl<I2C, E> Tlv320Dac3100<I2C>
 where
@@ -171,9 +176,12 @@ where
     }
 
     /// True while a jack is inserted. The firmware mutes the speaker on this.
+    ///
+    /// Detection only reports anything once `INIT_SEQUENCE` has enabled it;
+    /// the reset state of the register is disabled, reading a constant 00.
     pub fn headphones_connected(&mut self) -> Result<bool, Error<E>> {
-        let v = self.read_reg(1, page1::HP_DETECT)?;
-        Ok(v & HP_DETECT_INSERTED != 0)
+        let v = self.read_reg(0, page0::HEADSET_DETECT)?;
+        Ok(v & HEADSET_DETECTED != 0)
     }
 }
 
@@ -237,6 +245,7 @@ mod tests {
             w(vec![0x0E, 0x80]), // DOSR LSB = 128
             w(vec![0x1B, 0x00]), // interface: I2S, 16-bit, slave
             w(vec![0x3C, 0x08]), // DAC processing block
+            w(vec![0x43, 0x80]), // headset detection on, 16 ms debounce
             w(vec![0x00, 0x01]), // select page 1
             w(vec![0x1F, 0x04]), // headphone drivers
             w(vec![0x23, 0x44]), // DAC to output mixer routing
@@ -323,10 +332,10 @@ mod tests {
     }
 
     #[test]
-    fn headphone_detect_reads_the_flag_bit_on_page_one() {
+    fn a_headset_without_a_microphone_counts_as_connected() {
         let expected = [
-            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x01]),
-            Transaction::write_read(DEFAULT_ADDRESS, vec![page1::HP_DETECT], vec![0x20]),
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![page0::HEADSET_DETECT], vec![0x20]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         assert!(dac.headphones_connected().unwrap());
@@ -336,12 +345,12 @@ mod tests {
     #[test]
     fn invalidating_the_page_makes_the_next_access_select_it_again() {
         let expected = [
-            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x01]),
-            Transaction::write_read(DEFAULT_ADDRESS, vec![page1::HP_DETECT], vec![0x00]),
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![page0::HEADSET_DETECT], vec![0x00]),
             // The caller has since driven the RESET line, or the board's power
             // gate cycled, so the codec is back on page 0 and the cache lies.
-            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x01]),
-            Transaction::write_read(DEFAULT_ADDRESS, vec![page1::HP_DETECT], vec![0x20]),
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![page0::HEADSET_DETECT], vec![0x20]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
 
@@ -354,8 +363,8 @@ mod tests {
     #[test]
     fn headphone_detect_reports_absence_when_the_flag_is_clear() {
         let expected = [
-            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x01]),
-            Transaction::write_read(DEFAULT_ADDRESS, vec![page1::HP_DETECT], vec![0x00]),
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![page0::HEADSET_DETECT], vec![0x00]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         assert!(!dac.headphones_connected().unwrap());

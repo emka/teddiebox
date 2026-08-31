@@ -24,6 +24,8 @@ pub mod page0 {
     pub const DAC_MUTE_CTRL: u8 = 0x40;
     pub const DAC_LEFT_VOLUME: u8 = 0x41;
     pub const DAC_RIGHT_VOLUME: u8 = 0x42;
+    /// Headset detection: D7 enables it, D6-D5 report what is plugged in.
+    pub const HEADSET_DETECT: u8 = 0x43;
 }
 
 pub mod page1 {
@@ -42,5 +44,4 @@ pub mod page1 {
     pub const HPL_DRIVER_GAIN: u8 = 0x28;
     pub const HPR_DRIVER_GAIN: u8 = 0x29;
     pub const SPK_DRIVER_GAIN: u8 = 0x2A;
-    pub const HP_DETECT: u8 = 0x2E;
 }
