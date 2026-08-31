@@ -110,8 +110,12 @@ pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
     (0, page0::DAC_PROCESSING_BLOCK, 0x08),
     // Analog: power the output stages before unmuting.
     (1, page1::HP_DRIVERS, 0x04),
-    (1, page1::HP_OUT_ROUTING, 0x44),
-    (1, page1::SPK_OUT_ROUTING, 0x40),
+    (1, page1::OUTPUT_MIXER_ROUTING, 0x44),
+    // Route each analog volume control to its driver at 0 dB. Without D7 the
+    // mixer reaches no amplifier at all, and the reset gain is -78 dB.
+    (1, page1::HPL_ANALOG_VOLUME, 0x80),
+    (1, page1::HPR_ANALOG_VOLUME, 0x80),
+    (1, page1::SPK_ANALOG_VOLUME, 0x80),
     (1, page1::HPL_DRIVER_GAIN, 0x06),
     (1, page1::HPR_DRIVER_GAIN, 0x06),
     (1, page1::SPK_DRIVER_GAIN, 0x0C),
@@ -223,7 +227,9 @@ mod tests {
             w(vec![0x00, 0x01]), // select page 1
             w(vec![0x1F, 0x04]), // headphone drivers
             w(vec![0x23, 0x44]), // DAC to output mixer routing
-            w(vec![0x24, 0x40]), // left analog volume
+            w(vec![0x24, 0x80]), // left analog volume to HPL: routed, 0 dB
+            w(vec![0x25, 0x80]), // right analog volume to HPR: routed, 0 dB
+            w(vec![0x26, 0x80]), // left analog volume to speaker: routed, 0 dB
             w(vec![0x28, 0x06]), // HPL driver gain
             w(vec![0x29, 0x06]), // HPR driver gain
             w(vec![0x2A, 0x0C]), // speaker driver gain

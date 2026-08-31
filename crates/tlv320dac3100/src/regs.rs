@@ -1,7 +1,7 @@
 //! Register addresses, by page.
 //!
 //! **Unverified against silicon.** These values come from the TLV320DAC3100
-//! datasheet (SLAS667) and are checked only by the mocks in this crate.
+//! datasheet (SLAS671C) and are checked only by the mocks in this crate.
 //! Phase B step 6 is the first time they meet the real codec.
 
 /// Register 0 on every page selects the active page.
@@ -29,8 +29,16 @@ pub mod page0 {
 pub mod page1 {
     pub const HP_DRIVERS: u8 = 0x1F;
     pub const SPK_AMP: u8 = 0x20;
-    pub const HP_OUT_ROUTING: u8 = 0x23;
-    pub const SPK_OUT_ROUTING: u8 = 0x24;
+    /// DAC_L and DAC_R output mixer routing.
+    pub const OUTPUT_MIXER_ROUTING: u8 = 0x23;
+    /// Analog volume controls, one per output driver.
+    ///
+    /// D7 routes the volume control to its driver and D6–D0 is the gain, whose
+    /// reset value is –78 dB. Both halves matter: an unrouted driver is silent,
+    /// and so is a routed one left at its reset gain.
+    pub const HPL_ANALOG_VOLUME: u8 = 0x24;
+    pub const HPR_ANALOG_VOLUME: u8 = 0x25;
+    pub const SPK_ANALOG_VOLUME: u8 = 0x26;
     pub const HPL_DRIVER_GAIN: u8 = 0x28;
     pub const HPR_DRIVER_GAIN: u8 = 0x29;
     pub const SPK_DRIVER_GAIN: u8 = 0x2A;
