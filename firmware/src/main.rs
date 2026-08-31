@@ -11,6 +11,11 @@ use teddiebox_core::board::{Colour, Gates, Rail};
 
 use crate::pins::BoardPins;
 
+// The ESP-IDF-style bootloader identifies an app by this descriptor. Without
+// it the image links but no flashing tool will accept it — a failure a build
+// gate cannot see.
+esp_bootloader_esp_idf::esp_app_desc!();
+
 /// Prints on UART0 so a bench session can tell a running box from a hung one.
 #[embassy_executor::task]
 async fn heartbeat() {
