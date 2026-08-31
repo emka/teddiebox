@@ -125,7 +125,9 @@ pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
     // permanently empty. 16 ms debounce, the reset default.
     (0, page0::HEADSET_DETECT, 0x80),
     // Analog: power the output stages before unmuting.
-    (1, page1::HP_DRIVERS, 0x04),
+    // D7 and D6 power the HPL and HPR drivers; D2 is reserved and must be 1.
+    // Common mode stays at its 1.35 V reset value.
+    (1, page1::HP_DRIVERS, 0xC4),
     (1, page1::OUTPUT_MIXER_ROUTING, 0x44),
     // Route each analog volume control to its driver at 0 dB. Without D7 the
     // mixer reaches no amplifier at all, and the reset gain is -78 dB.
@@ -247,7 +249,7 @@ mod tests {
             w(vec![0x3C, 0x08]), // DAC processing block
             w(vec![0x43, 0x80]), // headset detection on, 16 ms debounce
             w(vec![0x00, 0x01]), // select page 1
-            w(vec![0x1F, 0x04]), // headphone drivers
+            w(vec![0x1F, 0xC4]), // headphone drivers: HPL and HPR powered up
             w(vec![0x23, 0x44]), // DAC to output mixer routing
             w(vec![0x24, 0x80]), // left analog volume to HPL: routed, 0 dB
             w(vec![0x25, 0x80]), // right analog volume to HPR: routed, 0 dB
