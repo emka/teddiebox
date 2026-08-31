@@ -10,40 +10,27 @@ jobs:
         with:
           extra_nix_config: "experimental-features = nix-command flakes"
 
+      # Each gate below is a justfile recipe, so `just check` locally runs
+      # exactly what the pipeline runs. The steps stay separate only so a red
+      # build names the gate that failed; why each gate exists is documented
+      # beside its recipe in the justfile.
+
       - name: Format
-        run: nix develop --command cargo fmt --all --check
+        run: nix develop --command just fmt
 
       - name: Lint
-        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+        run: nix develop --command just lint
 
       - name: Test
-        run: nix develop --command cargo test --workspace
+        run: nix develop --command just test
 
-      # Proves the library crates are genuinely no_std, against the target
-      # the firmware actually runs on rather than a bare-metal stand-in.
-      # rustc ships no prebuilt core for xtensa, so core is built from source.
       - name: Cross-compile check
-        run: |
-          nix develop --command cargo check -p teddiebox-taf --target xtensa-esp32s3-none-elf -Z build-std=core
-          nix develop --command cargo check -p teddiebox-core --target xtensa-esp32s3-none-elf -Z build-std=core
-          nix develop --command cargo check -p teddiebox-config --target xtensa-esp32s3-none-elf -Z build-std=core
-          nix develop --command cargo check -p teddiebox-cloud --target xtensa-esp32s3-none-elf -Z build-std=core
-          nix develop --command cargo check -p tlv320dac3100 --target xtensa-esp32s3-none-elf -Z build-std=core
-          nix develop --command cargo check -p trf7962a --target xtensa-esp32s3-none-elf -Z build-std=core
+        run: nix develop --command just cross
 
-      # Catches an FFI mismatch or a libopus dependency the device's C
-      # library cannot satisfy — neither of which a host test or a
-      # cross-compile check can see.
       - name: Link check
-        run: nix develop --command ./scripts/xtensa-link-check.sh
+        run: nix develop --command just link
 
-      # Every format claim the parser is built on rests on these committed
-      # fixtures, so a generator that has drifted from them quietly
-      # invalidates the evidence. Generation is byte-reproducible, which is
-      # what makes this a plain diff rather than a fuzzy comparison.
+      # Generation is byte-reproducible, which is what makes this a plain diff
+      # rather than a fuzzy comparison.
       - name: Fixtures match their generator
-        run: |
-          out="$(mktemp -d)"
-          nix develop --command cargo run -q -p fixturegen -- "$out/sine.taf"
-          diff "$out/sine.taf" crates/teddiebox-taf/tests/data/sine.taf
-          diff "$out/chapters.taf" crates/teddiebox-taf/tests/data/chapters.taf
+        run: nix develop --command just fixtures
