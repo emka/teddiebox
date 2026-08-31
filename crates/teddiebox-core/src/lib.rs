@@ -2,6 +2,7 @@
 
 mod battery;
 pub mod board;
+pub mod console;
 mod gesture;
 mod led;
 mod playback;
