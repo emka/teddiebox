@@ -1493,6 +1493,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-core"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+]
+
+[[package]]
 name = "teddiebox-firmware"
 version = "0.1.0"
 dependencies = [
@@ -1502,6 +1509,7 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "esp-rtos",
+ "teddiebox-core",
 ]
 
 [[package]]

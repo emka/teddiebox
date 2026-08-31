@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 [workspace]
 
 [dependencies]
+teddiebox-core = { path = "../crates/teddiebox-core" }
 esp-hal = { version = "1.2.0-rc.0", features = ["esp32s3", "unstable", "rt"] }
 esp-rtos = { version = "0.4", features = ["esp32s3", "embassy"] }
 # No features: esp-rtos provides the executor. Enabling arch-* or a task
