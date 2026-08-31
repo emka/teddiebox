@@ -5,6 +5,12 @@
 //! Format is deliberately the dullest thing that works: `key = value`, one per
 //! line, `#` comments, blank lines ignored. A parent editing this file on a
 //! laptop should not be able to get the syntax wrong.
+//!
+//! A `#` that starts a word ends the line, so `server = box.lan:8080 # ours`
+//! means what it looks like, while `ssid = net#1` keeps its hash. **`password`
+//! is exempt**: it is opaque bytes, `#` is common in them, and a password
+//! truncated by a comment rule fails at the box where the cause is invisible.
+//! Everything after `password =` is the password.
 
 use heapless::String;
 
@@ -28,6 +34,22 @@ pub enum ConfigError {
     MalformedLine,
 }
 
+/// Cuts a trailing `# comment` off a value.
+///
+/// The `#` must begin a word — preceded by whitespace, or first in the value —
+/// so that `net#1` survives intact while `net #1` does not. Callers decide
+/// whether a value is eligible; `password` is not.
+fn strip_comment(value: &str) -> &str {
+    let mut after_space = true;
+    for (i, c) in value.char_indices() {
+        if c == '#' && after_space {
+            return value[..i].trim_end();
+        }
+        after_space = c.is_whitespace();
+    }
+    value
+}
+
 impl Config {
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let mut ssid: Option<String<MAX_SSID>> = None;
@@ -48,12 +70,15 @@ impl Config {
 
             match key {
                 "ssid" => {
+                    let value = strip_comment(value);
                     ssid = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
                 }
+                // Not comment-stripped, deliberately: see the module docs.
                 "password" => {
                     password = String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?;
                 }
                 "server" => {
+                    let value = strip_comment(value);
                     server = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
                 }
                 // Unknown keys are ignored so a newer config file does not
@@ -93,6 +118,29 @@ mod tests {
     fn a_server_with_no_value_is_missing_rather_than_empty() {
         let err = Config::parse("ssid = home\nserver =   \n").unwrap_err();
         assert_eq!(err, ConfigError::MissingServer);
+    }
+
+    #[test]
+    fn a_trailing_comment_is_not_part_of_the_server() {
+        let c = Config::parse("ssid = home\nserver = box.lan:8080 # our box\n").unwrap();
+        assert_eq!(c.server.as_str(), "box.lan:8080");
+    }
+
+    /// Only a `#` that starts a word is a comment, so a value may contain one.
+    #[test]
+    fn a_hash_inside_a_value_is_part_of_the_value() {
+        let c = Config::parse("ssid = net#1\nserver = box.lan:8080\n").unwrap();
+        assert_eq!(c.ssid.as_str(), "net#1");
+    }
+
+    /// The exception that the whole rule is shaped around: WiFi passwords
+    /// contain `#` often, and truncating one fails at the box rather than in
+    /// the file, where nobody can see why.
+    #[test]
+    fn a_password_keeps_a_hash_and_everything_after_it() {
+        let c =
+            Config::parse("ssid = home\npassword = hunter2 #1\nserver = box.lan:8080\n").unwrap();
+        assert_eq!(c.password.as_str(), "hunter2 #1");
     }
 
     /// An open network is a real thing, so this one stays permitted.
