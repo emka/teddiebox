@@ -67,7 +67,9 @@ fn polls(n: usize) -> Vec<DelayTransaction> {
 /// length encoding agreed with itself and passed — the encoding is the
 /// thing under test, so the test has to spell it out.
 /// `fifo_status` is likewise the raw status byte the reader returns, so a
-/// caller can set the overflow flag independently of the byte count.
+/// caller can set the overflow flag independently of the byte count. Per
+/// SLOS757C Table 6-21 the count sits in B3-B0 and reads as N-1, so a
+/// ten-byte reply is the literal 9.
 fn transceive_transactions(
     request: &[u8],
     tx_length: [u8; 2],
@@ -165,7 +167,7 @@ fn inventory_waits_for_the_reader_before_reading_the_fifo() {
     // Response: flags, DSFID, then the UID least-significant byte first.
     let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
     // Three bytes: the 12-bit length field splits as 0x00 / 0x30.
-    let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 10, &response);
+    let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 9, &response);
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
@@ -213,7 +215,7 @@ fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
     // UID out of whatever the FIFO returns.
     let mut spi = transmit_transactions(&INVENTORY, [0x00, 0x30]);
     spi.extend(spi_read(0x4C, 0x00));
-    spi.extend(spi_read(0x5C, 0x8A));
+    spi.extend(spi_read(0x5C, 0x1A));
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
@@ -227,15 +229,35 @@ fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
     irq.done();
 }
 
+/// B6 and B5 are the FIFO level flags, not part of the count. Masking them
+/// in turns a ten-byte reply into a claim of 105 bytes.
+#[test]
+fn the_fifo_level_flags_are_not_counted_as_received_bytes() {
+    let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+    // 0x69: level-high, level-low, and a count nibble of 9 meaning ten bytes.
+    let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 0x69, &response);
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&polls(0)),
+        PinMock::new(&irq_after(0)),
+    );
+    assert!(r.inventory().unwrap().is_some());
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
 #[test]
 fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
     let random_response = [0x00u8, 0xCD, 0xAB]; // flags, then RN low, high
-    let mut spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 3, &random_response);
+    let mut spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &random_response);
     // Eight bytes: the length field splits as 0x00 / 0x80.
     spi.extend(transceive_transactions(
         &SET_PASSWORD_0,
         [0x00, 0x80],
-        1,
+        0,
         &[0x00],
     ));
 
@@ -259,11 +281,11 @@ fn a_rejected_password_is_reported_rather_than_read_as_success() {
     // ISO 15693-3 §7.4: bit 0 of the response flags means the payload is
     // an error code. A SLIX refusing the privacy password answers
     // [0x01, 0x0F] — two bytes, so a bare length check calls it a success.
-    let mut spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 3, &[0x00, 0xCD, 0xAB]);
+    let mut spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &[0x00, 0xCD, 0xAB]);
     spi.extend(transceive_transactions(
         &SET_PASSWORD_0,
         [0x00, 0x80],
-        2,
+        1,
         &[0x01, 0x0F],
     ));
 
@@ -288,7 +310,7 @@ fn a_rejected_password_is_reported_rather_than_read_as_success() {
 
 #[test]
 fn an_error_response_is_not_mistaken_for_a_random_number() {
-    let spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &[0x01, 0x03]);
+    let spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 1, &[0x01, 0x03]);
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
         CheckedDelay::new(&polls(0)),

@@ -68,9 +68,14 @@ pub const INIT_SEQUENCE: &[(u8, u8)] = &[
 /// Longest ISO 15693 response this driver handles.
 pub const MAX_RESPONSE: usize = 32;
 
-/// FIFO status register: bit 7 flags overflow, bits 6:0 hold the byte count.
-const FIFO_OVERFLOW: u8 = 0x80;
-const FIFO_COUNT_MASK: u8 = 0x7F;
+/// FIFO status register (0x1C), per SLOS757C Table 6-21.
+///
+/// B7 is reserved and reads zero, so an overflow check against it could never
+/// fire. B6 and B5 are the level-high and level-low flags, so folding them
+/// into the count claims bytes that were never received — a full-looking FIFO
+/// reads as 105 bytes rather than ten.
+const FIFO_OVERFLOW: u8 = 0x10;
+const FIFO_COUNT_MASK: u8 = 0x0F;
 
 /// How long the reader is given to signal that an exchange finished.
 ///
@@ -189,14 +194,22 @@ where
         // note in `regs`, and confirm them at bench step 10.
         let _ = self.read_register(regs::IRQ_STATUS)?;
 
-        // Bit 7 is the overflow flag, bits 6:0 the unread byte count. Reading
-        // the raw byte as a count turns an overflow into a plausible-looking
-        // 128-plus bytes and hands the caller fabricated data.
+        // B4 is the overflow flag and B3-B0 the unread byte count. Reading the
+        // raw byte as a count folds in the two level flags and hands the
+        // caller fabricated data.
         let status = self.read_register(regs::FIFO_STATUS)?;
         if status & FIFO_OVERFLOW != 0 {
             return Err(Error::FifoOverflow);
         }
-        let available = (status & FIFO_COUNT_MASK) as usize;
+        // The count reads as N-1: SLOS757C says so in §5.12.2 and again in
+        // Table 6-21, "if 8 bytes are in the FIFO, this number is 7". This
+        // runs only after the interrupt fired, so the FIFO holds at least one
+        // byte and the adjustment is always defined.
+        //
+        // **The least verified claim in this driver.** Off by one here either
+        // truncates every reply or reads one byte of rubbish past it, and no
+        // mock can tell which. Confirm at bench step 10, first thing.
+        let available = (status & FIFO_COUNT_MASK) as usize + 1;
         let n = available.min(response.len());
         for slot in response.iter_mut().take(n) {
             *slot = self.read_register(regs::FIFO)?;
