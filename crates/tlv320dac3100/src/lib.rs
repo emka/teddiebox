@@ -87,6 +87,37 @@ where
         }
         Ok(())
     }
+
+    fn read_reg(&mut self, page: u8, reg: u8) -> Result<u8, Error<E>> {
+        self.select_page(page)?;
+        let mut buf = [0u8; 1];
+        self.i2c
+            .write_read(self.address, &[reg], &mut buf)
+            .map_err(Error::Bus)?;
+        Ok(buf[0])
+    }
+
+    /// Sets the digital volume on both DAC channels.
+    pub fn set_volume_db(&mut self, db: i8) -> Result<(), Error<E>> {
+        let code = (i16::from(db) * 2).clamp(VOLUME_MIN_CODE, VOLUME_MAX_CODE) as i8 as u8;
+        self.write_reg(0, page0::DAC_LEFT_VOLUME, code)?;
+        self.write_reg(0, page0::DAC_RIGHT_VOLUME, code)
+    }
+
+    pub fn set_muted(&mut self, muted: bool) -> Result<(), Error<E>> {
+        // Bits 3 and 2 mute the left and right DAC channels.
+        let value = if muted { 0x0C } else { 0x00 };
+        self.write_reg(0, page0::DAC_MUTE_CTRL, value)
+    }
+
+    /// True while a jack is inserted. The firmware mutes the speaker on this.
+    ///
+    /// Detection only reports anything once `INIT_SEQUENCE` has enabled it;
+    /// the reset state of the register is disabled, reading a constant 00.
+    pub fn headphones_connected(&mut self) -> Result<bool, Error<E>> {
+        let v = self.read_reg(0, page0::HEADSET_DETECT)?;
+        Ok(v & HEADSET_DETECTED != 0)
+    }
 }
 
 /// The power-on configuration, as `(page, register, value)`.
@@ -150,42 +181,6 @@ const VOLUME_MAX_CODE: i16 = 48; //  +24 dB
 /// nothing, 01 for a headset without a microphone, 11 for one with. Anything
 /// non-zero is a jack, which is all this driver needs to know.
 const HEADSET_DETECTED: u8 = 0x60;
-
-impl<I2C, E> Tlv320Dac3100<I2C>
-where
-    I2C: I2c<Error = E>,
-{
-    fn read_reg(&mut self, page: u8, reg: u8) -> Result<u8, Error<E>> {
-        self.select_page(page)?;
-        let mut buf = [0u8; 1];
-        self.i2c
-            .write_read(self.address, &[reg], &mut buf)
-            .map_err(Error::Bus)?;
-        Ok(buf[0])
-    }
-
-    /// Sets the digital volume on both DAC channels.
-    pub fn set_volume_db(&mut self, db: i8) -> Result<(), Error<E>> {
-        let code = (i16::from(db) * 2).clamp(VOLUME_MIN_CODE, VOLUME_MAX_CODE) as i8 as u8;
-        self.write_reg(0, page0::DAC_LEFT_VOLUME, code)?;
-        self.write_reg(0, page0::DAC_RIGHT_VOLUME, code)
-    }
-
-    pub fn set_muted(&mut self, muted: bool) -> Result<(), Error<E>> {
-        // Bits 3 and 2 mute the left and right DAC channels.
-        let value = if muted { 0x0C } else { 0x00 };
-        self.write_reg(0, page0::DAC_MUTE_CTRL, value)
-    }
-
-    /// True while a jack is inserted. The firmware mutes the speaker on this.
-    ///
-    /// Detection only reports anything once `INIT_SEQUENCE` has enabled it;
-    /// the reset state of the register is disabled, reading a constant 00.
-    pub fn headphones_connected(&mut self) -> Result<bool, Error<E>> {
-        let v = self.read_reg(0, page0::HEADSET_DETECT)?;
-        Ok(v & HEADSET_DETECTED != 0)
-    }
-}
 
 #[cfg(test)]
 mod tests {
