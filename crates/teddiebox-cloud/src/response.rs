@@ -11,7 +11,23 @@ pub struct ResponseHead {
 
 /// Parses the head of a response. Returns the parsed fields and the offset at
 /// which the body starts.
+///
+/// A `1xx` response is a preamble, not an answer: the real response follows it
+/// in the same stream. Each one is skipped, and since every head consumes at
+/// least its own terminator the search always advances and ends either at a
+/// final status or at a buffer with no complete head left in it.
 pub fn parse_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
+    let mut consumed = 0;
+    loop {
+        let (head, body_at) = parse_one_head(&buf[consumed..])?;
+        consumed += body_at;
+        if !(100..200).contains(&head.status) {
+            return Ok((head, consumed));
+        }
+    }
+}
+
+fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
     // The body is arbitrary bytes — Opus, not text — so the terminator is
     // found on the raw slice and only the head is validated as UTF-8.
     let head_end = buf
@@ -68,6 +84,18 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
+
+    /// A server may answer with `100 Continue` before the real response. Both
+    /// end with a blank line, so a parser that stops at the first one reports
+    /// the preamble's status and points the body at the response that follows.
+    #[test]
+    fn an_informational_preamble_is_not_mistaken_for_the_response() {
+        let raw = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody";
+        let (head, body_at) = parse_head(raw).unwrap();
+        assert_eq!(head.status, 200);
+        assert_eq!(head.content_length, Some(4));
+        assert_eq!(&raw[body_at..], b"body");
+    }
 
     #[test]
     fn parses_a_successful_response() {
