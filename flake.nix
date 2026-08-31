@@ -201,6 +201,9 @@
             # run (it's dynamically linked against a generic glibc), so we
             # supply one from nixpkgs instead.
             pkgs.protobuf
+            # The recipes in ./justfile mirror the CI gates, so a commit can be
+            # checked the way the pipeline will check it.
+            pkgs.just
           ];
 
           # Tell prost-build to use the nixpkgs protoc rather than its
