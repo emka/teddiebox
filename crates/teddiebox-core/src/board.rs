@@ -191,19 +191,32 @@ mod tests {
 
     /// GPIO45 is the VDD_SPI strapping pin as well as the gate: left high
     /// across a reset it selects a 1.8 V flash supply and the chip will not
-    /// boot.
+    /// boot. Asserted against the whole returned array, literally: a
+    /// `release_for_reset` that forgot the storage rail entirely would still
+    /// leave GPIO45 low, so checking only for GPIO45 would not catch it.
     #[test]
-    fn releasing_for_reset_drives_gpio45_low() {
+    fn releasing_for_reset_drives_gpio45_low_and_gpio47_high() {
         let mut gates = Gates::at_reset();
         gates.power(Rail::Peripherals, true);
+        gates.power(Rail::Storage, true);
 
         let released = gates.release_for_reset();
 
-        assert!(
-            released.iter().any(|p| p.gpio == 45 && !p.high),
-            "the strapping pin must be released: {released:?}"
+        assert_eq!(
+            released,
+            [
+                PinLevel {
+                    gpio: 45,
+                    high: false
+                },
+                PinLevel {
+                    gpio: 47,
+                    high: true
+                },
+            ]
         );
         assert!(!gates.is_on(Rail::Peripherals));
+        assert!(!gates.is_on(Rail::Storage));
     }
 
     /// `power` returns the right pin level *and* records the change. Without
