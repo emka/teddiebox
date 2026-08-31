@@ -30,6 +30,8 @@ pub enum Error<E> {
     /// The tag answered with the error flag set, carrying this error code.
     /// A refused privacy password arrives this way.
     TagError(u8),
+    /// The request will not fit the reader's FIFO in a single load.
+    RequestTooLong,
 }
 
 /// ISO 15693-3 §7.4: bit 0 of the response flags marks an error response,
@@ -67,6 +69,16 @@ pub const INIT_SEQUENCE: &[(u8, u8)] = &[
 
 /// Longest ISO 15693 response this driver handles.
 pub const MAX_RESPONSE: usize = 32;
+
+/// Longest request this driver can send.
+///
+/// The FIFO is twelve bytes (SLOS757C §5.12.2) and the whole request is loaded
+/// before transmission starts, rather than being refilled from the level-low
+/// interrupt as the datasheet describes for longer frames. Every frame this
+/// driver sends is far shorter — inventory is three bytes, SLIX set-password
+/// eight — so the simpler scheme stands, and anything longer is refused rather
+/// than quietly overrunning the FIFO.
+pub const MAX_REQUEST: usize = 12;
 
 /// FIFO status register (0x1C), per SLOS757C Table 6-21.
 ///
@@ -174,6 +186,11 @@ where
     /// Sends `request` and collects the tag's reply. Returns the number of
     /// bytes received, which is zero when no tag answered.
     pub fn transceive(&mut self, request: &[u8], response: &mut [u8]) -> Result<usize, Error<E>> {
+        // Checked before any bus traffic: a rejected request must leave the
+        // reader exactly as it was found.
+        if request.len() > MAX_REQUEST {
+            return Err(Error::RequestTooLong);
+        }
         self.send_command(regs::cmd::RESET_FIFO)?;
 
         // The length is split across two registers as a 12-bit field.

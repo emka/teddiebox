@@ -185,6 +185,20 @@ fn inventory_waits_for_the_reader_before_reading_the_fifo() {
     irq.done();
 }
 
+/// The FIFO holds twelve bytes and this driver loads a request in one go, so
+/// a longer one cannot be sent. Silently, it both overran the FIFO and, past
+/// 4096 bytes, wrapped the 12-bit length field into a plausible small number.
+#[test]
+fn a_request_too_large_for_the_fifo_is_refused_before_any_bus_traffic() {
+    let mut r = reader(&[]);
+    let mut response = [0u8; 16];
+    assert_eq!(
+        r.transceive(&[0xAA; 13], &mut response),
+        Err(Error::RequestTooLong)
+    );
+    check(r);
+}
+
 #[test]
 fn an_empty_plate_reports_no_tag_without_reading_the_fifo() {
     // Nothing answers, so the interrupt never comes. Reading the FIFO anyway
