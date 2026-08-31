@@ -1177,6 +1177,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b23ac50abb8261cb38c6e2a7192d3302e0836dac1628f6a93b82b4fad185897"
 
 [[package]]
+name = "lis3dh"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
+]
+
+[[package]]
 name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1643,6 +1650,7 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "esp-rtos",
+ "lis3dh",
  "teddiebox-core",
 ]
 

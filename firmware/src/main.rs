@@ -11,6 +11,7 @@ use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
+use lis3dh::{regs as lis, Lis3dh};
 use teddiebox_core::board::{self, Colour, Gates, Rail};
 use teddiebox_core::console::CommandWatch;
 use teddiebox_core::i2c as bus;
@@ -173,6 +174,48 @@ fn scan_i2c(i2c: &mut I2c<'_, esp_hal::Blocking>) {
     }
 }
 
+/// Identifies the accelerometer, then streams its axes.
+///
+/// Both candidate addresses are tried because 0x18 is shared with the audio
+/// codec, which acknowledges and answers something that is not an identity
+/// register. Bench step 5 wants tilt traces captured from here as fixtures for
+/// the host-side gesture work.
+#[embassy_executor::task]
+async fn motion(i2c: I2c<'static, esp_hal::Blocking>) {
+    let mut bus = i2c;
+    let mut address = None;
+
+    for candidate in [lis::ADDRESS_SA0_LOW, lis::ADDRESS_SA0_HIGH] {
+        let mut probe = Lis3dh::new(bus, candidate);
+        let present = matches!(probe.is_present(), Ok(true));
+        bus = probe.release();
+        if present {
+            address = Some(candidate);
+            break;
+        }
+    }
+
+    let Some(address) = address else {
+        esp_println::println!("teddiebox: no LIS3DH at 0x18 or 0x19");
+        return;
+    };
+
+    esp_println::println!("teddiebox: LIS3DH at {address:#04x}");
+    let mut accel = Lis3dh::new(bus, address);
+    if accel.init().is_err() {
+        esp_println::println!("teddiebox: LIS3DH would not start");
+        return;
+    }
+
+    loop {
+        match accel.acceleration() {
+            Ok([x, y, z]) => esp_println::println!("teddiebox: accel {x} {y} {z}"),
+            Err(_) => esp_println::println!("teddiebox: LIS3DH read failed"),
+        }
+        Timer::after(Duration::from_secs(2)).await;
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -226,6 +269,7 @@ async fn main(spawner: Spawner) {
         Ok(i2c) => {
             let mut i2c = i2c.with_sda(p.GPIO5).with_scl(p.GPIO6);
             scan_i2c(&mut i2c);
+            spawner.spawn(motion(i2c).unwrap());
         }
         Err(_) => esp_println::println!("teddiebox: I2C would not configure"),
     }
