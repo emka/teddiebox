@@ -1,6 +1,7 @@
 #![no_std]
 
 mod battery;
+pub mod board;
 mod gesture;
 mod led;
 mod playback;
