@@ -63,11 +63,11 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
         // that drops a header over it loses real information for no gain.
         let name = name.trim();
         let value = value.trim();
-        if name.eq_ignore_ascii_case("transfer-encoding") {
-            // "identity" is the one encoding that leaves the body alone.
-            if !value.eq_ignore_ascii_case("identity") {
-                return Err(CloudError::UnsupportedTransferEncoding);
-            }
+        // "identity" is the one encoding that leaves the body alone.
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            && !value.eq_ignore_ascii_case("identity")
+        {
+            return Err(CloudError::UnsupportedTransferEncoding);
         } else if name.eq_ignore_ascii_case("etag") {
             // The first usable value wins. Assigning unconditionally let a
             // later unusable copy write `None` straight over a good one.
@@ -75,10 +75,8 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
                 // Too long to store: drop it. The cost is one re-download.
                 etag = ETag::try_from(value).ok();
             }
-        } else if name.eq_ignore_ascii_case("content-length") {
-            if content_length.is_none() {
-                content_length = value.parse().ok();
-            }
+        } else if name.eq_ignore_ascii_case("content-length") && content_length.is_none() {
+            content_length = value.parse().ok();
         }
     }
 
