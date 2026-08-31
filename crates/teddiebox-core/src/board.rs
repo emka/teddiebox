@@ -87,7 +87,65 @@ impl Gates {
             self.power(Rail::Storage, false),
         ]
     }
+
+    /// The three pin levels that show `colour`.
+    ///
+    /// Fails rather than doing nothing when the peripherals rail is down: a
+    /// dark LED is the expected output of a great many faults, so it must
+    /// not also be the output of a caller ordering mistake.
+    pub fn led(&self, colour: Colour) -> Result<[PinLevel; 3], NotPowered> {
+        if !self.is_on(Rail::Peripherals) {
+            return Err(NotPowered);
+        }
+
+        let (red, green, blue) = match colour {
+            Colour::Off => (false, false, false),
+            Colour::Red => (true, false, false),
+            Colour::Green => (false, true, false),
+            Colour::Blue => (false, false, true),
+        };
+
+        Ok([
+            PinLevel {
+                gpio: LED_RED,
+                high: red == LED_ACTIVE_HIGH,
+            },
+            PinLevel {
+                gpio: LED_GREEN,
+                high: green == LED_ACTIVE_HIGH,
+            },
+            PinLevel {
+                gpio: LED_BLUE,
+                high: blue == LED_ACTIVE_HIGH,
+            },
+        ])
+    }
 }
+
+/// The discrete RGB LED, per the hardware inventory.
+pub const LED_RED: u8 = 19;
+pub const LED_GREEN: u8 = 18;
+pub const LED_BLUE: u8 = 17;
+
+/// Whether a lit channel is driven high.
+///
+/// **Assumed, not measured.** The ears are documented active-low; the LED's
+/// polarity is documented nowhere. Bench step 1 settles it, and if it is
+/// wrong the only change is this constant.
+pub const LED_ACTIVE_HIGH: bool = true;
+
+/// What the LED can show during bring-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Colour {
+    Off,
+    Red,
+    Green,
+    Blue,
+}
+
+/// The rail feeding the requested peripheral is off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotPowered;
 
 #[cfg(test)]
 mod tests {
@@ -165,5 +223,47 @@ mod tests {
             gates.is_on(Rail::Storage),
             "switching one must not switch the other"
         );
+    }
+
+    /// The LED is fed by the peripherals rail, so asking for a colour before
+    /// that rail is up cannot work. Silently doing nothing would present as
+    /// a dead LED during the one bring-up step whose only output is the LED.
+    #[test]
+    fn a_colour_cannot_be_set_before_the_rail_that_feeds_it() {
+        let gates = Gates::at_reset();
+        assert_eq!(gates.led(Colour::Red), Err(NotPowered));
+    }
+
+    #[test]
+    fn red_lights_only_the_red_channel() {
+        let mut gates = Gates::at_reset();
+        gates.power(Rail::Peripherals, true);
+
+        assert_eq!(
+            gates.led(Colour::Red),
+            Ok([
+                PinLevel {
+                    gpio: 19,
+                    high: true
+                },
+                PinLevel {
+                    gpio: 18,
+                    high: false
+                },
+                PinLevel {
+                    gpio: 17,
+                    high: false
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn off_darkens_every_channel() {
+        let mut gates = Gates::at_reset();
+        gates.power(Rail::Peripherals, true);
+
+        let levels = gates.led(Colour::Off).unwrap();
+        assert!(levels.iter().all(|p| !p.high));
     }
 }
