@@ -24,6 +24,31 @@ middle pad, stop and ring it out against the SD socket shell before connecting
 anything.
 
 
+## Getting in and out of download mode
+
+Download mode is where a flashing tool can talk to the box. Three ways in, in
+descending order of convenience:
+
+| Route | Needs | When |
+|---|---|---|
+| Type `dl` + Enter on the console | firmware running and responsive | normal development |
+| `esptool --before no-reset --after watchdog-reset run` | box already in download mode | to leave download mode |
+| Short **J100**, then apply power cold | nothing but the board | always works; the recovery floor |
+
+The first two need the firmware or the ROM to cooperate. **J100 with a cold
+power-on is the one that cannot fail**, because the chip samples GPIO0 in mask
+ROM before it reads a byte of flash. Whatever else you do, that route stays
+open — which is what makes flashing experimental firmware safe.
+
+Note that the DTR and RTS lines are not wired to anything on this board, so
+esptool's and espflash's default auto-reset cannot work. Every invocation needs
+`--before no-reset`, and getting the chip to reset itself means either the
+watchdog route above or removing power.
+
+**A cold power-on is not the same as a reset.** Only power-on clears the RTC
+domain, and the `FORCE_DOWNLOAD_BOOT` bit lives there. If the box ever comes up
+in download mode when you did not ask it to, pull power rather than resetting.
+
 ## Sources
 
 - [RevvoX ESP32 pinout table](https://tonies-wiki.revvox.de/docs/wiki/esp32/pinout/)
