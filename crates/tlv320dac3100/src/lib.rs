@@ -92,13 +92,26 @@ where
 /// The power-on configuration, as `(page, register, value)`.
 ///
 /// Kept as data so it can be compared line by line against the datasheet.
-/// Configures the PLL for a 48 kHz DAC from a 12 MHz BCLK, 16-bit I2S,
-/// and routes the DAC to both the speaker amplifier and the headphone drivers.
+/// Routes the DAC to both the speaker amplifier and the headphone drivers, and
+/// clocks a 48 kHz DAC from BCLK alone — the board wires no MCLK, only DIN,
+/// BCLK and WCLK.
+///
+/// The clocking is a chain of exact integers, and every link is checked here
+/// because a single wrong one is inaudible until it is a wrong pitch:
+///
+/// - **BCLK = 1.536 MHz**, from 48 kHz x 16 bits x 2 channels. This is a
+///   requirement on the I2S peripheral, not an observation: if it is ever
+///   configured for 32-bit slots, BCLK doubles and `J` must halve to 32.
+/// - **PLL = 1.536 MHz x J=64 = 98.304 MHz**, with P=1, R=1 and D=0. SLAS671C
+///   requires 80 MHz <= PLL_CLKIN x J.D x R/P <= 110 MHz and 4 <= R x J <= 259;
+///   both hold. The previous J=32 gave 49.152 MHz, under the floor, so the PLL
+///   never locked at all.
+/// - **fS = 98.304 MHz / (NDAC=8 x MDAC=2 x DOSR=128) = 48000 Hz** exactly.
 pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
     // Clocking: PLL from BCLK, CODEC_CLKIN from PLL.
     (0, page0::CLOCK_GEN_MUX, 0x07),
     (0, page0::PLL_P_R, 0x91), // PLL on, P=1, R=1
-    (0, page0::PLL_J, 0x20),   // J=32
+    (0, page0::PLL_J, 0x40),   // J=64
     (0, page0::PLL_D_MSB, 0x00),
     (0, page0::PLL_D_LSB, 0x00),
     (0, page0::NDAC, 0x88), // NDAC on, divide by 8
@@ -215,7 +228,7 @@ mod tests {
             w(vec![0x00, 0x00]), // select page 0
             w(vec![0x04, 0x07]), // clock gen mux: PLL from BCLK
             w(vec![0x05, 0x91]), // PLL P/R: on, P=1, R=1
-            w(vec![0x06, 0x20]), // PLL J=32
+            w(vec![0x06, 0x40]), // PLL J=64
             w(vec![0x07, 0x00]), // PLL D, MSB
             w(vec![0x08, 0x00]), // PLL D, LSB
             w(vec![0x0B, 0x88]), // NDAC on, /8
