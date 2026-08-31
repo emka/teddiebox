@@ -8,11 +8,20 @@
 check: fmt lint test cross link fixtures firmware
 
 # formatting, the gate no test or review will catch
+#
+# firmware/ is its own workspace (see firmware/Cargo.toml), so it is not
+# reached by the root `--all` and must be checked separately, from inside
+# firmware/ so cargo picks up firmware/.cargo/config.toml.
 fmt:
     cargo fmt --all --check
+    cd firmware && cargo fmt --all --check
 
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
+    # No --all-targets here: xtensa-esp32s3-none-elf is bare-metal and has
+    # no `test` crate, so building a test harness for it fails outright.
+    # There is nothing under cfg(test) in firmware/ to lint anyway.
+    cd firmware && cargo clippy --workspace -- -D warnings
 
 test:
     cargo test --workspace
