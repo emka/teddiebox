@@ -143,4 +143,27 @@ mod tests {
         );
         assert!(!gates.is_on(Rail::Peripherals));
     }
+
+    /// `power` returns the right pin level *and* records the change. Without
+    /// this, an implementation that emitted correct levels but never updated
+    /// its own state would pass every other test here — and `led()` in the
+    /// next task refuses to work when it believes the rail is down.
+    #[test]
+    fn powering_a_rail_records_that_it_is_on() {
+        let mut gates = Gates::at_reset();
+
+        gates.power(Rail::Peripherals, true);
+        assert!(gates.is_on(Rail::Peripherals));
+        assert!(!gates.is_on(Rail::Storage), "rails are independent");
+
+        gates.power(Rail::Storage, true);
+        assert!(gates.is_on(Rail::Storage));
+
+        gates.power(Rail::Peripherals, false);
+        assert!(!gates.is_on(Rail::Peripherals));
+        assert!(
+            gates.is_on(Rail::Storage),
+            "switching one must not switch the other"
+        );
+    }
 }
