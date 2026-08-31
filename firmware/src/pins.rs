@@ -17,8 +17,12 @@ pub struct BoardPins<'d> {
 impl<'d> BoardPins<'d> {
     /// Claims the pins, leaving every rail off.
     ///
-    /// GPIO45 starts Low deliberately: it is the VDD_SPI strapping pin, and
-    /// coming up High would select a 1.8 V flash supply.
+    /// The reset level of each pin — including GPIO45, the VDD_SPI
+    /// strapping pin that must come up Low or the chip will not boot on a
+    /// 1.8 V flash supply it doesn't have — comes from
+    /// [`board::at_reset_levels`], not from a level chosen here. That is
+    /// the one place board.rs's gate/LED polarities are known; this
+    /// function only applies what it says.
     pub fn new(
         gpio45: impl esp_hal::gpio::OutputPin + 'd,
         gpio47: impl esp_hal::gpio::OutputPin + 'd,
@@ -27,13 +31,20 @@ impl<'d> BoardPins<'d> {
         gpio17: impl esp_hal::gpio::OutputPin + 'd,
     ) -> Self {
         let cfg = OutputConfig::default();
+        let levels = board::at_reset_levels();
+        let level_for = |gpio: u8| -> Level {
+            match levels.iter().find(|p| p.gpio == gpio) {
+                Some(p) if p.high => Level::High,
+                Some(_) => Level::Low,
+                None => panic!("no reset level for GPIO{gpio}"),
+            }
+        };
         Self {
-            gate_peripherals: Output::new(gpio45, Level::Low, cfg),
-            // Storage is active low, so High is off.
-            gate_storage: Output::new(gpio47, Level::High, cfg),
-            led_red: Output::new(gpio19, Level::Low, cfg),
-            led_green: Output::new(gpio18, Level::Low, cfg),
-            led_blue: Output::new(gpio17, Level::Low, cfg),
+            gate_peripherals: Output::new(gpio45, level_for(board::GATE_PERIPHERALS), cfg),
+            gate_storage: Output::new(gpio47, level_for(board::GATE_STORAGE), cfg),
+            led_red: Output::new(gpio19, level_for(board::LED_RED), cfg),
+            led_green: Output::new(gpio18, level_for(board::LED_GREEN), cfg),
+            led_blue: Output::new(gpio17, level_for(board::LED_BLUE), cfg),
         }
     }
 

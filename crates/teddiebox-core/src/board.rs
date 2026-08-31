@@ -126,6 +126,43 @@ impl Gates {
     }
 }
 
+/// The level every one of the five pins this module knows about must hold
+/// the instant it is claimed, before any policy has run: both gates off and
+/// every LED channel dark.
+///
+/// `firmware/src/pins.rs` applies this array as the reset `Level` of each
+/// `Output`. It must not hardcode these levels itself — this function, built
+/// from [`Gates::power`] and [`LED_ACTIVE_HIGH`], is the one place the
+/// gate/LED polarities are known, matching the promise made on
+/// [`Gates::power`] and [`led`](Gates::led).
+///
+/// GPIO45 ([`GATE_PERIPHERALS`]) is also the VDD_SPI strapping pin: High at
+/// reset selects the internal 1.8 V flash supply and the chip will not
+/// boot, so it MUST come up Low, which is what "off" already means for that
+/// gate.
+pub fn at_reset_levels() -> [PinLevel; 5] {
+    let mut gates = Gates::at_reset();
+    let peripherals_off = gates.power(Rail::Peripherals, false);
+    let storage_off = gates.power(Rail::Storage, false);
+
+    [
+        peripherals_off,
+        storage_off,
+        PinLevel {
+            gpio: LED_RED,
+            high: !LED_ACTIVE_HIGH,
+        },
+        PinLevel {
+            gpio: LED_GREEN,
+            high: !LED_ACTIVE_HIGH,
+        },
+        PinLevel {
+            gpio: LED_BLUE,
+            high: !LED_ACTIVE_HIGH,
+        },
+    ]
+}
+
 /// The discrete RGB LED, per the hardware inventory.
 pub const LED_RED: u8 = 19;
 pub const LED_GREEN: u8 = 18;
@@ -282,5 +319,90 @@ mod tests {
 
         let levels = gates.led(Colour::Off).unwrap();
         assert!(levels.iter().all(|p| !p.high));
+    }
+
+    /// Without this, swapping `LED_GREEN` and `LED_BLUE` in `led()` would
+    /// pass every test above: `red_lights_only_the_red_channel` never
+    /// touches these two, and `off_darkens_every_channel` expects both
+    /// false regardless of which gpio each is attached to.
+    #[test]
+    fn green_lights_only_the_green_channel() {
+        let mut gates = Gates::at_reset();
+        gates.power(Rail::Peripherals, true);
+
+        assert_eq!(
+            gates.led(Colour::Green),
+            Ok([
+                PinLevel {
+                    gpio: 19,
+                    high: false
+                },
+                PinLevel {
+                    gpio: 18,
+                    high: true
+                },
+                PinLevel {
+                    gpio: 17,
+                    high: false
+                },
+            ])
+        );
+    }
+
+    /// See `green_lights_only_the_green_channel`: this is the other half of
+    /// the swap it would not catch alone.
+    #[test]
+    fn blue_lights_only_the_blue_channel() {
+        let mut gates = Gates::at_reset();
+        gates.power(Rail::Peripherals, true);
+
+        assert_eq!(
+            gates.led(Colour::Blue),
+            Ok([
+                PinLevel {
+                    gpio: 19,
+                    high: false
+                },
+                PinLevel {
+                    gpio: 18,
+                    high: false
+                },
+                PinLevel {
+                    gpio: 17,
+                    high: true
+                },
+            ])
+        );
+    }
+
+    /// Literal, not recomputed from the constants this function is built
+    /// from: the test must be able to disagree with the code.
+    #[test]
+    fn at_reset_every_rail_is_off_and_every_led_is_dark() {
+        assert_eq!(
+            at_reset_levels(),
+            [
+                PinLevel {
+                    gpio: 45,
+                    high: false
+                },
+                PinLevel {
+                    gpio: 47,
+                    high: true
+                },
+                PinLevel {
+                    gpio: 19,
+                    high: false
+                },
+                PinLevel {
+                    gpio: 18,
+                    high: false
+                },
+                PinLevel {
+                    gpio: 17,
+                    high: false
+                },
+            ]
+        );
     }
 }
