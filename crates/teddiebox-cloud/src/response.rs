@@ -64,8 +64,7 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
         let name = name.trim();
         let value = value.trim();
         // "identity" is the one encoding that leaves the body alone.
-        if name.eq_ignore_ascii_case("transfer-encoding")
-            && !value.eq_ignore_ascii_case("identity")
+        if name.eq_ignore_ascii_case("transfer-encoding") && !value.eq_ignore_ascii_case("identity")
         {
             return Err(CloudError::UnsupportedTransferEncoding);
         } else if name.eq_ignore_ascii_case("etag") {
@@ -115,7 +114,10 @@ mod tests {
     #[test]
     fn a_chunked_body_is_refused_rather_than_decoded_as_audio() {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n";
-        assert_eq!(parse_head(raw), Err(CloudError::UnsupportedTransferEncoding));
+        assert_eq!(
+            parse_head(raw),
+            Err(CloudError::UnsupportedTransferEncoding)
+        );
     }
 
     #[test]
