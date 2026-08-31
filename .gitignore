@@ -1,5 +1,6 @@
 /target
 /tools/xtensa-linkcheck/target
+/firmware/target
 /.direnv
 
 # `nix build` output symlinks.

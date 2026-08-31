@@ -5,7 +5,7 @@
 # too, or the two drift and this stops being worth running.
 
 # everything CI runs; what to run before committing
-check: fmt lint test cross link fixtures
+check: fmt lint test cross link fixtures firmware
 
 # formatting, the gate no test or review will catch
 fmt:
@@ -49,6 +49,10 @@ fixtures:
     cargo run -q -p fixturegen -- "$out/sine.taf"
     diff "$out/sine.taf" crates/teddiebox-taf/tests/data/sine.taf
     diff "$out/chapters.taf" crates/teddiebox-taf/tests/data/chapters.taf
+
+# the device firmware compiles and links for the target
+firmware:
+    cd firmware && cargo build --release
 
 # format the tree rather than checking it
 fix:

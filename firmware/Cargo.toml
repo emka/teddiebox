@@ -1,0 +1,22 @@
+[package]
+name = "teddiebox-firmware"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# Its own workspace: the device dependency tree is pinned to release
+# candidates and must not reach the host lockfile.
+[workspace]
+
+[dependencies]
+esp-hal = { version = "1.2.0-rc.0", features = ["esp32s3", "unstable", "rt"] }
+esp-rtos = { version = "0.4", features = ["esp32s3", "embassy"] }
+# No features: esp-rtos provides the executor. Enabling arch-* or a task
+# arena here breaks the build.
+embassy-executor = "0.10"
+embassy-time = "0.5"
+esp-println = { version = "0.18", features = ["esp32s3"] }
+esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
+
+[profile.release]
+opt-level = "s"

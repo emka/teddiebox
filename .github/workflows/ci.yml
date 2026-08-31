@@ -34,3 +34,6 @@ jobs:
       # rather than a fuzzy comparison.
       - name: Fixtures match their generator
         run: nix develop --command just fixtures
+
+      - name: Firmware builds and links
+        run: nix develop --command just firmware
