@@ -16,7 +16,18 @@ esp-rtos = { version = "0.4", features = ["esp32s3", "embassy"] }
 # arena here breaks the build.
 embassy-executor = "0.10"
 embassy-time = "0.5"
-esp-println = { version = "0.18", features = ["esp32s3"] }
+# default-features off: the default `auto` feature picks USB Serial/JTAG
+# over UART0 once a USB host has been seen, and GPIO19 (USB D-) is wired as
+# the red LED here. The design specifies UART0 unconditionally, so `uart`
+# is selected explicitly instead. `critical-section` is kept (esp-println
+# needs a lock to print from more than one task); `colors` is dropped along
+# with the rest of default — it only adds ANSI escapes to the output and a
+# bench UART session doesn't need them.
+esp-println = { version = "0.18", default-features = false, features = [
+    "esp32s3",
+    "uart",
+    "critical-section",
+] }
 esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
 
 [profile.release]
