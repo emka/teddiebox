@@ -1,23 +1,22 @@
 //! TRF7962A registers and commands.
 //!
-//! **Unverified against silicon.** Taken from the TI TRF7962A datasheet
-//! (SLOS743). Phase B step 10 is the first time these meet the real reader.
+//! Addresses follow Table 6-1 of the TI datasheet (SLOS757C). **Unverified
+//! against silicon**: Phase B step 10 is the first time these meet the real
+//! reader.
 
 pub const CHIP_STATUS_CONTROL: u8 = 0x00;
 pub const ISO_CONTROL: u8 = 0x01;
-pub const TX_TIMER_HIGH: u8 = 0x08;
-pub const TX_TIMER_LOW: u8 = 0x09;
-pub const TX_PULSE_LENGTH: u8 = 0x0A;
-pub const RX_NO_RESPONSE_WAIT: u8 = 0x0B;
-/// Registers 0x0C and 0x0D are the IRQ status and mask.
+/// The protocol sub-setting registers, 0x06 through 0x0B, are absent on purpose.
 ///
-/// Several community sources also list an RX wait time and a modulator/system
-/// clock register at these addresses. **Confirm against SLOS743 before writing
-/// to either**, and note that the init sequence deliberately avoids them: a
-/// stray write to the IRQ mask would silently disable tag interrupts.
+/// The reader presets all of them from the ISO Control write, so this driver
+/// never has cause to address them, and 0x0F is the read-only RSSI register
+/// rather than a writable setting. Naming them would only invite a write.
 pub const IRQ_STATUS: u8 = 0x0C;
+/// Collision position and interrupt mask — SLOS757C gives it both jobs.
+///
+/// The init sequence leaves it alone deliberately: a stray write here would
+/// silently disable tag interrupts.
 pub const IRQ_MASK: u8 = 0x0D;
-pub const RX_SPECIAL_SETTINGS: u8 = 0x0F;
 pub const FIFO_STATUS: u8 = 0x1C;
 pub const TX_LENGTH_BYTE1: u8 = 0x1D;
 pub const TX_LENGTH_BYTE2: u8 = 0x1E;

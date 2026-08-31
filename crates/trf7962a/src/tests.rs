@@ -139,9 +139,6 @@ fn initialisation_puts_exactly_this_sequence_on_the_bus() {
     spi.extend(spi_write(vec![0x83])); // command: soft init
     spi.extend(spi_write(vec![0x80])); // command: idle
     spi.extend(spi_write(vec![0x01, 0x02])); // ISO control: 15693 high rate
-    spi.extend(spi_write(vec![0x0A, 0x80])); // TX pulse length
-    spi.extend(spi_write(vec![0x0B, 0x14])); // RX no-response wait
-    spi.extend(spi_write(vec![0x0F, 0x40])); // RX special settings
     spi.extend(spi_write(vec![0x00, 0x21])); // chip status: RF on, last
 
     // The reader needs to settle after a soft init before it takes

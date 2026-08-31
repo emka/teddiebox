@@ -51,11 +51,16 @@ fn tag_error<E>(response: &[u8]) -> Result<(), Error<E>> {
 }
 
 /// Reader configuration applied at startup, as `(register, value)`.
+///
+/// Two writes are enough. Selecting the protocol presets every sub-setting
+/// register the reader needs, and for ISO 15693 those presets are already the
+/// values this driver wants: a 9.44 µs modulation pulse (0x06 = 0x00), a 755 µs
+/// no-response window at high data rate (0x07 = 0x0E), and the 200–900 kHz
+/// bandpass matching the 424 kHz subcarrier (0x0A = 0x40) — SLOS757C §6.1.2.1,
+/// §6.1.2.2 and §6.1.2.5. Restating them buys nothing; tuning them belongs to a
+/// specific antenna at the bench, not to a default.
 pub const INIT_SEQUENCE: &[(u8, u8)] = &[
     (regs::ISO_CONTROL, regs::ISO_CONTROL_15693_HIGH),
-    (regs::TX_PULSE_LENGTH, 0x80),
-    (regs::RX_NO_RESPONSE_WAIT, 0x14),
-    (regs::RX_SPECIAL_SETTINGS, 0x40),
     // The field goes on last, once the protocol is configured.
     (regs::CHIP_STATUS_CONTROL, regs::CHIP_STATUS_RF_ON),
 ];
