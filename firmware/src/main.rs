@@ -8,10 +8,12 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
 use teddiebox_core::board::{self, Colour, Gates, Rail};
 use teddiebox_core::console::CommandWatch;
+use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::power::{self, PackState};
 
@@ -145,6 +147,32 @@ async fn sense(
     }
 }
 
+/// Scans the I2C bus once and names what answers.
+///
+/// Bench step 4. Every device here sits behind power gate 2, so this runs
+/// after that rail is up or it finds an empty bus.
+fn scan_i2c(i2c: &mut I2c<'_, esp_hal::Blocking>) {
+    esp_println::println!("teddiebox: scanning I2C");
+    let mut found = 0;
+
+    for address in bus::FIRST_ADDRESS..=bus::LAST_ADDRESS {
+        // A zero-length write addresses the device and stops. Anything that
+        // acknowledges is present; anything else is not, and the distinction
+        // between "absent" and "bus fault" is not one this can draw.
+        if i2c.write(address, &[]).is_ok() {
+            found += 1;
+            match bus::describe(address) {
+                Some(name) => esp_println::println!("teddiebox:   {address:#04x} {name}"),
+                None => esp_println::println!("teddiebox:   {address:#04x} unexpected"),
+            }
+        }
+    }
+
+    if found == 0 {
+        esp_println::println!("teddiebox:   nothing answered — is the rail up?");
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -191,6 +219,16 @@ async fn main(spawner: Spawner) {
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
     esp_println::println!("teddiebox: type dl<enter> to reboot into download mode");
+
+    // The codec and the accelerometer are both on the rail brought up above,
+    // so the bus is only worth scanning now.
+    match I2c::new(p.I2C0, I2cConfig::default()) {
+        Ok(i2c) => {
+            let mut i2c = i2c.with_sda(p.GPIO5).with_scl(p.GPIO6);
+            scan_i2c(&mut i2c);
+        }
+        Err(_) => esp_println::println!("teddiebox: I2C would not configure"),
+    }
 
     // A dim green breath, software PWM at 200 Hz. Bright enough to say the
     // firmware is alive, dim enough to live in a child's room.
