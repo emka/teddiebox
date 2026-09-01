@@ -45,6 +45,13 @@ esptool's and espflash's default auto-reset cannot work. Every invocation needs
 `--before no-reset`, and getting the chip to reset itself means either the
 watchdog route above or removing power.
 
+**Flash before you probe.** `espflash` must be the first tool to touch the port
+after the box enters download mode. Running `esptool` first — even `flash-id` —
+leaves esptool's stub loader resident, and `espflash` then fails with `Timeout
+while running MemData command`, or simply cannot connect. Recovering from that
+costs a cold boot with J100 shorted, so the order is: enter download mode,
+flash, and only then probe.
+
 **A cold power-on is not the same as a reset.** Only power-on clears the RTC
 domain, and the `FORCE_DOWNLOAD_BOOT` bit lives there. If the box ever comes up
 in download mode when you did not ask it to, pull power rather than resetting.
