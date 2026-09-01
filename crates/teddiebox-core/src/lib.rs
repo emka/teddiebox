@@ -13,6 +13,7 @@ pub mod power;
 pub mod tone;
 mod types;
 mod volume;
+pub mod walk;
 
 pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
 pub use gesture::{Gesture, GestureConfig, GestureDetector};
