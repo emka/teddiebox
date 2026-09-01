@@ -233,6 +233,13 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         Ok(()) => {
             esp_println::println!("teddiebox: codec configured");
 
+            // A bring-up listening level, not a design decision. The gain
+            // chain is wide open by default and the first tone was painfully
+            // loud with the box open on a desk.
+            if dac.set_volume_db(-12).is_err() {
+                esp_println::println!("teddiebox: codec volume not set");
+            }
+
             // What it says it did, rather than what we asked for. A silent
             // output with every configuration register correct is exactly the
             // case this separates: asked wrongly, or declined.
@@ -297,9 +304,28 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
 /// would make the result depend on which output is being tested.
 #[embassy_executor::task]
 async fn tone_out(i2s_tx: esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>) {
-    let buffer = esp_hal::dma_tx_stream_buffer!(4 * 4092);
+    // Exactly one cycle, looped by the DMA forever.
+    //
+    // A stream buffer was tried first and underran: the transfer starts as
+    // soon as it is created, ran off the end of an empty buffer before the
+    // first sample was pushed, and never restarted — 16 kB went in once and
+    // nothing ever drained. A tone is a fixed repeating waveform, so it wants
+    // a buffer the DMA repeats rather than one the CPU refills.
+    let mut buffer = esp_hal::dma_loop_buffer!(tone::SINE.len() * 4);
 
-    let mut transfer = match i2s_tx.write(buffer) {
+    // Interleaved stereo, little endian, the same sample in both slots. The
+    // codec takes its speaker path from the left channel and its headphones
+    // from both, so a single channel would make the result depend on which
+    // output is being listened to.
+    for (i, sample) in tone::SINE.iter().enumerate() {
+        let bytes = sample.to_le_bytes();
+        buffer[i * 4] = bytes[0];
+        buffer[i * 4 + 1] = bytes[1];
+        buffer[i * 4 + 2] = bytes[0];
+        buffer[i * 4 + 3] = bytes[1];
+    }
+
+    let _transfer = match i2s_tx.write(buffer) {
         Ok(transfer) => transfer,
         Err(_) => {
             esp_println::println!("teddiebox: I2S would not start");
@@ -308,29 +334,16 @@ async fn tone_out(i2s_tx: esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking
     };
 
     esp_println::println!(
-        "teddiebox: playing {} Hz at {} Hz",
+        "teddiebox: playing {} Hz at {} Hz, {} byte loop",
         tone::TONE_HZ,
-        tone::SAMPLE_RATE_HZ
+        tone::SAMPLE_RATE_HZ,
+        tone::SINE.len() * 4
     );
 
-    // Interleaved stereo, little endian, the format the codec was configured
-    // for: 16-bit words, two channels.
-    let mut frame = [0u8; tone::SINE.len() * 4];
-    for (i, sample) in tone::SINE.iter().enumerate() {
-        let bytes = sample.to_le_bytes();
-        frame[i * 4] = bytes[0];
-        frame[i * 4 + 1] = bytes[1];
-        frame[i * 4 + 2] = bytes[0];
-        frame[i * 4 + 3] = bytes[1];
-    }
-
+    // The transfer stops when it is dropped, so this task owns it for as long
+    // as the tone should play.
     loop {
-        let free = transfer.available_bytes();
-        if free >= frame.len() {
-            let _pushed = transfer.push(&frame);
-        } else {
-            Timer::after(Duration::from_millis(1)).await;
-        }
+        Timer::after(Duration::from_secs(60)).await;
     }
 }
 

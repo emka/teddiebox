@@ -193,7 +193,10 @@ pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
     (1, page1::SPK_ANALOG_VOLUME, 0x80),
     (1, page1::HPL_DRIVER_GAIN, 0x06),
     (1, page1::HPR_DRIVER_GAIN, 0x06),
-    (1, page1::SPK_DRIVER_GAIN, 0x0C),
+    // 6 dB, the lowest the class-D stage offers, and unmuted. 12 dB was
+    // painfully loud on a bench with the box open; real content can raise it
+    // deliberately rather than inheriting it.
+    (1, page1::SPK_DRIVER_GAIN, 0x04),
     (1, page1::SPK_AMP, 0x86),
     // DAC on, both channels, then unmute.
     (0, page0::DAC_DATA_PATH, 0xD4),
@@ -278,7 +281,7 @@ mod tests {
             w(vec![0x26, 0x80]), // left analog volume to speaker: routed, 0 dB
             w(vec![0x28, 0x06]), // HPL driver gain
             w(vec![0x29, 0x06]), // HPR driver gain
-            w(vec![0x2A, 0x0C]), // speaker driver gain
+            w(vec![0x2A, 0x04]), // speaker driver gain: 6 dB, unmuted
             w(vec![0x20, 0x86]), // speaker amp on
             w(vec![0x00, 0x00]), // back to page 0
             w(vec![0x3F, 0xD4]), // DAC data path: on, both channels
