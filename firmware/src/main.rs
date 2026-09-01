@@ -13,7 +13,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
 use lis3dh::{regs as lis, Lis3dh};
 use teddiebox_core::board::{self, Colour, Gates, Rail};
-use teddiebox_core::console::CommandWatch;
+use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::power::{self, PackState};
@@ -46,6 +46,17 @@ async fn heartbeat() {
 /// The rails go down first. This is the one reset path the firmware controls,
 /// so it is the one that can be tidy about the strapping pin, whatever the
 /// board does on the paths it cannot control.
+/// Reboots straight back into the application.
+///
+/// The rails go down first, same as the download path. Exists so a laptop can
+/// restart the box without `esptool`, which takes exclusive hold of the serial
+/// port and so cannot run while anything is watching the console.
+fn reboot(board: &mut BoardPins, gates: &mut Gates) -> ! {
+    esp_println::println!("teddiebox: rebooting");
+    board.apply_all(&gates.release_for_reset());
+    esp_hal::system::software_reset()
+}
+
 fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_println::println!("teddiebox: rebooting into download mode");
     board.apply_all(&gates.release_for_reset());
@@ -300,7 +311,7 @@ async fn main(spawner: Spawner) {
         .expect("UART0 receive")
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
-    esp_println::println!("teddiebox: type dl<enter> to reboot into download mode");
+    esp_println::println!("teddiebox: dl<enter> for download mode, rb<enter> to reboot");
 
     // The codec and the accelerometer are both on the rail brought up above,
     // so the bus is only worth scanning now.
@@ -339,8 +350,10 @@ async fn main(spawner: Spawner) {
             since_poll = 0;
             let mut buf = [0u8; 16];
             if let Ok(n) = console.read_buffered(&mut buf) {
-                if buf[..n].iter().any(|&b| watch.feed(b)) {
-                    reboot_to_download(&mut board, &mut gates);
+                match buf[..n].iter().find_map(|&b| watch.feed(b)) {
+                    Some(Command::DownloadMode) => reboot_to_download(&mut board, &mut gates),
+                    Some(Command::Reboot) => reboot(&mut board, &mut gates),
+                    None => {}
                 }
             }
         }

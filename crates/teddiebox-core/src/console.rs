@@ -1,46 +1,76 @@
 //! The bench console: commands the box accepts on UART0.
 //!
-//! Byte matching only, so it can be tested on the host. What a command *does*
+//! Line matching only, so it can be tested on the host. What a command *does*
 //! belongs to the firmware, which owns the hardware to do it with.
 
-/// Typed at the console to reboot into ROM download mode.
-///
-/// Short enough to type on a bench, and terminated, so it cannot fire on a
-/// prefix of ordinary output looping back into the port.
-const COMMAND: &[u8] = b"dl";
+/// A command the box understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// Reboot into the ROM's UART download mode, for flashing.
+    DownloadMode,
+    /// Reboot into the application.
+    ///
+    /// Exists so a laptop can restart the box while watching its console.
+    /// `esptool`'s reset takes exclusive hold of the serial port, so it cannot
+    /// run while anything is capturing; writing two bytes can.
+    Reboot,
+}
 
-/// Watches a byte stream for [`COMMAND`].
+/// Longest command line accepted. Anything longer cannot be a command, and is
+/// discarded rather than allowed to shift a buffer around.
+const MAX_LINE: usize = 8;
+
+/// Watches a byte stream for a command line.
 ///
-/// The box prints a heartbeat forever, and a terminal may echo, so this must
-/// only fire on a deliberate, completed line.
-#[derive(Debug, Default)]
+/// Deliberately line-oriented: the box prints a heartbeat forever and a
+/// terminal may echo, so a command fires only on a complete line that matches
+/// exactly. `ddl` is a typo, not a request to reboot.
+#[derive(Debug)]
 pub struct CommandWatch {
-    matched: usize,
+    line: [u8; MAX_LINE],
+    len: usize,
+    overflowed: bool,
+}
+
+impl Default for CommandWatch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CommandWatch {
     pub const fn new() -> Self {
-        Self { matched: 0 }
+        Self {
+            line: [0; MAX_LINE],
+            len: 0,
+            overflowed: false,
+        }
     }
 
-    /// Feeds one received byte. True exactly once, when the command completes.
-    pub fn feed(&mut self, byte: u8) -> bool {
-        if self.matched == COMMAND.len() {
-            // The whole word is in; only a line ending completes it.
-            if byte == b'\r' || byte == b'\n' {
-                self.matched = 0;
-                return true;
-            }
-            self.matched = 0;
+    /// Feeds one received byte. `Some` exactly once per matching line.
+    pub fn feed(&mut self, byte: u8) -> Option<Command> {
+        if byte == b'\r' || byte == b'\n' {
+            let matched = if self.overflowed {
+                None
+            } else {
+                match &self.line[..self.len] {
+                    b"dl" => Some(Command::DownloadMode),
+                    b"rb" => Some(Command::Reboot),
+                    _ => None,
+                }
+            };
+            self.len = 0;
+            self.overflowed = false;
+            return matched;
         }
 
-        if byte == COMMAND[self.matched] {
-            self.matched += 1;
+        if self.len == MAX_LINE {
+            self.overflowed = true;
         } else {
-            // Restart, but a mismatched byte may itself begin a fresh command.
-            self.matched = usize::from(byte == COMMAND[0]);
+            self.line[self.len] = byte;
+            self.len += 1;
         }
-        false
+        None
     }
 }
 
@@ -48,50 +78,58 @@ impl CommandWatch {
 mod tests {
     use super::*;
 
-    fn feed_all(watch: &mut CommandWatch, bytes: &[u8]) -> bool {
-        bytes.iter().any(|&b| watch.feed(b))
+    fn feed_all(watch: &mut CommandWatch, bytes: &[u8]) -> Option<Command> {
+        bytes.iter().find_map(|&b| watch.feed(b))
     }
 
     #[test]
-    fn the_command_fires_on_its_terminator() {
+    fn the_download_command_fires_on_its_terminator() {
         let mut watch = CommandWatch::new();
-        assert!(!feed_all(&mut watch, b"dl"), "not until the line ends");
-        assert!(watch.feed(b'\r'));
+        assert_eq!(feed_all(&mut watch, b"dl"), None, "not until the line ends");
+        assert_eq!(watch.feed(b'\r'), Some(Command::DownloadMode));
     }
 
     #[test]
-    fn a_newline_terminates_it_too() {
+    fn the_reboot_command_is_distinct() {
         let mut watch = CommandWatch::new();
-        assert!(feed_all(&mut watch, b"dl\n"));
+        assert_eq!(feed_all(&mut watch, b"rb\n"), Some(Command::Reboot));
     }
 
-    /// Terminals echo, users mistype, and line noise exists. Anything before
-    /// the command is skipped rather than poisoning the match.
+    /// Line-oriented on purpose. An earlier matcher fired on `ddl` because it
+    /// scanned for a substring; a mistyped line must not reboot the box.
     #[test]
-    fn leading_junk_does_not_prevent_a_match() {
+    fn a_mistyped_line_does_not_fire() {
         let mut watch = CommandWatch::new();
-        assert!(feed_all(&mut watch, b"xyz dl\r"));
-    }
-
-    /// The classic matcher bug: a repeated first character must restart the
-    /// match rather than desynchronising it.
-    #[test]
-    fn a_repeated_first_character_restarts_the_match() {
-        let mut watch = CommandWatch::new();
-        assert!(feed_all(&mut watch, b"ddl\r"));
+        assert_eq!(feed_all(&mut watch, b"ddl\r"), None);
+        assert_eq!(feed_all(&mut watch, b"dl \r"), None);
+        assert_eq!(feed_all(&mut watch, b"DL\r"), None);
     }
 
     #[test]
-    fn an_interrupted_command_does_not_fire() {
+    fn a_correct_line_after_a_wrong_one_still_fires() {
         let mut watch = CommandWatch::new();
-        assert!(!feed_all(&mut watch, b"d\rl\r"));
+        assert_eq!(
+            feed_all(&mut watch, b"nonsense\rdl\r"),
+            Some(Command::DownloadMode)
+        );
     }
 
-    /// A heartbeat prints once a second forever; the watcher must not fire on
-    /// ordinary output looping back or on any prefix of it.
+    /// A heartbeat prints once a second forever. None of it may look like a
+    /// command, including any prefix of it.
     #[test]
-    fn ordinary_traffic_does_not_fire_it() {
+    fn ordinary_traffic_does_not_fire_anything() {
         let mut watch = CommandWatch::new();
-        assert!(!feed_all(&mut watch, b"teddiebox: alive 41\r\n"));
+        assert_eq!(feed_all(&mut watch, b"teddiebox: alive 41\r\n"), None);
+        assert_eq!(
+            feed_all(&mut watch, b"teddiebox: accel -6912 1216 14656\r\n"),
+            None
+        );
+    }
+
+    /// An overlong line is discarded whole rather than having its tail matched.
+    #[test]
+    fn an_overlong_line_cannot_match_by_its_ending() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"aaaaaaaaaaaaadl\r"), None);
     }
 }
