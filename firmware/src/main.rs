@@ -1,10 +1,11 @@
 #![no_std]
 #![no_main]
 
+mod audio;
 mod pins;
 mod storage;
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 
@@ -297,100 +298,134 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     }
 }
 
-/// Set by the console to start the test tone.
+/// What the console has asked the media task to do.
 ///
-/// The tone does not play at boot. It is loud, it is a bring-up aid rather
-/// than a feature, and the box is often sitting next to whoever is working on
-/// it. `t` starts it; `rb` stops it by restarting the box.
-static TONE_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// One word rather than a flag each, because the tone, the card walk and WAV
+/// playback all contend for the same two pieces of hardware — the I2S
+/// peripheral and the SD bus — and a task that owns both is the honest way to
+/// say that. None of them runs at boot: the tone is loud, the walk powers a
+/// rail shared with the NFC reader, and the box is usually sitting next to
+/// whoever is working on it.
+static REQUEST: AtomicU8 = AtomicU8::new(REQUEST_NONE);
+const REQUEST_NONE: u8 = 0;
+const REQUEST_TONE: u8 = 1;
+const REQUEST_WALK: u8 = 2;
+const REQUEST_WAV: u8 = 3;
 
-/// Plays a continuous test tone out of the codec.
+/// Owns the I2S peripheral and the SD bus, and serves the bench commands that
+/// need them.
 ///
-/// Bench step 6's second half. One cycle of a sine repeated forever: the table
-/// is a whole number of cycles so the seam has no discontinuity, and a click
-/// once per cycle would be audible.
+/// One task for three jobs because they contend for the same two pieces of
+/// hardware. The card is mounted once and kept, so `sd` and `wav` do not each
+/// re-identify it and re-raise the bus clock.
 ///
-/// Stereo, with the same sample in both slots. The codec's speaker path is fed
-/// from the left channel and the headphones from both, so sending one channel
-/// would make the result depend on which output is being tested.
+/// The tone and WAV playback are both terminal: each takes the I2S peripheral
+/// and does not give it back — the tone by design, since it repeats forever,
+/// and playback because its DMA buffer is a `static` claimed once whose
+/// pre-fill state this does not re-derive. `rb` restarts the box, which is the
+/// documented way to run another.
 #[embassy_executor::task]
-async fn tone_out(i2s_tx: esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>) {
-    // Exactly one cycle, looped by the DMA forever.
+async fn media(
+    spi: Spi<'static, esp_hal::Blocking>,
+    cs: Output<'static>,
+    i2s_tx: esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>,
+    mut tone_buffer: esp_hal::dma::DmaLoopBuf,
+    wav_buffer: esp_hal::dma::DmaTxStreamBuf,
+) {
+    // Exactly one cycle of a sine, looped by the DMA forever.
     //
     // A stream buffer was tried first and underran: the transfer starts as
     // soon as it is created, ran off the end of an empty buffer before the
-    // first sample was pushed, and never restarted — 16 kB went in once and
-    // nothing ever drained. A tone is a fixed repeating waveform, so it wants
-    // a buffer the DMA repeats rather than one the CPU refills.
-    let mut buffer = esp_hal::dma_loop_buffer!(tone::SINE.len() * 4);
-
-    // Interleaved stereo, little endian, the same sample in both slots. The
-    // codec takes its speaker path from the left channel and its headphones
-    // from both, so a single channel would make the result depend on which
-    // output is being listened to.
+    // first sample was pushed, and never restarted. A fixed repeating waveform
+    // wants a buffer the DMA repeats rather than one the CPU refills.
     for (i, sample) in tone::SINE.iter().enumerate() {
         let bytes = sample.to_le_bytes();
-        buffer[i * 4] = bytes[0];
-        buffer[i * 4 + 1] = bytes[1];
-        buffer[i * 4 + 2] = bytes[0];
-        buffer[i * 4 + 3] = bytes[1];
+        // Interleaved stereo, the same sample in both slots. The codec takes
+        // its speaker path from the left channel and its headphones from both,
+        // so a single channel would make the result depend on which output is
+        // being listened to.
+        tone_buffer[i * 4] = bytes[0];
+        tone_buffer[i * 4 + 1] = bytes[1];
+        tone_buffer[i * 4 + 2] = bytes[0];
+        tone_buffer[i * 4 + 3] = bytes[1];
     }
 
-    // Wait to be asked.
-    while !TONE_REQUESTED.load(Ordering::Relaxed) {
-        Timer::after(Duration::from_millis(100)).await;
-    }
+    // Every one of these is claimed once and not returned, so each is held in
+    // an Option and taken when its command arrives.
+    let mut card: Option<storage::Mounted> = None;
+    let mut bus = Some((spi, cs));
+    let mut i2s_tx = Some(i2s_tx);
+    let mut tone_buffer = Some(tone_buffer);
+    let mut wav_buffer = Some(wav_buffer);
 
-    let _transfer = match i2s_tx.write(buffer) {
-        Ok(transfer) => transfer,
-        Err(_) => {
-            esp_println::println!("teddiebox: I2S would not start");
-            return;
-        }
-    };
-
-    esp_println::println!(
-        "teddiebox: playing {} Hz at {} Hz, {} byte loop",
-        tone::TONE_HZ,
-        tone::SAMPLE_RATE_HZ,
-        tone::SINE.len() * 4
-    );
-
-    // The transfer stops when it is dropped, so this task owns it for as long
-    // as the tone should play.
     loop {
-        Timer::after(Duration::from_secs(60)).await;
-    }
-}
+        let request = REQUEST.swap(REQUEST_NONE, Ordering::Relaxed);
+        if request == REQUEST_NONE {
+            Timer::after(Duration::from_millis(100)).await;
+            continue;
+        }
 
-/// Set by the console to walk the SD card.
-///
-/// Opt-in like the tone, for a different reason: the walk powers a rail shared
-/// with the NFC reader and then holds the bus for as long as the card is
-/// large. A boot that was not asking for it should not pay that.
-static STORAGE_REQUESTED: AtomicBool = AtomicBool::new(false);
+        // The console loop raised the storage rail before setting the request.
+        // Devices need their supply settled before they answer — a scan against
+        // an unsettled rail is what invented an I2C device at 0x09 in step 4.
+        if matches!(request, REQUEST_WALK | REQUEST_WAV) && card.is_none() {
+            let Some((spi, cs)) = bus.take() else {
+                esp_println::println!("teddiebox: the card bus is gone — reboot to retry");
+                continue;
+            };
+            Timer::after(Duration::from_millis(50)).await;
+            match storage::Mounted::open(spi, cs, esp_hal::delay::Delay::new()) {
+                Ok(mounted) => card = Some(mounted),
+                Err(reason) => {
+                    // The bus was consumed by the attempt, so nothing needing
+                    // the card can be retried without a restart.
+                    esp_println::println!("teddiebox: sd failed — {reason}");
+                    continue;
+                }
+            }
+        }
 
-/// Mounts the SD card and checksums what is on it.
-///
-/// Bench step 7. The rail comes up here rather than at startup because it is
-/// shared with the NFC reader, which nothing has driven yet — leaving it off
-/// until asked keeps step 7 from quietly changing the conditions of steps 1
-/// to 6.
-#[embassy_executor::task]
-async fn storage_walk(spi: Spi<'static, esp_hal::Blocking>, cs: Output<'static>) {
-    while !STORAGE_REQUESTED.load(Ordering::Relaxed) {
-        Timer::after(Duration::from_millis(100)).await;
-    }
+        match request {
+            REQUEST_WALK => {
+                if let Some(card) = card.as_ref() {
+                    card.walk().await;
+                }
+            }
 
-    // The rail was raised by the console loop, which owns the pins. The card
-    // needs its supply settled before it will answer, the same way the I2C
-    // devices did — a scan against an unsettled rail is what invented a device
-    // at 0x09 during step 4.
-    Timer::after(Duration::from_millis(50)).await;
+            REQUEST_TONE => {
+                let (Some(tx), Some(buffer)) = (i2s_tx.take(), tone_buffer.take()) else {
+                    esp_println::println!("teddiebox: I2S is already in use");
+                    continue;
+                };
+                match tx.write(buffer) {
+                    Ok(transfer) => {
+                        esp_println::println!(
+                            "teddiebox: playing {} Hz at {} Hz",
+                            tone::TONE_HZ,
+                            tone::SAMPLE_RATE_HZ
+                        );
+                        // The transfer stops when dropped, so it is held for as
+                        // long as the tone should play — which is forever.
+                        core::mem::forget(transfer);
+                    }
+                    Err(_) => esp_println::println!("teddiebox: I2S would not start"),
+                }
+            }
 
-    match storage::walk_card(spi, cs, esp_hal::delay::Delay::new()).await {
-        Ok(()) => {}
-        Err(reason) => esp_println::println!("teddiebox: sd failed — {reason}"),
+            REQUEST_WAV => {
+                let (Some(tx), Some(buffer), Some(card)) =
+                    (i2s_tx.take(), wav_buffer.take(), card.as_ref())
+                else {
+                    esp_println::println!("teddiebox: I2S is already in use");
+                    continue;
+                };
+                if let Err(reason) = audio::play_first_wav(card, tx, buffer).await {
+                    esp_println::println!("teddiebox: wav failed — {reason}");
+                }
+            }
+
+            _ => {}
+        }
     }
 }
 
@@ -440,47 +475,53 @@ async fn main(spawner: Spawner) {
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
     esp_println::println!(
-        "teddiebox: dl download mode, rb reboot, t test tone (loud), sd card checksums"
+        "teddiebox: dl download, rb reboot, t tone (loud), sd checksums, wav play (loud)"
     );
 
-    // The tone goes out on I2S: DIN 10, BCLK 11, WCLK 12, driven at the rate
-    // the codec's PLL was configured for.
-    match I2s::new(
-        p.I2S0,
-        p.DMA_CH0,
-        TdmConfig::new_tdm_philips()
-            .with_sample_rate(Rate::from_hz(tone::SAMPLE_RATE_HZ))
-            .with_data_format(DataFormat::Data16Channel16)
-            .with_channels(Channels::STEREO),
+    // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
+    // was configured for. The SD card is SPI2 on CLK 35, MOSI 38, MISO 36 with
+    // CS 34, created at the specification's 400 kHz initialisation rate;
+    // storage.rs raises it once the card has identified itself.
+    //
+    // Both go to one task: the tone, the checksum walk and WAV playback all
+    // contend for these two peripherals.
+    match (
+        I2s::new(
+            p.I2S0,
+            p.DMA_CH0,
+            TdmConfig::new_tdm_philips()
+                .with_sample_rate(Rate::from_hz(tone::SAMPLE_RATE_HZ))
+                .with_data_format(DataFormat::Data16Channel16)
+                .with_channels(Channels::STEREO),
+        ),
+        Spi::new(p.SPI2, storage::init_config()),
     ) {
-        Ok(i2s) => {
+        (Ok(i2s), Ok(spi)) => {
             let i2s_tx = i2s
                 .i2s_tx
                 .with_bclk(p.GPIO11)
                 .with_ws(p.GPIO12)
                 .with_dout(p.GPIO10)
                 .build();
-            spawner.spawn(tone_out(i2s_tx).unwrap());
-        }
-        Err(_) => esp_println::println!("teddiebox: I2S would not configure"),
-    }
-
-    // The SD card: SPI2 on CLK 35, MOSI 38, MISO 36, with CS 34 driven by
-    // ExclusiveDevice. Created at the specification's 400 kHz initialisation
-    // rate; storage.rs raises it once the card has identified itself.
-    match Spi::new(p.SPI2, storage::init_config()) {
-        Ok(spi) => {
             let spi = spi
                 .with_sck(p.GPIO35)
                 .with_mosi(p.GPIO38)
                 .with_miso(p.GPIO36);
-            // Idle high: on SPI a card watches for its select line to fall,
-            // and one that starts low is addressed before anything is ready
-            // to talk to it.
+            // Idle high: on SPI a card watches for its select line to fall, and
+            // one that starts low is addressed before anything is ready to talk
+            // to it.
             let cs = Output::new(p.GPIO34, Level::High, OutputConfig::default());
-            spawner.spawn(storage_walk(spi, cs).unwrap());
+
+            let tone_buffer = esp_hal::dma_loop_buffer!(tone::SINE.len() * 4);
+            // Roughly 170 ms of audio at 48 kHz stereo 16-bit. Design §5 wants
+            // the cushion sized from measurement rather than estimate, and this
+            // is the buffer whose low-water mark provides that measurement.
+            let wav_buffer = esp_hal::dma_tx_stream_buffer!(audio::BUFFER_BYTES);
+
+            spawner.spawn(media(spi, cs, i2s_tx, tone_buffer, wav_buffer).unwrap());
         }
-        Err(_) => esp_println::println!("teddiebox: SPI would not configure"),
+        (Err(_), _) => esp_println::println!("teddiebox: I2S would not configure"),
+        (_, Err(_)) => esp_println::println!("teddiebox: SPI would not configure"),
     }
 
     // Devices need a moment after their rail comes up before they answer.
@@ -529,7 +570,11 @@ async fn main(spawner: Spawner) {
                     Some(Command::DownloadMode) => reboot_to_download(&mut board, &mut gates),
                     Some(Command::Reboot) => reboot(&mut board, &mut gates),
                     Some(Command::Tone) => {
-                        TONE_REQUESTED.store(true, Ordering::Relaxed);
+                        REQUEST.store(REQUEST_TONE, Ordering::Relaxed);
+                    }
+                    Some(Command::PlayWav) => {
+                        board.apply(gates.power(Rail::Storage, true));
+                        REQUEST.store(REQUEST_WAV, Ordering::Relaxed);
                     }
                     Some(Command::Storage) => {
                         // The rail comes up here because this loop owns the
@@ -537,7 +582,7 @@ async fn main(spawner: Spawner) {
                         // action, and a rail that drops under a card mid-read
                         // is a worse bug than one left on.
                         board.apply(gates.power(Rail::Storage, true));
-                        STORAGE_REQUESTED.store(true, Ordering::Relaxed);
+                        REQUEST.store(REQUEST_WALK, Ordering::Relaxed);
                     }
                     None => {}
                 }

@@ -25,6 +25,11 @@ pub enum Command {
     /// for as long as the card is large, and has no business running on a boot
     /// that was not asking for it.
     Storage,
+    /// Play the first WAV file on the card.
+    ///
+    /// Bench step 8, joining steps 6 and 7. Opt-in like the others: it powers
+    /// a rail, takes the I2S peripheral for good, and is loud.
+    PlayWav,
 }
 
 /// Longest command line accepted. Anything longer cannot be a command, and is
@@ -69,6 +74,7 @@ impl CommandWatch {
                     b"rb" => Some(Command::Reboot),
                     b"t" => Some(Command::Tone),
                     b"sd" => Some(Command::Storage),
+                    b"wav" => Some(Command::PlayWav),
                     _ => None,
                 }
             };
@@ -137,6 +143,12 @@ mod tests {
     fn the_storage_command_fires_on_its_own_line() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"sd\r"), Some(Command::Storage));
+    }
+
+    #[test]
+    fn the_wav_command_fires_on_its_own_line() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"wav\r"), Some(Command::PlayWav));
     }
 
     /// A heartbeat prints once a second forever. None of it may look like a
