@@ -17,13 +17,23 @@ pub const ADC_MAX: u16 = 4095;
 
 /// Millivolts at full scale.
 ///
-/// The nominal figure for the highest attenuation setting. The ESP32-S3's ADC
-/// is not linear and ESP-IDF corrects it with a per-chip calibration curve;
-/// this is a straight line through the nominal endpoints, which is enough to
-/// tell a charging pack from a flat one and not enough to trust to the
-/// millivolt. **Bench step 3 compares these against a multimeter across a real
-/// charge and discharge, and the correction belongs here when it does.**
-const FULL_SCALE_MV: u32 = 3100;
+/// **Measured, not nominal.** On 2026-09-01 a multimeter read 3.82 V across the
+/// pack while the ADC reported raw 3111, which with the documented 100k/33k
+/// divider gives 1257 mV at full scale:
+/// `3820 x 4095 / (3111 x 4)`.
+///
+/// The nominal figure for the attenuation this driver requests would be around
+/// 3100 mV, and using it put the pack at 9.4 V — impossible for three NiMH
+/// cells. 1257 mV is close to the 6 dB range rather than the 11 dB one asked
+/// for, so either the attenuation is not applied as requested or the nominal
+/// endpoints are badly wrong. The measurement is trusted over the theory.
+///
+/// **This is one point on a line.** The ESP32-S3's ADC is not linear, and step
+/// 3's criterion is that the millivolts track a meter across a real charge and
+/// discharge. Until that has been done, treat the reading as good near 3.8 V
+/// and approximate elsewhere. The charger channel is **not** calibrated at all
+/// — nobody has put a meter on it.
+const FULL_SCALE_MV: u32 = 1257;
 
 const fn scaled_mv(raw: u16, divider: u32) -> u32 {
     let raw = if raw > ADC_MAX { ADC_MAX } else { raw };
@@ -70,8 +80,8 @@ mod tests {
 
     #[test]
     fn a_full_scale_reading_is_the_rail_times_its_divider() {
-        assert_eq!(battery_mv(ADC_MAX), 12_400);
-        assert_eq!(charger_mv(ADC_MAX), 6_200);
+        assert_eq!(battery_mv(ADC_MAX), 5_028);
+        assert_eq!(charger_mv(ADC_MAX), 2_514);
     }
 
     #[test]
@@ -84,8 +94,8 @@ mod tests {
     /// what the code computes cannot disagree with it.
     #[test]
     fn a_midscale_reading_converts_with_its_own_divider() {
-        assert_eq!(battery_mv(2048), 6_201);
-        assert_eq!(charger_mv(1024), 1_550);
+        assert_eq!(battery_mv(2048), 2_514);
+        assert_eq!(charger_mv(1024), 628);
     }
 
     /// A reading above full scale is a broken driver, not a 20 V battery.
@@ -102,5 +112,16 @@ mod tests {
         assert_eq!(pack_state(LOW_BATTERY_MV), PackState::Low);
         assert_eq!(pack_state(LOW_BATTERY_MV - 1), PackState::Low);
         assert_eq!(pack_state(CRITICAL_BATTERY_MV - 1), PackState::Critical);
+    }
+
+    /// The calibration point itself: the raw count the ADC actually reported
+    /// while a multimeter read 3.82 V across the pack.
+    #[test]
+    fn the_measured_calibration_point_reproduces_the_meter() {
+        let mv = battery_mv(3111);
+        assert!(
+            (3_780..=3_860).contains(&mv),
+            "expected about 3820 mV, got {mv}"
+        );
     }
 }
