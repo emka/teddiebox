@@ -2,6 +2,7 @@
 
 mod battery;
 pub mod board;
+pub mod checksum;
 pub mod console;
 mod gesture;
 pub mod i2c;
