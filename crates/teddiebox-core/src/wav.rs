@@ -163,6 +163,31 @@ mod tests {
         0x64, 0x61, 0x74, 0x61, 0x00, 0x97, 0x0e, 0x00, // "data", size 956160
     ];
 
+    /// The first 44 bytes of a file from `scripts/make-test-wav.py`, which is
+    /// what step 8 actually plays. A second writer, so the parser is pinned
+    /// against both tools that produce WAVs for this project rather than
+    /// against one of them.
+    const GENERATED_HEADER: [u8; 44] = [
+        0x52, 0x49, 0x46, 0x46, 0x24, 0xe8, 0x6e, 0x03, // "RIFF", size 57600036
+        0x57, 0x41, 0x56, 0x45, // "WAVE"
+        0x66, 0x6d, 0x74, 0x20, 0x10, 0x00, 0x00, 0x00, // "fmt ", size 16
+        0x01, 0x00, 0x02, 0x00, // PCM, 2 channels
+        0x80, 0xbb, 0x00, 0x00, // 48000
+        0x00, 0xee, 0x02, 0x00, // 192000 bytes/s
+        0x04, 0x00, 0x10, 0x00, // block align 4, 16 bits
+        0x64, 0x61, 0x74, 0x61, 0x00, 0xe8, 0x6e, 0x03, // "data", size 57600000
+    ];
+
+    /// Step 8 asks for "several minutes". Five, and the parser agrees with the
+    /// generator about it — the two compute it from opposite ends.
+    #[test]
+    fn the_step_8_test_file_is_five_minutes_the_codec_can_play() {
+        let format = WavFormat::parse(&GENERATED_HEADER).expect("the generator's header parses");
+        assert!(format.matches_codec());
+        assert_eq!(format.data_offset, 44);
+        assert_eq!(format.duration_ms(), 300_000);
+    }
+
     #[test]
     fn a_real_file_from_taf2wav_is_read_correctly() {
         let format = WavFormat::parse(&REAL_HEADER).expect("a real header parses");
