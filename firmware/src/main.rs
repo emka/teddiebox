@@ -9,6 +9,8 @@ use esp_backtrace as _;
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
+use esp_hal::i2s::master::{Channels, DataFormat, I2s, TdmConfig};
+use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
 use lis3dh::{regs as lis, Lis3dh};
@@ -17,6 +19,7 @@ use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::power::{self, PackState};
+use teddiebox_core::tone;
 use tlv320dac3100::Tlv320Dac3100;
 
 use crate::pins::BoardPins;
@@ -266,6 +269,54 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     }
 }
 
+/// Plays a continuous test tone out of the codec.
+///
+/// Bench step 6's second half. One cycle of a sine repeated forever: the table
+/// is a whole number of cycles so the seam has no discontinuity, and a click
+/// once per cycle would be audible.
+///
+/// Stereo, with the same sample in both slots. The codec's speaker path is fed
+/// from the left channel and the headphones from both, so sending one channel
+/// would make the result depend on which output is being tested.
+#[embassy_executor::task]
+async fn tone_out(i2s_tx: esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>) {
+    let buffer = esp_hal::dma_tx_stream_buffer!(4 * 4092);
+
+    let mut transfer = match i2s_tx.write(buffer) {
+        Ok(transfer) => transfer,
+        Err(_) => {
+            esp_println::println!("teddiebox: I2S would not start");
+            return;
+        }
+    };
+
+    esp_println::println!(
+        "teddiebox: playing {} Hz at {} Hz",
+        tone::TONE_HZ,
+        tone::SAMPLE_RATE_HZ
+    );
+
+    // Interleaved stereo, little endian, the format the codec was configured
+    // for: 16-bit words, two channels.
+    let mut frame = [0u8; tone::SINE.len() * 4];
+    for (i, sample) in tone::SINE.iter().enumerate() {
+        let bytes = sample.to_le_bytes();
+        frame[i * 4] = bytes[0];
+        frame[i * 4 + 1] = bytes[1];
+        frame[i * 4 + 2] = bytes[0];
+        frame[i * 4 + 3] = bytes[1];
+    }
+
+    loop {
+        let free = transfer.available_bytes();
+        if free >= frame.len() {
+            let _pushed = transfer.push(&frame);
+        } else {
+            Timer::after(Duration::from_millis(1)).await;
+        }
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -312,6 +363,28 @@ async fn main(spawner: Spawner) {
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
     esp_println::println!("teddiebox: dl<enter> for download mode, rb<enter> to reboot");
+
+    // The tone goes out on I2S: DIN 10, BCLK 11, WCLK 12, driven at the rate
+    // the codec's PLL was configured for.
+    match I2s::new(
+        p.I2S0,
+        p.DMA_CH0,
+        TdmConfig::new_tdm_philips()
+            .with_sample_rate(Rate::from_hz(tone::SAMPLE_RATE_HZ))
+            .with_data_format(DataFormat::Data16Channel16)
+            .with_channels(Channels::STEREO),
+    ) {
+        Ok(i2s) => {
+            let i2s_tx = i2s
+                .i2s_tx
+                .with_bclk(p.GPIO11)
+                .with_ws(p.GPIO12)
+                .with_dout(p.GPIO10)
+                .build();
+            spawner.spawn(tone_out(i2s_tx).unwrap());
+        }
+        Err(_) => esp_println::println!("teddiebox: I2S would not configure"),
+    }
 
     // Devices need a moment after their rail comes up before they answer.
     // Without this the accelerometer misses the scan and then answers the

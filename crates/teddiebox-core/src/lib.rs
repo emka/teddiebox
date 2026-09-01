@@ -9,6 +9,7 @@ pub mod input;
 mod led;
 mod playback;
 pub mod power;
+pub mod tone;
 mod types;
 mod volume;
 
