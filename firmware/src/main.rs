@@ -230,7 +230,24 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     // goes back to the accelerometer, which needs it continuously.
     let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
     match dac.reset().and_then(|()| dac.init()) {
-        Ok(()) => esp_println::println!("teddiebox: codec configured"),
+        Ok(()) => {
+            esp_println::println!("teddiebox: codec configured");
+
+            // What it says it did, rather than what we asked for. A silent
+            // output with every configuration register correct is exactly the
+            // case this separates: asked wrongly, or declined.
+            match dac.power_flags() {
+                Ok(f) => esp_println::println!(
+                    "teddiebox: codec powered dac_l={} dac_r={} class_d_l={} class_d_r={} hpl={}",
+                    f.left_dac,
+                    f.right_dac,
+                    f.left_class_d,
+                    f.right_class_d,
+                    f.hpl_driver
+                ),
+                Err(_) => esp_println::println!("teddiebox: codec flags unreadable"),
+            }
+        }
         Err(_) => esp_println::println!(
             "teddiebox: codec did not answer — check board::DAC_RESET_RUNS_HIGH"
         ),

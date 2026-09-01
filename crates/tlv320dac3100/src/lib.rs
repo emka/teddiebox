@@ -110,6 +110,22 @@ where
         self.write_reg(0, page0::DAC_MUTE_CTRL, value)
     }
 
+    /// What the codec says actually powered up.
+    ///
+    /// Writing a power-up bit is a request; this register is the answer. A
+    /// silent output with every configuration register correct is the case
+    /// this exists for — it separates "we asked wrongly" from "it declined".
+    pub fn power_flags(&mut self) -> Result<PowerFlags, Error<E>> {
+        let v = self.read_reg(0, page0::DAC_FLAGS)?;
+        Ok(PowerFlags {
+            left_dac: v & 0x80 != 0,
+            hpl_driver: v & 0x20 != 0,
+            left_class_d: v & 0x10 != 0,
+            right_dac: v & 0x08 != 0,
+            right_class_d: v & 0x01 != 0,
+        })
+    }
+
     /// True while a jack is inserted. The firmware mutes the speaker on this.
     ///
     /// Detection only reports anything once `INIT_SEQUENCE` has enabled it;
@@ -118,6 +134,16 @@ where
         let v = self.read_reg(0, page0::HEADSET_DETECT)?;
         Ok(v & HEADSET_DETECTED != 0)
     }
+}
+
+/// Which output stages report themselves powered up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerFlags {
+    pub left_dac: bool,
+    pub right_dac: bool,
+    pub hpl_driver: bool,
+    pub left_class_d: bool,
+    pub right_class_d: bool,
 }
 
 /// The power-on configuration, as `(page, register, value)`.
@@ -366,6 +392,41 @@ mod tests {
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         assert!(!dac.headphones_connected().unwrap());
+        dac.release().done();
+    }
+
+    /// The bit positions are the point of this function, so they are asserted
+    /// against a literal register value rather than a mask expression.
+    #[test]
+    fn the_power_flags_decode_each_stage_separately() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x25], vec![0b1001_1000]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+
+        assert_eq!(
+            dac.power_flags().unwrap(),
+            PowerFlags {
+                left_dac: true,
+                right_dac: true,
+                hpl_driver: false,
+                left_class_d: true,
+                right_class_d: false,
+            }
+        );
+        dac.release().done();
+    }
+
+    #[test]
+    fn nothing_powered_reads_as_nothing_powered() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x25], vec![0x00]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        let flags = dac.power_flags().unwrap();
+        assert!(!flags.left_dac && !flags.left_class_d);
         dac.release().done();
     }
 }

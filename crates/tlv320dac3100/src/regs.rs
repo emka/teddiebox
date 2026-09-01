@@ -19,6 +19,10 @@ pub mod page0 {
     pub const DOSR_MSB: u8 = 0x0D;
     pub const DOSR_LSB: u8 = 0x0E;
     pub const CODEC_IF_CTRL1: u8 = 0x1B;
+    /// Read-only. Reports what actually powered up, as opposed to what was
+    /// asked for: D7 left DAC, D5 HPL driver, D4 left class-D, D3 right DAC,
+    /// D0 right class-D.
+    pub const DAC_FLAGS: u8 = 0x25;
     pub const DAC_PROCESSING_BLOCK: u8 = 0x3C;
     pub const DAC_DATA_PATH: u8 = 0x3F;
     pub const DAC_MUTE_CTRL: u8 = 0x40;
