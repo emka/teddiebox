@@ -34,6 +34,7 @@ esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "pri
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
 embedded-sdmmc = { version = "0.10", default-features = false }
 embedded-hal-bus = { version = "0.3", default-features = false }
+embassy-futures = "0.1"
 
 [profile.release]
 opt-level = "s"

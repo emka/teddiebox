@@ -1713,6 +1713,7 @@ name = "teddiebox-firmware"
 version = "0.1.0"
 dependencies = [
  "embassy-executor",
+ "embassy-futures",
  "embassy-time",
  "embedded-hal-bus",
  "embedded-sdmmc",

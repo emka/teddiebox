@@ -388,7 +388,7 @@ async fn storage_walk(spi: Spi<'static, esp_hal::Blocking>, cs: Output<'static>)
     // at 0x09 during step 4.
     Timer::after(Duration::from_millis(50)).await;
 
-    match storage::walk_card(spi, cs, esp_hal::delay::Delay::new()) {
+    match storage::walk_card(spi, cs, esp_hal::delay::Delay::new()).await {
         Ok(()) => {}
         Err(reason) => esp_println::println!("teddiebox: sd failed — {reason}"),
     }

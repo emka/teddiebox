@@ -10,8 +10,19 @@
 //! one, or touches a directory.
 //!
 //! This module owns pins and a bus. The checksum it reports is
-//! [`teddiebox_core::checksum`], which knows nothing about cards and is tested
-//! on the host.
+//! [`teddiebox_core::checksum`] and the traversal order comes from
+//! [`teddiebox_core::walk`]; neither knows anything about cards, which is what
+//! lets both be tested on the host.
+//!
+//! **The walk yields.** It began as a recursive blocking function, and on a
+//! full card that held the single executor for 78 minutes: the heartbeat froze
+//! at one tick, the ears went unpolled and the console stopped reading, so the
+//! box could not be told to stop and only pulling power ended it. Worse, a
+//! file prints only once it is fully read, so a 114 MB file was seven minutes
+//! of silence indistinguishable from a hang. The traversal is now a cursor
+//! rather than a call stack, which is what lets this be a flat `async` loop
+//! that can await — recursion would need its futures boxed, and there is no
+//! allocator here to box them in.
 //!
 //! **Names are the 8.3 short names**, because that is what the directory
 //! entries hold. A file stored with a long name prints here as its short alias
@@ -23,6 +34,7 @@
 use core::fmt::Write as _;
 use core::ops::ControlFlow;
 
+use embassy_futures::yield_now;
 use embassy_time::Instant;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::{
@@ -33,6 +45,7 @@ use esp_hal::gpio::Output;
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use teddiebox_core::checksum::Crc32;
+use teddiebox_core::walk::{Action, Cursor, Found, MAX_DEPTH};
 
 /// Card initialisation runs at 400 kHz, which the SD specification requires
 /// until the card has been identified.
@@ -46,12 +59,12 @@ const INIT_RATE_KHZ: u32 = 400;
 /// what a later step would use to argue for more.
 const WALK_RATE_KHZ: u32 = 8_000;
 
-/// How deep the walk descends before it refuses to go further.
+/// How often the file read hands the executor back.
 ///
-/// A Toniebox card is `CONTENT/<8 hex>/<8 hex>`, so three is enough and four
-/// leaves room. The limit exists because this recurses, and a device stack is
-/// the wrong place to discover a directory loop.
-const MAX_DEPTH: usize = 4;
+/// Every 16 blocks is 8 KiB, about 30 ms at the rate this bus sustains — often
+/// enough that the heartbeat keeps time and the console stays responsive,
+/// rarely enough that yielding is not what the walk spends its time on.
+const YIELD_EVERY_BLOCKS: u32 = 16;
 
 /// Longest path the walk will print.
 const MAX_PATH: usize = 64;
@@ -155,7 +168,7 @@ type Volumes = VolumeManager<Card, NoClock, MAX_DEPTH, 1, 1>;
 /// The storage rail must already be on; powering it is the caller's business,
 /// because the rail is shared with the NFC reader and this module has no claim
 /// on that decision.
-pub fn walk_card(
+pub async fn walk_card(
     spi: Spi<'static, esp_hal::Blocking>,
     cs: Output<'static>,
     delay: Delay,
@@ -190,8 +203,7 @@ pub fn walk_card(
         .map_err(|_| "no root directory")?;
 
     esp_println::println!("teddiebox: sd walk begins");
-    let mut path = Path::new();
-    walk_dir(&volumes, root, &mut path, 0);
+    walk_tree(&volumes, root).await;
     esp_println::println!("teddiebox: sd walk done");
 
     let _ = volumes.close_dir(root);
@@ -199,36 +211,86 @@ pub fn walk_card(
     Ok(())
 }
 
-/// Checksums every file in `dir`, then descends into its subdirectories.
+/// Checksums every file under `root`, depth first.
 ///
-/// Recursive, bounded by [`MAX_DEPTH`]. Each frame holds one [`Entry`] and two
-/// counters rather than a list of the directory's contents, so the cost of the
-/// walk does not grow with how full a directory is — the price is that finding
-/// the n-th entry rescans, which is cheap beside reading the files themselves.
-fn walk_dir(volumes: &Volumes, dir: RawDirectory, path: &mut Path, depth: usize) {
-    let mut index = 0;
+/// Flat rather than recursive: [`Cursor`] holds the position the call stack
+/// used to, so this can `await` between entries and inside long reads. The
+/// open directory handles live in an array indexed by depth, which is why
+/// `MAX_DIRS` on [`Volumes`] is `MAX_DEPTH` and not a number of its own.
+async fn walk_tree(volumes: &Volumes, root: RawDirectory) {
+    let mut path = Path::new();
+    let mut cursor = Cursor::new();
+    let mut dirs: [Option<RawDirectory>; MAX_DEPTH] = [None; MAX_DEPTH];
+    // Where to cut the path back to when each level is left.
+    let mut marks = [0usize; MAX_DEPTH];
+    dirs[0] = Some(root);
 
-    while let Some(entry) = nth_entry(volumes, dir, index) {
-        index += 1;
+    loop {
+        let Some(here) = dirs[cursor.depth()] else {
+            // Only reachable if a level were left open with no handle, which
+            // the cursor's own transitions rule out. Stopping beats walking a
+            // directory this cannot name.
+            esp_println::println!("teddiebox: sd lost its place");
+            return;
+        };
 
-        if !entry.is_dir {
-            checksum_file(volumes, dir, path, &entry);
-            continue;
-        }
+        let entry = nth_entry(volumes, here, cursor.index() as usize);
+        let found = match &entry {
+            None => Found::Nothing,
+            Some(entry) if entry.is_dir => Found::Directory,
+            Some(_) => Found::File,
+        };
 
-        let mark = path.push(&entry.name);
-        if depth + 1 >= MAX_DEPTH {
-            esp_println::println!("teddiebox: sd {} SKIPPED too deep", path.as_str());
-        } else {
-            match volumes.open_dir(dir, entry.name) {
-                Ok(child) => {
-                    walk_dir(volumes, child, path, depth + 1);
-                    let _ = volumes.close_dir(child);
-                }
-                Err(_) => esp_println::println!("teddiebox: sd {} UNREADABLE", path.as_str()),
+        match cursor.advance(found) {
+            Action::ReadFile => {
+                let entry = entry.expect("a file was found at this position");
+                checksum_file(volumes, here, &mut path, &entry).await;
             }
+
+            Action::Descend => {
+                let entry = entry.expect("a directory was found at this position");
+                let depth = cursor.depth();
+                marks[depth] = path.push(&entry.name);
+
+                match volumes.open_dir(here, entry.name) {
+                    Ok(child) => dirs[depth] = Some(child),
+                    Err(_) => {
+                        esp_println::println!("teddiebox: sd {} UNREADABLE", path.as_str());
+                        // Treat it as a directory that turned out to be empty:
+                        // the cursor pops back to the parent and steps past it,
+                        // which is exactly the recovery wanted and needs no
+                        // separate way to undo a descent.
+                        if cursor.advance(Found::Nothing) == Action::Ascend {
+                            path.truncate(marks[depth]);
+                        }
+                    }
+                }
+            }
+
+            Action::TooDeep => {
+                let entry = entry.expect("a directory was found at this position");
+                let mark = path.push(&entry.name);
+                esp_println::println!("teddiebox: sd {} SKIPPED too deep", path.as_str());
+                path.truncate(mark);
+            }
+
+            Action::Ascend => {
+                // The cursor has already stepped back, so the level just left
+                // is the one below where it now is.
+                let left = cursor.depth() + 1;
+                if let Some(directory) = dirs[left].take() {
+                    let _ = volumes.close_dir(directory);
+                }
+                path.truncate(marks[left]);
+            }
+
+            Action::Finished => return,
         }
-        path.truncate(mark);
+
+        // Hand the executor back at every entry, not only inside long reads:
+        // a directory of small files would otherwise starve it just as
+        // effectively as one large one.
+        yield_now().await;
     }
 }
 
@@ -275,7 +337,7 @@ fn nth_entry(volumes: &Volumes, dir: RawDirectory, index: usize) -> Option<Entry
 /// The throughput after it is not part of the comparison — it is the first
 /// measurement of what this bus actually sustains, which is what a later step
 /// would need before arguing for the SDMMC controller instead.
-fn checksum_file(volumes: &Volumes, dir: RawDirectory, path: &mut Path, entry: &Entry) {
+async fn checksum_file(volumes: &Volumes, dir: RawDirectory, path: &mut Path, entry: &Entry) {
     let mark = path.push(&entry.name);
 
     let file = match volumes.open_file_in_dir(dir, entry.name, Mode::ReadOnly) {
@@ -292,6 +354,7 @@ fn checksum_file(volumes: &Volumes, dir: RawDirectory, path: &mut Path, entry: &
     let mut read: u64 = 0;
     let started = Instant::now();
     let mut failed = false;
+    let mut blocks: u32 = 0;
 
     loop {
         match volumes.read(file, &mut buffer) {
@@ -304,6 +367,14 @@ fn checksum_file(volumes: &Volumes, dir: RawDirectory, path: &mut Path, entry: &
                 failed = true;
                 break;
             }
+        }
+
+        // The largest file on the card is seven minutes of reading. Without a
+        // yield inside this loop the box would still go silent for all of it,
+        // however often the walk yielded between files.
+        blocks += 1;
+        if blocks.is_multiple_of(YIELD_EVERY_BLOCKS) {
+            yield_now().await;
         }
     }
 
