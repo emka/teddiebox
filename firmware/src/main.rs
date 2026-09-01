@@ -81,10 +81,15 @@ fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
 async fn inputs(left: Input<'static>, right: Input<'static>, wake: Input<'static>) {
     const POLL_MS: u64 = 2;
 
+    // Name, debouncer, raw transitions seen since the last settled edge, and
+    // the previous raw level. The transition count is the bounce measurement
+    // step 2 asks for, so it must count changes of the raw line — counting
+    // polls that merely disagree with the settled state yields
+    // DEBOUNCE_MS / POLL_MS every single time, which looks like data and is not.
     let mut state = [
-        ("left ear", Debounced::released(), 0u32),
-        ("right ear", Debounced::released(), 0u32),
-        ("wake", Debounced::released(), 0u32),
+        ("left ear", Debounced::released(), 0u32, false),
+        ("right ear", Debounced::released(), 0u32, false),
+        ("wake", Debounced::released(), 0u32, false),
     ];
 
     loop {
@@ -95,19 +100,22 @@ async fn inputs(left: Input<'static>, right: Input<'static>, wake: Input<'static
             input::wake_asserted(wake.is_high()),
         ];
 
-        for ((name, button, flips), &pressed) in state.iter_mut().zip(raw.iter()) {
-            let was = button.is_pressed();
-            match button.update(pressed, now) {
-                Some(edge) => {
-                    let label = match edge {
-                        Edge::Pressed => "pressed",
-                        Edge::Released => "released",
-                    };
-                    esp_println::println!("teddiebox: {name} {label} after {flips} bounces");
-                    *flips = 0;
-                }
-                None if pressed != was => *flips += 1,
-                None => {}
+        for ((name, button, transitions, last_raw), &pressed) in state.iter_mut().zip(raw.iter()) {
+            if pressed != *last_raw {
+                *transitions += 1;
+                *last_raw = pressed;
+            }
+
+            if let Some(edge) = button.update(pressed, now) {
+                let label = match edge {
+                    Edge::Pressed => "pressed",
+                    Edge::Released => "released",
+                };
+                // One transition is the change itself; anything above that is
+                // bounce. Sampled every POLL_MS, so bounce faster than that is
+                // invisible here and reads as a clean edge.
+                esp_println::println!("teddiebox: {name} {label}, {transitions} raw transitions");
+                *transitions = 0;
             }
         }
 
