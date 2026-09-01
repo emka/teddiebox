@@ -4,6 +4,7 @@ mod battery;
 pub mod board;
 pub mod checksum;
 pub mod console;
+pub mod cushion;
 mod gesture;
 pub mod i2c;
 pub mod input;
@@ -14,6 +15,7 @@ pub mod tone;
 mod types;
 mod volume;
 pub mod walk;
+pub mod wav;
 
 pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
 pub use gesture::{Gesture, GestureConfig, GestureDetector};
