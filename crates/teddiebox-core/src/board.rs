@@ -212,6 +212,26 @@ pub const fn breathing_duty(now_ms: u32) -> u8 {
     ((rising * BREATHE_PEAK as u32) / half) as u8
 }
 
+/// The codec's hardware reset line.
+pub const DAC_RESET: u8 = 26;
+
+/// Whether driving [`DAC_RESET`] high runs the codec.
+///
+/// The RevvoX pinout labels GPIO26 "RESET (active high)", which is ambiguous:
+/// the TLV320DAC3100's own pin is an active-low RESET, so "active high" most
+/// plausibly means the board inverts it and high releases the part. **Assumed,
+/// not measured.** If the codec never acknowledges on I2C, invert this one
+/// constant before suspecting anything else.
+pub const DAC_RESET_RUNS_HIGH: bool = true;
+
+/// The level that holds the codec in reset, and the one that releases it.
+pub const fn dac_reset(held: bool) -> PinLevel {
+    PinLevel {
+        gpio: DAC_RESET,
+        high: held != DAC_RESET_RUNS_HIGH,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +482,23 @@ mod tests {
             assert!(breathing_duty(t) <= BREATHE_PEAK, "at {t}");
             t += 37;
         }
+    }
+
+    #[test]
+    fn releasing_the_codec_drives_its_reset_line_to_the_running_level() {
+        assert_eq!(
+            dac_reset(false),
+            PinLevel {
+                gpio: 26,
+                high: true
+            }
+        );
+        assert_eq!(
+            dac_reset(true),
+            PinLevel {
+                gpio: 26,
+                high: false
+            }
+        );
     }
 }

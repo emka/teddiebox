@@ -7,7 +7,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 use esp_backtrace as _;
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
-use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
@@ -17,6 +17,7 @@ use teddiebox_core::console::CommandWatch;
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::power::{self, PackState};
+use tlv320dac3100::Tlv320Dac3100;
 
 use crate::pins::BoardPins;
 
@@ -197,8 +198,30 @@ fn scan_i2c(i2c: &mut I2c<'_, esp_hal::Blocking>) {
 /// register. Bench step 5 wants tilt traces captured from here as fixtures for
 /// the host-side gesture work.
 #[embassy_executor::task]
-async fn motion(i2c: I2c<'static, esp_hal::Blocking>) {
+async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>) {
+    // Release the codec from reset before anything on this bus is believed.
+    // Held first, deliberately: the part may already be running from a previous
+    // boot, and a device half-configured by an earlier session is worse than
+    // one that has just come up.
+    let hold = board::dac_reset(true);
+    let run = board::dac_reset(false);
+    reset.set_level(if hold.high { Level::High } else { Level::Low });
+    Timer::after(Duration::from_millis(10)).await;
+    reset.set_level(if run.high { Level::High } else { Level::Low });
+    Timer::after(Duration::from_millis(10)).await;
+
     let mut bus = i2c;
+
+    // The codec first: it is a one-shot configuration, after which the bus
+    // goes back to the accelerometer, which needs it continuously.
+    let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+    match dac.reset().and_then(|()| dac.init()) {
+        Ok(()) => esp_println::println!("teddiebox: codec configured"),
+        Err(_) => esp_println::println!(
+            "teddiebox: codec did not answer — check board::DAC_RESET_RUNS_HIGH"
+        ),
+    }
+    bus = dac.release();
     let mut address = None;
 
     for candidate in [lis::ADDRESS_SA0_LOW, lis::ADDRESS_SA0_HIGH] {
@@ -285,7 +308,8 @@ async fn main(spawner: Spawner) {
         Ok(i2c) => {
             let mut i2c = i2c.with_sda(p.GPIO5).with_scl(p.GPIO6);
             scan_i2c(&mut i2c);
-            spawner.spawn(motion(i2c).unwrap());
+            let reset = Output::new(p.GPIO26, Level::Low, OutputConfig::default());
+            spawner.spawn(motion(i2c, reset).unwrap());
         }
         Err(_) => esp_println::println!("teddiebox: I2C would not configure"),
     }

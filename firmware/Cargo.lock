@@ -1652,6 +1652,7 @@ dependencies = [
  "esp-rtos",
  "lis3dh",
  "teddiebox-core",
+ "tlv320dac3100",
 ]
 
 [[package]]
@@ -1690,6 +1691,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tlv320dac3100"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
 ]
 
 [[package]]
