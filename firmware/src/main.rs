@@ -3,8 +3,10 @@
 
 mod pins;
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
+
 use esp_backtrace as _;
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
@@ -293,6 +295,13 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     }
 }
 
+/// Set by the console to start the test tone.
+///
+/// The tone does not play at boot. It is loud, it is a bring-up aid rather
+/// than a feature, and the box is often sitting next to whoever is working on
+/// it. `t` starts it; `rb` stops it by restarting the box.
+static TONE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 /// Plays a continuous test tone out of the codec.
 ///
 /// Bench step 6's second half. One cycle of a sine repeated forever: the table
@@ -323,6 +332,11 @@ async fn tone_out(i2s_tx: esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking
         buffer[i * 4 + 1] = bytes[1];
         buffer[i * 4 + 2] = bytes[0];
         buffer[i * 4 + 3] = bytes[1];
+    }
+
+    // Wait to be asked.
+    while !TONE_REQUESTED.load(Ordering::Relaxed) {
+        Timer::after(Duration::from_millis(100)).await;
     }
 
     let _transfer = match i2s_tx.write(buffer) {
@@ -392,7 +406,7 @@ async fn main(spawner: Spawner) {
         .expect("UART0 receive")
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
-    esp_println::println!("teddiebox: dl<enter> for download mode, rb<enter> to reboot");
+    esp_println::println!("teddiebox: dl download mode, rb reboot, t test tone (loud)");
 
     // The tone goes out on I2S: DIN 10, BCLK 11, WCLK 12, driven at the rate
     // the codec's PLL was configured for.
@@ -461,6 +475,9 @@ async fn main(spawner: Spawner) {
                 match buf[..n].iter().find_map(|&b| watch.feed(b)) {
                     Some(Command::DownloadMode) => reboot_to_download(&mut board, &mut gates),
                     Some(Command::Reboot) => reboot(&mut board, &mut gates),
+                    Some(Command::Tone) => {
+                        TONE_REQUESTED.store(true, Ordering::Relaxed);
+                    }
                     None => {}
                 }
             }

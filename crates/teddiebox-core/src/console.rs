@@ -8,6 +8,11 @@
 pub enum Command {
     /// Reboot into the ROM's UART download mode, for flashing.
     DownloadMode,
+    /// Start the test tone.
+    ///
+    /// Opt-in rather than automatic: a tone that plays on every boot is
+    /// unusable on a bench, and this box has no volume control of its own yet.
+    Tone,
     /// Reboot into the application.
     ///
     /// Exists so a laptop can restart the box while watching its console.
@@ -56,6 +61,7 @@ impl CommandWatch {
                 match &self.line[..self.len] {
                     b"dl" => Some(Command::DownloadMode),
                     b"rb" => Some(Command::Reboot),
+                    b"t" => Some(Command::Tone),
                     _ => None,
                 }
             };
@@ -97,6 +103,12 @@ mod tests {
 
     /// Line-oriented on purpose. An earlier matcher fired on `ddl` because it
     /// scanned for a substring; a mistyped line must not reboot the box.
+    #[test]
+    fn the_tone_command_is_a_single_letter() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"t\r"), Some(Command::Tone));
+    }
+
     #[test]
     fn a_mistyped_line_does_not_fire() {
         let mut watch = CommandWatch::new();
