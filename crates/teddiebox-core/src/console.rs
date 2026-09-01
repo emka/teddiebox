@@ -19,6 +19,12 @@ pub enum Command {
     /// `esptool`'s reset takes exclusive hold of the serial port, so it cannot
     /// run while anything is capturing; writing two bytes can.
     Reboot,
+    /// Mount the SD card and checksum what is on it.
+    ///
+    /// Opt-in for the same reason the tone is: it powers a rail, holds the bus
+    /// for as long as the card is large, and has no business running on a boot
+    /// that was not asking for it.
+    Storage,
 }
 
 /// Longest command line accepted. Anything longer cannot be a command, and is
@@ -62,6 +68,7 @@ impl CommandWatch {
                     b"dl" => Some(Command::DownloadMode),
                     b"rb" => Some(Command::Reboot),
                     b"t" => Some(Command::Tone),
+                    b"sd" => Some(Command::Storage),
                     _ => None,
                 }
             };
@@ -124,6 +131,12 @@ mod tests {
             feed_all(&mut watch, b"nonsense\rdl\r"),
             Some(Command::DownloadMode)
         );
+    }
+
+    #[test]
+    fn the_storage_command_fires_on_its_own_line() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"sd\r"), Some(Command::Storage));
     }
 
     /// A heartbeat prints once a second forever. None of it may look like a

@@ -2,6 +2,7 @@
 #![no_main]
 
 mod pins;
+mod storage;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::Spawner;
@@ -12,6 +13,7 @@ use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::i2s::master::{Channels, DataFormat, I2s, TdmConfig};
+use esp_hal::spi::master::Spi;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
@@ -361,6 +363,37 @@ async fn tone_out(i2s_tx: esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking
     }
 }
 
+/// Set by the console to walk the SD card.
+///
+/// Opt-in like the tone, for a different reason: the walk powers a rail shared
+/// with the NFC reader and then holds the bus for as long as the card is
+/// large. A boot that was not asking for it should not pay that.
+static STORAGE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Mounts the SD card and checksums what is on it.
+///
+/// Bench step 7. The rail comes up here rather than at startup because it is
+/// shared with the NFC reader, which nothing has driven yet — leaving it off
+/// until asked keeps step 7 from quietly changing the conditions of steps 1
+/// to 6.
+#[embassy_executor::task]
+async fn storage_walk(spi: Spi<'static, esp_hal::Blocking>, cs: Output<'static>) {
+    while !STORAGE_REQUESTED.load(Ordering::Relaxed) {
+        Timer::after(Duration::from_millis(100)).await;
+    }
+
+    // The rail was raised by the console loop, which owns the pins. The card
+    // needs its supply settled before it will answer, the same way the I2C
+    // devices did — a scan against an unsettled rail is what invented a device
+    // at 0x09 during step 4.
+    Timer::after(Duration::from_millis(50)).await;
+
+    match storage::walk_card(spi, cs, esp_hal::delay::Delay::new()) {
+        Ok(()) => {}
+        Err(reason) => esp_println::println!("teddiebox: sd failed — {reason}"),
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -406,7 +439,9 @@ async fn main(spawner: Spawner) {
         .expect("UART0 receive")
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
-    esp_println::println!("teddiebox: dl download mode, rb reboot, t test tone (loud)");
+    esp_println::println!(
+        "teddiebox: dl download mode, rb reboot, t test tone (loud), sd card checksums"
+    );
 
     // The tone goes out on I2S: DIN 10, BCLK 11, WCLK 12, driven at the rate
     // the codec's PLL was configured for.
@@ -428,6 +463,24 @@ async fn main(spawner: Spawner) {
             spawner.spawn(tone_out(i2s_tx).unwrap());
         }
         Err(_) => esp_println::println!("teddiebox: I2S would not configure"),
+    }
+
+    // The SD card: SPI2 on CLK 35, MOSI 38, MISO 36, with CS 34 driven by
+    // ExclusiveDevice. Created at the specification's 400 kHz initialisation
+    // rate; storage.rs raises it once the card has identified itself.
+    match Spi::new(p.SPI2, storage::init_config()) {
+        Ok(spi) => {
+            let spi = spi
+                .with_sck(p.GPIO35)
+                .with_mosi(p.GPIO38)
+                .with_miso(p.GPIO36);
+            // Idle high: on SPI a card watches for its select line to fall,
+            // and one that starts low is addressed before anything is ready
+            // to talk to it.
+            let cs = Output::new(p.GPIO34, Level::High, OutputConfig::default());
+            spawner.spawn(storage_walk(spi, cs).unwrap());
+        }
+        Err(_) => esp_println::println!("teddiebox: SPI would not configure"),
     }
 
     // Devices need a moment after their rail comes up before they answer.
@@ -477,6 +530,14 @@ async fn main(spawner: Spawner) {
                     Some(Command::Reboot) => reboot(&mut board, &mut gates),
                     Some(Command::Tone) => {
                         TONE_REQUESTED.store(true, Ordering::Relaxed);
+                    }
+                    Some(Command::Storage) => {
+                        // The rail comes up here because this loop owns the
+                        // pins. It stays up afterwards: the walk is a bench
+                        // action, and a rail that drops under a card mid-read
+                        // is a worse bug than one left on.
+                        board.apply(gates.power(Rail::Storage, true));
+                        STORAGE_REQUESTED.store(true, Ordering::Relaxed);
                     }
                     None => {}
                 }
