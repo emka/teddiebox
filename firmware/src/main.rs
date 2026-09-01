@@ -2,6 +2,7 @@
 #![no_main]
 
 mod audio;
+mod led;
 mod pins;
 mod storage;
 
@@ -357,6 +358,9 @@ async fn media(
     let mut i2s_tx = Some(i2s_tx);
     let mut tone_buffer = Some(tone_buffer);
     let mut wav_buffer = Some(wav_buffer);
+    // The tone's transfer stops when it is dropped, so it is parked here for
+    // as long as the tone should play — which is until the box restarts.
+    let mut _tone_transfer = None;
 
     loop {
         let request = REQUEST.swap(REQUEST_NONE, Ordering::Relaxed);
@@ -404,9 +408,7 @@ async fn media(
                             tone::TONE_HZ,
                             tone::SAMPLE_RATE_HZ
                         );
-                        // The transfer stops when dropped, so it is held for as
-                        // long as the tone should play — which is forever.
-                        core::mem::forget(transfer);
+                        _tone_transfer = Some(transfer);
                     }
                     Err(_) => esp_println::println!("teddiebox: I2S would not start"),
                 }
@@ -443,7 +445,7 @@ async fn main(spawner: Spawner) {
         .option1()
         .modify(|_, w| w.force_download_boot().clear_bit());
 
-    let mut board = BoardPins::new(p.GPIO45, p.GPIO47, p.GPIO19, p.GPIO18, p.GPIO17);
+    let mut board = BoardPins::new(p.GPIO45, p.GPIO47);
     let mut gates = Gates::at_reset();
 
     spawner.spawn(heartbeat().unwrap());
@@ -541,52 +543,66 @@ async fn main(spawner: Spawner) {
         Err(_) => esp_println::println!("teddiebox: I2C would not configure"),
     }
 
-    // A dim green breath, software PWM at 200 Hz. Bright enough to say the
-    // firmware is alive, dim enough to live in a child's room.
-    const PWM_PERIOD_US: u64 = 5_000;
+    // A dim green breath. The waveform is held by the LEDC peripheral, so
+    // this loop only decides how bright and then goes back to sleep — it does
+    // not have to be on time. The software PWM this replaces woke four hundred
+    // times a second and could not keep its own period once anything else
+    // wanted the executor.
+    const BREATH_STEP: Duration = Duration::from_millis(20);
+
+    // The controller and its timer are bound here rather than inside the
+    // helper because the channels borrow the timer, so it has to outlive them.
+    // `main` never returns, which is exactly long enough.
+    let ledc = led::controller(p.LEDC);
+    let timer = led::timer(&ledc);
+    let rgb = match timer.as_ref() {
+        Ok(timer) => match led::Rgb::new(&ledc, timer, p.GPIO19, p.GPIO18, p.GPIO17) {
+            Ok(rgb) => Some(rgb),
+            Err(()) => {
+                esp_println::println!("teddiebox: LED channels would not configure");
+                None
+            }
+        },
+        Err(()) => {
+            esp_println::println!("teddiebox: LED timer would not configure");
+            None
+        }
+    };
+
     let lit = gates.led(Colour::Green).expect("the rail is up");
-    let dark = gates.led(Colour::Off).expect("the rail is up");
-    let mut since_poll = 0u32;
 
     loop {
-        let duty = board::breathing_duty(Instant::now().as_millis() as u32);
-        let on_us = PWM_PERIOD_US * duty as u64 / 255;
-
-        if on_us > 0 {
-            board.apply_all(&lit);
-            Timer::after(Duration::from_micros(on_us)).await;
+        if let Some(rgb) = rgb.as_ref() {
+            rgb.apply(
+                &lit,
+                board::breathing_duty(Instant::now().as_millis() as u32),
+            );
         }
-        board.apply_all(&dark);
-        Timer::after(Duration::from_micros(PWM_PERIOD_US - on_us)).await;
 
-        // Roughly twice a second is responsive enough for a typed command and
-        // cheap enough not to disturb the breath.
-        since_poll += 1;
-        if since_poll >= 100 {
-            since_poll = 0;
-            let mut buf = [0u8; 16];
-            if let Ok(n) = console.read_buffered(&mut buf) {
-                match buf[..n].iter().find_map(|&b| watch.feed(b)) {
-                    Some(Command::DownloadMode) => reboot_to_download(&mut board, &mut gates),
-                    Some(Command::Reboot) => reboot(&mut board, &mut gates),
-                    Some(Command::Tone) => {
-                        REQUEST.store(REQUEST_TONE, Ordering::Relaxed);
-                    }
-                    Some(Command::PlayWav) => {
-                        board.apply(gates.power(Rail::Storage, true));
-                        REQUEST.store(REQUEST_WAV, Ordering::Relaxed);
-                    }
-                    Some(Command::Storage) => {
-                        // The rail comes up here because this loop owns the
-                        // pins. It stays up afterwards: the walk is a bench
-                        // action, and a rail that drops under a card mid-read
-                        // is a worse bug than one left on.
-                        board.apply(gates.power(Rail::Storage, true));
-                        REQUEST.store(REQUEST_WALK, Ordering::Relaxed);
-                    }
-                    None => {}
+        let mut buf = [0u8; 16];
+        if let Ok(n) = console.read_buffered(&mut buf) {
+            match buf[..n].iter().find_map(|&b| watch.feed(b)) {
+                Some(Command::DownloadMode) => reboot_to_download(&mut board, &mut gates),
+                Some(Command::Reboot) => reboot(&mut board, &mut gates),
+                Some(Command::Tone) => {
+                    REQUEST.store(REQUEST_TONE, Ordering::Relaxed);
                 }
+                Some(Command::PlayWav) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    REQUEST.store(REQUEST_WAV, Ordering::Relaxed);
+                }
+                Some(Command::Storage) => {
+                    // The rail comes up here because this loop owns the pins.
+                    // It stays up afterwards: the walk is a bench action, and a
+                    // rail that drops under a card mid-read is a worse bug than
+                    // one left on.
+                    board.apply(gates.power(Rail::Storage, true));
+                    REQUEST.store(REQUEST_WALK, Ordering::Relaxed);
+                }
+                None => {}
             }
         }
+
+        Timer::after(BREATH_STEP).await;
     }
 }
