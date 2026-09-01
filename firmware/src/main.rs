@@ -313,6 +313,11 @@ async fn main(spawner: Spawner) {
     let mut watch = CommandWatch::new();
     esp_println::println!("teddiebox: dl<enter> for download mode, rb<enter> to reboot");
 
+    // Devices need a moment after their rail comes up before they answer.
+    // Without this the accelerometer misses the scan and then answers the
+    // probe a few milliseconds later, which reads as a bus that is lying.
+    Timer::after(Duration::from_millis(50)).await;
+
     // The codec and the accelerometer are both on the rail brought up above,
     // so the bus is only worth scanning now.
     match I2c::new(p.I2C0, I2cConfig::default()) {
