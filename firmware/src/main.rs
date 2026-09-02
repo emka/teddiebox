@@ -240,10 +240,17 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         Ok(()) => {
             esp_println::println!("teddiebox: codec configured");
 
-            // A bring-up listening level, not a design decision. The gain
-            // chain is wide open by default and the first tone was painfully
-            // loud with the box open on a desk.
-            if dac.set_volume_db(-12).is_err() {
+            // A bring-up listening level, not a design decision — real volume
+            // belongs to `teddiebox_core::VolumeModel` and the ears, once
+            // there is a box to drive them from.
+            //
+            // -12 dB was tuned against the test tone, which peaks at half
+            // scale. Real content runs to full scale and carries far more
+            // spectral energy than a sine, and the first Tonie played through
+            // this was, in the listener's words, "120% of the max volume".
+            // The codec goes to -63.5 dB, so erring quiet costs nothing and
+            // is the right way to err beside someone's head.
+            if dac.set_volume_db(BENCH_VOLUME_DB).is_err() {
                 esp_println::println!("teddiebox: codec volume not set");
             }
 
@@ -299,6 +306,12 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         Timer::after(Duration::from_secs(2)).await;
     }
 }
+
+/// How loud the box plays during bring-up.
+///
+/// Deliberately low. Turning it up is a one-line change and a reflash; the
+/// alternative is discovering it is too loud with the box against your ear.
+const BENCH_VOLUME_DB: i8 = -35;
 
 /// What the console has asked the media task to do.
 ///
