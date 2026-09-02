@@ -73,6 +73,10 @@ pub const INIT_SEQUENCE: &[(u8, u8)] = &[
 /// Longest ISO 15693 response this driver handles.
 pub const MAX_RESPONSE: usize = 32;
 
+/// Bytes ahead of the request in a transmit burst: two direct commands, the
+/// continuous-write address, and the two length bytes.
+const TRANSMIT_HEADER: usize = 5;
+
 /// Longest request this driver can send.
 ///
 /// The FIFO is twelve bytes (SLOS757C §5.12.2) and the whole request is loaded
@@ -210,6 +214,31 @@ where
         Ok(false)
     }
 
+    /// Puts `request` on the air, as one slave-select window.
+    ///
+    /// SLOS757G Figure 6-20 shows the whole transmit as a single burst —
+    /// reset FIFO, transmit with CRC, a continuous write from 0x1D carrying
+    /// the two length bytes and then the request — and the FIFO will not take
+    /// data any other way. Written a byte per transaction the FIFO byte
+    /// counter stays at zero even though the length registers read back
+    /// correctly, and since "data transmission begins automatically after the
+    /// first byte is written into the FIFO" (§6.12.5) a FIFO that never takes
+    /// a byte is a transmitter that never starts. At a bench that is a reader
+    /// which raises no interrupt at all and looks like an empty plate.
+    fn transmit(&mut self, request: &[u8]) -> Result<(), Error<E>> {
+        let mut burst = [0u8; TRANSMIT_HEADER + MAX_REQUEST];
+        burst[0] = CMD_BIT | (regs::cmd::RESET_FIFO & ADDRESS_MASK);
+        burst[1] = CMD_BIT | (regs::cmd::TRANSMIT_WITH_CRC & ADDRESS_MASK);
+        burst[2] = CONTINUOUS_BIT | (regs::TX_LENGTH_BYTE1 & ADDRESS_MASK);
+        // The length is a 12-bit field split across 0x1D and 0x1E, with the
+        // low nibble of 0x1E counting the bits of a trailing broken byte.
+        burst[3] = (request.len() >> 4) as u8;
+        burst[4] = ((request.len() << 4) & 0xF0) as u8;
+        let end = TRANSMIT_HEADER + request.len();
+        burst[TRANSMIT_HEADER..end].copy_from_slice(request);
+        self.spi.write(&burst[..end]).map_err(Error::Bus)
+    }
+
     /// Sends `request` and collects the tag's reply. Returns the number of
     /// bytes received, which is zero when no tag answered.
     pub fn transceive(&mut self, request: &[u8], response: &mut [u8]) -> Result<usize, Error<E>> {
@@ -218,24 +247,7 @@ where
         if request.len() > MAX_REQUEST {
             return Err(Error::RequestTooLong);
         }
-        self.send_command(regs::cmd::RESET_FIFO)?;
-
-        // The transmit command arms the transmitter and must precede the data.
-        // SLOS757C §5.12.3: "data transmission begins automatically after the
-        // first byte is written into the FIFO" — so loading the FIFO is what
-        // starts the transmission, and a command issued afterwards is too
-        // late. Sent the other way round the reader never transmits, and at a
-        // bench that is indistinguishable from an empty plate, a tag of the
-        // wrong family, or a disconnected antenna.
-        self.send_command(regs::cmd::TRANSMIT_WITH_CRC)?;
-
-        // The length is split across two registers as a 12-bit field.
-        self.write_register(regs::TX_LENGTH_BYTE1, (request.len() >> 4) as u8)?;
-        self.write_register(regs::TX_LENGTH_BYTE2, ((request.len() << 4) & 0xF0) as u8)?;
-
-        for &b in request {
-            self.write_register(regs::FIFO, b)?;
-        }
+        self.transmit(request)?;
 
         if !self.wait_for_response()? {
             return Ok(0);

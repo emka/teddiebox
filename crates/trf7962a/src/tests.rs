@@ -118,23 +118,21 @@ fn transceive_transactions(
 
 /// Everything up to and including the transmit command — all that happens
 /// when nothing answers.
-/// The transmit sequence, in the order SLOS757C §5.12.3 describes.
+/// The transmit sequence, as one slave-select window — SLOS757G Figure 6-20.
 ///
-/// The transmit command comes *before* the FIFO is loaded, because "data
-/// transmission begins automatically after the first byte is written into the
-/// FIFO" — the command arms the transmitter, and writing data is what starts
-/// it. Issued the other way round the reader never transmits at all, which at
-/// a bench is indistinguishable from an empty plate.
+/// The shape is asserted byte for byte by
+/// `a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it`; this only
+/// builds the same burst for the tests that care about what comes after it.
 fn transmit_transactions(request: &[u8], tx_length: [u8; 2]) -> Vec<Transaction<u8>> {
-    let mut t = Vec::new();
-    t.extend(spi_write(vec![0x8F])); // command: reset FIFO
-    t.extend(spi_write(vec![0x91])); // command: transmit with CRC, arming the TX
-    t.extend(spi_write(vec![0x1D, tx_length[0]])); // TX length, high nibbles
-    t.extend(spi_write(vec![0x1E, tx_length[1]])); // TX length, low nibble
-    for &b in request {
-        t.extend(spi_write(vec![0x1F, b])); // byte into the FIFO; this starts it
-    }
-    t
+    let mut burst = vec![
+        0x8F, // command: reset FIFO
+        0x91, // command: transmit with CRC
+        0x3D, // continuous write, starting at the TX length register 0x1D
+        tx_length[0],
+        tx_length[1],
+    ];
+    burst.extend_from_slice(request);
+    spi_write(burst)
 }
 
 /// GET RANDOM NUMBER, spelled out rather than taken from `slix`.
@@ -398,4 +396,36 @@ fn the_field_is_turned_on_last() {
         regs::CHIP_STATUS_CONTROL,
         "enabling the field before the protocol is configured radiates noise"
     );
+}
+
+/// SLOS757G Figure 6-20, byte for byte: the datasheet's own single-slot
+/// inventory, in one slave-select window.
+///
+/// Loading the FIFO one transaction per byte does not reach the FIFO at all.
+/// Measured on the reader: after a reset and three single-address writes of
+/// 0x26, 0x01, 0x00 the FIFO byte counter still reads 0x00, while a write to
+/// the length register 0x1E in the same style reads back correctly. Since
+/// "transmission starts automatically after the first byte is written into
+/// the FIFO" (§6.12.5), a FIFO that never takes a byte is a transmitter that
+/// never starts — which at a bench is a reader that raises no interrupt and
+/// looks like an empty plate.
+///
+/// The bytes are copied from the figure rather than assembled here: 0x8F
+/// reset FIFO, 0x91 transmit with CRC, 0x3D continuous write from 0x1D, the
+/// two length bytes, then the request.
+#[test]
+fn a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it() {
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi_write(vec![
+            0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00,
+        ])),
+        CheckedDelay::new(&polls(IRQ_POLL_ATTEMPTS as usize)),
+        PinMock::new(&irq_never()),
+    );
+    let mut response = [0u8; MAX_RESPONSE];
+    assert_eq!(r.transceive(&INVENTORY, &mut response), Ok(0));
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
 }
