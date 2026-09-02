@@ -10,9 +10,11 @@
 
 mod cache;
 mod sidecar;
+mod writer;
 
 pub use cache::{decide, Cached, Decision};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
+pub use writer::{ContentSink, Writer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadError {
