@@ -27,6 +27,7 @@ use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::power::{self, PackState};
+use teddiebox_core::sounds::Language;
 use teddiebox_core::tone;
 use tlv320dac3100::Tlv320Dac3100;
 
@@ -505,6 +506,21 @@ const NFC_LOCK: u8 = 4;
 /// RAM only, and deliberately: it is a credential, it is never written to the
 /// card or committed, and it dies with the next reset.
 static NFC_PASSWORD: AtomicU32 = AtomicU32::new(0);
+
+/// The language this box speaks, from `TEDDIEBOX_LANGUAGE` in `.envrc.local`.
+///
+/// Chosen at build time rather than read off the card: it is a property of the
+/// box, and the card carries all four languages regardless. An unset value
+/// takes the German sounds; a value that is not a language fails the build,
+/// because a box quietly speaking the wrong language to a child is not a
+/// failure anyone would look for.
+const LANGUAGE: Language = match option_env!("TEDDIEBOX_LANGUAGE") {
+    Some(name) => match Language::from_name(name) {
+        Some(language) => language,
+        None => panic!("TEDDIEBOX_LANGUAGE must be one of: de, en-gb, en-us, fr"),
+    },
+    None => Language::German,
+};
 
 /// Which content file `play` names, as two halves of `CONTENT/<dir>/<file>`.
 static CONTENT_DIRECTORY: AtomicU32 = AtomicU32::new(0);
@@ -1111,6 +1127,13 @@ async fn main(spawner: Spawner) {
                     board.apply(gates.power(Rail::Storage, true));
                     OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
                     REQUEST.store(REQUEST_TAF, Ordering::Relaxed);
+                }
+                Some(Command::PlaySound { file }) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+                    CONTENT_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
+                    CONTENT_FILE.store(file, Ordering::Relaxed);
+                    REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
                 }
                 Some(Command::PlayContent { directory, file }) => {
                     board.apply(gates.power(Rail::Storage, true));

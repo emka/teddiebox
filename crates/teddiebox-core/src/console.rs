@@ -37,6 +37,12 @@ pub enum Command {
     /// megabytes for a figure. Naming one is what makes them usable, both as a
     /// start-up sound and as a playback fixture that finishes in seconds.
     PlayContent { directory: u32, file: u32 },
+    /// Play one of the box's own sounds, in whichever language it speaks.
+    ///
+    /// The same file ID means the same sound in all four language
+    /// directories, so naming the directory as well is noise everywhere
+    /// except when deliberately comparing languages.
+    PlaySound { file: u32 },
     /// Stop whatever is playing.
     Stop,
     /// Decode and play the first TAF file on the card.
@@ -205,12 +211,20 @@ fn hex_u32(digits: &[u8]) -> Option<u32> {
 fn parse_play_content(line: &[u8]) -> Option<Command> {
     let rest = line.strip_prefix(b"play ")?;
     let mut halves = rest.split(|&b| b == b'/');
-    let directory = hex_u32(halves.next()?)?;
-    let file = hex_u32(halves.next()?)?;
+    let first = hex_u32(halves.next()?)?;
+    // One half names a sound in the box's own language; two name a path, which
+    // is what comparing languages needs.
+    let Some(second) = halves.next() else {
+        return Some(Command::PlaySound { file: first });
+    };
+    let file = hex_u32(second)?;
     if halves.next().is_some() {
         return None;
     }
-    Some(Command::PlayContent { directory, file })
+    Some(Command::PlayContent {
+        directory: first,
+        file,
+    })
 }
 
 /// Reads two hex digits, exactly.
@@ -422,12 +436,22 @@ mod tests {
         );
     }
 
+    /// One half means "in this box's language", which is what almost every
+    /// use wants: the same file ID is the same sound in all four directories.
+    #[test]
+    fn a_play_command_with_one_half_names_a_sound_not_a_path() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"play 00000000\r"),
+            Some(Command::PlaySound { file: 0 })
+        );
+    }
+
     /// Both halves are eight hex digits: that is how the Toniebox names them
     /// on the card, and a short one would silently open a different file.
     #[test]
     fn a_malformed_content_id_does_not_fire() {
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"play 00000000\r"), None, "no file");
         assert_eq!(
             feed_all(&mut watch, b"play 0000000/00000003\r"),
             None,
