@@ -90,6 +90,15 @@ pub static PAGE_READ_US: AtomicU64 = AtomicU64::new(0);
 const TONIE_CONTENT_DIR: &str = "CONTENT";
 const TONIE_AUDIO_FILE: &str = "500304E0";
 
+/// Writes `value` as eight upper-case hex digits, the way FAT holds a
+/// Toniebox content name.
+fn write_hex8(out: &mut [u8; 8], value: u32) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = DIGITS[((value >> (28 - 4 * i)) & 0xF) as usize];
+    }
+}
+
 /// Longest path the walk will print.
 const MAX_PATH: usize = 64;
 
@@ -396,6 +405,69 @@ impl Mounted {
 
         let _ = self.volumes.close_dir(content);
         found
+    }
+
+    /// Opens `CONTENT/<directory>/<file>`, the path the box keeps audio under.
+    ///
+    /// Names are the eight upper-case hex digits FAT stores, formatted here
+    /// rather than taken from the caller: a lower-case or short name is a
+    /// different file on a FAT volume, and the failure would be "not found"
+    /// rather than anything that points at the cause.
+    pub fn open_content(&self, directory: u32, file: u32) -> Result<(RawFile, u32), &'static str> {
+        let mut folder_name = [0u8; 8];
+        let mut file_name = [0u8; 8];
+        write_hex8(&mut folder_name, directory);
+        write_hex8(&mut file_name, file);
+        let folder_name =
+            core::str::from_utf8(&folder_name).map_err(|_| "the directory name is not text")?;
+        let file_name =
+            core::str::from_utf8(&file_name).map_err(|_| "the file name is not text")?;
+
+        let content = self
+            .volumes
+            .open_dir(self.root, TONIE_CONTENT_DIR)
+            .map_err(|_| "no CONTENT directory on the card")?;
+        let folder = match self.volumes.open_dir(content, folder_name) {
+            Ok(folder) => folder,
+            Err(_) => {
+                let _ = self.volumes.close_dir(content);
+                return Err("no such content directory");
+            }
+        };
+
+        // The size comes from the directory entry rather than from the open
+        // file, because the decoder needs to know where the last page ends
+        // before it reads any of them.
+        let mut size = None;
+        let mut at = 0;
+        while let Some(entry) = nth_entry(&self.volumes, folder, at) {
+            at += 1;
+            if !entry.is_dir && entry.name.base_name() == file_name.as_bytes() {
+                size = Some(entry.size);
+                break;
+            }
+        }
+
+        let opened = self
+            .volumes
+            .open_file_in_dir(folder, file_name, Mode::ReadOnly)
+            .ok();
+        let _ = self.volumes.close_dir(folder);
+        let _ = self.volumes.close_dir(content);
+
+        match (opened, size) {
+            (Some(handle), Some(size)) => {
+                esp_println::println!(
+                    "teddiebox: content /CONTENT/{folder_name}/{file_name}, {size} bytes"
+                );
+                Ok((handle, size))
+            }
+            (Some(handle), None) => {
+                self.close_file(handle);
+                Err("the file is there but has no directory entry")
+            }
+            (None, _) => Err("no such content file"),
+        }
     }
 
     /// Opens a file in the root directory for reading.

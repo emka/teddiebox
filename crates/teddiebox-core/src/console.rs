@@ -30,6 +30,15 @@ pub enum Command {
     /// Bench step 8, joining steps 6 and 7. Opt-in like the others: it powers
     /// a rail, takes the I2S peripheral for good, and is loud.
     PlayWav,
+    /// Decode and play one named content file, `CONTENT/<dir>/<file>`.
+    ///
+    /// The Toniebox keeps its own system sounds under the reserved IDs
+    /// `00000000` and `00000001`, a few tens of kilobytes each against tens of
+    /// megabytes for a figure. Naming one is what makes them usable, both as a
+    /// start-up sound and as a playback fixture that finishes in seconds.
+    PlayContent { directory: u32, file: u32 },
+    /// Stop whatever is playing.
+    Stop,
     /// Decode and play the first TAF file on the card.
     ///
     /// Bench step 9. Opt-in like the rest, and the loudest thing here — it is
@@ -98,8 +107,9 @@ pub enum Command {
 /// Longest command line accepted. Anything longer cannot be a command, and is
 /// discarded rather than allowed to shift a buffer around.
 ///
-/// Sixteen rather than eight since `pw` carries eight hex digits after it.
-const MAX_LINE: usize = 16;
+/// Long enough for `play <8 hex>/<8 hex>`, which is the longest thing typed
+/// here at twenty-one characters.
+const MAX_LINE: usize = 24;
 
 /// Watches a byte stream for a command line.
 ///
@@ -141,6 +151,7 @@ impl CommandWatch {
                     b"sd" => Some(Command::Storage),
                     b"wav" => Some(Command::PlayWav),
                     b"taf" => Some(Command::PlayTaf),
+                    b"stop" => Some(Command::Stop),
                     b"nfc" => Some(Command::Nfc),
                     b"slix" => Some(Command::Unlock),
                     b"slixp" => Some(Command::ForceUnlock),
@@ -152,7 +163,9 @@ impl CommandWatch {
                     b"out 0" => Some(Command::Output(false)),
                     b"spk 1" => Some(Command::Speaker(true)),
                     b"spk 0" => Some(Command::Speaker(false)),
-                    other => parse_password(other).or_else(|| parse_codec_set(other)),
+                    other => parse_password(other)
+                        .or_else(|| parse_codec_set(other))
+                        .or_else(|| parse_play_content(other)),
                 }
             };
             self.len = 0;
@@ -168,6 +181,36 @@ impl CommandWatch {
         }
         None
     }
+}
+
+/// Reads exactly eight hex digits, as the Toniebox writes a content ID.
+fn hex_u32(digits: &[u8]) -> Option<u32> {
+    if digits.len() != 8 {
+        return None;
+    }
+    let mut value = 0u32;
+    for &byte in digits {
+        let nibble = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        };
+        value = (value << 4) | u32::from(nibble);
+    }
+    Some(value)
+}
+
+/// Reads `play <8 hex>/<8 hex>`, the path the box keeps its audio under.
+fn parse_play_content(line: &[u8]) -> Option<Command> {
+    let rest = line.strip_prefix(b"play ")?;
+    let mut halves = rest.split(|&b| b == b'/');
+    let directory = hex_u32(halves.next()?)?;
+    let file = hex_u32(halves.next()?)?;
+    if halves.next().is_some() {
+        return None;
+    }
+    Some(Command::PlayContent { directory, file })
 }
 
 /// Reads two hex digits, exactly.
@@ -353,6 +396,57 @@ mod tests {
     fn the_codec_power_down_command_fires_on_its_own_line() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"cdown\r"), Some(Command::CodecDown));
+    }
+
+    /// The box's own system sounds live at `CONTENT/00000000/` and
+    /// `CONTENT/00000001/` alongside the figures, and `taf` can only reach
+    /// whichever file it happens to find first. Naming one is what makes the
+    /// short ones usable as fixtures — seconds instead of the half hour a
+    /// real figure takes.
+    #[test]
+    fn the_play_command_carries_the_content_id_it_names() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"play 00000000/00000003\r"),
+            Some(Command::PlayContent {
+                directory: 0x0000_0000,
+                file: 0x0000_0003
+            })
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"play 1A2B3C4D/500304E0\r"),
+            Some(Command::PlayContent {
+                directory: 0x1A2B_3C4D,
+                file: 0x5003_04E0
+            })
+        );
+    }
+
+    /// Both halves are eight hex digits: that is how the Toniebox names them
+    /// on the card, and a short one would silently open a different file.
+    #[test]
+    fn a_malformed_content_id_does_not_fire() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"play 00000000\r"), None, "no file");
+        assert_eq!(
+            feed_all(&mut watch, b"play 0000000/00000003\r"),
+            None,
+            "short"
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"play 0000000G/00000003\r"),
+            None,
+            "not hex"
+        );
+    }
+
+    /// Stopping has to be its own word rather than a second `taf`: playback is
+    /// loud, and the command that ends it must not be a typo away from one
+    /// that starts it.
+    #[test]
+    fn the_stop_command_fires_on_its_own_line() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"stop\r"), Some(Command::Stop));
     }
 
     #[test]

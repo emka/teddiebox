@@ -253,6 +253,21 @@ static SCRATCH_TAKEN: AtomicBool = AtomicBool::new(false);
 /// The guard is what makes the `static mut` sound rather than merely
 /// convention: a second caller gets `None` instead of a second `&mut` to the
 /// same bytes.
+/// Set to ask whatever is playing to stop at the next frame.
+///
+/// Read by the playback loop rather than acted on from outside it: the DMA
+/// transfer owns the I2S transmitter and the buffer, and only the loop that
+/// created it can hand them back.
+pub static STOP: AtomicBool = AtomicBool::new(false);
+
+/// Hands the scratch back, so another playback can have it.
+///
+/// Playback used to be terminal — the decoder was claimed once for the life of
+/// the program — which made `stop` meaningless and a second `taf` impossible.
+fn release_scratch() {
+    SCRATCH_TAKEN.store(false, Ordering::Relaxed);
+}
+
 fn take_scratch() -> Option<&'static mut DecodeScratch> {
     if SCRATCH_TAKEN.swap(true, Ordering::Relaxed) {
         return None;
@@ -277,31 +292,91 @@ fn as_bytes(pcm: &[i16]) -> &[u8] {
 ///
 /// Terminal, for the same reason as the others: the DMA buffer and the decode
 /// scratch are each claimed once. `rb` restarts the box.
-pub async fn play_first_taf(
+/// Which audio file a playback should decode.
+pub enum Source {
+    /// Whatever the card offers: a `.TAF` in the root if there is one, else
+    /// the first Tonie under `CONTENT/`.
+    First,
+    /// One named `CONTENT/<directory>/<file>`.
+    Content { directory: u32, file: u32 },
+}
+
+/// Plays one TAF, handing back the hardware it borrowed.
+///
+/// Returning the I2S transmitter and the DMA buffer is what makes playback
+/// something the box can do twice. It used to be terminal — `rb` between every
+/// attempt — which also made stopping meaningless, since nothing could follow.
+pub async fn play_taf(
+    card: &Mounted,
+    i2s_tx: I2sTx<'static, Blocking>,
+    buffer: DmaTxStreamBuf,
+    source: Source,
+) -> (
+    Result<(), &'static str>,
+    I2sTx<'static, Blocking>,
+    DmaTxStreamBuf,
+) {
+    match play_taf_inner(card, i2s_tx, buffer, source).await {
+        Ok((tx, buffer)) => (Ok(()), tx, buffer),
+        Err((reason, tx, buffer)) => (Err(reason), tx, buffer),
+    }
+}
+
+type Reclaimed = (I2sTx<'static, Blocking>, DmaTxStreamBuf);
+type PlaybackError = (&'static str, I2sTx<'static, Blocking>, DmaTxStreamBuf);
+
+async fn play_taf_inner(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
     mut buffer: DmaTxStreamBuf,
-) -> Result<(), &'static str> {
-    let scratch = take_scratch().ok_or("the decoder has already been used")?;
+    source: Source,
+) -> Result<Reclaimed, PlaybackError> {
+    let Some(scratch) = take_scratch() else {
+        return Err(("the decoder is already in use", i2s_tx, buffer));
+    };
 
     // A `.TAF` copied into the root wins, so a specific file can be chosen for
     // a test. Failing that, the card's own content is used where the Toniebox
     // keeps it — which means step 9 runs against the stock card without
     // anything being written to it.
-    let (file, size) = match card.find_by_extension(b"TAF") {
-        Some((name, size)) => {
-            esp_println::println!("teddiebox: taf /{name}, {size} bytes");
-            (card.open_file(name)?, size)
+    let opened = match source {
+        Source::Content { directory, file } => card.open_content(directory, file),
+        Source::First => match card.find_by_extension(b"TAF") {
+            Some((name, size)) => {
+                esp_println::println!("teddiebox: taf /{name}, {size} bytes");
+                card.open_file(name).map(|handle| (handle, size))
+            }
+            None => card
+                .open_first_tonie()
+                .ok_or("no .TAF in the root and no CONTENT/<hex>/500304E0 on the card"),
+        },
+    };
+    let (file, size) = match opened {
+        Ok(pair) => pair,
+        Err(reason) => {
+            release_scratch();
+            return Err((reason, i2s_tx, buffer));
         }
-        None => card
-            .open_first_tonie()
-            .ok_or("no .TAF in the root and no CONTENT/<hex>/500304E0 on the card")?,
     };
     esp_println::println!("teddiebox: taf {size} bytes");
     let pages = CardPages::new(card, file, size);
 
-    let opus = LibOpus::new(&mut scratch.opus).map_err(|_| "the Opus decoder would not start")?;
-    let mut decoder = TafDecoder::open(pages, opus).map_err(|_| "not a readable TAF file")?;
+    let opus = match LibOpus::new(&mut scratch.opus) {
+        Ok(opus) => opus,
+        Err(_) => {
+            card.close_file(file);
+            release_scratch();
+            return Err(("the Opus decoder would not start", i2s_tx, buffer));
+        }
+    };
+    let mut decoder = match TafDecoder::open(pages, opus) {
+        Ok(decoder) => decoder,
+        Err(_) => {
+            card.close_file(file);
+            release_scratch();
+            return Err(("not a readable TAF file", i2s_tx, buffer));
+        }
+    };
     esp_println::println!(
         "teddiebox: taf audio id {:#010x}, {} chapters",
         decoder.header().audio_id,
@@ -333,7 +408,11 @@ pub async fn play_first_taf(
                     pending = 0..samples * 2;
                 }
                 Ok(None) => break,
-                Err(_) => return Err("the first frames would not decode"),
+                Err(_) => {
+                    card.close_file(file);
+                    release_scratch();
+                    return Err(("the first frames would not decode", i2s_tx, buffer));
+                }
             }
         }
         let pushed = buffer.push(&as_bytes(&scratch.pcm)[pending.clone()]);
@@ -347,9 +426,10 @@ pub async fn play_first_taf(
 
     let mut transfer = match i2s_tx.write(buffer) {
         Ok(transfer) => transfer,
-        Err(_) => {
+        Err((_, tx, buffer)) => {
             card.close_file(file);
-            return Err("I2S would not start");
+            release_scratch();
+            return Err(("I2S would not start", tx, buffer));
         }
     };
 
@@ -362,7 +442,12 @@ pub async fn play_first_taf(
     // that would cause a dropout.
     let mut decode_us: u64 = 0;
 
+    let mut stopped = false;
     loop {
+        if STOP.swap(false, Ordering::Relaxed) {
+            stopped = true;
+            break;
+        }
         cushion.observe(BUFFER_BYTES.saturating_sub(transfer.available_bytes()) as u32);
 
         if pending.is_empty() {
@@ -418,13 +503,26 @@ pub async fn play_first_taf(
         yield_now().await;
     }
 
-    while !transfer.is_done() {
-        yield_now().await;
+    // A stop must not wait for the buffer to drain — that is most of a second
+    // of audio after the word was typed, which does not read as having
+    // stopped.
+    if !stopped {
+        while !transfer.is_done() {
+            yield_now().await;
+        }
     }
+    let (i2s_tx, buffer) = transfer.stop();
 
     card.close_file(file);
+    release_scratch();
 
     let elapsed = started.elapsed();
+    if stopped {
+        esp_println::println!(
+            "teddiebox: taf stopped after {frames} frames, {} s",
+            elapsed.as_secs()
+        );
+    }
     esp_println::println!(
         "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns",
         elapsed.as_secs(),
@@ -444,5 +542,5 @@ pub async fn play_first_taf(
         card_us * 100 / played_us,
         decode_us.saturating_sub(card_us) * 100 / played_us
     );
-    Ok(())
+    Ok((i2s_tx, buffer))
 }

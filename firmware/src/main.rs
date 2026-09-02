@@ -487,6 +487,7 @@ const REQUEST_TONE: u8 = 1;
 const REQUEST_WALK: u8 = 2;
 const REQUEST_WAV: u8 = 3;
 const REQUEST_TAF: u8 = 4;
+const REQUEST_CONTENT: u8 = 5;
 
 /// What the console has asked the NFC reader to do.
 ///
@@ -504,6 +505,10 @@ const NFC_LOCK: u8 = 4;
 /// RAM only, and deliberately: it is a credential, it is never written to the
 /// card or committed, and it dies with the next reset.
 static NFC_PASSWORD: AtomicU32 = AtomicU32::new(0);
+
+/// Which content file `play` names, as two halves of `CONTENT/<dir>/<file>`.
+static CONTENT_DIRECTORY: AtomicU32 = AtomicU32::new(0);
+static CONTENT_FILE: AtomicU32 = AtomicU32::new(0);
 
 /// Asked for before the rails go down, answered when the codec is quiet.
 ///
@@ -674,7 +679,11 @@ async fn media(
         // The console loop raised the storage rail before setting the request.
         // Devices need their supply settled before they answer — a scan against
         // an unsettled rail is what invented an I2C device at 0x09 in step 4.
-        if matches!(request, REQUEST_WALK | REQUEST_WAV | REQUEST_TAF) && card.is_none() {
+        if matches!(
+            request,
+            REQUEST_WALK | REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT
+        ) && card.is_none()
+        {
             let Some((spi, cs)) = bus.take() else {
                 esp_println::println!("teddiebox: the card bus is gone — reboot to retry");
                 continue;
@@ -716,7 +725,7 @@ async fn media(
                 }
             }
 
-            REQUEST_WAV | REQUEST_TAF => {
+            REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT => {
                 let Some(card) = card.as_ref() else {
                     continue;
                 };
@@ -734,13 +743,34 @@ async fn media(
                     continue;
                 };
 
-                let outcome = if request == REQUEST_WAV {
-                    audio::play_first_wav(card, tx, buffer).await
+                // A stop typed before the first frame must not be waiting for
+                // the next playback to start.
+                audio::STOP.store(false, Ordering::Relaxed);
+
+                if request == REQUEST_WAV {
+                    if let Err(reason) = audio::play_first_wav(card, tx, buffer).await {
+                        esp_println::println!("teddiebox: playback failed — {reason}");
+                    }
                 } else {
-                    audio::play_first_taf(card, tx, buffer).await
-                };
-                if let Err(reason) = outcome {
-                    esp_println::println!("teddiebox: playback failed — {reason}");
+                    let source = if request == REQUEST_CONTENT {
+                        audio::Source::Content {
+                            directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
+                            file: CONTENT_FILE.load(Ordering::Relaxed),
+                        }
+                    } else {
+                        audio::Source::First
+                    };
+                    // The hardware comes back, so playing again needs no
+                    // reboot — which is what makes stopping worth anything.
+                    let (outcome, tx, buffer) = audio::play_taf(card, tx, buffer, source).await;
+                    if let Err(reason) = outcome {
+                        esp_println::println!("teddiebox: playback failed — {reason}");
+                    }
+                    i2s_tx = Some(tx);
+                    wav_buffer = Some(buffer);
+                    // Nothing is playing now, so the speaker has no business
+                    // being driven.
+                    OUTPUT_REQUEST.store(OUTPUT_DOWN, Ordering::Relaxed);
                 }
             }
 
@@ -882,7 +912,7 @@ async fn main(spawner: Spawner) {
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf (loud) | sd | nfc pw slix slixp lock | cinit cdown cset cclr out spk"
+        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock | cinit cdown cset cclr out spk"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -1081,6 +1111,16 @@ async fn main(spawner: Spawner) {
                     board.apply(gates.power(Rail::Storage, true));
                     OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
                     REQUEST.store(REQUEST_TAF, Ordering::Relaxed);
+                }
+                Some(Command::PlayContent { directory, file }) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+                    CONTENT_DIRECTORY.store(directory, Ordering::Relaxed);
+                    CONTENT_FILE.store(file, Ordering::Relaxed);
+                    REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
+                }
+                Some(Command::Stop) => {
+                    audio::STOP.store(true, Ordering::Relaxed);
                 }
                 Some(Command::Storage) => {
                     // The rail comes up here because this loop owns the pins.
