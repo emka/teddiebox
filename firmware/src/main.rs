@@ -506,7 +506,35 @@ async fn nfc_reader(
 
     loop {
         match NFC_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
-            NFC_INVENTORY => reader.inventory(),
+            NFC_INVENTORY => {
+                reader.inventory();
+
+                // Is the antenna even connected? With our own field off, the
+                // RSSI register reports RF arriving from outside, so an
+                // external source proves the coil is coupled to the chip.
+                // Nothing else here can tell a disconnected antenna from an
+                // empty plate.
+                esp_println::println!(
+                    "teddiebox: nfc listening for an external field for 6 s — \
+                     hold an NFC phone against the plate"
+                );
+                reader.set_field(false);
+                let mut peak = 0u8;
+                for _ in 0..60 {
+                    peak = peak.max(reader.rssi());
+                    Timer::after(Duration::from_millis(100)).await;
+                }
+                reader.set_field(true);
+                if peak == 0 {
+                    esp_println::println!(
+                        "teddiebox: nfc heard nothing at all — the antenna is not coupled"
+                    );
+                } else {
+                    esp_println::println!(
+                        "teddiebox: nfc external field peaked at {peak:#04x} — the antenna works"
+                    );
+                }
+            }
             NFC_UNLOCK => {
                 let password = NFC_PASSWORD.load(Ordering::Relaxed);
                 if password == 0 {

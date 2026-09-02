@@ -100,6 +100,44 @@ impl Reader {
         }
     }
 
+    /// Turns the reader's own field off, or back on.
+    ///
+    /// With the field off, register 0x0F reports the RF amplitude *arriving*
+    /// at the antenna (SLOS757C Table 6-18: "RF amplitude during RF-off
+    /// state"). That turns the reader into a field detector, which is the only
+    /// way to ask whether the antenna is connected without involving a tag.
+    pub fn set_field(&mut self, on: bool) {
+        // Not simply clearing rf_on. SLOS757C Table 6-2 defines bit 5 as
+        // "transmitter on, receivers on", so clearing it alone silences the
+        // receiver too and the measurement reads zero whatever the antenna is
+        // doing. Bit 1, `rec_on`, exists for precisely this case: "receiver
+        // activated for external field measurement — forces enabling of
+        // receiver and TX oscillator". Bit 0 is the supply selection and is
+        // left as the driver set it.
+        const LISTEN: u8 = 0x03; // rec_on + supply, transmitter off
+        let value = if on {
+            trf7962a::regs::CHIP_STATUS_RF_ON
+        } else {
+            LISTEN
+        };
+        if self
+            .trf
+            .write_register(trf7962a::regs::CHIP_STATUS_CONTROL, value)
+            .is_err()
+        {
+            esp_println::println!("teddiebox: nfc could not change the field");
+        }
+    }
+
+    /// The RSSI register's signal bits, with the oscillator flag masked off.
+    pub fn rssi(&mut self) -> u8 {
+        const RSSI: u8 = 0x0F;
+        match self.trf.read_register(RSSI) {
+            Ok(value) => value & 0x3F,
+            Err(_) => 0,
+        }
+    }
+
     /// Says whether the reader heard anything at all.
     ///
     /// Silence has three quite different causes — no tag in the field, a tag
