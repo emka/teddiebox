@@ -310,7 +310,7 @@ fn the_air_is_left_quiet_for_t2_after_a_tag_has_answered() {
 }
 
 /// A tag that has refused a password stops answering everything until its
-/// supply is cycled — SL2S2002 §9.4.3.2, "if the IC receives an invalid
+/// supply is cycled — SL2S2602 §9.5.3.2, "if the IC receives an invalid
 /// password, it will not execute any following command until a Power-On Reset
 /// (POR) (RF reset) is executed". A passive tag's only supply is the reader's
 /// field, so the reset is the reader's to give: drop the field, let the tag's
@@ -350,7 +350,7 @@ const SET_PASSWORD_VENDOR: [u8; 8] = [0x02, 0xB3, 0x04, 0x04, 0x0F, 0x0F, 0x0F, 
 
 /// A tag may hold any of several passwords, and the wrong one is answered
 /// with silence — after which the tag ignores everything until its field has
-/// been taken away (SL2S2002 §9.4.3.2). So a driver that simply tries the
+/// been taken away (SL2S2602 §9.5.3.2). So a driver that simply tries the
 /// next password sends it to a tag that has stopped listening, and reports
 /// the plate empty whichever password was right.
 #[test]

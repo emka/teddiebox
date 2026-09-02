@@ -145,7 +145,7 @@ pub const T2_QUIET_US: u32 = 320;
 /// How long the field is held down to reset the tags standing in it.
 ///
 /// A tag that has refused a password answers nothing at all until it has been
-/// through a power-on reset — SL2S2002 §9.4.3.2, "it will not execute any
+/// through a power-on reset — SL2S2602 §9.5.3.2, "it will not execute any
 /// following command until a Power-On Reset (POR) (RF reset) is executed" —
 /// and a passive tag's only supply is the reader's field. The reservoir it
 /// runs on is small, so this only has to outlast a few microseconds of stored
@@ -258,7 +258,7 @@ where
     ///
     /// A tag that has been sent a password it does not accept stops answering
     /// everything — GET RANDOM NUMBER included — until its supply has been
-    /// interrupted (SL2S2002 §9.4.3.2). Nothing the reader can *say* to it
+    /// interrupted (SL2S2602 §9.5.3.2). Nothing the reader can *say* to it
     /// helps, because it has stopped listening; the only lever is the field
     /// it draws its power from.
     ///

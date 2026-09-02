@@ -9,15 +9,23 @@
 //! SLIX-L, both of which answered inventory after being unlocked this way.
 //!
 //! Named for SLIX by habit, but **plain ICODE SLIX has no privacy mode at
-//! all**: SL2S2002 §1.3 offers only a password-protected EAS/AFI, and its
-//! sole password identifier is `10h`. Privacy, the identifier `04h` used
-//! here, and ENABLE PRIVACY belong to SLIX-L and SLIX2 (SL2S5002 §1.3). The
-//! two parts share GET RANDOM NUMBER and SET PASSWORD, which is why the
-//! plain-SLIX datasheet is still worth reading for those two.
+//! all** — it offers only a password-protected EAS/AFI, at password
+//! identifier `10h`. Privacy belongs to SLIX-L and SLIX2 (SL2S5002 §1.3), so
+//! **SL2S2602, the SLIX2 product data sheet, is the reference for everything
+//! here**; it is the only public one in the family
+//! that carries the full command table.
+//!
+//! It settles two things this driver had to find out the hard way. Table 13
+//! gives the password identifiers — `01h` read, `02h` write, **`04h`
+//! privacy**, `08h` destroy, `10h` EAS/AFI. And §9.5.3.2: "the SET PASSWORD
+//! command can only be executed in Addressed or Selected mode **except for
+//! the Privacy password**", which is what makes the unaddressed request
+//! below correct rather than a violation — a tag in privacy mode will not
+//! give up the UID an addressed request would need.
 //!
 //! One rule from it governs everything above: **a password the tag does not
 //! hold is answered with silence, and the tag then ignores every command
-//! until its field has been taken away** (SL2S2002 §9.4.3.2). Trying a second
+//! until its field has been taken away** (SL2S2602 §9.5.3.2). Trying a second
 //! password without that reset asks a tag that has stopped listening.
 //!
 //! The Toniebox's own password is a caller-supplied constant, not held here.
@@ -42,14 +50,21 @@ pub const PASSWORD_ID_PRIVACY: u8 = 0x04;
 
 /// NXP's factory default privacy password.
 ///
-/// A SLIX-L that has never had a password written to it still holds this one,
-/// so a plain tag off the reel is readable without knowing anything about it.
-/// Confirmed at the bench on 2026-09-02: a SLIX-L that refused the Toniebox
-/// password accepted this and then answered inventory with
-/// `E00403504E3D2C1B`.
+/// SL2S2602 §9.2.3, the configuration ICs are delivered in: "all password
+/// bytes are 0Fh for the Privacy and Destroy passwords". A tag that has never
+/// had a password written to it still holds this, so a plain one off the reel
+/// is readable without knowing anything about it. Confirmed at the bench on
+/// 2026-09-02: a SLIX-L that refused the Toniebox password accepted this and
+/// then answered inventory with `E00403504E3D2C1B`.
 ///
 /// It is a published default, not a secret, which is why it can live here
 /// while the Toniebox's own password cannot.
+///
+/// **The Destroy password ships as the same value**, and DESTROY (`B9h`) sits
+/// next to ENABLE PRIVACY (`BAh`). On a factory tag a one-bit slip in the
+/// command code is therefore not a failed request — it is an irreversibly
+/// dead tag. Neither command is implemented here, and neither should be added
+/// without the request format in front of you.
 pub const VENDOR_DEFAULT_PASSWORD: u32 = 0x0F0F_0F0F;
 
 /// Builds the GET RANDOM NUMBER request.
