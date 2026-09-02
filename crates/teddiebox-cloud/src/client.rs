@@ -27,7 +27,15 @@ pub fn fetch<T: Read + Write>(
     buf: &mut [u8],
 ) -> Result<Outcome, CloudError> {
     let mut request_buf = [0u8; 512];
-    let n = build_content_request(&ContentRequest { uid, etag, server }, &mut request_buf)?;
+    let n = build_content_request(
+        &ContentRequest {
+            uid,
+            etag,
+            server,
+            from: None,
+        },
+        &mut request_buf,
+    )?;
     transport
         .write_all(&request_buf[..n])
         .map_err(|_| CloudError::Transport)?;

@@ -20,10 +20,13 @@ pub type ETag = String<MAX_ETAG>;
 #[derive(Debug, Clone)]
 pub struct ContentRequest<'a> {
     pub uid: [u8; 8],
-    /// Echoed back as `If-None-Match`, making the request conditional.
+    /// Echoed back as `If-None-Match` on a fresh request, or as `If-Range`
+    /// when resuming.
     pub etag: Option<&'a ETag>,
     /// `host:port` of the teddyCloud server.
     pub server: &'a str,
+    /// Where to resume. `Some(n)` asks for `bytes=n-`.
+    pub from: Option<u32>,
 }
 
 /// Writes a conditional GET for the content of `tag` into `out`.
@@ -44,8 +47,17 @@ pub fn build_content_request(
     let server = request.server;
     write!(buf, " HTTP/1.1\r\nHost: {server}\r\n").map_err(|_| CloudError::RequestTooLong)?;
 
-    if let Some(tag) = request.etag {
-        write!(buf, "If-None-Match: {tag}\r\n").map_err(|_| CloudError::RequestTooLong)?;
+    match (request.from, request.etag) {
+        (Some(from), etag) => {
+            write!(buf, "Range: bytes={from}-\r\n").map_err(|_| CloudError::RequestTooLong)?;
+            if let Some(tag) = etag {
+                write!(buf, "If-Range: {tag}\r\n").map_err(|_| CloudError::RequestTooLong)?;
+            }
+        }
+        (None, Some(tag)) => {
+            write!(buf, "If-None-Match: {tag}\r\n").map_err(|_| CloudError::RequestTooLong)?;
+        }
+        (None, None) => {}
     }
 
     write!(buf, "Connection: close\r\n\r\n").map_err(|_| CloudError::RequestTooLong)?;
@@ -87,6 +99,19 @@ mod tests {
             uid: UID,
             etag,
             server: "box.lan:8080",
+            from: None,
+        };
+        let n = build_content_request(&request, &mut out).unwrap();
+        heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
+    }
+
+    fn build_from(from: Option<u32>, etag: Option<&ETag>) -> heapless::String<512> {
+        let mut out = [0u8; 512];
+        let request = ContentRequest {
+            uid: UID,
+            etag,
+            server: "box.lan:8080",
+            from,
         };
         let n = build_content_request(&request, &mut out).unwrap();
         heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
@@ -135,6 +160,7 @@ mod tests {
             uid: UID,
             etag: None,
             server: &server,
+            from: None,
         };
         let n = build_content_request(&request, &mut out).unwrap();
         assert!(n > 512, "built {n} bytes");
@@ -148,10 +174,54 @@ mod tests {
             uid: UID,
             etag: None,
             server: "box.lan:8080",
+            from: None,
         };
         assert_eq!(
             build_content_request(&request, &mut out),
             Err(CloudError::RequestTooLong)
         );
+    }
+
+    #[test]
+    fn a_resumed_download_asks_for_the_bytes_it_is_missing() {
+        let req = build_from(Some(4096), None);
+        assert!(req.contains("Range: bytes=4096-\r\n"), "got: {req}");
+    }
+
+    /// `If-None-Match` alongside a `Range` invites a 304, which says nothing
+    /// about whether the partial file on the card is still the right prefix.
+    /// `If-Range` answers exactly the two questions a resume has: continue
+    /// (206), or start again (200).
+    #[test]
+    fn a_resumed_download_validates_with_if_range_not_if_none_match() {
+        let etag = ETag::try_from("\"v1\"").unwrap();
+        let req = build_from(Some(4096), Some(&etag));
+        assert!(req.contains("If-Range: \"v1\"\r\n"), "got: {req}");
+        assert!(!req.contains("If-None-Match"), "got: {req}");
+    }
+
+    #[test]
+    fn a_fresh_download_asks_for_no_range() {
+        let req = build_from(None, None);
+        assert!(!req.contains("Range:"), "got: {req}");
+    }
+
+    /// Without a range, an etag is still a revalidation and still belongs in
+    /// `If-None-Match`.
+    #[test]
+    fn without_a_range_an_etag_is_still_a_conditional_get() {
+        let etag = ETag::try_from("\"v1\"").unwrap();
+        let req = build_from(None, Some(&etag));
+        assert!(req.contains("If-None-Match: \"v1\"\r\n"), "got: {req}");
+        assert!(!req.contains("If-Range"), "got: {req}");
+    }
+
+    #[test]
+    fn a_resume_from_zero_is_still_a_range_request() {
+        // Zero is a legitimate resume point after a sidecar was written but
+        // no body byte ever landed. Treating it as "no range" would send an
+        // unconditional GET and silently discard the etag check.
+        let req = build_from(Some(0), None);
+        assert!(req.contains("Range: bytes=0-\r\n"), "got: {req}");
     }
 }
