@@ -110,6 +110,9 @@ const FIFO_COUNT_MASK: u8 = 0x0F;
 /// nothing answering is the ordinary empty plate, not an error.
 const IRQ_TX: u8 = 0x80;
 const IRQ_RX_STARTED: u8 = 0x40;
+/// The FIFO wants servicing: emptying during a transmit, filling during a
+/// reception. Never the end of either.
+const IRQ_FIFO: u8 = 0x20;
 const IRQ_ERRORS: u8 = 0x1E;
 
 /// How long the reader is given to signal that an exchange finished.
@@ -295,12 +298,27 @@ where
         }
         self.transmit(request)?;
 
-        if !self.wait_for_response()? {
-            return Ok(0);
-        }
         // Reading the status register clears the interrupt. Leaving it set
         // would make the next exchange return instantly on a stale assertion.
-        let mut status = self.read_irq_status()?;
+        //
+        // A frame of five bytes or more interrupts part-way through its own
+        // transmission — SLOS757G §6.12.5, "when the number of bytes in the
+        // FIFO reaches 3" — to ask for more data. This driver preloads the
+        // whole request, so there is never more to give and that interrupt is
+        // not the end of anything. Measured for an eight-byte frame: 0xA0 at
+        // 1.4 ms, then 0x80 at 1.6 ms. Acting on the first resets the FIFO
+        // mid-frame, the tag receives a truncated request and says nothing,
+        // and because three-byte requests never reach the threshold this
+        // looked exactly like a password being refused.
+        let mut status = loop {
+            if !self.wait_for_response()? {
+                return Ok(0);
+            }
+            let status = self.read_irq_status()?;
+            if status & IRQ_FIFO == 0 {
+                break status;
+            }
+        };
 
         // The reader interrupts twice: once when its own transmit finishes,
         // and again when the tag has answered. Reading the FIFO on the first

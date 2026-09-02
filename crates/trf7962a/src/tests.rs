@@ -625,3 +625,52 @@ fn a_reception_error_carries_the_reader_s_own_reason() {
     delay.done();
     irq.done();
 }
+
+/// A frame of five bytes or more interrupts part-way through its own
+/// transmission, and that is not the end of it.
+///
+/// SLOS757G §6.12.5: "if the number of bytes to be transmitted is higher or
+/// equal to 5, then the interrupt is generated. This occurs also when the
+/// number of bytes in the FIFO reaches 3", so the MCU can load more. This
+/// driver preloads the whole request, so there is never more to load and the
+/// interrupt is simply not the end of the transmit.
+///
+/// Measured on the board for the eight-byte SET PASSWORD: 0xA0 at 1.4 ms —
+/// transmit in progress, FIFO running low — then 0x80 at 1.6 ms when it
+/// actually finished. Taking the first for the end resets the FIFO in the
+/// middle of the frame, so the tag receives a truncated request and says
+/// nothing at all. Three-byte requests are below the threshold and worked
+/// throughout, which is what made this look like a password being refused.
+#[test]
+fn a_fifo_interrupt_during_a_transmit_is_not_the_end_of_it() {
+    let reply = [0x00u8, 0xCD, 0xAB];
+    // Eight bytes: the length field splits as 0x00 / 0x80.
+    let mut spi = spi_write(vec![
+        0x8F, 0x91, 0x3D, 0x00, 0x80, 0x02, 0xB3, 0x04, 0x04, 0xCD, 0xAB, 0xCD, 0xAB,
+    ]);
+    spi.extend(spi_read_irq(0xA0)); // transmitting still, FIFO down to three
+    spi.extend(spi_read_irq(0x80)); // now the transmit is finished
+    spi.extend(spi_write(vec![0x8F]));
+    spi.extend(spi_read_irq(0x40));
+    spi.extend(spi_read(0x5C, 0x02));
+    spi.extend(fifo_burst(&reply));
+
+    let mut irq = irq_after(0);
+    irq.extend(irq_exchange());
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&polls(0)),
+        PinMock::new(&irq),
+    );
+    let mut response = [0u8; MAX_RESPONSE];
+    assert_eq!(
+        r.transceive(&SET_PASSWORD_0, &mut response),
+        Ok(3),
+        "the frame is preloaded, so a request for more data is only noise"
+    );
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
