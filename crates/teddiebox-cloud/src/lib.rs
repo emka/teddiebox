@@ -5,10 +5,12 @@
 pub mod client;
 pub mod request;
 pub mod response;
+pub mod stream;
 
 pub use client::{fetch, Outcome};
 pub use request::{build_content_request, ContentRequest, ETag};
 pub use response::{parse_head, ContentRange, ResponseHead};
+pub use stream::{begin, Begun, Body};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloudError {

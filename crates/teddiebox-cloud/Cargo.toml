@@ -7,3 +7,7 @@ license.workspace = true
 [dependencies]
 heapless.workspace = true
 embedded-io.workspace = true
+embedded-io-async.workspace = true
+
+[dev-dependencies]
+pollster = "1.0"
