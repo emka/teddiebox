@@ -35,6 +35,13 @@ pub mod page0 {
 pub mod page1 {
     pub const HP_DRIVERS: u8 = 0x1F;
     pub const SPK_AMP: u8 = 0x20;
+    /// Output driver pop-removal settings: D7 orders the power-down, D6-D3 the
+    /// driver power-on time and D2-D1 the gain ramp step.
+    pub const HP_POP_REMOVAL: u8 = 0x21;
+    /// The datasheet calls this MICBIAS, but D7 is the device software
+    /// power-down enable and that is the only bit this driver uses. Named for
+    /// the datasheet so it can be found there.
+    pub const MICBIAS: u8 = 0x2E;
     /// DAC_L and DAC_R output mixer routing.
     pub const OUTPUT_MIXER_ROUTING: u8 = 0x23;
     /// Analog volume controls, one per output driver.

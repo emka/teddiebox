@@ -15,6 +15,10 @@ pub const DEFAULT_ADDRESS: u8 = 0x18;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error<E> {
     Bus(E),
+    /// The output stages did not report themselves off in time. Cutting the
+    /// supply now will be heard, so the caller is told rather than left to
+    /// assume the codec is quiet.
+    StillPowered,
 }
 
 pub struct Tlv320Dac3100<I2C> {
@@ -130,6 +134,26 @@ where
         self.write_reg(0, page0::DAC_MUTE_CTRL, value)
     }
 
+    /// Runs the codec's own power-down and waits for it to finish.
+    ///
+    /// Setting D7 of page 1 register 46 hands the sequence to the codec, which
+    /// — with `HP_POP_REMOVAL` D7 set in `INIT_ANALOG` — takes the amplifiers
+    /// down before the DAC. That ordering is the datasheet's stated way to
+    /// "optimize power-down POP", and it only helps if the supply is still
+    /// there while it happens, so this waits for the stages to report off
+    /// rather than returning as soon as the write lands.
+    pub fn power_down<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
+        self.write_reg(1, page1::MICBIAS, SOFTWARE_POWER_DOWN)?;
+        for _ in 0..POWER_DOWN_POLLS {
+            let f = self.power_flags()?;
+            if !f.left_dac && !f.right_dac && !f.hpl_driver && !f.left_class_d && !f.right_class_d {
+                return Ok(());
+            }
+            delay.delay_ms(POWER_DOWN_POLL_MS);
+        }
+        Err(Error::StillPowered)
+    }
+
     /// What the codec says actually powered up.
     ///
     /// Writing a power-up bit is a request; this register is the answer. A
@@ -219,11 +243,25 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // painfully loud on a bench with the box open; real content can raise it
     // deliberately rather than inheriting it.
     (1, page1::SPK_DRIVER_GAIN, 0x04),
+    // Pop removal, written rather than inherited. D7 set orders a software
+    // power-down to take the amplifiers down before the DAC — Table 6-101's
+    // own "this is to optimize power-down POP". D6-D3 (driver power-on time,
+    // 304 ms) and D2-D1 (gain ramp step, 3.9 ms) keep their reset values, so
+    // this changes the power-down and nothing about the power-up.
+    (1, page1::HP_POP_REMOVAL, 0xBE),
     // The drivers last. D7 and D6 power the HPL and HPR drivers; D2 is
     // reserved and must be 1. Common mode stays at its 1.35 V reset value.
     (1, page1::HP_DRIVERS, 0xC4),
     (1, page1::SPK_AMP, 0x86),
 ];
+
+/// D7 of page 1 register 46: device software power down enabled.
+const SOFTWARE_POWER_DOWN: u8 = 0x80;
+/// How long between reads of the power flags while the codec shuts down.
+pub const POWER_DOWN_POLL_MS: u32 = 20;
+/// How many such reads before giving up. Twenty-five covers half a second,
+/// comfortably past the ramp the drivers came up on.
+pub const POWER_DOWN_POLLS: u32 = 25;
 
 /// How long the output drivers are given to finish ramping.
 ///
@@ -322,6 +360,7 @@ mod tests {
             w(vec![0x28, 0x06]), // HPL driver gain
             w(vec![0x29, 0x06]), // HPR driver gain
             w(vec![0x2A, 0x04]), // speaker driver gain: 6 dB, unmuted
+            w(vec![0x21, 0xBE]), // pop removal: power down amps before the DAC
             w(vec![0x1F, 0xC4]), // headphone drivers: HPL and HPR powered up
             w(vec![0x20, 0x86]), // speaker amp on
             w(vec![0x00, 0x00]), // back to page 0
@@ -352,6 +391,77 @@ mod tests {
     /// hears the rest of that ramp. Measured on the board: the HPL driver
     /// reports itself unpowered when read straight after init and powered
     /// 400 ms later, which is the ramp this waits out.
+    /// SLAS671C Table 6-101, page 1 / register 33 D7: with it set, a software
+    /// power-down takes the DAC down "only after HP and SP amplifiers are
+    /// completely powered down. This is to optimize power-down POP". Its reset
+    /// value is 0, which powers everything down together — and this driver was
+    /// inheriting that.
+    #[test]
+    fn the_pop_removal_register_orders_the_power_down_after_the_amplifiers() {
+        let &(_, _, value) = INIT_ANALOG
+            .iter()
+            .find(|&&(p, r, _)| p == 1 && r == page1::HP_POP_REMOVAL)
+            .expect("the de-pop settings must be written rather than inherited");
+        assert_eq!(
+            value & 0x80,
+            0x80,
+            "D7 clear powers the DAC down alongside the amplifiers, which pops"
+        );
+    }
+
+    /// The power-down is a request the codec services over time, so it is not
+    /// finished when the write returns. Cutting the rail while the class-D
+    /// stage is still powered is exactly the pop this exists to avoid, so the
+    /// driver waits for the flags to go clear rather than for a guessed delay.
+    #[test]
+    fn powering_down_waits_for_the_output_stages_to_report_off() {
+        let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
+        let r =
+            |reg: u8, value: u8| Transaction::write_read(DEFAULT_ADDRESS, vec![reg], vec![value]);
+        let expected = [
+            w(vec![0x00, 0x01]), // page 1
+            w(vec![0x2E, 0x80]), // device software power down enabled
+            w(vec![0x00, 0x00]), // page 0 to read the flags
+            r(0x25, 0x98),       // still powered: DACs and left class-D
+            r(0x25, 0x00),       // everything off
+        ];
+
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        let mut delay = CheckedDelay::new(&[DelayTransaction::delay_ms(POWER_DOWN_POLL_MS)]);
+
+        assert_eq!(dac.power_down(&mut delay), Ok(()));
+        dac.release().done();
+        delay.done();
+    }
+
+    /// A codec that never reports itself off must not stall a reboot forever.
+    #[test]
+    fn powering_down_gives_up_rather_than_waiting_for_ever() {
+        let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
+        let mut expected = vec![
+            w(vec![0x00, 0x01]),
+            w(vec![0x2E, 0x80]),
+            w(vec![0x00, 0x00]),
+        ];
+        for _ in 0..POWER_DOWN_POLLS {
+            expected.push(Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![0x25],
+                vec![0x98],
+            ));
+        }
+
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        let mut delay = CheckedDelay::new(&vec![
+            DelayTransaction::delay_ms(POWER_DOWN_POLL_MS);
+            POWER_DOWN_POLLS as usize
+        ]);
+
+        assert_eq!(dac.power_down(&mut delay), Err(Error::StillPowered));
+        dac.release().done();
+        delay.done();
+    }
+
     #[test]
     fn the_dac_is_powered_only_after_the_drivers_have_finished_ramping() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);

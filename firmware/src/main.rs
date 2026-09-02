@@ -8,7 +8,7 @@ mod nfc;
 mod pins;
 mod storage;
 
-use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 
@@ -316,11 +316,29 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     }
 
     loop {
+        if CODEC_SHUTDOWN.load(Ordering::Relaxed) {
+            // The bus went to the accelerometer for good once the codec was
+            // configured, so taking the codec down means taking it back.
+            let bus = accel.release();
+            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+            match dac.power_down(&mut dac_delay) {
+                Ok(()) => esp_println::println!("teddiebox: codec quiet"),
+                Err(tlv320dac3100::Error::StillPowered) => {
+                    esp_println::println!("teddiebox: codec output stages still powered")
+                }
+                Err(_) => esp_println::println!("teddiebox: codec would not power down"),
+            }
+            CODEC_QUIET.store(true, Ordering::Relaxed);
+            // Nothing follows a shutdown but the reset, and the accelerometer
+            // no longer owns the bus.
+            return;
+        }
         match accel.acceleration() {
             Ok([x, y, z]) => esp_println::println!("teddiebox: accel {x} {y} {z}"),
             Err(_) => esp_println::println!("teddiebox: LIS3DH read failed"),
         }
-        Timer::after(Duration::from_secs(2)).await;
+        // Short enough that a reboot is not held up by an accelerometer nap.
+        Timer::after(Duration::from_millis(200)).await;
     }
 }
 
@@ -361,6 +379,36 @@ const NFC_LOCK: u8 = 4;
 /// RAM only, and deliberately: it is a credential, it is never written to the
 /// card or committed, and it dies with the next reset.
 static NFC_PASSWORD: AtomicU32 = AtomicU32::new(0);
+
+/// Asked for before the rails go down, answered when the codec is quiet.
+///
+/// The class-D amplifier is powered and unmuted for the whole of a session,
+/// and `rb` cut its supply out from under it — which is a click into the
+/// speaker beside a child's head. The codec can take itself down cleanly, but
+/// only over I2C, and that bus belongs to `motion`; hence a request rather
+/// than a call.
+static CODEC_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static CODEC_QUIET: AtomicBool = AtomicBool::new(false);
+
+/// How long a reboot waits for the codec before going ahead regardless.
+///
+/// Going ahead is the right failure: a box that will not reboot is worse than
+/// one that clicks, and the bench needs `rb` to work even when the codec does
+/// not answer.
+const CODEC_SHUTDOWN_TIMEOUT_MS: u64 = 800;
+
+/// Asks the codec to go quiet, and waits until it has or the wait runs out.
+async fn quieten_codec() {
+    CODEC_SHUTDOWN.store(true, Ordering::Relaxed);
+    let deadline = Instant::now() + Duration::from_millis(CODEC_SHUTDOWN_TIMEOUT_MS);
+    while !CODEC_QUIET.load(Ordering::Relaxed) {
+        if Instant::now() > deadline {
+            esp_println::println!("teddiebox: codec did not go quiet in time");
+            return;
+        }
+        Timer::after(Duration::from_millis(5)).await;
+    }
+}
 
 /// Owns the I2S peripheral and the SD bus, and serves the bench commands that
 /// need them.
@@ -749,8 +797,14 @@ async fn main(spawner: Spawner) {
         let mut buf = [0u8; 16];
         if let Ok(n) = console.read_buffered(&mut buf) {
             match buf[..n].iter().find_map(|&b| watch.feed(b)) {
-                Some(Command::DownloadMode) => reboot_to_download(&mut board, &mut gates),
-                Some(Command::Reboot) => reboot(&mut board, &mut gates),
+                Some(Command::DownloadMode) => {
+                    quieten_codec().await;
+                    reboot_to_download(&mut board, &mut gates)
+                }
+                Some(Command::Reboot) => {
+                    quieten_codec().await;
+                    reboot(&mut board, &mut gates)
+                }
                 Some(Command::Tone) => {
                     REQUEST.store(REQUEST_TONE, Ordering::Relaxed);
                 }
