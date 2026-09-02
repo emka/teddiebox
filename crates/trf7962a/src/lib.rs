@@ -28,6 +28,12 @@ pub enum Error<E> {
     Timeout,
     /// A tag responded, but the response was not the expected shape.
     BadResponse,
+    /// The reader received something it could not decode, carrying its own
+    /// reason: CRC, parity, byte framing or EOF, or collision (SLOS757G
+    /// Table 6-29, B4 to B1). A collision or framing error points at a reader
+    /// mistuned for the reply it is getting, a CRC error at a reply that
+    /// arrived corrupted — worth telling apart before anyone moves an antenna.
+    ReceiveError(u8),
     /// The reader's FIFO overflowed, so the bytes in it cannot be trusted.
     FifoOverflow,
     /// The tag answered with the error flag set, carrying this error code.
@@ -314,7 +320,7 @@ where
         // could not turn it into a frame. Reading the FIFO anyway hands the
         // caller a fragment that looks like a short reply.
         if status & IRQ_ERRORS != 0 {
-            return Err(Error::BadResponse);
+            return Err(Error::ReceiveError(status & IRQ_ERRORS));
         }
         // Without a reception there is nothing in the FIFO to read, and the
         // N-1 count cannot tell an empty FIFO from a one-byte one.
@@ -405,7 +411,10 @@ where
         // both mean "try unlocking", so neither aborts the operation.
         match self.inventory() {
             Ok(Some(uid)) => return Ok(Some(uid)),
-            Ok(None) | Err(Error::BadResponse) | Err(Error::TagError(_)) => {}
+            Ok(None)
+            | Err(Error::BadResponse)
+            | Err(Error::ReceiveError(_))
+            | Err(Error::TagError(_)) => {}
             Err(e) => return Err(e),
         }
         match self.unlock_privacy(password) {

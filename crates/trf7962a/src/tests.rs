@@ -592,3 +592,36 @@ fn the_fifo_is_read_as_one_continuous_burst() {
     delay.done();
     irq.done();
 }
+
+/// A reception the reader could not decode says why.
+///
+/// SLOS757G Table 6-29 gives four separate reasons — CRC (B4), parity (B3),
+/// byte framing or EOF (B2), and collision (B1) — and at a bench they point
+/// at quite different things: a collision or a framing error is a reader
+/// mistuned for the reply it is getting, while a CRC error is a reply that
+/// arrived and was corrupted. Folding them into one "bad response" throws
+/// away the only evidence that separates them.
+#[test]
+fn a_reception_error_carries_the_reader_s_own_reason() {
+    let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00]);
+    spi.extend(spi_read_irq(0x80));
+    spi.extend(spi_write(vec![0x8F]));
+    // Reception started, and the reader flagged a collision on it.
+    spi.extend(spi_read_irq(0x42));
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&polls(0)),
+        PinMock::new(&irq_exchange()),
+    );
+    let mut response = [0u8; MAX_RESPONSE];
+    assert_eq!(
+        r.transceive(&INVENTORY, &mut response),
+        Err(Error::ReceiveError(0x02)),
+        "the reason is the reader's own flags, not a verdict on the reply"
+    );
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
