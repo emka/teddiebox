@@ -96,6 +96,16 @@ pub const MAX_REQUEST: usize = 12;
 const FIFO_OVERFLOW: u8 = 0x10;
 const FIFO_COUNT_MASK: u8 = 0x0F;
 
+/// Interrupt status bits, SLOS757G Table 6-29.
+///
+/// B7 marks the reader's own transmit finishing and B6 a reception; the four
+/// in between are the ways a reception can fail — CRC, parity, byte framing
+/// or EOF, and collision. B0, the no-response timeout, is not among them:
+/// nothing answering is the ordinary empty plate, not an error.
+const IRQ_TX: u8 = 0x80;
+const IRQ_RX_STARTED: u8 = 0x40;
+const IRQ_ERRORS: u8 = 0x1E;
+
 /// How long the reader is given to signal that an exchange finished.
 ///
 /// An ISO 15693 exchange at high bit rate runs roughly 5–6 ms end to end:
@@ -254,9 +264,33 @@ where
         }
         // Reading the status register clears the interrupt. Leaving it set
         // would make the next exchange return instantly on a stale assertion.
-        // The individual bits are not interpreted yet — see the register map
-        // note in `regs`, and confirm them at bench step 10.
-        let _ = self.read_irq_status()?;
+        let mut status = self.read_irq_status()?;
+
+        // The reader interrupts twice: once when its own transmit finishes,
+        // and again when the tag has answered. Reading the FIFO on the first
+        // finds it empty and — through the N-1 count — reports one byte of
+        // nothing, which is what a reader transmitting perfectly well looked
+        // like at the bench. SLOS757G Figure 6-25 resets the FIFO between the
+        // two, so the reception starts from an empty one.
+        if status & IRQ_TX != 0 {
+            self.send_command(regs::cmd::RESET_FIFO)?;
+            if !self.wait_for_response()? {
+                return Ok(0);
+            }
+            status = self.read_irq_status()?;
+        }
+
+        // CRC, parity, framing or collision: the reader heard something and
+        // could not turn it into a frame. Reading the FIFO anyway hands the
+        // caller a fragment that looks like a short reply.
+        if status & IRQ_ERRORS != 0 {
+            return Err(Error::BadResponse);
+        }
+        // Without a reception there is nothing in the FIFO to read, and the
+        // N-1 count cannot tell an empty FIFO from a one-byte one.
+        if status & IRQ_RX_STARTED == 0 {
+            return Ok(0);
+        }
 
         // B4 is the overflow flag and B3-B0 the unread byte count. Reading the
         // raw byte as a count folds in the two level flags and hands the

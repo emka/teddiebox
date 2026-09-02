@@ -108,11 +108,24 @@ fn transceive_transactions(
     response: &[u8],
 ) -> Vec<Transaction<u8>> {
     let mut t = transmit_transactions(request, tx_length);
-    t.extend(spi_read_irq(0x00)); // IRQ status, read to clear
+    // Two interrupts, not one: the transmit finishing (0x80), then the tag's
+    // answer (0x40), with the FIFO reset between them. Asserted byte for byte
+    // by `the_transmit_interrupt_is_not_mistaken_for_the_tags_reply`.
+    t.extend(spi_read_irq(0x80));
+    t.extend(spi_write(vec![0x8F]));
+    t.extend(spi_read_irq(0x40));
     t.extend(spi_read(0x5C, fifo_status)); // FIFO status, read bit set
     for &b in response {
         t.extend(spi_read(0x5F, b)); // FIFO, read bit set
     }
+    t
+}
+
+/// The interrupt line through one exchange that a tag answers: the transmit's
+/// own interrupt, then the tag's.
+fn irq_exchange() -> Vec<PinTransaction> {
+    let mut t = irq_after(0);
+    t.extend(irq_after(0));
     t
 }
 
@@ -205,11 +218,15 @@ fn inventory_waits_for_the_reader_before_reading_the_fifo() {
     // Three bytes: the 12-bit length field splits as 0x00 / 0x30.
     let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 9, &response);
 
+    // Two polls come back low before the tag's answer arrives; the transmit's
+    // own interrupt is already there when it is first looked for.
+    let mut irq = irq_after(0);
+    irq.extend(irq_after(2));
+
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        // Two polls come back low before the exchange completes.
         CheckedDelay::new(&polls(2)),
-        PinMock::new(&irq_after(2)),
+        PinMock::new(&irq),
     );
 
     let uid = r.inventory().unwrap().expect("a tag answered");
@@ -264,13 +281,15 @@ fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
     // byte as a count reads 0x8A as 138 bytes available and fabricates a
     // UID out of whatever the FIFO returns.
     let mut spi = transmit_transactions(&INVENTORY, [0x00, 0x30]);
-    spi.extend(spi_read_irq(0x00));
+    spi.extend(spi_read_irq(0x80));
+    spi.extend(spi_write(vec![0x8F]));
+    spi.extend(spi_read_irq(0x40));
     spi.extend(spi_read(0x5C, 0x1A));
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
         CheckedDelay::new(&polls(0)),
-        PinMock::new(&irq_after(0)),
+        PinMock::new(&irq_exchange()),
     );
     assert_eq!(r.inventory(), Err(Error::FifoOverflow));
     let (mut spi, mut delay, mut irq) = r.release();
@@ -290,7 +309,7 @@ fn the_fifo_level_flags_are_not_counted_as_received_bytes() {
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
         CheckedDelay::new(&polls(0)),
-        PinMock::new(&irq_after(0)),
+        PinMock::new(&irq_exchange()),
     );
     assert!(r.inventory().unwrap().is_some());
     let (mut spi, mut delay, mut irq) = r.release();
@@ -311,8 +330,8 @@ fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
         &[0x00],
     ));
 
-    let mut irq = irq_after(0);
-    irq.extend(irq_after(0));
+    let mut irq = irq_exchange();
+    irq.extend(irq_exchange());
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
@@ -339,8 +358,8 @@ fn a_rejected_password_is_reported_rather_than_read_as_success() {
         &[0x01, 0x0F],
     ));
 
-    let mut irq = irq_after(0);
-    irq.extend(irq_after(0));
+    let mut irq = irq_exchange();
+    irq.extend(irq_exchange());
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
@@ -364,7 +383,7 @@ fn an_error_response_is_not_mistaken_for_a_random_number() {
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
         CheckedDelay::new(&polls(0)),
-        PinMock::new(&irq_after(0)),
+        PinMock::new(&irq_exchange()),
     );
     assert_eq!(r.get_random_number(), Err(Error::TagError(0x03)));
     let (mut spi, mut delay, mut irq) = r.release();
@@ -424,6 +443,81 @@ fn a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it() {
     );
     let mut response = [0u8; MAX_RESPONSE];
     assert_eq!(r.transceive(&INVENTORY, &mut response), Ok(0));
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+/// SLOS757G §6.12.5 and Figure 6-21: a transmit raises an interrupt of its
+/// own, before the tag has said anything.
+///
+/// "The flag is set at the start of TX but the interrupt request is sent when
+/// TX is finished" (Table 6-29, B7). The tag's answer is a *second* interrupt,
+/// about 4 ms later, and between the two the datasheet resets the FIFO.
+///
+/// Measured on the reader with the transmit burst working: the first
+/// interrupt arrives, the FIFO status reads 0x00 because the FIFO is empty,
+/// and the driver's N-1 rule turns that into a one-byte reply of 0x00. A
+/// reader transmitting perfectly well looked exactly like a tag answering
+/// with nonsense.
+///
+/// Bytes spelled out: 0x6C the interrupt status read, 0x80 TX complete, 0x8F
+/// reset FIFO, 0x40 RX started, 0x5C the FIFO status read.
+#[test]
+fn the_transmit_interrupt_is_not_mistaken_for_the_tags_reply() {
+    let reply = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+    let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00]);
+    spi.extend(spi_read_irq(0x80)); // TX finished; the tag has not answered yet
+    spi.extend(spi_write(vec![0x8F])); // reset the FIFO before the reception
+    spi.extend(spi_read_irq(0x40)); // RX started, and now finished
+    spi.extend(spi_read(0x5C, 9)); // ten bytes, counted as N-1
+    for &b in &reply {
+        spi.extend(spi_read(0x5F, b));
+    }
+
+    let mut irq = irq_after(0);
+    irq.extend(irq_after(0));
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&polls(0)),
+        PinMock::new(&irq),
+    );
+    assert_eq!(
+        r.inventory().unwrap(),
+        Some([1, 2, 3, 4, 5, 6, 7, 8]),
+        "the reply follows the transmit interrupt, not the transmit itself"
+    );
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+/// A reader that transmits and hears nothing must say so, not read the FIFO.
+///
+/// The transmit interrupt always arrives, so "an interrupt happened" is not
+/// evidence a tag answered — which is the whole reason an empty plate used to
+/// come back as a one-byte reply.
+#[test]
+fn a_transmit_with_no_answer_reports_no_tag() {
+    let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00]);
+    spi.extend(spi_read_irq(0x80));
+    spi.extend(spi_write(vec![0x8F]));
+
+    let mut irq = irq_after(0);
+    irq.extend(irq_never());
+
+    let mut delay = polls(0);
+    delay.extend(polls(IRQ_POLL_ATTEMPTS as usize));
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&delay),
+        PinMock::new(&irq),
+    );
+    assert_eq!(r.inventory().unwrap(), None);
     let (mut spi, mut delay, mut irq) = r.release();
     spi.done();
     delay.done();
