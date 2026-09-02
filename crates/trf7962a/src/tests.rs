@@ -309,6 +309,41 @@ fn the_air_is_left_quiet_for_t2_after_a_tag_has_answered() {
     irq.done();
 }
 
+/// A tag that has refused a password stops answering everything until its
+/// supply is cycled — SL2S2002 §9.4.3.2, "if the IC receives an invalid
+/// password, it will not execute any following command until a Power-On Reset
+/// (POR) (RF reset) is executed". A passive tag's only supply is the reader's
+/// field, so the reset is the reader's to give: drop the field, let the tag's
+/// reservoir collapse, bring it back and let it charge again.
+///
+/// Rebooting the box does this only as a side effect of dropping the storage
+/// rail, which is a heavy way to reset one tag and is not available to
+/// firmware that has to keep running.
+#[test]
+fn a_tag_is_reset_by_taking_its_field_away_and_giving_it_back() {
+    let mut spi = Vec::new();
+    // The field down: the same word with the transmitter bit cleared, so the
+    // supply selection cannot drift between the two.
+    spi.extend(spi_write(vec![0x00, 0x00]));
+    spi.extend(spi_write(vec![0x00, 0x20]));
+
+    let delay = [
+        DelayTransaction::delay_ms(FIELD_OFF_MS),
+        DelayTransaction::delay_ms(FIELD_SETTLE_MS),
+    ];
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&delay),
+        PinMock::new(&[]),
+    );
+    r.reset_tags().unwrap();
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
 /// The FIFO holds twelve bytes and this driver loads a request in one go, so
 /// a longer one cannot be sent. Silently, it both overran the FIFO and, past
 /// 4096 bytes, wrapped the 12-bit length field into a plausible small number.

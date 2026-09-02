@@ -46,3 +46,13 @@ pub const ISO_CONTROL_15693_HIGH: u8 = 0x02;
 /// This was `0x21` — the part's own reset default — for the whole of the
 /// driver's life, which claimed 5-V operation on a 3.3 V rail.
 pub const CHIP_STATUS_RF_ON: u8 = 0x20;
+
+/// B5, `rf_on`: transmitter on, receivers on.
+pub const RF_ON_BIT: u8 = 0x20;
+
+/// The same word with the field taken away.
+///
+/// Derived rather than restated so the supply selection cannot drift between
+/// the two — getting that wrong would change the rail the part thinks it is
+/// on every time a tag is reset.
+pub const CHIP_STATUS_RF_OFF: u8 = CHIP_STATUS_RF_ON & !RF_ON_BIT;

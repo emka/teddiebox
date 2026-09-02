@@ -287,7 +287,15 @@ impl Reader {
             }
             Err(trf7962a::Error::ReceiveError(flags)) => report_receive_error(flags),
             Err(trf7962a::Error::Timeout) => {
-                esp_println::println!("teddiebox: nfc   SET PASSWORD -> silent")
+                // Silence means the tag does not hold this password, and it
+                // now ignores everything until its field is cycled. Reset it
+                // here so the next attempt can be typed straight away —
+                // needing `rb` to un-stick a tag was only ever a side effect
+                // of rebooting dropping the reader's rail.
+                esp_println::println!("teddiebox: nfc   SET PASSWORD -> silent, resetting the tag");
+                if self.trf.reset_tags().is_err() {
+                    esp_println::println!("teddiebox: nfc   could not cycle the field");
+                }
             }
             Err(_) => esp_println::println!("teddiebox: nfc   SET PASSWORD -> failed"),
         }

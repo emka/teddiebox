@@ -142,6 +142,16 @@ pub const IRQ_POLL_ATTEMPTS: u32 = 100;
 /// microsecond costs nothing against an exchange of several milliseconds.
 pub const T2_QUIET_US: u32 = 320;
 
+/// How long the field is held down to reset the tags standing in it.
+///
+/// A tag that has refused a password answers nothing at all until it has been
+/// through a power-on reset — SL2S2002 §9.4.3.2, "it will not execute any
+/// following command until a Power-On Reset (POR) (RF reset) is executed" —
+/// and a passive tag's only supply is the reader's field. The reservoir it
+/// runs on is small, so this only has to outlast a few microseconds of stored
+/// charge; the margin is cheap because nothing resets a tag on a hot path.
+pub const FIELD_OFF_MS: u32 = 5;
+
 /// Settling time after a soft init, before the reader accepts configuration.
 pub const SOFT_INIT_SETTLE_MS: u32 = 1;
 
@@ -240,6 +250,25 @@ where
         for &(reg, value) in INIT_SEQUENCE {
             self.write_register(reg, value)?;
         }
+        self.delay.delay_ms(FIELD_SETTLE_MS);
+        Ok(())
+    }
+
+    /// Power-cycles every tag in the field, by taking the field away.
+    ///
+    /// A tag that has been sent a password it does not accept stops answering
+    /// everything — GET RANDOM NUMBER included — until its supply has been
+    /// interrupted (SL2S2002 §9.4.3.2). Nothing the reader can *say* to it
+    /// helps, because it has stopped listening; the only lever is the field
+    /// it draws its power from.
+    ///
+    /// Measured on the board: a tag muted this way answers again after this,
+    /// and rebooting the box worked before only because that drops the
+    /// storage rail the reader is on.
+    pub fn reset_tags(&mut self) -> Result<(), Error<E>> {
+        self.write_register(regs::CHIP_STATUS_CONTROL, regs::CHIP_STATUS_RF_OFF)?;
+        self.delay.delay_ms(FIELD_OFF_MS);
+        self.write_register(regs::CHIP_STATUS_CONTROL, regs::CHIP_STATUS_RF_ON)?;
         self.delay.delay_ms(FIELD_SETTLE_MS);
         Ok(())
     }
