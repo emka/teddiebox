@@ -36,18 +36,25 @@ pub fn get_random_number_request() -> [u8; 3] {
 ///
 /// The password is transmitted XORed with the random number repeated across
 /// both halves, so the plaintext never crosses the air gap.
+///
+/// It goes on the air most significant byte first, which is how a password is
+/// written down and how the box's is quoted. Sent the other way round the tag
+/// does not refuse it, it simply says nothing at all — measured at the bench,
+/// where reversing the byte order turned silence into the one-byte `0x00`
+/// that ISO 15693 uses to mean "done". The mask is applied in that same wire
+/// order: the two random bytes as the tag sent them, repeated.
 pub fn set_password_request(password: u32, random: u16) -> [u8; 8] {
-    let xor_mask = (u32::from(random) << 16) | u32::from(random);
-    let masked = (password ^ xor_mask).to_le_bytes();
+    let password = password.to_be_bytes();
+    let mask = random.to_le_bytes();
     [
         FLAGS,
         CMD_SET_PASSWORD,
         MFG_NXP,
         PASSWORD_ID_PRIVACY,
-        masked[0],
-        masked[1],
-        masked[2],
-        masked[3],
+        password[0] ^ mask[0],
+        password[1] ^ mask[1],
+        password[2] ^ mask[0],
+        password[3] ^ mask[1],
     ]
 }
 
@@ -76,14 +83,18 @@ mod tests {
     #[test]
     fn the_password_is_masked_with_the_random_number_in_both_halves() {
         let request = set_password_request(0x0000_0000, 0xABCD);
-        // Zero XOR mask is the mask itself, little-endian.
+        // A zero password leaves the mask itself: the two random bytes in the
+        // order the tag sent them, repeated.
         assert_eq!(&request[4..], &[0xCD, 0xAB, 0xCD, 0xAB]);
     }
 
+    /// The box's own password, as it is written down, is what must appear on
+    /// the air. Sent least significant byte first the tag stays silent — the
+    /// one failure that reads as an empty plate.
     #[test]
-    fn a_zero_random_number_transmits_the_password_unchanged() {
+    fn the_password_goes_on_the_air_most_significant_byte_first() {
         let request = set_password_request(0x1122_3344, 0x0000);
-        assert_eq!(&request[4..], &0x1122_3344u32.to_le_bytes());
+        assert_eq!(&request[4..], &[0x11, 0x22, 0x33, 0x44]);
     }
 
     #[test]
