@@ -8,8 +8,10 @@
 //! the decoder the writer has got — so that all of them can be tested without
 //! a box.
 
+mod cache;
 mod sidecar;
 
+pub use cache::{decide, Cached, Decision};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
