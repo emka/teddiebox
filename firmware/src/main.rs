@@ -27,7 +27,7 @@ use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::power::{self, PackState};
-use teddiebox_core::sounds::Language;
+use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
 use tlv320dac3100::Tlv320Dac3100;
 
@@ -177,6 +177,7 @@ async fn sense(
         esp_hal::peripherals::ADC1<'static>,
     >,
 ) {
+    let mut announcer = Announcer::new();
     loop {
         // Raw counts as well as millivolts. The conversion rests on an
         // assumed attenuation and on GPIO9 measuring the pack rather than
@@ -187,7 +188,8 @@ async fn sense(
         let pack_mv = power::battery_mv(pack_raw);
         let charger_mv = power::charger_mv(charger_raw);
 
-        let state = match power::pack_state(pack_mv) {
+        let pack_state = power::pack_state(pack_mv);
+        let state = match pack_state {
             PackState::Healthy => "healthy",
             PackState::Low => "LOW",
             PackState::Critical => "CRITICAL",
@@ -195,6 +197,18 @@ async fn sense(
         esp_println::println!(
             "teddiebox: pack {pack_mv} mV ({state}, raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
         );
+
+        // The box says this itself rather than only printing it: a child does
+        // not read the console. `Announcer` decides when there is anything
+        // worth saying — on the way down, once, and only after several
+        // readings agree.
+        if let Some(sound) = announcer.observe(pack_state) {
+            esp_println::println!("teddiebox: announcing {sound:?}");
+            if sound == Sound::BatteryCritical {
+                SHUTTING_DOWN.store(true, Ordering::Relaxed);
+            }
+            SOUND_REQUEST.store(sound.file(), Ordering::Relaxed);
+        }
 
         Timer::after(Duration::from_secs(10)).await;
     }
@@ -522,6 +536,24 @@ const LANGUAGE: Language = match option_env!("TEDDIEBOX_LANGUAGE") {
     None => Language::German,
 };
 
+/// A sound the box has decided to say about itself, as a file ID.
+///
+/// `u32::MAX` means nothing pending, since `0` is the start-up jingle and
+/// would otherwise be indistinguishable from silence.
+static SOUND_REQUEST: AtomicU32 = AtomicU32::new(NO_SOUND);
+const NO_SOUND: u32 = u32::MAX;
+
+/// Set while a sound the box asked for is still being played.
+static ANNOUNCING: AtomicBool = AtomicBool::new(false);
+
+/// Set when the box has said it is turning off, and must therefore do it.
+///
+/// `BatteryCritical` is not a warning, it is an announcement — "battery is
+/// critical, turning off now" — so it is the one sound with an obligation
+/// attached. A box that says this and keeps playing has told a child
+/// something untrue, which is worse than saying nothing.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
 /// Which content file `play` names, as two halves of `CONTENT/<dir>/<file>`.
 static CONTENT_DIRECTORY: AtomicU32 = AtomicU32::new(0);
 static CONTENT_FILE: AtomicU32 = AtomicU32::new(0);
@@ -782,6 +814,7 @@ async fn media(
                     if let Err(reason) = outcome {
                         esp_println::println!("teddiebox: playback failed — {reason}");
                     }
+                    ANNOUNCING.store(false, Ordering::Relaxed);
                     i2s_tx = Some(tx);
                     wav_buffer = Some(buffer);
                     // Nothing is playing now, so the speaker has no business
@@ -1043,6 +1076,39 @@ async fn main(spawner: Spawner) {
                 &lit,
                 board::breathing_duty(Instant::now().as_millis() as u32),
             );
+        }
+
+        // A sound the box decided to say about itself. Raised here rather
+        // than in the task that noticed, because the rails and the playback
+        // request belong to this loop.
+        let pending = SOUND_REQUEST.swap(NO_SOUND, Ordering::Relaxed);
+        if pending != NO_SOUND {
+            board.apply(gates.power(Rail::Storage, true));
+            OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+            CONTENT_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
+            CONTENT_FILE.store(pending, Ordering::Relaxed);
+            // Marked here rather than by the task that plays it, so there is
+            // no window in which the announcement is pending but nothing
+            // reports it as under way.
+            ANNOUNCING.store(true, Ordering::Relaxed);
+            REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
+        }
+
+        // The box said it was turning off. Do it, once the sentence has been
+        // heard — cutting the announcement short to obey it would be its own
+        // kind of broken.
+        if SHUTTING_DOWN.load(Ordering::Relaxed) && !ANNOUNCING.load(Ordering::Relaxed) {
+            esp_println::println!("teddiebox: battery critical — going dark");
+            quieten_codec().await;
+            board.apply_all(&gates.release_for_reset());
+            drain_console();
+            // Everything a child can see or hear is now off. This is not a
+            // true power-off — the chip is still running, and deep sleep is
+            // bench step 12 — so it is parked here rather than pretending
+            // otherwise.
+            loop {
+                Timer::after(Duration::from_secs(60)).await;
+            }
         }
 
         let mut buf = [0u8; 16];

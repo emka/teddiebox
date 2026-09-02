@@ -10,6 +10,8 @@
 //! this card by the file counts: 22, 25, 22 and 22 files against exactly one
 //! for every figure.
 
+use crate::power::PackState;
+
 /// Which set of system sounds the box speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Language {
@@ -125,8 +127,70 @@ impl Sound {
     }
 }
 
+/// How many readings must agree before the box says anything about the pack.
+///
+/// The pack reading has been implausible before — the very first sample this
+/// project took was 9453 mV from three NiMH cells — and a single bad one must
+/// not make the box announce that it is turning off. Four readings at the
+/// battery task's interval is a few seconds, which is nothing against a
+/// discharge curve.
+pub const READINGS_TO_AGREE: u8 = 4;
+
+/// Turns a stream of pack readings into the few moments worth speaking about.
+///
+/// The box should say something when the pack *becomes* low or critical, once,
+/// not on every reading — and never on the strength of one sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Announcer {
+    settled: PackState,
+    candidate: PackState,
+    agreed: u8,
+}
+
+impl Default for Announcer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Announcer {
+    /// Starts healthy, so a box that boots with a healthy pack says nothing.
+    pub const fn new() -> Self {
+        Self {
+            settled: PackState::Healthy,
+            candidate: PackState::Healthy,
+            agreed: 0,
+        }
+    }
+
+    /// The state the box currently believes the pack is in.
+    pub const fn settled(&self) -> PackState {
+        self.settled
+    }
+
+    /// Feeds one reading, and says what to play if anything.
+    pub fn observe(&mut self, state: PackState) -> Option<Sound> {
+        if state == self.candidate {
+            self.agreed = self.agreed.saturating_add(1);
+        } else {
+            self.candidate = state;
+            self.agreed = 1;
+        }
+
+        if self.agreed < READINGS_TO_AGREE || state == self.settled {
+            return None;
+        }
+        self.settled = state;
+        // Recovery is not worth interrupting anyone for; only the way down.
+        Sound::for_pack_state(state)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use std::vec::Vec;
+
     use super::*;
 
     /// The four directories, spelled out rather than derived: these are the
@@ -191,5 +255,69 @@ mod tests {
     fn the_two_battery_sounds_are_not_the_same_file() {
         assert_eq!(Sound::BatteryLow.file(), 0x0000_0003);
         assert_eq!(Sound::BatteryCritical.file(), 0x0000_0009);
+    }
+
+    /// A pack reading has been wildly wrong before, so one low sample must not
+    /// announce anything — least of all that the box is turning off.
+    #[test]
+    fn a_single_low_reading_says_nothing() {
+        let mut announcer = Announcer::new();
+        assert_eq!(announcer.observe(PackState::Low), None);
+        assert_eq!(announcer.settled(), PackState::Healthy);
+    }
+
+    #[test]
+    fn a_pack_that_stays_low_is_announced_once() {
+        let mut announcer = Announcer::new();
+        let mut spoken = Vec::new();
+        for _ in 0..10 {
+            if let Some(sound) = announcer.observe(PackState::Low) {
+                spoken.push(sound);
+            }
+        }
+        assert_eq!(spoken, [Sound::BatteryLow], "once, not once a reading");
+    }
+
+    /// Readings that disagree restart the count: a flapping value is not four
+    /// readings of anything.
+    #[test]
+    fn readings_must_agree_consecutively() {
+        let mut announcer = Announcer::new();
+        for _ in 0..3 {
+            assert_eq!(announcer.observe(PackState::Low), None);
+            assert_eq!(announcer.observe(PackState::Healthy), None);
+        }
+        assert_eq!(announcer.settled(), PackState::Healthy);
+    }
+
+    #[test]
+    fn a_pack_that_falls_further_is_announced_again() {
+        let mut announcer = Announcer::new();
+        let mut spoken = Vec::new();
+        for _ in 0..READINGS_TO_AGREE {
+            spoken.extend(announcer.observe(PackState::Low));
+        }
+        for _ in 0..READINGS_TO_AGREE {
+            spoken.extend(announcer.observe(PackState::Critical));
+        }
+        assert_eq!(spoken, [Sound::BatteryLow, Sound::BatteryCritical]);
+    }
+
+    /// Being plugged in is good news, and good news does not interrupt a
+    /// story. It does re-arm the warning for the next discharge.
+    #[test]
+    fn recovering_is_silent_but_arms_the_warning_again() {
+        let mut announcer = Announcer::new();
+        let mut spoken = Vec::new();
+        for _ in 0..READINGS_TO_AGREE {
+            spoken.extend(announcer.observe(PackState::Low));
+        }
+        for _ in 0..READINGS_TO_AGREE {
+            spoken.extend(announcer.observe(PackState::Healthy));
+        }
+        for _ in 0..READINGS_TO_AGREE {
+            spoken.extend(announcer.observe(PackState::Low));
+        }
+        assert_eq!(spoken, [Sound::BatteryLow, Sound::BatteryLow]);
     }
 }
