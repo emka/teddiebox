@@ -38,6 +38,7 @@ embassy-futures = "0.1"
 teddiebox-audio = { version = "0.1.0", path = "../crates/teddiebox-audio" }
 teddiebox-taf = { version = "0.1.0", path = "../crates/teddiebox-taf" }
 portable-atomic = "1.15.0"
+trf7962a = { version = "0.1.0", path = "../crates/trf7962a" }
 
 [profile.release]
 opt-level = "s"

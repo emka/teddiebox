@@ -4,10 +4,11 @@
 mod audio;
 mod led;
 mod libc_shim;
+mod nfc;
 mod pins;
 mod storage;
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 
@@ -328,6 +329,21 @@ const REQUEST_WALK: u8 = 2;
 const REQUEST_WAV: u8 = 3;
 const REQUEST_TAF: u8 = 4;
 
+/// What the console has asked the NFC reader to do.
+///
+/// Separate from [`REQUEST`] because the reader has its own SPI bus and shares
+/// only the power rail, so it has no reason to queue behind a track that is
+/// still playing.
+static NFC_REQUEST: AtomicU8 = AtomicU8::new(REQUEST_NONE);
+const NFC_INVENTORY: u8 = 1;
+const NFC_UNLOCK: u8 = 2;
+
+/// The SLIX privacy password, as typed at the console.
+///
+/// RAM only, and deliberately: it is a credential, it is never written to the
+/// card or committed, and it dies with the next reset.
+static NFC_PASSWORD: AtomicU32 = AtomicU32::new(0);
+
 /// Owns the I2S peripheral and the SD bus, and serves the bench commands that
 /// need them.
 ///
@@ -462,6 +478,49 @@ async fn media(
     }
 }
 
+/// Brings the NFC reader up on first use and answers the bench commands.
+///
+/// Waits for a request rather than starting at boot: the reader shares the
+/// storage rail, and raising that rail is the console loop's decision.
+#[embassy_executor::task]
+async fn nfc_reader(
+    spi: Spi<'static, esp_hal::Blocking>,
+    cs: Output<'static>,
+    irq: Input<'static>,
+) {
+    while NFC_REQUEST.load(Ordering::Relaxed) == REQUEST_NONE {
+        Timer::after(Duration::from_millis(100)).await;
+    }
+
+    // The rail was raised by the console loop; give it the same settling time
+    // the card and the I2C devices get.
+    Timer::after(Duration::from_millis(50)).await;
+
+    let mut reader = match nfc::Reader::open(spi, cs, irq, esp_hal::delay::Delay::new()) {
+        Ok(reader) => reader,
+        Err(reason) => {
+            esp_println::println!("teddiebox: nfc failed — {reason}");
+            return;
+        }
+    };
+
+    loop {
+        match NFC_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
+            NFC_INVENTORY => reader.inventory(),
+            NFC_UNLOCK => {
+                let password = NFC_PASSWORD.load(Ordering::Relaxed);
+                if password == 0 {
+                    esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
+                } else {
+                    reader.unlock(password);
+                }
+            }
+            _ => {}
+        }
+        Timer::after(Duration::from_millis(100)).await;
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -507,9 +566,7 @@ async fn main(spawner: Spawner) {
         .expect("UART0 receive")
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
-    esp_println::println!(
-        "teddiebox: dl download, rb reboot, t tone, sd checksums, wav play, taf decode (all loud)"
-    );
+    esp_println::println!("teddiebox: dl rb | t wav taf (loud) | sd | nfc, pw <8 hex>, slix");
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
     // was configured for. The SD card is SPI2 on CLK 35, MOSI 38, MISO 36 with
@@ -552,6 +609,21 @@ async fn main(spawner: Spawner) {
             let wav_buffer = esp_hal::dma_tx_stream_buffer!(audio::BUFFER_BYTES);
 
             spawner.spawn(media(spi, cs, i2s_tx, tone_buffer, wav_buffer).unwrap());
+
+            // The reader is on its own bus: SCLK 4, MOSI 2, MISO 3, CS 1, with
+            // IRQ on 13. It shares only the power rail with the card.
+            match Spi::new(p.SPI3, nfc::bus_config()) {
+                Ok(nfc_spi) => {
+                    let nfc_spi = nfc_spi
+                        .with_sck(p.GPIO4)
+                        .with_mosi(p.GPIO2)
+                        .with_miso(p.GPIO3);
+                    let nfc_cs = Output::new(p.GPIO1, Level::High, OutputConfig::default());
+                    let nfc_irq = Input::new(p.GPIO13, InputConfig::default());
+                    spawner.spawn(nfc_reader(nfc_spi, nfc_cs, nfc_irq).unwrap());
+                }
+                Err(_) => esp_println::println!("teddiebox: NFC SPI would not configure"),
+            }
         }
         (Err(_), _) => esp_println::println!("teddiebox: I2S would not configure"),
         (_, Err(_)) => esp_println::println!("teddiebox: SPI would not configure"),
@@ -621,6 +693,20 @@ async fn main(spawner: Spawner) {
                 Some(Command::PlayWav) => {
                     board.apply(gates.power(Rail::Storage, true));
                     REQUEST.store(REQUEST_WAV, Ordering::Relaxed);
+                }
+                Some(Command::Nfc) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    NFC_REQUEST.store(NFC_INVENTORY, Ordering::Relaxed);
+                }
+                Some(Command::Unlock) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    NFC_REQUEST.store(NFC_UNLOCK, Ordering::Relaxed);
+                }
+                Some(Command::Password(value)) => {
+                    NFC_PASSWORD.store(value, Ordering::Relaxed);
+                    // Deliberately not echoed. It is a credential, and a bench
+                    // capture is a file that outlives the session.
+                    esp_println::println!("teddiebox: nfc password set");
                 }
                 Some(Command::PlayTaf) => {
                     board.apply(gates.power(Rail::Storage, true));

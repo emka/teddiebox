@@ -35,11 +35,28 @@ pub enum Command {
     /// Bench step 9. Opt-in like the rest, and the loudest thing here — it is
     /// real content rather than a test tone.
     PlayTaf,
+    /// Bring the NFC reader up and report any tag on the plate.
+    ///
+    /// Bench step 10a. A plain ISO 15693 tag answers inventory; a Tonie in
+    /// privacy mode does not, and looks identical to a wiring fault.
+    Nfc,
+    /// Remember the SLIX privacy password for this session.
+    ///
+    /// Typed at the bench rather than compiled in or kept on the card: it is a
+    /// credential, and credentials have stayed out of this repository. It
+    /// lives in RAM and dies with the next reset.
+    Password(u32),
+    /// Unlock a Tonie with the remembered password, then read its UID.
+    ///
+    /// Bench step 10b.
+    Unlock,
 }
 
 /// Longest command line accepted. Anything longer cannot be a command, and is
 /// discarded rather than allowed to shift a buffer around.
-const MAX_LINE: usize = 8;
+///
+/// Sixteen rather than eight since `pw` carries eight hex digits after it.
+const MAX_LINE: usize = 16;
 
 /// Watches a byte stream for a command line.
 ///
@@ -81,7 +98,9 @@ impl CommandWatch {
                     b"sd" => Some(Command::Storage),
                     b"wav" => Some(Command::PlayWav),
                     b"taf" => Some(Command::PlayTaf),
-                    _ => None,
+                    b"nfc" => Some(Command::Nfc),
+                    b"slix" => Some(Command::Unlock),
+                    other => parse_password(other),
                 }
             };
             self.len = 0;
@@ -97,6 +116,31 @@ impl CommandWatch {
         }
         None
     }
+}
+
+/// Reads `pw <8 hex digits>`.
+///
+/// Exactly eight, because a privacy password is a `u32` and a short one is a
+/// typo rather than a small number. Getting it wrong matters more than usual:
+/// a tag refuses a wrong password by staying silent, which is what an empty
+/// plate and a broken antenna also look like.
+fn parse_password(line: &[u8]) -> Option<Command> {
+    let digits = line.strip_prefix(b"pw ")?;
+    if digits.len() != 8 {
+        return None;
+    }
+
+    let mut value: u32 = 0;
+    for &byte in digits {
+        let nibble = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        };
+        value = (value << 4) | u32::from(nibble);
+    }
+    Some(Command::Password(value))
 }
 
 #[cfg(test)]
@@ -162,6 +206,60 @@ mod tests {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"taf\r"), Some(Command::PlayTaf));
         assert_eq!(feed_all(&mut watch, b"wav\r"), Some(Command::PlayWav));
+    }
+
+    #[test]
+    fn the_nfc_command_fires_on_its_own_line() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"nfc\r"), Some(Command::Nfc));
+    }
+
+    #[test]
+    fn the_unlock_command_is_distinct_from_the_nfc_one() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
+    }
+
+    #[test]
+    fn the_password_command_carries_its_value() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"pw DEADBEEF\r"),
+            Some(Command::Password(0xDEAD_BEEF))
+        );
+    }
+
+    /// Lower case is what anyone actually types.
+    #[test]
+    fn a_password_in_lower_case_is_accepted() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"pw deadbeef\r"),
+            Some(Command::Password(0xDEAD_BEEF))
+        );
+    }
+
+    /// Leading zeroes are part of the value, not decoration: a password of
+    /// 0x0000FFFF must not be read as 0xFFFF0000 or refused.
+    #[test]
+    fn a_password_with_leading_zeroes_keeps_its_width() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"pw 0000ffff\r"),
+            Some(Command::Password(0x0000_FFFF))
+        );
+    }
+
+    /// A mistyped password must not silently become a different one. Sending
+    /// the wrong value to a tag is indistinguishable from an empty plate, so a
+    /// typo would look like a hardware fault.
+    #[test]
+    fn a_malformed_password_does_not_fire() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"pw DEADBEE\r"), None, "too short");
+        assert_eq!(feed_all(&mut watch, b"pw DEADBEEFF\r"), None, "too long");
+        assert_eq!(feed_all(&mut watch, b"pw DEADBEEG\r"), None, "not hex");
+        assert_eq!(feed_all(&mut watch, b"pw\r"), None, "no value at all");
     }
 
     /// A heartbeat prints once a second forever. None of it may look like a

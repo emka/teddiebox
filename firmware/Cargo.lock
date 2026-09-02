@@ -1736,6 +1736,7 @@ dependencies = [
  "teddiebox-core",
  "teddiebox-taf",
  "tlv320dac3100",
+ "trf7962a",
 ]
 
 [[package]]
@@ -1883,6 +1884,13 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "trf7962a"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
 ]
 
 [[package]]
