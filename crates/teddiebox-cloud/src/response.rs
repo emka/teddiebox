@@ -2,11 +2,45 @@
 
 use crate::{CloudError, ETag};
 
+/// The `Content-Range` of a `206`, which is the only place a resumed response
+/// states the file's full length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentRange {
+    /// Offset of the first byte of this body within the whole file.
+    pub first: u32,
+    /// Offset of its last byte, inclusive.
+    pub last: u32,
+    /// Length of the whole file, when the server chose to say.
+    pub total: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseHead {
     pub status: u16,
     pub etag: Option<ETag>,
     pub content_length: Option<u32>,
+    pub content_range: Option<ContentRange>,
+}
+
+/// Parses `bytes 4096-27841284/27841285`, or `None` if it is not that shape.
+///
+/// Returning `None` rather than a partial guess is deliberate: a caller given
+/// `None` refetches from zero, which is slow but correct, while a caller given
+/// a wrong `first` writes the body at the wrong offset and corrupts the file
+/// without any error to show for it.
+fn parse_content_range(value: &str) -> Option<ContentRange> {
+    let rest = value.strip_prefix("bytes ")?;
+    let (range, total) = rest.split_once('/')?;
+    let (first, last) = range.split_once('-')?;
+    Some(ContentRange {
+        first: first.trim().parse().ok()?,
+        last: last.trim().parse().ok()?,
+        total: if total.trim() == "*" {
+            None
+        } else {
+            Some(total.trim().parse().ok()?)
+        },
+    })
 }
 
 /// Parses the head of a response. Returns the parsed fields and the offset at
@@ -54,6 +88,7 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
 
     let mut etag = None;
     let mut content_length = None;
+    let mut content_range = None;
 
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -76,6 +111,8 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
             }
         } else if name.eq_ignore_ascii_case("content-length") && content_length.is_none() {
             content_length = value.parse().ok();
+        } else if name.eq_ignore_ascii_case("content-range") && content_range.is_none() {
+            content_range = parse_content_range(value);
         }
     }
 
@@ -84,6 +121,7 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
             status,
             etag,
             content_length,
+            content_range,
         },
         body_at,
     ))
@@ -216,5 +254,47 @@ Content-Length: banana\r\n\r\nbody";
             parse_head(b"HTTP/1.1 200 OK\r\nETag: \"e\"\r\n"),
             Err(CloudError::MalformedResponse)
         );
+    }
+
+    #[test]
+    fn a_partial_response_reports_where_its_body_starts_and_how_long_the_file_is() {
+        let raw = b"HTTP/1.1 206 Partial Content\r\n\
+Content-Range: bytes 4096-27841284/27841285\r\n\
+Content-Length: 27837189\r\n\r\nDATA";
+        let (head, body_at) = parse_head(raw).unwrap();
+        assert_eq!(head.status, 206);
+        let range = head.content_range.unwrap();
+        assert_eq!(range.first, 4096);
+        assert_eq!(range.last, 27841284);
+        assert_eq!(range.total, Some(27841285));
+        assert_eq!(&raw[body_at..], b"DATA");
+    }
+
+    /// A server that cannot say how long the whole file is writes `*`. The
+    /// range is still usable for placing the bytes; only the completeness
+    /// check loses its number, and the caller decides what to do about that.
+    #[test]
+    fn an_unknown_total_is_absent_rather_than_an_error() {
+        let raw = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/*\r\n\r\nDATA";
+        let (head, _) = parse_head(raw).unwrap();
+        assert_eq!(head.content_range.unwrap().total, None);
+    }
+
+    /// A malformed range is dropped rather than half-parsed. A caller that
+    /// sees `None` refetches from zero, which is correct but slow; a caller
+    /// handed a wrong `first` writes the body at the wrong offset, which
+    /// corrupts the file silently.
+    #[test]
+    fn a_malformed_content_range_is_dropped_rather_than_half_parsed() {
+        let raw = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes garbage\r\n\r\n";
+        let (head, _) = parse_head(raw).unwrap();
+        assert_eq!(head.content_range, None);
+    }
+
+    #[test]
+    fn a_response_with_no_content_range_reports_none() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody";
+        let (head, _) = parse_head(raw).unwrap();
+        assert_eq!(head.content_range, None);
     }
 }

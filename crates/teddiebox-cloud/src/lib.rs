@@ -8,7 +8,7 @@ pub mod response;
 
 pub use client::{fetch, Outcome};
 pub use request::{build_content_request, ContentRequest, ETag};
-pub use response::{parse_head, ResponseHead};
+pub use response::{parse_head, ContentRange, ResponseHead};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloudError {
