@@ -89,11 +89,46 @@ impl Reader {
     pub fn inventory(&mut self) {
         match self.trf.inventory() {
             Ok(Some(uid)) => report_uid("tag", &uid),
-            Ok(None) => esp_println::println!(
-                "teddiebox: nfc no answer — an empty plate and a locked Tonie look the same here"
-            ),
-            Err(_) => esp_println::println!("teddiebox: nfc inventory failed"),
+            Ok(None) => {
+                esp_println::println!("teddiebox: nfc no answer");
+                self.diagnose();
+            }
+            Err(_) => {
+                esp_println::println!("teddiebox: nfc inventory failed");
+                self.diagnose();
+            }
         }
+    }
+
+    /// Says whether the reader heard anything at all.
+    ///
+    /// Silence has three quite different causes — no tag in the field, a tag
+    /// of the wrong family, or a reply the driver could not parse — and they
+    /// are worth telling apart before anyone moves an antenna. The interrupt
+    /// status register is the one that knows: it latches whether a reception
+    /// even started.
+    ///
+    /// Reading it clears it, so this runs once, immediately after the attempt.
+    fn diagnose(&mut self) {
+        // 0x0F is the RSSI register (SLOS757C §6.13); the driver has no name
+        // for it because nothing in the protocol needs it, but at a bench it
+        // says whether there is any energy coming back.
+        const RSSI: u8 = 0x0F;
+
+        for (name, register) in [
+            ("irq status", trf7962a::regs::IRQ_STATUS),
+            ("fifo status", trf7962a::regs::FIFO_STATUS),
+            ("rssi", RSSI),
+        ] {
+            match self.trf.read_register(register) {
+                Ok(value) => esp_println::println!("teddiebox: nfc   {name} {value:#04x}"),
+                Err(_) => esp_println::println!("teddiebox: nfc   {name} unreadable"),
+            }
+        }
+        esp_println::println!(
+            "teddiebox: nfc   irq 0x00 means nothing was received at all — \
+             wrong tag family, out of range, or no field"
+        );
     }
 
     /// Bench step 10b: unlock a Tonie's privacy mode, then read it.
