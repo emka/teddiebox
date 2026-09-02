@@ -13,26 +13,38 @@ pub const MAX_ETAG: usize = 64;
 
 pub type ETag = String<MAX_ETAG>;
 
+/// Everything that varies between one content request and the next.
+///
+/// A struct rather than a parameter list because resuming adds fields, and a
+/// six-argument function is where a caller silently transposes two of them.
+#[derive(Debug, Clone)]
+pub struct ContentRequest<'a> {
+    pub uid: [u8; 8],
+    /// Echoed back as `If-None-Match`, making the request conditional.
+    pub etag: Option<&'a ETag>,
+    /// `host:port` of the teddyCloud server.
+    pub server: &'a str,
+}
+
 /// Writes a conditional GET for the content of `tag` into `out`.
 ///
 /// When `etag` is present the request is conditional, so an unchanged file
 /// answers 304 and costs nothing but headers — which is what lets the box
 /// revalidate cached content without interrupting playback.
 pub fn build_content_request(
-    uid: [u8; 8],
-    etag: Option<&ETag>,
-    server: &str,
+    request: &ContentRequest<'_>,
     out: &mut [u8],
 ) -> Result<usize, CloudError> {
     let mut buf = SliceWriter { out, used: 0 };
 
     write!(buf, "GET /content/").map_err(|_| CloudError::RequestTooLong)?;
-    for b in uid {
+    for b in request.uid {
         write!(buf, "{b:02X}").map_err(|_| CloudError::RequestTooLong)?;
     }
+    let server = request.server;
     write!(buf, " HTTP/1.1\r\nHost: {server}\r\n").map_err(|_| CloudError::RequestTooLong)?;
 
-    if let Some(tag) = etag {
+    if let Some(tag) = request.etag {
         write!(buf, "If-None-Match: {tag}\r\n").map_err(|_| CloudError::RequestTooLong)?;
     }
 
@@ -71,7 +83,12 @@ mod tests {
 
     fn build(etag: Option<&ETag>) -> heapless::String<512> {
         let mut out = [0u8; 512];
-        let n = build_content_request(UID, etag, "box.lan:8080", &mut out).unwrap();
+        let request = ContentRequest {
+            uid: UID,
+            etag,
+            server: "box.lan:8080",
+        };
+        let n = build_content_request(&request, &mut out).unwrap();
         heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
     }
 
@@ -114,7 +131,12 @@ mod tests {
     fn the_request_length_is_bounded_by_the_callers_buffer_alone() {
         let server = "x".repeat(600);
         let mut out = [0u8; 1024];
-        let n = build_content_request(UID, None, &server, &mut out).unwrap();
+        let request = ContentRequest {
+            uid: UID,
+            etag: None,
+            server: &server,
+        };
+        let n = build_content_request(&request, &mut out).unwrap();
         assert!(n > 512, "built {n} bytes");
         assert!(out[..n].ends_with(b"\r\n\r\n"));
     }
@@ -122,8 +144,13 @@ mod tests {
     #[test]
     fn a_buffer_too_small_is_an_error_rather_than_a_truncated_request() {
         let mut out = [0u8; 8];
+        let request = ContentRequest {
+            uid: UID,
+            etag: None,
+            server: "box.lan:8080",
+        };
         assert_eq!(
-            build_content_request(UID, None, "box.lan:8080", &mut out),
+            build_content_request(&request, &mut out),
             Err(CloudError::RequestTooLong)
         );
     }

@@ -1,6 +1,6 @@
 //! One request/response exchange over any byte transport.
 
-use crate::{build_content_request, parse_head, CloudError, ETag};
+use crate::{build_content_request, parse_head, CloudError, ContentRequest, ETag};
 use embedded_io::{Read, Write};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,10 +26,10 @@ pub fn fetch<T: Read + Write>(
     server: &str,
     buf: &mut [u8],
 ) -> Result<Outcome, CloudError> {
-    let mut request = [0u8; 512];
-    let n = build_content_request(uid, etag, server, &mut request)?;
+    let mut request_buf = [0u8; 512];
+    let n = build_content_request(&ContentRequest { uid, etag, server }, &mut request_buf)?;
     transport
-        .write_all(&request[..n])
+        .write_all(&request_buf[..n])
         .map_err(|_| CloudError::Transport)?;
     transport.flush().map_err(|_| CloudError::Transport)?;
 
