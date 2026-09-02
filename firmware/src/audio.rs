@@ -15,7 +15,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_futures::yield_now;
-use embassy_time::{Duration, Instant};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_sdmmc::RawFile;
 use esp_hal::dma::DmaTxStreamBuf;
 use esp_hal::i2s::master::I2sTx;
@@ -43,6 +43,14 @@ const CHUNK: usize = 4096;
 
 /// How often the occupancy line is printed.
 const LOG_EVERY: Duration = Duration::from_secs(5);
+
+/// How long to wait when the DMA buffer will not take any more.
+///
+/// The buffer drains at 192 KB/s, so a 4 KB chunk frees up roughly every
+/// 21 ms — sleeping a millisecond costs nothing against that and avoids
+/// spinning on `yield_now` for the whole window, which would burn the CPU on a
+/// five-minute run for no benefit.
+const BUFFER_FULL_WAIT: Duration = Duration::from_millis(1);
 
 type Blocking = esp_hal::Blocking;
 
@@ -90,7 +98,7 @@ pub async fn play_first_wav(
     // is created, so a buffer that is still empty at that moment is played as
     // silence and the stream runs off its end before the first sample arrives
     // — which is exactly how the step 6 tone failed.
-    let filled = prefill(card, file, &mut buffer)?;
+    let filled = prefill(card, file, &mut buffer, format.data_len as usize)?;
     // Prefill reads ahead of what it could fit, so put the file back exactly
     // where the buffer ends.
     card.seek(file, format.data_offset + filled as u32)?;
@@ -140,6 +148,10 @@ pub async fn play_first_wav(
                 }
             }
             remaining -= read;
+        } else {
+            // Nothing would fit. Wait for the DMA to make room rather than
+            // asking again immediately.
+            Timer::after(BUFFER_FULL_WAIT).await;
         }
 
         if last_log.elapsed() >= LOG_EVERY {
@@ -180,12 +192,20 @@ fn prefill(
     card: &Mounted,
     file: RawFile,
     buffer: &mut DmaTxStreamBuf,
+    limit: usize,
 ) -> Result<usize, &'static str> {
     let mut filled = 0;
     let mut chunk = [0u8; CHUNK];
 
     loop {
-        let read = card.read(file, &mut chunk)?;
+        // Bounded by the data chunk: a WAV may carry metadata after its
+        // samples, and reading into that would play it as the first audio out
+        // of the speaker.
+        let want = CHUNK.min(limit.saturating_sub(filled));
+        if want == 0 {
+            break;
+        }
+        let read = card.read(file, &mut chunk[..want])?;
         if read == 0 {
             break;
         }
@@ -357,7 +377,8 @@ pub async fn play_first_taf(
         let pushed = transfer.push(&as_bytes(&scratch.pcm)[pending.clone()]);
         pending.start += pushed;
         if pushed == 0 {
-            yield_now().await;
+            // The buffer is full and a frame is waiting. Let the DMA drain.
+            Timer::after(BUFFER_FULL_WAIT).await;
         }
 
         if last_log.elapsed() >= LOG_EVERY {
