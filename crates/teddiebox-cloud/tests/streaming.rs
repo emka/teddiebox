@@ -177,14 +177,54 @@ fn a_server_that_ignores_the_range_reports_an_offset_of_zero() {
 fn a_head_that_arrives_in_pieces_is_still_parsed() {
     let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
     raw.extend_from_slice(b"DATA");
-    let mut t = Fake::new(&raw).in_bites_of(6);
+    let mut t = Fake::new(&raw).in_bites_of(3);
     let mut buf = [0u8; 256];
 
-    let Begun::Content { prefix, .. } = block_on(begin(&mut t, &request(None), &mut buf)).unwrap()
+    let Begun::Content {
+        body_length,
+        prefix,
+        ..
+    } = block_on(begin(&mut t, &request(None), &mut buf)).unwrap()
     else {
         panic!("expected content");
     };
-    assert_eq!(&buf[prefix], b"DATA");
+    assert_eq!(body_length, 4);
+    let mut collected = Vec::from(&buf[prefix.clone()]);
+    let mut stream = Body::new(body_length, prefix.len() as u32);
+    while !stream.is_complete() {
+        let n = block_on(stream.read(&mut t, &mut buf)).unwrap();
+        collected.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(collected, b"DATA");
+}
+
+/// A pipelining or keep-alive peer can leave bytes in the buffer past the
+/// body's declared end — here, garbage that arrived in the same read as the
+/// head. Those bytes are not content, and a caller that wrote them to the
+/// file would corrupt it without any error to show for it.
+#[test]
+fn trailing_bytes_after_the_body_are_not_handed_to_the_caller() {
+    let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
+    raw.extend_from_slice(b"DATATRAILING");
+    let mut t = Fake::new(&raw);
+    let mut buf = [0u8; 256];
+
+    let Begun::Content {
+        body_length,
+        prefix,
+        ..
+    } = block_on(begin(&mut t, &request(None), &mut buf)).unwrap()
+    else {
+        panic!("expected content");
+    };
+
+    let mut collected = Vec::from(&buf[prefix.clone()]);
+    let mut stream = Body::new(body_length, prefix.len() as u32);
+    while !stream.is_complete() {
+        let n = block_on(stream.read(&mut t, &mut buf)).unwrap();
+        collected.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(collected, b"DATA");
 }
 
 /// A socket with nothing to give yet returns Pending. The client must survive
@@ -260,6 +300,11 @@ fn an_unchanged_file_reports_unchanged_and_reads_no_body() {
     assert_eq!(
         block_on(begin(&mut t, &request, &mut buf)).unwrap(),
         Begun::Unchanged
+    );
+    assert_eq!(
+        t.read_at,
+        t.response.len(),
+        "a 304 carries no body, so nothing beyond the head should be read"
     );
 }
 

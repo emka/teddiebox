@@ -89,12 +89,21 @@ pub async fn begin<T: Read + Write>(
         None => (0, Some(body_length)),
     };
 
+    // `received` may hold bytes beyond the body — a pipelining or keep-alive
+    // peer, or any trailing garbage — and those are never body. Clamping
+    // here, not just in `Body::read`, is what stops them reaching the
+    // caller as if they were content. `saturating_add` rather than a plain
+    // `+`: `body_at + body_length` must not wrap `usize` on a 32-bit target,
+    // where `usize` is the same width as `u32`; the `.min(received)` after
+    // it means a saturated `usize::MAX` still clamps down to `received`.
+    let body_end = body_at.saturating_add(body_length as usize).min(received);
+
     Ok(Begun::Content {
         etag: head.etag,
         body_length,
         offset,
         total,
-        prefix: body_at..received,
+        prefix: body_at..body_end,
     })
 }
 
