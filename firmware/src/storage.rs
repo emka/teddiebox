@@ -68,6 +68,13 @@ const WALK_RATE_KHZ: u32 = 8_000;
 /// rarely enough that yielding is not what the walk spends its time on.
 const YIELD_EVERY_BLOCKS: u32 = 16;
 
+/// Where a Toniebox keeps its audio, and what it calls it.
+///
+/// Fixed by the box's own layout rather than chosen here: every file step 7
+/// found on the real card sat at `CONTENT/<8 hex>/500304E0`.
+const TONIE_CONTENT_DIR: &str = "CONTENT";
+const TONIE_AUDIO_FILE: &str = "500304E0";
+
 /// Longest path the walk will print.
 const MAX_PATH: usize = 64;
 
@@ -304,6 +311,63 @@ impl Mounted {
             }
         }
         None
+    }
+
+    /// Opens the first Tonie audio file on the card.
+    ///
+    /// A real card keeps its content at `CONTENT/<8 hex>/500304E0` — three
+    /// levels down, and with no extension, so neither the root search above
+    /// nor an extension match will find it. The name is fixed by the
+    /// Toniebox's own layout, which is the layout this box exists to read.
+    ///
+    /// Read-only, and that is the point: it means step 9 can run against the
+    /// card the box shipped with, without copying anything onto it.
+    ///
+    /// The directory handles are closed before returning. An open file keeps
+    /// the directory entry it was opened from, so it does not need its parent
+    /// to stay open — and holding three levels open would sit right on the
+    /// `MAX_DIRS` limit.
+    pub fn open_first_tonie(&self) -> Option<(RawFile, u32)> {
+        let content = self.volumes.open_dir(self.root, TONIE_CONTENT_DIR).ok()?;
+
+        let mut index = 0;
+        let found = loop {
+            let Some(entry) = nth_entry(&self.volumes, content, index) else {
+                break None;
+            };
+            index += 1;
+            if !entry.is_dir {
+                continue;
+            }
+
+            let Ok(folder) = self.volumes.open_dir(content, entry.name) else {
+                continue;
+            };
+            let opened = self
+                .volumes
+                .open_file_in_dir(folder, TONIE_AUDIO_FILE, Mode::ReadOnly)
+                .ok()
+                .map(|file| (file, entry.name));
+            let size = opened.as_ref().and_then(|_| {
+                let mut at = 0;
+                loop {
+                    let e = nth_entry(&self.volumes, folder, at)?;
+                    at += 1;
+                    if !e.is_dir && e.name.extension().is_empty() {
+                        break Some(e.size);
+                    }
+                }
+            });
+            let _ = self.volumes.close_dir(folder);
+
+            if let (Some((file, folder_name)), Some(size)) = (opened, size) {
+                esp_println::println!("teddiebox: tonie /CONTENT/{folder_name}/500304E0");
+                break Some((file, size));
+            }
+        };
+
+        let _ = self.volumes.close_dir(content);
+        found
     }
 
     /// Opens a file in the root directory for reading.

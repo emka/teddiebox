@@ -281,13 +281,22 @@ pub async fn play_first_taf(
     i2s_tx: I2sTx<'static, Blocking>,
     mut buffer: DmaTxStreamBuf,
 ) -> Result<(), &'static str> {
-    let Some((name, size)) = card.find_by_extension(b"TAF") else {
-        return Err("no .TAF in the card's root directory");
-    };
     let scratch = take_scratch().ok_or("the decoder has already been used")?;
 
-    esp_println::println!("teddiebox: taf {name}, {size} bytes");
-    let file = card.open_file(name)?;
+    // A `.TAF` copied into the root wins, so a specific file can be chosen for
+    // a test. Failing that, the card's own content is used where the Toniebox
+    // keeps it — which means step 9 runs against the stock card without
+    // anything being written to it.
+    let (file, size) = match card.find_by_extension(b"TAF") {
+        Some((name, size)) => {
+            esp_println::println!("teddiebox: taf /{name}, {size} bytes");
+            (card.open_file(name)?, size)
+        }
+        None => card
+            .open_first_tonie()
+            .ok_or("no .TAF in the root and no CONTENT/<hex>/500304E0 on the card")?,
+    };
+    esp_println::println!("teddiebox: taf {size} bytes");
     let pages = CardPages::new(card, file, size);
 
     let opus = LibOpus::new(&mut scratch.opus).map_err(|_| "the Opus decoder would not start")?;
