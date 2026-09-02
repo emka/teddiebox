@@ -78,6 +78,15 @@ pub enum Command {
     /// Take the codec down and bring it up again, so the start-up transient
     /// can be heard on demand rather than once per reboot.
     CodecInit,
+    /// Run the codec's software power-down and nothing else.
+    CodecDown,
+    /// Power the codec's output path up or down.
+    ///
+    /// Powering the class-D amplifier and the DAC is what the box clicks on,
+    /// so the start-up no longer does it and this is what makes the box
+    /// audible at all. Eventually playback will ask for it; for now the bench
+    /// asks, so the two can be heard apart.
+    Output(bool),
     /// Mute or unmute the class-D speaker driver, now rather than at start-up.
     ///
     /// Unmuting is what the box clicks on, and the codec's soft-stepping only
@@ -138,6 +147,9 @@ impl CommandWatch {
                     b"lock" => Some(Command::Lock),
                     b"cinit" => Some(Command::CodecInit),
                     b"cclr" => Some(Command::CodecClear),
+                    b"cdown" => Some(Command::CodecDown),
+                    b"out 1" => Some(Command::Output(true)),
+                    b"out 0" => Some(Command::Output(false)),
                     b"spk 1" => Some(Command::Speaker(true)),
                     b"spk 0" => Some(Command::Speaker(false)),
                     other => parse_password(other).or_else(|| parse_codec_set(other)),
@@ -334,6 +346,29 @@ mod tests {
     /// The class-D mute has to be reachable while the box is running, not
     /// only during start-up: whether unmuting clicks may depend on whether
     /// the codec has a clock, and it only has one once audio is playing.
+    /// Every moment the box clicks — `rb`, `cinit` — contains the codec's
+    /// software power-down, and every silent one does not. Running that step
+    /// on its own, changing nothing else, is what tells the two apart.
+    #[test]
+    fn the_codec_power_down_command_fires_on_its_own_line() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"cdown\r"), Some(Command::CodecDown));
+    }
+
+    #[test]
+    fn the_output_command_carries_which_way_it_goes() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"out 1\r"),
+            Some(Command::Output(true))
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"out 0\r"),
+            Some(Command::Output(false))
+        );
+        assert_eq!(feed_all(&mut watch, b"out\r"), None, "no direction given");
+    }
+
     #[test]
     fn the_speaker_command_carries_which_way_it_goes() {
         let mut watch = CommandWatch::new();

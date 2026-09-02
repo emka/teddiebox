@@ -346,6 +346,38 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 continue;
             }
         }
+        let output = OUTPUT_REQUEST.swap(0, Ordering::Relaxed);
+        if let request @ (OUTPUT_DOWN | OUTPUT_UP) = output {
+            let bus = accel.release();
+            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+            let up = request == OUTPUT_UP;
+            let outcome = if up {
+                dac.start_output(&mut dac_delay)
+            } else {
+                dac.stop_output()
+            };
+            match outcome {
+                Ok(()) => esp_println::println!(
+                    "teddiebox: codec output {}",
+                    if up { "up" } else { "down" }
+                ),
+                Err(_) => esp_println::println!("teddiebox: codec output would not change"),
+            }
+            let bus = dac.release();
+            accel = Lis3dh::new(bus, address);
+            continue;
+        }
+        if CODEC_POWER_DOWN.swap(false, Ordering::Relaxed) {
+            let bus = accel.release();
+            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+            match dac.power_down(&mut dac_delay) {
+                Ok(()) => esp_println::println!("teddiebox: codec powered down"),
+                Err(_) => esp_println::println!("teddiebox: codec would not power down"),
+            }
+            let bus = dac.release();
+            accel = Lis3dh::new(bus, address);
+            continue;
+        }
         if CODEC_REINIT.swap(false, Ordering::Relaxed) {
             // Down first, so every run starts from the same place and what is
             // heard is a start-up rather than a re-configuration.
@@ -486,10 +518,18 @@ static CODEC_QUIET: AtomicBool = AtomicBool::new(false);
 /// Ask the motion task to take the codec down and bring it back up.
 static CODEC_REINIT: AtomicBool = AtomicBool::new(false);
 
+/// Ask the motion task to run the codec's power-down, and nothing else.
+static CODEC_POWER_DOWN: AtomicBool = AtomicBool::new(false);
+
 /// A pending speaker mute change: 0 nothing, 1 mute, 2 unmute.
 static SPEAKER_REQUEST: AtomicU8 = AtomicU8::new(0);
 const SPEAKER_MUTE: u8 = 1;
 const SPEAKER_UNMUTE: u8 = 2;
+
+/// A pending output power change: 0 nothing, 1 down, 2 up.
+static OUTPUT_REQUEST: AtomicU8 = AtomicU8::new(0);
+const OUTPUT_DOWN: u8 = 1;
+const OUTPUT_UP: u8 = 2;
 
 /// Register overrides applied to the codec's start-up sequence.
 ///
@@ -842,7 +882,7 @@ async fn main(spawner: Spawner) {
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf (loud) | sd | nfc pw slix slixp lock | cinit cset cclr spk"
+        "teddiebox: dl rb | t wav taf (loud) | sd | nfc pw slix slixp lock | cinit cdown cset cclr out spk"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -971,10 +1011,15 @@ async fn main(spawner: Spawner) {
                     reboot(&mut board, &mut gates)
                 }
                 Some(Command::Tone) => {
+                    // The output path is unpowered until something plays, so
+                    // every audio command has to ask for it first or it is
+                    // heard by nobody.
+                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
                     REQUEST.store(REQUEST_TONE, Ordering::Relaxed);
                 }
                 Some(Command::PlayWav) => {
                     board.apply(gates.power(Rail::Storage, true));
+                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
                     REQUEST.store(REQUEST_WAV, Ordering::Relaxed);
                 }
                 Some(Command::Nfc) => {
@@ -1009,6 +1054,13 @@ async fn main(spawner: Spawner) {
                 Some(Command::CodecInit) => {
                     CODEC_REINIT.store(true, Ordering::Relaxed);
                 }
+                Some(Command::CodecDown) => {
+                    CODEC_POWER_DOWN.store(true, Ordering::Relaxed);
+                }
+                Some(Command::Output(on)) => {
+                    OUTPUT_REQUEST
+                        .store(if on { OUTPUT_UP } else { OUTPUT_DOWN }, Ordering::Relaxed);
+                }
                 Some(Command::Speaker(on)) => {
                     SPEAKER_REQUEST.store(
                         if on { SPEAKER_UNMUTE } else { SPEAKER_MUTE },
@@ -1027,6 +1079,7 @@ async fn main(spawner: Spawner) {
                 }
                 Some(Command::PlayTaf) => {
                     board.apply(gates.power(Rail::Storage, true));
+                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
                     REQUEST.store(REQUEST_TAF, Ordering::Relaxed);
                 }
                 Some(Command::Storage) => {

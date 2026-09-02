@@ -85,9 +85,14 @@ where
         Ok(())
     }
 
-    /// Applies `INIT_ANALOG`, waits out the drivers' ramp, then `INIT_DAC`.
+    /// Configures the codec and leaves it silent.
+    ///
+    /// The output stages are configured but not powered, and the speaker is
+    /// muted: a box that is not playing anything should not be driving a
+    /// speaker, and powering these stages is what it used to click on.
+    /// `start_output` is what makes it audible.
     pub fn init<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
-        self.apply(delay, INIT_ANALOG, INIT_DAC)
+        self.apply(delay, INIT_ANALOG, &[])
     }
 
     /// Writes `analog`, waits `DRIVER_RAMP_MS`, then writes `dac`.
@@ -109,9 +114,7 @@ where
         for &(page, reg, value) in dac {
             self.write_reg(page, reg, value)?;
         }
-        // Last of all, with the drivers ramped and the DAC running, so the
-        // unmute has nothing left to expose.
-        self.unmute_speaker(delay)
+        Ok(())
     }
 
     fn read_reg(&mut self, page: u8, reg: u8) -> Result<u8, Error<E>> {
@@ -134,6 +137,28 @@ where
         // Bits 3 and 2 mute the left and right DAC channels.
         let value = if muted { 0x0C } else { 0x00 };
         self.write_reg(0, page0::DAC_MUTE_CTRL, value)
+    }
+
+    /// Powers the output path up, in the order the datasheet gives.
+    ///
+    /// Separate from `init` because powering these stages is what the box
+    /// clicked on, and nothing should pay for that until there is audio to
+    /// hear. The speaker is unmuted last, which is the one step in the whole
+    /// sequence already measured to be silent.
+    pub fn start_output<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
+        for &(page, reg, value) in INIT_DAC {
+            self.write_reg(page, reg, value)?;
+        }
+        self.write_reg(1, page1::SPK_AMP, SPK_AMP_UP)?;
+        self.unmute_speaker(delay)
+    }
+
+    /// Powers the output path down again, muting before anything moves.
+    pub fn stop_output(&mut self) -> Result<(), Error<E>> {
+        self.mute_speaker()?;
+        self.write_reg(1, page1::SPK_AMP, SPK_AMP_DOWN)?;
+        self.write_reg(0, page0::DAC_MUTE_CTRL, DAC_MUTED)?;
+        self.write_reg(0, page0::DAC_DATA_PATH, DAC_DOWN)
     }
 
     /// Mutes the class-D driver.
@@ -282,7 +307,11 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // The drivers last. D7 and D6 power the HPL and HPR drivers; D2 is
     // reserved and must be 1. Common mode stays at its 1.35 V reset value.
     (1, page1::HP_DRIVERS, 0xC4),
-    (1, page1::SPK_AMP, 0x86),
+    // Configured but *not* powered: D7 clear. Powering the class-D amplifier
+    // is, measured by ear, the loudest part of what the box used to do when it
+    // started, and it is audible whether or not the driver in front of it is
+    // muted. D6-D1 keep their reset value as the datasheet requires.
+    (1, page1::SPK_AMP, SPK_AMP_DOWN),
 ];
 
 /// Class-D driver, 6 dB, muted — D2 clear. The speaker spends the whole
@@ -316,12 +345,26 @@ pub const POWER_DOWN_POLLS: u32 = 25;
 /// being read through, not a driver declining to come up.
 pub const DRIVER_RAMP_MS: u32 = 400;
 
-/// Powered only once the drivers are up, so nothing is converted into a
-/// half-ramped output stage.
+/// Class-D amplifier configured and powered; D6-D1 are reserved and hold the
+/// reset value the datasheet insists on.
+pub const SPK_AMP_UP: u8 = 0x86;
+/// The same, powered down.
+pub const SPK_AMP_DOWN: u8 = 0x06;
+/// DAC powered, both channels routed to their own side.
+pub const DAC_UP: u8 = 0xD4;
+/// The same, both channels powered down.
+pub const DAC_DOWN: u8 = 0x14;
+/// D3 and D2 mute the left and right DAC channels.
+pub const DAC_MUTED: u8 = 0x0C;
+pub const DAC_UNMUTED: u8 = 0x00;
+
+/// Applied when there is something to play, never at start-up.
+///
+/// Powering the DAC accounts for most of what remains of the start-up click
+/// once the amplifier is left alone, so it waits here with it.
 pub const INIT_DAC: &[(u8, u8, u8)] = &[
-    // DAC on, both channels, then unmute.
-    (0, page0::DAC_DATA_PATH, 0xD4),
-    (0, page0::DAC_MUTE_CTRL, 0x00),
+    (0, page0::DAC_DATA_PATH, DAC_UP),
+    (0, page0::DAC_MUTE_CTRL, DAC_UNMUTED),
 ];
 
 // The volume register counts in half-decibel steps, two's complement, which
@@ -402,16 +445,12 @@ mod tests {
             w(vec![0x26, 0x80]), // left analog volume to speaker: routed, 0 dB
             w(vec![0x28, 0x06]), // HPL driver gain
             w(vec![0x29, 0x06]), // HPR driver gain
-            w(vec![0x2A, 0x00]), // speaker driver gain: 6 dB, muted for now
+            w(vec![0x2A, 0x00]), // speaker driver gain: 6 dB, muted
             w(vec![0x21, 0xBE]), // pop removal: power down amps before the DAC
             w(vec![0x1F, 0xC4]), // headphone drivers: HPL and HPR powered up
-            w(vec![0x20, 0x86]), // speaker amp on
-            w(vec![0x00, 0x00]), // back to page 0
-            w(vec![0x3F, 0xD4]), // DAC data path: on, both channels
-            w(vec![0x40, 0x00]), // unmute
-            w(vec![0x00, 0x01]), // page 1
-            w(vec![0x2A, 0x04]), // speaker unmuted, last of all
-            Transaction::write_read(DEFAULT_ADDRESS, vec![0x2A], vec![0x05]),
+            w(vec![0x20, 0x06]), // speaker amp configured but NOT powered
+                                 // Nothing else: no DAC, no amplifier, no unmute. A box that is
+                                 // not playing anything drives nothing.
         ];
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
@@ -446,6 +485,72 @@ mod tests {
     /// the start-up sequence is what stops it clicking. So the speaker comes
     /// up muted and is unmuted last, once the drivers have ramped and the DAC
     /// is running — everything the unmute would otherwise expose.
+    /// Measured by ear, bisecting the start-up a register at a time: leaving
+    /// the class-D amplifier unpowered is what silences it, leaving the DAC
+    /// unpowered accounts for most of the rest, and the headphone drivers
+    /// contribute nothing. Powering an output stage is audible whether or not
+    /// the driver in front of it is muted, so the only cure is not to power
+    /// it until there is something to play.
+    #[test]
+    fn the_start_up_leaves_the_output_stages_unpowered() {
+        let &(_, _, amp) = INIT_ANALOG
+            .iter()
+            .find(|&&(p, r, _)| p == 1 && r == page1::SPK_AMP)
+            .expect("the sequence must configure the speaker amplifier");
+        assert_eq!(
+            amp & 0x80,
+            0x00,
+            "D7 set powers the class-D amp, which clicks"
+        );
+        assert!(
+            !INIT_ANALOG
+                .iter()
+                .any(|&(p, r, _)| p == 0 && r == page0::DAC_DATA_PATH),
+            "the DAC must not be powered by the start-up sequence"
+        );
+    }
+
+    /// Starting the output is the inverse, and its order is the datasheet's:
+    /// the DAC comes up, then the amplifier, and the speaker is unmuted last
+    /// — the one step already measured to be silent.
+    #[test]
+    fn starting_the_output_powers_the_dac_then_the_amplifier_then_unmutes() {
+        let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
+        let expected = [
+            w(vec![0x00, 0x00]), // page 0
+            w(vec![0x3F, 0xD4]), // DAC on, both channels
+            w(vec![0x40, 0x00]), // digital unmute
+            w(vec![0x00, 0x01]), // page 1
+            w(vec![0x20, 0x86]), // class-D amplifier powered
+            w(vec![0x2A, 0x04]), // speaker unmuted, last
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x2A], vec![0x05]),
+        ];
+
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        let mut delay = CheckedDelay::new(&[]);
+        assert_eq!(dac.start_output(&mut delay), Ok(()));
+        dac.release().done();
+        delay.done();
+    }
+
+    /// Stopping unwinds it: muted first, so nothing that follows is heard.
+    #[test]
+    fn stopping_the_output_mutes_before_it_unpowers_anything() {
+        let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
+        let expected = [
+            w(vec![0x00, 0x01]), // page 1
+            w(vec![0x2A, 0x00]), // speaker muted first
+            w(vec![0x20, 0x06]), // class-D amplifier down
+            w(vec![0x00, 0x00]), // page 0
+            w(vec![0x40, 0x0C]), // digital mute
+            w(vec![0x3F, 0x14]), // DAC down
+        ];
+
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        assert_eq!(dac.stop_output(), Ok(()));
+        dac.release().done();
+    }
+
     #[test]
     fn the_speaker_comes_up_muted() {
         let &(_, _, value) = INIT_ANALOG
@@ -559,10 +664,6 @@ mod tests {
                 w(vec![0x20, 0x86]),
                 w(vec![0x00, 0x00]),
                 w(vec![0x3F, 0xD4]),
-                // apply() always finishes by unmuting the speaker.
-                w(vec![0x00, 0x01]),
-                w(vec![0x2A, 0x04]),
-                Transaction::write_read(DEFAULT_ADDRESS, vec![0x2A], vec![0x05]),
             ]),
             DEFAULT_ADDRESS,
         );
