@@ -1,13 +1,26 @@
-//! NXP ICODE SLIX privacy mode.
+//! NXP ICODE privacy mode.
 //!
 //! Tonie figures ship with privacy mode enabled: the tag ignores inventory
 //! entirely until it receives the correct privacy password. The unlock is a
 //! two-step exchange — fetch a random number, then send the password XORed
 //! with that number, twice over.
 //!
-//! **Unverified against silicon.** Command codes are from the NXP ICODE SLIX
-//! datasheet; the password itself is a Toniebox-specific constant supplied by
-//! the caller, not held here.
+//! **Verified against silicon on 2026-09-02**, on a Tonie figure and on a
+//! SLIX-L, both of which answered inventory after being unlocked this way.
+//!
+//! Named for SLIX by habit, but **plain ICODE SLIX has no privacy mode at
+//! all**: SL2S2002 §1.3 offers only a password-protected EAS/AFI, and its
+//! sole password identifier is `10h`. Privacy, the identifier `04h` used
+//! here, and ENABLE PRIVACY belong to SLIX-L and SLIX2 (SL2S5002 §1.3). The
+//! two parts share GET RANDOM NUMBER and SET PASSWORD, which is why the
+//! plain-SLIX datasheet is still worth reading for those two.
+//!
+//! One rule from it governs everything above: **a password the tag does not
+//! hold is answered with silence, and the tag then ignores every command
+//! until its field has been taken away** (SL2S2002 §9.4.3.2). Trying a second
+//! password without that reset asks a tag that has stopped listening.
+//!
+//! The Toniebox's own password is a caller-supplied constant, not held here.
 
 /// Request flags: one subcarrier, high data rate, not addressed.
 ///
@@ -26,6 +39,18 @@ pub const CMD_SET_PASSWORD: u8 = 0xB3;
 
 /// Password identifier for the privacy password.
 pub const PASSWORD_ID_PRIVACY: u8 = 0x04;
+
+/// NXP's factory default privacy password.
+///
+/// A SLIX-L that has never had a password written to it still holds this one,
+/// so a plain tag off the reel is readable without knowing anything about it.
+/// Confirmed at the bench on 2026-09-02: a SLIX-L that refused the Toniebox
+/// password accepted this and then answered inventory with
+/// `E00403504E3D2C1B`.
+///
+/// It is a published default, not a secret, which is why it can live here
+/// while the Toniebox's own password cannot.
+pub const VENDOR_DEFAULT_PASSWORD: u32 = 0x0F0F_0F0F;
 
 /// Builds the GET RANDOM NUMBER request.
 pub fn get_random_number_request() -> [u8; 3] {

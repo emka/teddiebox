@@ -344,6 +344,86 @@ fn a_tag_is_reset_by_taking_its_field_away_and_giving_it_back() {
     irq.done();
 }
 
+/// SET PASSWORD for privacy, the NXP vendor default 0x0F0F0F0F masked with a
+/// random number of zero, so the password shows through unchanged.
+const SET_PASSWORD_VENDOR: [u8; 8] = [0x02, 0xB3, 0x04, 0x04, 0x0F, 0x0F, 0x0F, 0x0F];
+
+/// A tag may hold any of several passwords, and the wrong one is answered
+/// with silence — after which the tag ignores everything until its field has
+/// been taken away (SL2S2002 §9.4.3.2). So a driver that simply tries the
+/// next password sends it to a tag that has stopped listening, and reports
+/// the plate empty whichever password was right.
+#[test]
+fn a_refused_password_is_followed_by_a_field_reset_before_the_next_one() {
+    let uid_response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+
+    let mut spi = Vec::new();
+    // A tag in privacy mode ignores inventory entirely.
+    spi.extend(transmit_transactions(&INVENTORY, [0x00, 0x30]));
+    // It does answer GET RANDOM NUMBER — that is what privacy mode leaves
+    // open — and then says nothing to a password it does not hold.
+    spi.extend(transceive_transactions(
+        &GET_RANDOM_NUMBER,
+        [0x00, 0x30],
+        2,
+        &[0x00, 0xCD, 0xAB],
+    ));
+    spi.extend(transmit_transactions(&SET_PASSWORD_0, [0x00, 0x80]));
+    // The field down and back up, which is the tag's power-on reset.
+    spi.extend(spi_write(vec![0x00, 0x00]));
+    spi.extend(spi_write(vec![0x00, 0x20]));
+    // Listening again, so the second password can be tried at all.
+    spi.extend(transceive_transactions(
+        &GET_RANDOM_NUMBER,
+        [0x00, 0x30],
+        2,
+        &[0x00, 0x00, 0x00],
+    ));
+    spi.extend(transceive_transactions(
+        &SET_PASSWORD_VENDOR,
+        [0x00, 0x80],
+        0,
+        &[0x00],
+    ));
+    spi.extend(transceive_transactions(
+        &INVENTORY,
+        [0x00, 0x30],
+        9,
+        &uid_response,
+    ));
+
+    let mut irq = irq_never();
+    irq.extend(irq_exchange());
+    irq.extend(irq_never());
+    irq.extend(irq_exchange());
+    irq.extend(irq_exchange());
+    irq.extend(irq_exchange());
+
+    let mut delay = polls(IRQ_POLL_ATTEMPTS as usize);
+    delay.extend(answered(0));
+    delay.extend(polls(IRQ_POLL_ATTEMPTS as usize));
+    delay.push(DelayTransaction::delay_ms(FIELD_OFF_MS));
+    delay.push(DelayTransaction::delay_ms(FIELD_SETTLE_MS));
+    delay.extend(answered(0));
+    delay.extend(answered(0));
+    delay.extend(answered(0));
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&delay),
+        PinMock::new(&irq),
+    );
+    assert_eq!(
+        r.inventory_unlocked(&[0x0000_0000, 0x0F0F_0F0F]),
+        Ok(Some([1, 2, 3, 4, 5, 6, 7, 8])),
+        "the second password must reach a tag that is listening"
+    );
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
 /// The FIFO holds twelve bytes and this driver loads a request in one go, so
 /// a longer one cannot be sent. Silently, it both overran the FIFO and, past
 /// 4096 bytes, wrapped the 12-bit length field into a plausible small number.

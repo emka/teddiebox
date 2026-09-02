@@ -227,7 +227,7 @@ impl Reader {
             }
         }
 
-        match self.trf.inventory_unlocked(password) {
+        match self.trf.inventory_unlocked(&passwords(password)) {
             Ok(Some(uid)) => report_uid("unlocked tag", &uid),
             Ok(None) => esp_println::println!(
                 "teddiebox: nfc still silent after unlock — wrong password, or still locked"
@@ -301,6 +301,17 @@ impl Reader {
         }
         self.diagnose();
     }
+}
+
+/// The passwords to try on a tag, in the order they are expected.
+///
+/// The Toniebox's own first, since that is what a figure holds. NXP's factory
+/// default second, so a plain SLIX-L off the reel — the sort of tag used to
+/// test this without risking a figure — reads too. A wrong password costs a
+/// field reset rather than an error, so the fallback is cheap and only
+/// happens on tags the first password does not fit.
+fn passwords(tonie: u32) -> [u32; 2] {
+    [tonie, trf7962a::slix::VENDOR_DEFAULT_PASSWORD]
 }
 
 /// Names the reader's own reason for rejecting a reception.

@@ -495,7 +495,11 @@ where
 
     /// Unlocks, then inventories. This is the operation the firmware calls;
     /// a locked tag is invisible to `inventory` alone.
-    pub fn inventory_unlocked(&mut self, password: u32) -> Result<Option<[u8; 8]>, Error<E>> {
+    ///
+    /// `passwords` are tried in order, so the caller states its preference:
+    /// a Toniebox figure and a tag still holding NXP's factory default are
+    /// both readable, and which one is expected comes first.
+    pub fn inventory_unlocked(&mut self, passwords: &[u32]) -> Result<Option<[u8; 8]>, Error<E>> {
         // A tag already out of privacy mode answers inventory directly, so try
         // that first and only pay for the unlock exchange when it is needed.
         // A locked tag is silent, and a tag mid-exchange can answer garbled —
@@ -508,12 +512,30 @@ where
             | Err(Error::TagError(_)) => {}
             Err(e) => return Err(e),
         }
-        match self.unlock_privacy(password) {
-            Ok(()) => self.inventory(),
-            // Nothing on the plate at all.
-            Err(Error::Timeout) => Ok(None),
-            Err(e) => Err(e),
+
+        for &password in passwords {
+            // Asked first and on its own, because privacy mode leaves exactly
+            // this command open. Silence here is an empty plate rather than a
+            // wrong password, and trying the rest would cost a field reset
+            // per password for a tag that is not there.
+            let random = match self.get_random_number() {
+                Ok(random) => random,
+                Err(Error::Timeout) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            match self.set_password(password, random) {
+                Ok(()) => return self.inventory(),
+                // A password the tag does not hold is answered with silence,
+                // and leaves it deaf to everything until its supply has been
+                // interrupted. The next password would be shouted at a tag
+                // that stopped listening, so the field goes down first —
+                // including after the last one, so the tag is left usable
+                // rather than mute for whoever polls next.
+                Err(Error::Timeout) => self.reset_tags()?,
+                Err(e) => return Err(e),
+            }
         }
+        Ok(None)
     }
 }
 
