@@ -14,6 +14,9 @@ use embedded_hal::spi::SpiDevice;
 /// command, so the encoding lives here and nowhere else.
 const CMD_BIT: u8 = 0x80;
 const READ_BIT: u8 = 0x40;
+/// Continuous address mode: the reader auto-increments through registers
+/// within one transaction. Required when reading the interrupt status.
+const CONTINUOUS_BIT: u8 = 0x20;
 const ADDRESS_MASK: u8 = 0x1F;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +153,30 @@ where
     }
 
     /// Issues a direct command.
+    /// Reads the interrupt status register.
+    ///
+    /// Not an ordinary register read. SLOS757C's SPI procedure sets the
+    /// continuous-address bit as well as the read bit — address `0x6C`, not
+    /// `0x4C` — and follows the status byte with a dummy read of register
+    /// `0x0D`, "because the reader's IRQ Status register needs an additional
+    /// clock cycle to clear the register". Read the ordinary way the register
+    /// does not clear, and at a bench that presents as a reader which never
+    /// raises an interrupt at all.
+    pub fn read_irq_status(&mut self) -> Result<u8, Error<E>> {
+        let mut buf = [0u8; 3];
+        self.spi
+            .transfer(
+                &mut buf,
+                &[
+                    (regs::IRQ_STATUS & ADDRESS_MASK) | READ_BIT | CONTINUOUS_BIT,
+                    0,
+                    0,
+                ],
+            )
+            .map_err(Error::Bus)?;
+        Ok(buf[1])
+    }
+
     pub fn send_command(&mut self, command: u8) -> Result<(), Error<E>> {
         self.spi
             .write(&[CMD_BIT | (command & ADDRESS_MASK)])
@@ -209,7 +236,7 @@ where
         // would make the next exchange return instantly on a stale assertion.
         // The individual bits are not interpreted yet — see the register map
         // note in `regs`, and confirm them at bench step 10.
-        let _ = self.read_register(regs::IRQ_STATUS)?;
+        let _ = self.read_irq_status()?;
 
         // B4 is the overflow flag and B3-B0 the unread byte count. Reading the
         // raw byte as a count folds in the two level flags and hands the

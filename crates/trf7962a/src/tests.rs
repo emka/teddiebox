@@ -29,6 +29,37 @@ fn spi_write(bytes: Vec<u8>) -> Vec<Transaction<u8>> {
     ]
 }
 
+/// SLOS757C: reading the interrupt status register over SPI needs the
+/// continuous-address bit set and a dummy read of the next register, "because
+/// the reader's IRQ Status register needs an additional clock cycle to clear
+/// the register". A plain single-byte read leaves it uncleared, and the
+/// address byte is 0x6C rather than 0x4C.
+///
+/// Literal bytes, from the datasheet's own step-by-step procedure. The driver
+/// read this register the ordinary way for its whole life, and at the bench
+/// that reads as a reader which never raises an interrupt at all.
+#[test]
+fn the_interrupt_status_is_read_with_a_dummy_byte() {
+    let mut trf = reader(&[
+        Transaction::transaction_start(),
+        Transaction::transfer(vec![0x6C, 0x00, 0x00], vec![0x00, 0x80, 0x00]),
+        Transaction::transaction_end(),
+    ]);
+    assert_eq!(trf.read_irq_status(), Ok(0x80));
+    check(trf);
+}
+
+/// The interrupt status read, which is not an ordinary register read: the
+/// continuous-address bit is set and a dummy byte follows. See
+/// `the_interrupt_status_is_read_with_a_dummy_byte`.
+fn spi_read_irq(value: u8) -> Vec<Transaction<u8>> {
+    vec![
+        Transaction::transaction_start(),
+        Transaction::transfer(vec![0x6C, 0x00, 0x00], vec![0x00, value, 0x00]),
+        Transaction::transaction_end(),
+    ]
+}
+
 /// One SPI transaction reading a register.
 ///
 /// Two bytes are clocked: the reader cannot answer during the address
@@ -77,7 +108,7 @@ fn transceive_transactions(
     response: &[u8],
 ) -> Vec<Transaction<u8>> {
     let mut t = transmit_transactions(request, tx_length);
-    t.extend(spi_read(0x4C, 0x00)); // IRQ status, read to clear
+    t.extend(spi_read_irq(0x00)); // IRQ status, read to clear
     t.extend(spi_read(0x5C, fifo_status)); // FIFO status, read bit set
     for &b in response {
         t.extend(spi_read(0x5F, b)); // FIFO, read bit set
@@ -228,7 +259,7 @@ fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
     // byte as a count reads 0x8A as 138 bytes available and fabricates a
     // UID out of whatever the FIFO returns.
     let mut spi = transmit_transactions(&INVENTORY, [0x00, 0x30]);
-    spi.extend(spi_read(0x4C, 0x00));
+    spi.extend(spi_read_irq(0x00));
     spi.extend(spi_read(0x5C, 0x1A));
 
     let mut r = Trf7962a::new(
