@@ -271,6 +271,7 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     {
         Ok(()) => {
             esp_println::println!("teddiebox: codec configured");
+            CODEC_READY.store(true, Ordering::Relaxed);
 
             // A bring-up listening level, not a design decision — real volume
             // belongs to `teddiebox_core::VolumeModel` and the ears, once
@@ -545,6 +546,13 @@ const NO_SOUND: u32 = u32::MAX;
 
 /// Set while a sound the box asked for is still being played.
 static ANNOUNCING: AtomicBool = AtomicBool::new(false);
+
+/// Set once the codec is configured and would be heard if it were driven.
+///
+/// The start-up jingle waits on this. `init` spends 400 ms letting the output
+/// drivers ramp, and a jingle that begins before then loses its first second
+/// to a codec that is not listening yet.
+static CODEC_READY: AtomicBool = AtomicBool::new(false);
 
 /// Set when the box has said it is turning off, and must therefore do it.
 ///
@@ -960,6 +968,9 @@ async fn main(spawner: Spawner) {
         .expect("UART0 receive")
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
+    // Cleared the moment it is asked for, so a jingle is a start-up event and
+    // not something that can happen twice.
+    let mut startup_pending = true;
     esp_println::println!(
         "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock | cinit cdown cset cclr out spk"
     );
@@ -1076,6 +1087,18 @@ async fn main(spawner: Spawner) {
                 &lit,
                 board::breathing_duty(Instant::now().as_millis() as u32),
             );
+        }
+
+        // The jingle stock plays at power-on, once the codec could carry it.
+        //
+        // It is not decoration. Powering the class-D amplifier is audible on
+        // its own — that is what this box used to click on — and starting the
+        // audio in the same breath is how the stock firmware lives with it.
+        // The sound covers the transient rather than the transient being
+        // removed, which is the same trick, honestly arrived at.
+        if startup_pending && CODEC_READY.load(Ordering::Relaxed) {
+            startup_pending = false;
+            SOUND_REQUEST.store(Sound::Startup.file(), Ordering::Relaxed);
         }
 
         // A sound the box decided to say about itself. Raised here rather
