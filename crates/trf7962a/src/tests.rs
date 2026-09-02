@@ -138,9 +138,9 @@ fn transmit_transactions(request: &[u8], tx_length: [u8; 2]) -> Vec<Transaction<
 }
 
 /// GET RANDOM NUMBER, spelled out rather than taken from `slix`.
-const GET_RANDOM_NUMBER: [u8; 3] = [0x22, 0xB2, 0x04];
+const GET_RANDOM_NUMBER: [u8; 3] = [0x02, 0xB2, 0x04];
 /// SET PASSWORD for privacy, password 0 masked with random number 0xABCD.
-const SET_PASSWORD_0: [u8; 8] = [0x22, 0xB3, 0x04, 0x04, 0xCD, 0xAB, 0xCD, 0xAB];
+const SET_PASSWORD_0: [u8; 8] = [0x02, 0xB3, 0x04, 0x04, 0xCD, 0xAB, 0xCD, 0xAB];
 /// Single-slot inventory: high data rate, inventory, one slot.
 const INVENTORY: [u8; 3] = [0x26, 0x01, 0x00];
 

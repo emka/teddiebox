@@ -9,10 +9,15 @@
 //! datasheet; the password itself is a Toniebox-specific constant supplied by
 //! the caller, not held here.
 
-/// Request flags: high data rate, addressed to any tag.
+/// Request flags: one subcarrier, high data rate, not addressed.
+///
+/// ISO 15693-3 §7.3.1 puts the Address flag in bit 6, and a request that sets
+/// it must carry the tag's eight-byte UID. During a privacy unlock the UID is
+/// exactly what is not yet known — a locked tag will not answer inventory, so
+/// there is nothing to address — which makes 0x02 the only flags byte these
+/// two commands can carry. Nothing marks a request as manufacturer-custom:
+/// that is the command code's range plus the IC manufacturer byte after it.
 pub const FLAGS: u8 = 0x02;
-/// Flags with the manufacturer-custom bit set.
-pub const FLAGS_CUSTOM: u8 = 0x22;
 /// NXP's IC manufacturer code.
 pub const MFG_NXP: u8 = 0x04;
 
@@ -24,7 +29,7 @@ pub const PASSWORD_ID_PRIVACY: u8 = 0x04;
 
 /// Builds the GET RANDOM NUMBER request.
 pub fn get_random_number_request() -> [u8; 3] {
-    [FLAGS_CUSTOM, CMD_GET_RANDOM_NUMBER, MFG_NXP]
+    [FLAGS, CMD_GET_RANDOM_NUMBER, MFG_NXP]
 }
 
 /// Builds the SET PASSWORD request.
@@ -35,7 +40,7 @@ pub fn set_password_request(password: u32, random: u16) -> [u8; 8] {
     let xor_mask = (u32::from(random) << 16) | u32::from(random);
     let masked = (password ^ xor_mask).to_le_bytes();
     [
-        FLAGS_CUSTOM,
+        FLAGS,
         CMD_SET_PASSWORD,
         MFG_NXP,
         PASSWORD_ID_PRIVACY,
@@ -50,13 +55,22 @@ pub fn set_password_request(password: u32, random: u16) -> [u8; 8] {
 mod tests {
     use super::*;
 
+    /// ISO 15693-3 §7.3.1: bit 6 of the request flags is the Address flag,
+    /// and setting it promises an eight-byte UID that these three bytes do
+    /// not carry. A tag reading a malformed addressed request stays silent,
+    /// which at a bench is indistinguishable from an empty plate.
     #[test]
-    fn the_random_number_request_is_a_custom_nxp_command() {
+    fn the_random_number_request_is_not_addressed_to_a_uid() {
         assert_eq!(
             get_random_number_request(),
-            [0x22, 0xB2, 0x04],
-            "custom bit must be set or the tag ignores the command"
+            [0x02, 0xB2, 0x04],
+            "the UID is what an unlock does not yet know"
         );
+    }
+
+    #[test]
+    fn the_password_request_is_not_addressed_to_a_uid() {
+        assert_eq!(&set_password_request(0, 0)[..3], &[0x02, 0xB3, 0x04]);
     }
 
     #[test]
