@@ -250,7 +250,10 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     // goes back to the accelerometer, which needs it continuously.
     let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
     let mut dac_delay = esp_hal::delay::Delay::new();
-    match dac.reset().and_then(|()| dac.init(&mut dac_delay)) {
+    match dac
+        .reset()
+        .and_then(|()| codec_bring_up(&mut dac, &mut dac_delay))
+    {
         Ok(()) => {
             esp_println::println!("teddiebox: codec configured");
 
@@ -316,6 +319,34 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     }
 
     loop {
+        if CODEC_REINIT.swap(false, Ordering::Relaxed) {
+            // Down first, so every run starts from the same place and what is
+            // heard is a start-up rather than a re-configuration.
+            let bus = accel.release();
+            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+            let _ = dac.power_down(&mut dac_delay);
+            match dac
+                .reset()
+                .and_then(|()| codec_bring_up(&mut dac, &mut dac_delay))
+            {
+                Ok(()) => {
+                    let _ = dac.set_volume_db(BENCH_VOLUME_DB);
+                    match dac.power_flags() {
+                        Ok(f) => esp_println::println!(
+                            "teddiebox: codec re-inited dac_l={} class_d_l={} hpl={}",
+                            f.left_dac,
+                            f.left_class_d,
+                            f.hpl_driver
+                        ),
+                        Err(_) => esp_println::println!("teddiebox: codec flags unreadable"),
+                    }
+                }
+                Err(_) => esp_println::println!("teddiebox: codec would not re-init"),
+            }
+            let bus = dac.release();
+            accel = Lis3dh::new(bus, address);
+            continue;
+        }
         if CODEC_SHUTDOWN.load(Ordering::Relaxed) {
             // The bus went to the accelerometer for good once the codec was
             // configured, so taking the codec down means taking it back.
@@ -340,6 +371,26 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         // Short enough that a reboot is not held up by an accelerometer nap.
         Timer::after(Duration::from_millis(200)).await;
     }
+}
+
+/// Applies the start-up sequence with any console overrides in place.
+///
+/// Both the boot path and `cinit` go through this, so what the bench hears
+/// when it re-runs the sequence is what the box will do on its next start —
+/// a rig that diverged from the real thing would be worse than no rig.
+fn codec_bring_up<I2C, E, D>(
+    dac: &mut Tlv320Dac3100<I2C>,
+    delay: &mut D,
+) -> Result<(), tlv320dac3100::Error<E>>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    D: embedded_hal::delay::DelayNs,
+{
+    let mut analog = [(0u8, 0u8, 0u8); 32];
+    let mut dac_table = [(0u8, 0u8, 0u8); 8];
+    let analog = codec_apply_overrides(tlv320dac3100::INIT_ANALOG, &mut analog);
+    let dac_regs = codec_apply_overrides(tlv320dac3100::INIT_DAC, &mut dac_table);
+    dac.apply(delay, analog, dac_regs)
 }
 
 /// How loud the box plays during bring-up.
@@ -389,6 +440,73 @@ static NFC_PASSWORD: AtomicU32 = AtomicU32::new(0);
 /// than a call.
 static CODEC_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static CODEC_QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Ask the motion task to take the codec down and bring it back up.
+static CODEC_REINIT: AtomicBool = AtomicBool::new(false);
+
+/// Register overrides applied to the codec's start-up sequence.
+///
+/// Which register value stops the box clicking on start-up is a question for
+/// the ear, and a reflash between guesses makes that loop minutes long. Each
+/// slot is packed as `page << 16 | register << 8 | value`, with the top byte
+/// set to mark it used, so the whole table is lock-free and needs no
+/// allocator.
+static CODEC_OVERRIDES: [AtomicU32; CODEC_OVERRIDE_SLOTS] =
+    [const { AtomicU32::new(0) }; CODEC_OVERRIDE_SLOTS];
+const CODEC_OVERRIDE_SLOTS: usize = 6;
+const CODEC_OVERRIDE_USED: u32 = 1 << 24;
+
+fn codec_override_set(page: u8, register: u8, value: u8) -> bool {
+    let packed = CODEC_OVERRIDE_USED
+        | (u32::from(page) << 16)
+        | (u32::from(register) << 8)
+        | u32::from(value);
+    let same_register = |slot: u32| slot & 0x00FF_FF00 == packed & 0x00FF_FF00;
+    // Replace an override of the same register rather than filling the table
+    // with a history of one register's values.
+    for slot in CODEC_OVERRIDES.iter() {
+        let current = slot.load(Ordering::Relaxed);
+        if current & CODEC_OVERRIDE_USED != 0 && same_register(current) {
+            slot.store(packed, Ordering::Relaxed);
+            return true;
+        }
+    }
+    for slot in CODEC_OVERRIDES.iter() {
+        if slot.load(Ordering::Relaxed) & CODEC_OVERRIDE_USED == 0 {
+            slot.store(packed, Ordering::Relaxed);
+            return true;
+        }
+    }
+    false
+}
+
+fn codec_overrides_clear() {
+    for slot in CODEC_OVERRIDES.iter() {
+        slot.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Copies `table` into `out`, applying any override for each register.
+fn codec_apply_overrides<'a>(
+    table: &[(u8, u8, u8)],
+    out: &'a mut [(u8, u8, u8)],
+) -> &'a [(u8, u8, u8)] {
+    out[..table.len()].copy_from_slice(table);
+    for entry in out[..table.len()].iter_mut() {
+        for slot in CODEC_OVERRIDES.iter() {
+            let packed = slot.load(Ordering::Relaxed);
+            if packed & CODEC_OVERRIDE_USED == 0 {
+                continue;
+            }
+            let page = ((packed >> 16) & 0xFF) as u8;
+            let register = ((packed >> 8) & 0xFF) as u8;
+            if entry.0 == page && entry.1 == register {
+                entry.2 = (packed & 0xFF) as u8;
+            }
+        }
+    }
+    &out[..table.len()]
+}
 
 /// How long a reboot waits for the codec before going ahead regardless.
 ///
@@ -677,7 +795,7 @@ async fn main(spawner: Spawner) {
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf (loud) | sd | nfc, pw <8 hex>, slix, slixp, lock"
+        "teddiebox: dl rb | t wav taf (loud) | sd | nfc pw slix slixp lock | cinit cset cclr"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -823,6 +941,26 @@ async fn main(spawner: Spawner) {
                 Some(Command::ForceUnlock) => {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_FORCE_UNLOCK, Ordering::Relaxed);
+                }
+                Some(Command::CodecSet {
+                    page,
+                    register,
+                    value,
+                }) => {
+                    if codec_override_set(page, register, value) {
+                        esp_println::println!(
+                            "teddiebox: codec page {page} register {register:#04x} -> {value:#04x} on next cinit"
+                        );
+                    } else {
+                        esp_println::println!("teddiebox: no override slots left — cclr first");
+                    }
+                }
+                Some(Command::CodecClear) => {
+                    codec_overrides_clear();
+                    esp_println::println!("teddiebox: codec overrides cleared");
+                }
+                Some(Command::CodecInit) => {
+                    CODEC_REINIT.store(true, Ordering::Relaxed);
                 }
                 Some(Command::Lock) => {
                     board.apply(gates.power(Rail::Storage, true));

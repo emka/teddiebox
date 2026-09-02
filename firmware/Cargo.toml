@@ -33,6 +33,7 @@ esp-println = { version = "0.18", default-features = false, features = [
 esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
 embedded-sdmmc = { version = "0.10", default-features = false }
+embedded-hal = { version = "1.0" }
 embedded-hal-bus = { version = "0.3", default-features = false }
 embassy-futures = "0.1"
 teddiebox-audio = { version = "0.1.0", path = "../crates/teddiebox-audio" }

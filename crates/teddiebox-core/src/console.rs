@@ -66,6 +66,18 @@ pub enum Command {
     /// restores a bench tag to the state a figure actually arrives in — and
     /// without it the privacy path cannot be exercised twice.
     Lock,
+    /// Override one register of the codec's start-up sequence.
+    ///
+    /// Which register decides whether the box clicks on start-up can only be
+    /// settled by ear, and a reflash between guesses makes that loop minutes
+    /// long. Overrides are applied by `CodecInit`, not immediately, because
+    /// the question is always what the *start-up* does.
+    CodecSet { page: u8, register: u8, value: u8 },
+    /// Forget every override, back to the compiled-in sequence.
+    CodecClear,
+    /// Take the codec down and bring it up again, so the start-up transient
+    /// can be heard on demand rather than once per reboot.
+    CodecInit,
 }
 
 /// Longest command line accepted. Anything longer cannot be a command, and is
@@ -118,7 +130,9 @@ impl CommandWatch {
                     b"slix" => Some(Command::Unlock),
                     b"slixp" => Some(Command::ForceUnlock),
                     b"lock" => Some(Command::Lock),
-                    other => parse_password(other),
+                    b"cinit" => Some(Command::CodecInit),
+                    b"cclr" => Some(Command::CodecClear),
+                    other => parse_password(other).or_else(|| parse_codec_set(other)),
                 }
             };
             self.len = 0;
@@ -134,6 +148,51 @@ impl CommandWatch {
         }
         None
     }
+}
+
+/// Reads two hex digits, exactly.
+///
+/// Exactly two, because a register or a value written with one digit is a
+/// typo rather than a small number, and these go to a live codec where a
+/// wrong register is a write to something unrelated.
+fn hex_byte(digits: &[u8]) -> Option<u8> {
+    if digits.len() != 2 {
+        return None;
+    }
+    let mut value = 0u8;
+    for &byte in digits {
+        let nibble = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        };
+        value = (value << 4) | nibble;
+    }
+    Some(value)
+}
+
+/// Reads `cset <page> <register> <value>`, the last two as two hex digits.
+fn parse_codec_set(line: &[u8]) -> Option<Command> {
+    let rest = line.strip_prefix(b"cset ")?;
+    let mut parts = rest.split(|&b| b == b' ');
+    // The codec has pages 0 and 1; nothing this firmware touches lives higher,
+    // and a mistyped page would write to a quite different register.
+    let page = match parts.next()? {
+        b"0" => 0,
+        b"1" => 1,
+        _ => return None,
+    };
+    let register = hex_byte(parts.next()?)?;
+    let value = hex_byte(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(Command::CodecSet {
+        page,
+        register,
+        value,
+    })
 }
 
 /// Reads `pw <8 hex digits>`.
@@ -258,6 +317,50 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"lock\r"), Some(Command::Lock));
         assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
         assert_eq!(feed_all(&mut watch, b"slixp\r"), Some(Command::ForceUnlock));
+    }
+
+    /// The codec's pop behaviour is decided by a handful of register values,
+    /// and which of them matters can only be settled by ear. Reflashing
+    /// between each guess makes that loop minutes long, so the values are
+    /// overridable from the console and the sequence is re-runnable.
+    #[test]
+    fn a_codec_override_carries_its_page_register_and_value() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"cset 1 21 be\r"),
+            Some(Command::CodecSet {
+                page: 1,
+                register: 0x21,
+                value: 0xBE
+            })
+        );
+    }
+
+    #[test]
+    fn the_codec_rerun_and_clear_commands_fire_on_their_own_lines() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"cinit\r"), Some(Command::CodecInit));
+        assert_eq!(feed_all(&mut watch, b"cclr\r"), Some(Command::CodecClear));
+    }
+
+    /// A mistyped override must not quietly become a different register. This
+    /// writes to a live codec, where a wrong page is a write to something
+    /// entirely unrelated.
+    #[test]
+    fn a_malformed_codec_override_does_not_fire() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"cset 1 21\r"), None, "no value");
+        assert_eq!(
+            feed_all(&mut watch, b"cset 1 2 be\r"),
+            None,
+            "short register"
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"cset 9 21 be\r"),
+            None,
+            "no such page"
+        );
+        assert_eq!(feed_all(&mut watch, b"cset 1 2g be\r"), None, "not hex");
     }
 
     #[test]
