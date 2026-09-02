@@ -338,6 +338,7 @@ static NFC_REQUEST: AtomicU8 = AtomicU8::new(REQUEST_NONE);
 const NFC_INVENTORY: u8 = 1;
 const NFC_UNLOCK: u8 = 2;
 const NFC_FORCE_UNLOCK: u8 = 3;
+const NFC_LOCK: u8 = 4;
 
 /// The SLIX privacy password, as typed at the console.
 ///
@@ -552,6 +553,14 @@ async fn nfc_reader(
                     reader.force_unlock(password);
                 }
             }
+            NFC_LOCK => {
+                let password = NFC_PASSWORD.load(Ordering::Relaxed);
+                if password == 0 {
+                    esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
+                } else {
+                    reader.lock(password);
+                }
+            }
             _ => {}
         }
         Timer::after(Duration::from_millis(100)).await;
@@ -603,7 +612,9 @@ async fn main(spawner: Spawner) {
         .expect("UART0 receive")
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
-    esp_println::println!("teddiebox: dl rb | t wav taf (loud) | sd | nfc, pw <8 hex>, slix");
+    esp_println::println!(
+        "teddiebox: dl rb | t wav taf (loud) | sd | nfc, pw <8 hex>, slix, slixp, lock"
+    );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
     // was configured for. The SD card is SPI2 on CLK 35, MOSI 38, MISO 36 with
@@ -742,6 +753,10 @@ async fn main(spawner: Spawner) {
                 Some(Command::ForceUnlock) => {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_FORCE_UNLOCK, Ordering::Relaxed);
+                }
+                Some(Command::Lock) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    NFC_REQUEST.store(NFC_LOCK, Ordering::Relaxed);
                 }
                 Some(Command::Password(value)) => {
                     NFC_PASSWORD.store(value, Ordering::Relaxed);

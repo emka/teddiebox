@@ -301,6 +301,40 @@ impl Reader {
         }
         self.diagnose();
     }
+
+    /// Bench: put the tag back into privacy mode.
+    ///
+    /// A figure arrives locked and the stock firmware re-locks it after
+    /// reading, so this is what restores a bench tag to a realistic state.
+    /// It is also the only command here that makes a tag harder to read, so
+    /// it reports the UID it is about to lock away.
+    pub fn lock(&mut self, password: u32) {
+        match self.trf.enable_privacy(password) {
+            Ok(()) => {
+                esp_println::println!("teddiebox: nfc tag is in privacy mode again");
+                // Proof rather than assertion: a locked tag stops answering
+                // inventory, so the same command that reads it also confirms
+                // the lock took.
+                match self.trf.inventory() {
+                    Ok(Some(uid)) => report_uid("still readable — lock did NOT take", &uid),
+                    Ok(None) => {
+                        esp_println::println!("teddiebox: nfc   silent to inventory — locked")
+                    }
+                    Err(_) => esp_println::println!("teddiebox: nfc   inventory failed"),
+                }
+            }
+            Err(trf7962a::Error::TagError(code)) => {
+                esp_println::println!("teddiebox: nfc tag refused to lock (error {code:#04x})")
+            }
+            Err(trf7962a::Error::Timeout) => {
+                esp_println::println!("teddiebox: nfc no answer to the lock — wrong password?");
+                if self.trf.reset_tags().is_err() {
+                    esp_println::println!("teddiebox: nfc   could not cycle the field");
+                }
+            }
+            Err(_) => esp_println::println!("teddiebox: nfc lock failed"),
+        }
+    }
 }
 
 /// The passwords to try on a tag, in the order they are expected.

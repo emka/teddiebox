@@ -59,6 +59,13 @@ pub enum Command {
     /// the longest frame the reader sends, and the only one a tag can refuse
     /// — is never put on the air at all. This forces it.
     ForceUnlock,
+    /// Put a tag back into privacy mode with the remembered password.
+    ///
+    /// The only command here that leaves a tag less readable than it found
+    /// it. Stock firmware re-locks a figure after reading it, so this is what
+    /// restores a bench tag to the state a figure actually arrives in — and
+    /// without it the privacy path cannot be exercised twice.
+    Lock,
 }
 
 /// Longest command line accepted. Anything longer cannot be a command, and is
@@ -110,6 +117,7 @@ impl CommandWatch {
                     b"nfc" => Some(Command::Nfc),
                     b"slix" => Some(Command::Unlock),
                     b"slixp" => Some(Command::ForceUnlock),
+                    b"lock" => Some(Command::Lock),
                     other => parse_password(other),
                 }
             };
@@ -239,6 +247,17 @@ mod tests {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"slixp\r"), Some(Command::ForceUnlock));
         assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
+    }
+
+    /// Locking is not the inverse of any command here — it is its own — and
+    /// it must not be reachable by a typo of `slix` or `slixp`, because the
+    /// tag it acts on stops answering afterwards.
+    #[test]
+    fn the_lock_command_is_distinct_from_the_unlock_ones() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"lock\r"), Some(Command::Lock));
+        assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
+        assert_eq!(feed_all(&mut watch, b"slixp\r"), Some(Command::ForceUnlock));
     }
 
     #[test]
