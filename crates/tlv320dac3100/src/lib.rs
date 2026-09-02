@@ -136,6 +136,11 @@ where
         self.write_reg(0, page0::DAC_MUTE_CTRL, value)
     }
 
+    /// Mutes the class-D driver.
+    pub fn mute_speaker(&mut self) -> Result<(), Error<E>> {
+        self.write_reg(1, page1::SPK_DRIVER_GAIN, SPK_GAIN_MUTED)
+    }
+
     /// Unmutes the class-D driver and waits for the gain to take effect.
     ///
     /// The last step of a start-up, and deliberately so: the speaker is muted

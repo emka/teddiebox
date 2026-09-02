@@ -78,6 +78,12 @@ pub enum Command {
     /// Take the codec down and bring it up again, so the start-up transient
     /// can be heard on demand rather than once per reboot.
     CodecInit,
+    /// Mute or unmute the class-D speaker driver, now rather than at start-up.
+    ///
+    /// Unmuting is what the box clicks on, and the codec's soft-stepping only
+    /// runs when it has a clock — which it does not have until audio is
+    /// playing. Separating the two needs the mute reachable at any moment.
+    Speaker(bool),
 }
 
 /// Longest command line accepted. Anything longer cannot be a command, and is
@@ -132,6 +138,8 @@ impl CommandWatch {
                     b"lock" => Some(Command::Lock),
                     b"cinit" => Some(Command::CodecInit),
                     b"cclr" => Some(Command::CodecClear),
+                    b"spk 1" => Some(Command::Speaker(true)),
+                    b"spk 0" => Some(Command::Speaker(false)),
                     other => parse_password(other).or_else(|| parse_codec_set(other)),
                 }
             };
@@ -323,6 +331,24 @@ mod tests {
     /// and which of them matters can only be settled by ear. Reflashing
     /// between each guess makes that loop minutes long, so the values are
     /// overridable from the console and the sequence is re-runnable.
+    /// The class-D mute has to be reachable while the box is running, not
+    /// only during start-up: whether unmuting clicks may depend on whether
+    /// the codec has a clock, and it only has one once audio is playing.
+    #[test]
+    fn the_speaker_command_carries_which_way_it_goes() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"spk 1\r"),
+            Some(Command::Speaker(true))
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"spk 0\r"),
+            Some(Command::Speaker(false))
+        );
+        assert_eq!(feed_all(&mut watch, b"spk\r"), None, "no direction given");
+        assert_eq!(feed_all(&mut watch, b"spk 2\r"), None, "not a direction");
+    }
+
     #[test]
     fn a_codec_override_carries_its_page_register_and_value() {
         let mut watch = CommandWatch::new();
