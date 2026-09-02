@@ -19,6 +19,7 @@ use embassy_time::{Duration, Instant};
 use embedded_sdmmc::RawFile;
 use esp_hal::dma::DmaTxStreamBuf;
 use esp_hal::i2s::master::I2sTx;
+use teddiebox_core::checksum::Crc32;
 use teddiebox_core::cushion::Cushion;
 use teddiebox_core::wav::{WavError, WavFormat};
 
@@ -309,13 +310,27 @@ pub async fn play_first_taf(
     let mut last_log = Instant::now();
     let started = Instant::now();
     let mut frames: u32 = 0;
+    // Step 9's criterion is that the device's samples match the host's. The
+    // box cannot hand back a WAV, so it checksums what it decoded and the
+    // host checksums what `taf2wav` produced from the same file — the same
+    // trick step 7 used for the card, and the same CRC-32.
+    let mut pcm_crc = Crc32::new();
+    // And the other half of the criterion: how much of real time the decode
+    // actually costs. Accumulated rather than sampled, because a mean hides
+    // exactly the frames that would cause a dropout.
+    let mut decode_us: u64 = 0;
 
     loop {
         cushion.observe(capacity.saturating_sub(transfer.available_bytes()) as u32);
 
         if pending.is_empty() {
-            match decoder.next_frame(&mut scratch.pcm) {
+            let began = Instant::now();
+            let decoded = decoder.next_frame(&mut scratch.pcm);
+            decode_us += began.elapsed().as_micros();
+
+            match decoded {
                 Ok(Some(samples)) => {
+                    pcm_crc.update(as_bytes(&scratch.pcm[..samples]));
                     pending = 0..samples * 2;
                     frames += 1;
                 }
@@ -352,11 +367,23 @@ pub async fn play_first_taf(
     }
 
     card.close_file(file);
+
+    let elapsed = started.elapsed();
     esp_println::println!(
         "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns",
-        started.elapsed().as_secs(),
+        elapsed.as_secs(),
         cushion.low_water_percent(),
         cushion.underruns()
+    );
+    esp_println::println!("teddiebox: taf pcm crc32 {:08X}", pcm_crc.finish());
+
+    // Decode cost as a percentage of the audio it produced. Under 100 means
+    // the box can decode faster than it plays, and the margin is the headroom
+    // step 9 asks to be measured rather than assumed.
+    let played_us = elapsed.as_micros().max(1);
+    esp_println::println!(
+        "teddiebox: taf decode used {decode_us} us of {played_us} us — {}% of real time",
+        decode_us * 100 / played_us
     );
     Ok(())
 }
