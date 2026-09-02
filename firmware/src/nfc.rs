@@ -116,13 +116,18 @@ impl Reader {
         // receiver too and the measurement reads zero whatever the antenna is
         // doing. Bit 1, `rec_on`, exists for precisely this case: "receiver
         // activated for external field measurement — forces enabling of
-        // receiver and TX oscillator". Bit 0 is the supply selection and is
-        // left as the driver set it.
-        const LISTEN: u8 = 0x03; // rec_on + supply, transmitter off
+        // receiver and TX oscillator".
+        const REC_ON: u8 = 0x02;
+        // Bit 0 selects the supply range, and turning the transmitter off is
+        // no reason to change it. Taken from the driver's own word rather
+        // than restated, so the two cannot disagree about which rail this
+        // board has.
+        const SUPPLY: u8 = 0x01;
+        let listen = REC_ON | (trf7962a::regs::CHIP_STATUS_RF_ON & SUPPLY);
         let value = if on {
             trf7962a::regs::CHIP_STATUS_RF_ON
         } else {
-            LISTEN
+            listen
         };
         if self
             .trf

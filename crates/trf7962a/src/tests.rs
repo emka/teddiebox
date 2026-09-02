@@ -217,7 +217,11 @@ fn initialisation_puts_exactly_this_sequence_on_the_bus() {
     spi.extend(spi_write(vec![0x83])); // command: soft init
     spi.extend(spi_write(vec![0x80])); // command: idle
     spi.extend(spi_write(vec![0x01, 0x02])); // ISO control: 15693 high rate
-    spi.extend(spi_write(vec![0x00, 0x21])); // chip status: RF on, last
+                                             // Chip status, written last. B0 is `vrs5_3`: 1 selects 5-V operation and
+                                             // 0 selects 3-V (Table 6-16), and §6.4 says the 3-V configuration is the
+                                             // one to use below 4.3 V. The reader shares power gate 47 with the SD
+                                             // card, so its rail is 3.3 V.
+    spi.extend(spi_write(vec![0x00, 0x20]));
 
     // The reader needs to settle after a soft init before it takes
     // configuration, so both commands are followed by a wait. The third wait

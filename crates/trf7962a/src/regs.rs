@@ -33,5 +33,16 @@ pub mod cmd {
 
 /// ISO 15693, high bit rate, one subcarrier, 1-out-of-4 coding.
 pub const ISO_CONTROL_15693_HIGH: u8 = 0x02;
-/// RF output on, full power, 5 V operation.
-pub const CHIP_STATUS_RF_ON: u8 = 0x21;
+/// RF output on, full power, 3-V operation.
+///
+/// B0 is `vrs5_3` and selects the VIN range: 1 is 5-V operation, 0 is 3-V
+/// (SLOS757G Table 6-16). §6.4 puts the boundary at 4.3 V — "if the supply
+/// voltage is below 4.3 V, the 3-V configuration should be used" — and the
+/// reader shares power gate 47 with the SD card, so it runs at 3.3 V. The
+/// setting decides how the supply regulators are configured, and the two
+/// systems are genuinely different: the same regulator control word means
+/// VDD_RF = 5 V in one table and 3.3 V in the other.
+///
+/// This was `0x21` — the part's own reset default — for the whole of the
+/// driver's life, which claimed 5-V operation on a 3.3 V rail.
+pub const CHIP_STATUS_RF_ON: u8 = 0x20;
