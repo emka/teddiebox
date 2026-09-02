@@ -504,6 +504,7 @@ const REQUEST_WALK: u8 = 2;
 const REQUEST_WAV: u8 = 3;
 const REQUEST_TAF: u8 = 4;
 const REQUEST_CONTENT: u8 = 5;
+const REQUEST_PCM: u8 = 6;
 
 /// What the console has asked the NFC reader to do.
 ///
@@ -565,6 +566,9 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 /// Which content file `play` names, as two halves of `CONTENT/<dir>/<file>`.
 static CONTENT_DIRECTORY: AtomicU32 = AtomicU32::new(0);
 static CONTENT_FILE: AtomicU32 = AtomicU32::new(0);
+
+/// How many frames `pcm` should print.
+static PCM_FRAMES: AtomicU8 = AtomicU8::new(0);
 
 /// Asked for before the rails go down, answered when the codec is quiet.
 ///
@@ -737,7 +741,7 @@ async fn media(
         // an unsettled rail is what invented an I2C device at 0x09 in step 4.
         if matches!(
             request,
-            REQUEST_WALK | REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT
+            REQUEST_WALK | REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT | REQUEST_PCM
         ) && card.is_none()
         {
             let Some((spi, cs)) = bus.take() else {
@@ -778,6 +782,15 @@ async fn media(
                         _tone_transfer = Some(transfer);
                     }
                     Err(_) => esp_println::println!("teddiebox: I2S would not start"),
+                }
+            }
+
+            REQUEST_PCM => {
+                if let Some(card) = card.as_ref() {
+                    let frames = PCM_FRAMES.load(Ordering::Relaxed);
+                    if let Err(reason) = audio::dump_pcm(card, frames).await {
+                        esp_println::println!("teddiebox: pcm failed — {reason}");
+                    }
                 }
             }
 
@@ -972,7 +985,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock | cinit cdown cset cclr out spk"
+        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock | cinit cdown cset cclr out spk | pcm <2hex>"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -1230,6 +1243,11 @@ async fn main(spawner: Spawner) {
                     CONTENT_DIRECTORY.store(directory, Ordering::Relaxed);
                     CONTENT_FILE.store(file, Ordering::Relaxed);
                     REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
+                }
+                Some(Command::DumpPcm { frames }) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    PCM_FRAMES.store(frames, Ordering::Relaxed);
+                    REQUEST.store(REQUEST_PCM, Ordering::Relaxed);
                 }
                 Some(Command::Stop) => {
                     audio::STOP.store(true, Ordering::Relaxed);

@@ -16,3 +16,7 @@
 *.taf
 *.wav
 !/crates/teddiebox-taf/tests/data/*.taf
+
+# Background agent worktrees. These are git repositories of their own and
+# have no business in this history.
+/.claude/worktrees/

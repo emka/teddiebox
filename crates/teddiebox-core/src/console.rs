@@ -45,6 +45,11 @@ pub enum Command {
     PlaySound { file: u32 },
     /// Stop whatever is playing.
     Stop,
+    /// Decode the first TAF and print its samples, without playing them.
+    ///
+    /// Silent and as fast as the decoder goes, because this is a measurement
+    /// rather than a listening test: what the host needs is the numbers.
+    DumpPcm { frames: u8 },
     /// Decode and play the first TAF file on the card.
     ///
     /// Bench step 9. Opt-in like the rest, and the loudest thing here — it is
@@ -171,7 +176,8 @@ impl CommandWatch {
                     b"spk 0" => Some(Command::Speaker(false)),
                     other => parse_password(other)
                         .or_else(|| parse_codec_set(other))
-                        .or_else(|| parse_play_content(other)),
+                        .or_else(|| parse_play_content(other))
+                        .or_else(|| parse_dump_pcm(other)),
                 }
             };
             self.len = 0;
@@ -205,6 +211,12 @@ fn hex_u32(digits: &[u8]) -> Option<u32> {
         value = (value << 4) | u32::from(nibble);
     }
     Some(value)
+}
+
+/// Reads `pcm <2 hex>`, a frame count.
+fn parse_dump_pcm(line: &[u8]) -> Option<Command> {
+    let frames = hex_byte(line.strip_prefix(b"pcm ")?)?;
+    Some(Command::DumpPcm { frames })
 }
 
 /// Reads `play <8 hex>/<8 hex>`, the path the box keeps its audio under.
@@ -467,6 +479,29 @@ mod tests {
     /// Stopping has to be its own word rather than a second `taf`: playback is
     /// loud, and the command that ends it must not be a typo away from one
     /// that starts it.
+    /// Step 9's criterion is that the box's samples match the host's, and a
+    /// checksum can only ever answer yes or no. Opus is not specified to be
+    /// bit-exact across platforms, so the useful question is *how far apart*,
+    /// and that needs the samples themselves.
+    #[test]
+    fn the_pcm_command_carries_how_many_frames_to_dump() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"pcm 53\r"),
+            Some(Command::DumpPcm { frames: 0x53 })
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"pcm ff\r"),
+            Some(Command::DumpPcm { frames: 0xFF })
+        );
+        assert_eq!(feed_all(&mut watch, b"pcm\r"), None, "no count");
+        assert_eq!(
+            feed_all(&mut watch, b"pcm 5\r"),
+            None,
+            "one digit is a typo"
+        );
+    }
+
     #[test]
     fn the_stop_command_fires_on_its_own_line() {
         let mut watch = CommandWatch::new();

@@ -292,6 +292,64 @@ fn as_bytes(pcm: &[i16]) -> &[u8] {
 ///
 /// Terminal, for the same reason as the others: the DMA buffer and the decode
 /// scratch are each claimed once. `rb` restarts the box.
+/// Decodes `frames` frames of the first TAF and prints the samples.
+///
+/// No I2S, no playback, no real-time constraint: step 9 asks whether the box
+/// decodes the same audio the host does, and that is a question about numbers
+/// rather than about sound. A checksum can only answer yes or no, and Opus is
+/// not specified to be bit-exact across platforms — so the samples themselves
+/// are what the host needs in order to say *how far apart*.
+///
+/// Hex rather than anything denser because the console is a text stream shared
+/// with the box's own logging, and a decoder that has to be told where the
+/// data starts is one more thing to get wrong.
+pub async fn dump_pcm(card: &Mounted, frames: u8) -> Result<(), &'static str> {
+    let Some(scratch) = take_scratch() else {
+        return Err("the decoder is already in use");
+    };
+
+    let (file, size) = match card.find_by_extension(b"TAF") {
+        Some((name, size)) => {
+            esp_println::println!("teddiebox: pcm /{name}, {size} bytes");
+            (card.open_file(name)?, size)
+        }
+        None => {
+            release_scratch();
+            return Err("no .TAF in the root to decode");
+        }
+    };
+
+    let pages = CardPages::new(card, file, size);
+    let result = (|| {
+        let opus =
+            LibOpus::new(&mut scratch.opus).map_err(|_| "the Opus decoder would not start")?;
+        let mut decoder = TafDecoder::open(pages, opus).map_err(|_| "not a readable TAF file")?;
+        let mut crc = Crc32::new();
+        for index in 0..frames {
+            match decoder.next_frame(&mut scratch.pcm) {
+                Ok(Some(samples)) => {
+                    crc.update(as_bytes(&scratch.pcm[..samples]));
+                    // One line per frame, so a divergence can be placed as
+                    // well as detected.
+                    esp_println::print!("teddiebox: pcm {index} ");
+                    for sample in &scratch.pcm[..samples] {
+                        esp_println::print!("{:04X}", *sample as u16);
+                    }
+                    esp_println::println!();
+                }
+                Ok(None) => break,
+                Err(_) => return Err("a frame would not decode"),
+            }
+        }
+        esp_println::println!("teddiebox: pcm crc32 {:08X}", crc.finish());
+        Ok(())
+    })();
+
+    card.close_file(file);
+    release_scratch();
+    result
+}
+
 /// Which audio file a playback should decode.
 pub enum Source {
     /// Whatever the card offers: a `.TAF` in the root if there is one, else
