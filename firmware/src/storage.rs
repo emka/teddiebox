@@ -47,6 +47,7 @@ use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use teddiebox_core::checksum::Crc32;
 use teddiebox_core::walk::{Action, Cursor, Found, MAX_DEPTH};
+use teddiebox_taf::{PageSource, PAGE_SIZE};
 
 /// Card initialisation runs at 400 kHz, which the SD specification requires
 /// until the card has been identified.
@@ -144,6 +145,62 @@ impl core::fmt::Write for PathWriter<'_> {
     }
 }
 
+/// Page-indexed reads of one file on the card.
+///
+/// `teddiebox-taf` asks for 4096-byte pages and nothing else, because every
+/// structure in a TAF file is 4096-aligned. On the host that trait is a slice
+/// index; here it is a seek and a read, and nothing above it knows which.
+pub struct CardPages<'a> {
+    card: &'a Mounted,
+    file: RawFile,
+    pages: u32,
+}
+
+impl<'a> CardPages<'a> {
+    /// Wraps an open file. `size` is its length in bytes.
+    pub fn new(card: &'a Mounted, file: RawFile, size: u32) -> Self {
+        Self {
+            card,
+            file,
+            // A short final page is normal — the last Ogg page runs only as
+            // long as it needs to — so this rounds up rather than truncating.
+            pages: size.div_ceil(PAGE_SIZE as u32),
+        }
+    }
+}
+
+impl PageSource for CardPages<'_> {
+    type Error = &'static str;
+
+    fn read_page(&mut self, index: u32, buf: &mut [u8; PAGE_SIZE]) -> Result<(), Self::Error> {
+        let offset = index
+            .checked_mul(PAGE_SIZE as u32)
+            .ok_or("page index out of range")?;
+        self.card.seek(self.file, offset)?;
+
+        // One read is not guaranteed to fill the buffer, so keep asking until
+        // it does or the file ends.
+        let mut filled = 0;
+        while filled < PAGE_SIZE {
+            let read = self.card.read(self.file, &mut buf[filled..])?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+
+        // Zero-fill a short final page. Safe because an Ogg page declares its
+        // own extent through its lacing table, so nothing reads past the bytes
+        // that were really there.
+        buf[filled..].fill(0);
+        Ok(())
+    }
+
+    fn page_count(&self) -> u32 {
+        self.pages
+    }
+}
+
 /// One thing found in a directory.
 #[derive(Clone, Copy)]
 struct Entry {
@@ -230,16 +287,19 @@ impl Mounted {
         esp_println::println!("teddiebox: sd walk done");
     }
 
-    /// The first `.WAV` in the root directory.
+    /// The first file in the root directory with this extension.
     ///
-    /// Root only, and deliberately: the file is one somebody copies onto the
-    /// card for step 8, the root is where it naturally lands, and searching
-    /// the whole card would mean reading every directory on it first.
-    pub fn find_wav(&self) -> Option<(ShortFileName, u32)> {
+    /// Root only, and deliberately: the files steps 8 and 9 play are ones
+    /// somebody copies onto the card, the root is where they naturally land,
+    /// and searching the whole card would mean reading every directory first.
+    /// A real Tonie's `.taf` lives three levels down under `CONTENT`, so for
+    /// step 9 it has to be copied out to the root — which also keeps step 7's
+    /// walk comparing like with like.
+    pub fn find_by_extension(&self, extension: &[u8]) -> Option<(ShortFileName, u32)> {
         let mut index = 0;
         while let Some(entry) = nth_entry(&self.volumes, self.root, index) {
             index += 1;
-            if !entry.is_dir && entry.name.extension() == b"WAV" {
+            if !entry.is_dir && entry.name.extension() == extension {
                 return Some((entry.name, entry.size));
             }
         }

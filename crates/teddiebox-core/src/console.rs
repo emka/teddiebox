@@ -30,6 +30,11 @@ pub enum Command {
     /// Bench step 8, joining steps 6 and 7. Opt-in like the others: it powers
     /// a rail, takes the I2S peripheral for good, and is loud.
     PlayWav,
+    /// Decode and play the first TAF file on the card.
+    ///
+    /// Bench step 9. Opt-in like the rest, and the loudest thing here — it is
+    /// real content rather than a test tone.
+    PlayTaf,
 }
 
 /// Longest command line accepted. Anything longer cannot be a command, and is
@@ -75,6 +80,7 @@ impl CommandWatch {
                     b"t" => Some(Command::Tone),
                     b"sd" => Some(Command::Storage),
                     b"wav" => Some(Command::PlayWav),
+                    b"taf" => Some(Command::PlayTaf),
                     _ => None,
                 }
             };
@@ -148,6 +154,13 @@ mod tests {
     #[test]
     fn the_wav_command_fires_on_its_own_line() {
         let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"wav\r"), Some(Command::PlayWav));
+    }
+
+    #[test]
+    fn the_taf_command_is_distinct_from_the_wav_one() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"taf\r"), Some(Command::PlayTaf));
         assert_eq!(feed_all(&mut watch, b"wav\r"), Some(Command::PlayWav));
     }
 

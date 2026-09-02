@@ -12,6 +12,8 @@
 //! [`teddiebox_core::wav`]; both are tested on the host. What is left here is
 //! the part that owns a DMA engine.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use embassy_futures::yield_now;
 use embassy_time::{Duration, Instant};
 use embedded_sdmmc::RawFile;
@@ -20,7 +22,9 @@ use esp_hal::i2s::master::I2sTx;
 use teddiebox_core::cushion::Cushion;
 use teddiebox_core::wav::{WavError, WavFormat};
 
-use crate::storage::Mounted;
+use teddiebox_audio::{LibOpus, OpusState, TafDecoder, MAX_FRAME_SAMPLES};
+
+use crate::storage::{CardPages, Mounted};
 
 /// The DMA buffer between the card and the codec.
 ///
@@ -51,7 +55,7 @@ pub async fn play_first_wav(
     i2s_tx: I2sTx<'static, Blocking>,
     mut buffer: DmaTxStreamBuf,
 ) -> Result<(), &'static str> {
-    let Some((name, size)) = card.find_wav() else {
+    let Some((name, size)) = card.find_by_extension(b"WAV") else {
         return Err("no .WAV in the card's root directory");
     };
     esp_println::println!("teddiebox: wav {name}, {size} bytes");
@@ -200,4 +204,159 @@ fn describe(error: WavError) -> &'static str {
         WavError::NotPcm => "not plain PCM samples",
         WavError::Malformed => "a chunk header is nonsense",
     }
+}
+
+/// Decoder state and PCM scratch.
+///
+/// Static because neither belongs in an embassy task's future: the Opus state
+/// alone is 28 KB, and a task arena sized to hold it would be paying for it on
+/// every boot whether or not anything ever decodes.
+struct DecodeScratch {
+    opus: OpusState,
+    pcm: [i16; MAX_FRAME_SAMPLES],
+}
+
+static mut SCRATCH: DecodeScratch = DecodeScratch {
+    opus: OpusState::new(),
+    pcm: [0; MAX_FRAME_SAMPLES],
+};
+static SCRATCH_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// Hands out the decode scratch, once and once only.
+///
+/// The guard is what makes the `static mut` sound rather than merely
+/// convention: a second caller gets `None` instead of a second `&mut` to the
+/// same bytes.
+fn take_scratch() -> Option<&'static mut DecodeScratch> {
+    if SCRATCH_TAKEN.swap(true, Ordering::Relaxed) {
+        return None;
+    }
+    // SAFETY: the swap above succeeds exactly once for the life of the
+    // program, so no other reference to SCRATCH can exist.
+    Some(unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) })
+}
+
+/// Reinterprets decoded samples as the bytes I2S wants.
+///
+/// The codec is configured for 16-bit little-endian samples and this is a
+/// little-endian target, so the in-memory representation is already the wire
+/// format. Converting sample by sample would be the same bytes, more slowly.
+fn as_bytes(pcm: &[i16]) -> &[u8] {
+    // SAFETY: `i16` has no padding and no invalid bit patterns, and any
+    // alignment is valid for `u8`.
+    unsafe { core::slice::from_raw_parts(pcm.as_ptr() as *const u8, core::mem::size_of_val(pcm)) }
+}
+
+/// Decodes the first `.TAF` on the card and plays it. Bench step 9.
+///
+/// Terminal, for the same reason as the others: the DMA buffer and the decode
+/// scratch are each claimed once. `rb` restarts the box.
+pub async fn play_first_taf(
+    card: &Mounted,
+    i2s_tx: I2sTx<'static, Blocking>,
+    mut buffer: DmaTxStreamBuf,
+) -> Result<(), &'static str> {
+    let Some((name, size)) = card.find_by_extension(b"TAF") else {
+        return Err("no .TAF in the card's root directory");
+    };
+    let scratch = take_scratch().ok_or("the decoder has already been used")?;
+
+    esp_println::println!("teddiebox: taf {name}, {size} bytes");
+    let file = card.open_file(name)?;
+    let pages = CardPages::new(card, file, size);
+
+    let opus = LibOpus::new(&mut scratch.opus).map_err(|_| "the Opus decoder would not start")?;
+    let mut decoder = TafDecoder::open(pages, opus).map_err(|_| "not a readable TAF file")?;
+    esp_println::println!(
+        "teddiebox: taf audio id {:#010x}, {} chapters",
+        decoder.header().audio_id,
+        decoder.chapter_count()
+    );
+
+    // Pre-fill before the transfer starts, exactly as the WAV path does: a
+    // buffer still empty when `write()` runs is played as silence and the
+    // stream ends before the first sample arrives.
+    let mut pending: core::ops::Range<usize> = 0..0;
+    let mut ended = false;
+    while !ended {
+        if pending.is_empty() {
+            match decoder.next_frame(&mut scratch.pcm) {
+                Ok(Some(samples)) => pending = 0..samples * 2,
+                Ok(None) => break,
+                Err(_) => return Err("the first frames would not decode"),
+            }
+        }
+        let pushed = buffer.push(&as_bytes(&scratch.pcm)[pending.clone()]);
+        pending.start += pushed;
+        if pushed == 0 {
+            // The buffer is full; whatever is left stays pending for the
+            // transfer loop below rather than being dropped.
+            ended = true;
+        }
+    }
+
+    let capacity = BUFFER_BYTES;
+    let mut transfer = match i2s_tx.write(buffer) {
+        Ok(transfer) => transfer,
+        Err(_) => {
+            card.close_file(file);
+            return Err("I2S would not start");
+        }
+    };
+
+    let mut cushion = Cushion::new(capacity as u32);
+    cushion.start();
+    let mut last_log = Instant::now();
+    let started = Instant::now();
+    let mut frames: u32 = 0;
+
+    loop {
+        cushion.observe(capacity.saturating_sub(transfer.available_bytes()) as u32);
+
+        if pending.is_empty() {
+            match decoder.next_frame(&mut scratch.pcm) {
+                Ok(Some(samples)) => {
+                    pending = 0..samples * 2;
+                    frames += 1;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    esp_println::println!("teddiebox: taf decode failed after {frames} frames");
+                    break;
+                }
+            }
+        }
+
+        let pushed = transfer.push(&as_bytes(&scratch.pcm)[pending.clone()]);
+        pending.start += pushed;
+        if pushed == 0 {
+            yield_now().await;
+        }
+
+        if last_log.elapsed() >= LOG_EVERY {
+            last_log = Instant::now();
+            esp_println::println!(
+                "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns",
+                started.elapsed().as_secs(),
+                cushion.percent(),
+                cushion.low_water_percent(),
+                cushion.underruns()
+            );
+        }
+
+        yield_now().await;
+    }
+
+    while !transfer.is_done() {
+        yield_now().await;
+    }
+
+    card.close_file(file);
+    esp_println::println!(
+        "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns",
+        started.elapsed().as_secs(),
+        cushion.low_water_percent(),
+        cushion.underruns()
+    );
+    Ok(())
 }

@@ -3,6 +3,7 @@
 
 mod audio;
 mod led;
+mod libc_shim;
 mod pins;
 mod storage;
 
@@ -312,6 +313,7 @@ const REQUEST_NONE: u8 = 0;
 const REQUEST_TONE: u8 = 1;
 const REQUEST_WALK: u8 = 2;
 const REQUEST_WAV: u8 = 3;
+const REQUEST_TAF: u8 = 4;
 
 /// Owns the I2S peripheral and the SD bus, and serves the bench commands that
 /// need them.
@@ -372,7 +374,7 @@ async fn media(
         // The console loop raised the storage rail before setting the request.
         // Devices need their supply settled before they answer — a scan against
         // an unsettled rail is what invented an I2C device at 0x09 in step 4.
-        if matches!(request, REQUEST_WALK | REQUEST_WAV) && card.is_none() {
+        if matches!(request, REQUEST_WALK | REQUEST_WAV | REQUEST_TAF) && card.is_none() {
             let Some((spi, cs)) = bus.take() else {
                 esp_println::println!("teddiebox: the card bus is gone — reboot to retry");
                 continue;
@@ -423,6 +425,18 @@ async fn media(
                 };
                 if let Err(reason) = audio::play_first_wav(card, tx, buffer).await {
                     esp_println::println!("teddiebox: wav failed — {reason}");
+                }
+            }
+
+            REQUEST_TAF => {
+                let (Some(tx), Some(buffer), Some(card)) =
+                    (i2s_tx.take(), wav_buffer.take(), card.as_ref())
+                else {
+                    esp_println::println!("teddiebox: I2S is already in use");
+                    continue;
+                };
+                if let Err(reason) = audio::play_first_taf(card, tx, buffer).await {
+                    esp_println::println!("teddiebox: taf failed — {reason}");
                 }
             }
 
@@ -477,7 +491,7 @@ async fn main(spawner: Spawner) {
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
     esp_println::println!(
-        "teddiebox: dl download, rb reboot, t tone (loud), sd checksums, wav play (loud)"
+        "teddiebox: dl download, rb reboot, t tone, sd checksums, wav play, taf decode (all loud)"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -590,6 +604,10 @@ async fn main(spawner: Spawner) {
                 Some(Command::PlayWav) => {
                     board.apply(gates.power(Rail::Storage, true));
                     REQUEST.store(REQUEST_WAV, Ordering::Relaxed);
+                }
+                Some(Command::PlayTaf) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    REQUEST.store(REQUEST_TAF, Ordering::Relaxed);
                 }
                 Some(Command::Storage) => {
                     // The rail comes up here because this loop owns the pins.
