@@ -220,6 +220,15 @@ where
         }
         self.send_command(regs::cmd::RESET_FIFO)?;
 
+        // The transmit command arms the transmitter and must precede the data.
+        // SLOS757C §5.12.3: "data transmission begins automatically after the
+        // first byte is written into the FIFO" — so loading the FIFO is what
+        // starts the transmission, and a command issued afterwards is too
+        // late. Sent the other way round the reader never transmits, and at a
+        // bench that is indistinguishable from an empty plate, a tag of the
+        // wrong family, or a disconnected antenna.
+        self.send_command(regs::cmd::TRANSMIT_WITH_CRC)?;
+
         // The length is split across two registers as a 12-bit field.
         self.write_register(regs::TX_LENGTH_BYTE1, (request.len() >> 4) as u8)?;
         self.write_register(regs::TX_LENGTH_BYTE2, ((request.len() << 4) & 0xF0) as u8)?;
@@ -227,7 +236,6 @@ where
         for &b in request {
             self.write_register(regs::FIFO, b)?;
         }
-        self.send_command(regs::cmd::TRANSMIT_WITH_CRC)?;
 
         if !self.wait_for_response()? {
             return Ok(0);

@@ -118,15 +118,22 @@ fn transceive_transactions(
 
 /// Everything up to and including the transmit command — all that happens
 /// when nothing answers.
+/// The transmit sequence, in the order SLOS757C §5.12.3 describes.
+///
+/// The transmit command comes *before* the FIFO is loaded, because "data
+/// transmission begins automatically after the first byte is written into the
+/// FIFO" — the command arms the transmitter, and writing data is what starts
+/// it. Issued the other way round the reader never transmits at all, which at
+/// a bench is indistinguishable from an empty plate.
 fn transmit_transactions(request: &[u8], tx_length: [u8; 2]) -> Vec<Transaction<u8>> {
     let mut t = Vec::new();
     t.extend(spi_write(vec![0x8F])); // command: reset FIFO
+    t.extend(spi_write(vec![0x91])); // command: transmit with CRC, arming the TX
     t.extend(spi_write(vec![0x1D, tx_length[0]])); // TX length, high nibbles
     t.extend(spi_write(vec![0x1E, tx_length[1]])); // TX length, low nibble
     for &b in request {
-        t.extend(spi_write(vec![0x1F, b])); // byte into the FIFO
+        t.extend(spi_write(vec![0x1F, b])); // byte into the FIFO; this starts it
     }
-    t.extend(spi_write(vec![0x91])); // command: transmit with CRC
     t
 }
 
