@@ -115,10 +115,24 @@ fn transceive_transactions(
     t.extend(spi_write(vec![0x8F]));
     t.extend(spi_read_irq(0x40));
     t.extend(spi_read(0x5C, fifo_status)); // FIFO status, read bit set
-    for &b in response {
-        t.extend(spi_read(0x5F, b)); // FIFO, read bit set
-    }
+    t.extend(fifo_burst(response));
     t
+}
+
+/// The continuous read that empties the FIFO — SLOS757G Figure 6-23.
+///
+/// Asserted byte for byte by `the_fifo_is_read_as_one_continuous_burst`; this
+/// builds the same burst for the tests that care about what it returns.
+fn fifo_burst(response: &[u8]) -> Vec<Transaction<u8>> {
+    let mut out = vec![0x7Fu8];
+    out.extend(core::iter::repeat_n(0x00, response.len()));
+    let mut back = vec![0x00u8];
+    back.extend_from_slice(response);
+    vec![
+        Transaction::transaction_start(),
+        Transaction::transfer(out, back),
+        Transaction::transaction_end(),
+    ]
 }
 
 /// The interrupt line through one exchange that a tag answers: the transmit's
@@ -488,9 +502,7 @@ fn the_transmit_interrupt_is_not_mistaken_for_the_tags_reply() {
     spi.extend(spi_write(vec![0x8F])); // reset the FIFO before the reception
     spi.extend(spi_read_irq(0x40)); // RX started, and now finished
     spi.extend(spi_read(0x5C, 9)); // ten bytes, counted as N-1
-    for &b in &reply {
-        spi.extend(spi_read(0x5F, b));
-    }
+    spi.extend(fifo_burst(&reply));
 
     let mut irq = irq_after(0);
     irq.extend(irq_after(0));
@@ -534,6 +546,47 @@ fn a_transmit_with_no_answer_reports_no_tag() {
         PinMock::new(&irq),
     );
     assert_eq!(r.inventory().unwrap(), None);
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+/// SLOS757G Figure 6-23: the FIFO is read as one continuous burst.
+///
+/// The address byte is 0x7F — read bit, continuous bit, FIFO address — sent
+/// once, followed by a filler byte per byte wanted, all inside one slave
+/// select. The reply arrives one byte behind, as it does for every read.
+///
+/// Read a byte per transaction instead, the count is right and every byte
+/// comes back 0x00. Measured on the board: a GET RANDOM NUMBER answered with
+/// exactly three bytes — the right shape, so the N-1 count is sound — and all
+/// three were zero, giving a random number of 0x0000 on every run. The FIFO
+/// refuses single-address reads the same way it refuses single-address
+/// writes.
+#[test]
+fn the_fifo_is_read_as_one_continuous_burst() {
+    let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x02, 0xB2, 0x04]);
+    spi.extend(spi_read_irq(0x80));
+    spi.extend(spi_write(vec![0x8F]));
+    spi.extend(spi_read_irq(0x40));
+    spi.extend(spi_read(0x5C, 0x02)); // three bytes, counted as N-1
+    spi.extend(vec![
+        Transaction::transaction_start(),
+        Transaction::transfer(vec![0x7F, 0x00, 0x00, 0x00], vec![0x00, 0x00, 0xCD, 0xAB]),
+        Transaction::transaction_end(),
+    ]);
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&polls(0)),
+        PinMock::new(&irq_exchange()),
+    );
+    assert_eq!(
+        r.get_random_number(),
+        Ok(0xABCD),
+        "a random number of zero on every run is a FIFO that was never read"
+    );
     let (mut spi, mut delay, mut irq) = r.release();
     spi.done();
     delay.done();

@@ -259,6 +259,26 @@ where
         self.spi.write(&burst[..end]).map_err(Error::Bus)
     }
 
+    /// Empties `out.len()` bytes out of the FIFO, as one slave-select window.
+    ///
+    /// SLOS757G Figure 6-23: address 0x7F — the read and continuous bits over
+    /// the FIFO address — sent once, then a filler byte per byte wanted, and
+    /// the reply arrives one byte behind. The FIFO refuses to be read a byte
+    /// per transaction exactly as it refuses to be written that way: the byte
+    /// count is right and every byte comes back 0x00, which is a tag reduced
+    /// to a reply of zeroes.
+    fn read_fifo(&mut self, out: &mut [u8]) -> Result<(), Error<E>> {
+        let mut rx = [0u8; MAX_RESPONSE + 1];
+        let mut tx = [0u8; MAX_RESPONSE + 1];
+        tx[0] = (regs::FIFO & ADDRESS_MASK) | READ_BIT | CONTINUOUS_BIT;
+        let len = out.len() + 1;
+        self.spi
+            .transfer(&mut rx[..len], &tx[..len])
+            .map_err(Error::Bus)?;
+        out.copy_from_slice(&rx[1..len]);
+        Ok(())
+    }
+
     /// Sends `request` and collects the tag's reply. Returns the number of
     /// bytes received, which is zero when no tag answered.
     pub fn transceive(&mut self, request: &[u8], response: &mut [u8]) -> Result<usize, Error<E>> {
@@ -319,9 +339,7 @@ where
         // mock can tell which. Confirm at bench step 10, first thing.
         let available = (status & FIFO_COUNT_MASK) as usize + 1;
         let n = available.min(response.len());
-        for slot in response.iter_mut().take(n) {
-            *slot = self.read_register(regs::FIFO)?;
-        }
+        self.read_fifo(&mut response[..n])?;
         Ok(n)
     }
 
