@@ -236,6 +236,58 @@ impl Reader {
             Err(_) => esp_println::println!("teddiebox: nfc unlock failed"),
         }
     }
+
+    /// Bench instrument: put SET PASSWORD on the air whatever the tag's state.
+    ///
+    /// `unlock` cannot reach it on a tag that is already out of privacy mode,
+    /// because the inventory it tries first answers and it stops there — and
+    /// a SLIX stays out of privacy mode until something puts it back, which
+    /// this driver has no command to do. That leaves the eight-byte password
+    /// exchange, the longest frame the reader sends and the only one a tag
+    /// can refuse, unreachable at the bench.
+    ///
+    /// The registers are read out afterwards whatever happens, because the
+    /// question this exists to answer is what state a refused exchange leaves
+    /// the reader in.
+    pub fn force_unlock(&mut self, password: u32) {
+        // The two exchanges are run separately rather than through
+        // `unlock_privacy`, because silence from each means something quite
+        // different — a tag that will not give a random number is not
+        // answering at all, while one that gives a random number and then
+        // ignores the password is answering selectively — and the bundled
+        // call reports both as the same timeout.
+        let random = match self.trf.get_random_number() {
+            Ok(random) => random,
+            Err(trf7962a::Error::ReceiveError(flags)) => {
+                report_receive_error(flags);
+                self.diagnose();
+                return;
+            }
+            Err(_) => {
+                esp_println::println!("teddiebox: nfc   GET RANDOM NUMBER -> silent");
+                self.diagnose();
+                return;
+            }
+        };
+
+        // Nothing is printed between the two exchanges. A console line is
+        // milliseconds at 115200, and putting one here is a delay disguised
+        // as a diagnostic — the exact variable under test.
+        let outcome = self.trf.set_password(password, random);
+        esp_println::println!("teddiebox: nfc   GET RANDOM NUMBER -> {random:#06x}");
+        match outcome {
+            Ok(()) => esp_println::println!("teddiebox: nfc   SET PASSWORD -> accepted"),
+            Err(trf7962a::Error::TagError(code)) => {
+                esp_println::println!("teddiebox: nfc   SET PASSWORD -> refused ({code:#04x})")
+            }
+            Err(trf7962a::Error::ReceiveError(flags)) => report_receive_error(flags),
+            Err(trf7962a::Error::Timeout) => {
+                esp_println::println!("teddiebox: nfc   SET PASSWORD -> silent")
+            }
+            Err(_) => esp_println::println!("teddiebox: nfc   SET PASSWORD -> failed"),
+        }
+        self.diagnose();
+    }
 }
 
 /// Names the reader's own reason for rejecting a reception.

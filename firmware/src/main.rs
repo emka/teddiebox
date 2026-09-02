@@ -337,6 +337,7 @@ const REQUEST_TAF: u8 = 4;
 static NFC_REQUEST: AtomicU8 = AtomicU8::new(REQUEST_NONE);
 const NFC_INVENTORY: u8 = 1;
 const NFC_UNLOCK: u8 = 2;
+const NFC_FORCE_UNLOCK: u8 = 3;
 
 /// The SLIX privacy password, as typed at the console.
 ///
@@ -543,6 +544,14 @@ async fn nfc_reader(
                     reader.unlock(password);
                 }
             }
+            NFC_FORCE_UNLOCK => {
+                let password = NFC_PASSWORD.load(Ordering::Relaxed);
+                if password == 0 {
+                    esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
+                } else {
+                    reader.force_unlock(password);
+                }
+            }
             _ => {}
         }
         Timer::after(Duration::from_millis(100)).await;
@@ -729,6 +738,10 @@ async fn main(spawner: Spawner) {
                 Some(Command::Unlock) => {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_UNLOCK, Ordering::Relaxed);
+                }
+                Some(Command::ForceUnlock) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    NFC_REQUEST.store(NFC_FORCE_UNLOCK, Ordering::Relaxed);
                 }
                 Some(Command::Password(value)) => {
                     NFC_PASSWORD.store(value, Ordering::Relaxed);

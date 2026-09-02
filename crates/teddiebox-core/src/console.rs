@@ -50,6 +50,15 @@ pub enum Command {
     ///
     /// Bench step 10b.
     Unlock,
+    /// Send SET PASSWORD unconditionally, skipping the inventory that would
+    /// otherwise answer first.
+    ///
+    /// A SLIX taken out of privacy mode stays out of it until something puts
+    /// it back, and this driver has no command that does. So on the bench tag
+    /// `Unlock` returns on its first inventory and the password exchange —
+    /// the longest frame the reader sends, and the only one a tag can refuse
+    /// — is never put on the air at all. This forces it.
+    ForceUnlock,
 }
 
 /// Longest command line accepted. Anything longer cannot be a command, and is
@@ -100,6 +109,7 @@ impl CommandWatch {
                     b"taf" => Some(Command::PlayTaf),
                     b"nfc" => Some(Command::Nfc),
                     b"slix" => Some(Command::Unlock),
+                    b"slixp" => Some(Command::ForceUnlock),
                     other => parse_password(other),
                 }
             };
@@ -217,6 +227,17 @@ mod tests {
     #[test]
     fn the_unlock_command_is_distinct_from_the_nfc_one() {
         let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
+    }
+
+    /// The privacy path has to be reachable on a tag that does not need it.
+    /// `slix` tries a plain inventory first and stops as soon as that answers,
+    /// so on an unlocked tag SET PASSWORD is never sent at all — and the one
+    /// exchange this bench most needs to provoke becomes unreachable.
+    #[test]
+    fn the_forced_unlock_command_is_distinct_from_the_unlock_one() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"slixp\r"), Some(Command::ForceUnlock));
         assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
     }
 
