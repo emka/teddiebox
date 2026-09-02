@@ -91,6 +91,18 @@ fn polls(n: usize) -> Vec<DelayTransaction> {
     vec![DelayTransaction::delay_us(IRQ_POLL_INTERVAL_US); n]
 }
 
+/// The delays through one exchange that a tag answers: `n` interrupt polls
+/// waiting for it, then the quiet the reply has to be followed by.
+///
+/// Separate from `polls` because the two are different claims. An exchange
+/// nothing answers ends with a poll, and one a tag answers ends with t2 —
+/// see `the_air_is_left_quiet_for_t2_after_a_tag_has_answered`.
+fn answered(n: usize) -> Vec<DelayTransaction> {
+    let mut t = polls(n);
+    t.push(DelayTransaction::delay_us(T2_QUIET_US));
+    t
+}
+
 /// Builds the SPI transactions for one transceive that a tag answers.
 ///
 /// `tx_length` is the two-register length field, stated literally by the
@@ -242,13 +254,51 @@ fn inventory_waits_for_the_reader_before_reading_the_fifo() {
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        CheckedDelay::new(&polls(2)),
+        CheckedDelay::new(&answered(2)),
         PinMock::new(&irq),
     );
 
     let uid = r.inventory().unwrap().expect("a tag answered");
     // Reported most-significant byte first, the order printed on a figure.
     assert_eq!(uid, [1, 2, 3, 4, 5, 6, 7, 8]);
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+/// ISO 15693-3 §9.1: after a tag has answered, a reader must leave the air
+/// quiet for t2 before it sends the next request, because the tag is not
+/// listening again until then. The driver had no such wait and issued the
+/// next frame as fast as SPI could carry it.
+///
+/// Measured on the board, twelve forced privacy unlocks each sending GET
+/// RANDOM NUMBER and then SET PASSWORD back to back: GET RANDOM NUMBER was
+/// answered 12 times out of 12, and the SET PASSWORD that immediately
+/// followed it was silent 6 times out of 12, in no pattern. With roughly 4 ms
+/// of console printing between the two, 12 out of 12. The reader transmits
+/// and receives perfectly throughout — it is the tag that is not listening
+/// yet, and a silent tag is indistinguishable from an empty plate.
+#[test]
+fn the_air_is_left_quiet_for_t2_after_a_tag_has_answered() {
+    let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+    let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 9, &response);
+
+    let mut irq = irq_after(0);
+    irq.extend(irq_after(2));
+
+    // The two IRQ polls, and then the guard the reply has to be followed by.
+    let mut delay = polls(2);
+    delay.push(DelayTransaction::delay_us(T2_QUIET_US));
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&delay),
+        PinMock::new(&irq),
+    );
+
+    let mut out = [0u8; MAX_RESPONSE];
+    assert_eq!(r.transceive(&INVENTORY, &mut out), Ok(10));
     let (mut spi, mut delay, mut irq) = r.release();
     spi.done();
     delay.done();
@@ -325,7 +375,7 @@ fn the_fifo_level_flags_are_not_counted_as_received_bytes() {
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        CheckedDelay::new(&polls(0)),
+        CheckedDelay::new(&answered(0)),
         PinMock::new(&irq_exchange()),
     );
     assert!(r.inventory().unwrap().is_some());
@@ -350,9 +400,16 @@ fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
     let mut irq = irq_exchange();
     irq.extend(irq_exchange());
 
+    // Two exchanges, so two guards. This is the sequence the bench found:
+    // the tag answers GET RANDOM NUMBER and then ignores a SET PASSWORD that
+    // follows it too soon, which is why the second guard matters as much as
+    // the first.
+    let mut delay = answered(0);
+    delay.extend(answered(0));
+
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        CheckedDelay::new(&polls(0)),
+        CheckedDelay::new(&delay),
         PinMock::new(&irq),
     );
     r.unlock_privacy(0).unwrap();
@@ -378,9 +435,13 @@ fn a_rejected_password_is_reported_rather_than_read_as_success() {
     let mut irq = irq_exchange();
     irq.extend(irq_exchange());
 
+    // Two exchanges, so two guards.
+    let mut delay = answered(0);
+    delay.extend(answered(0));
+
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        CheckedDelay::new(&polls(0)),
+        CheckedDelay::new(&delay),
         PinMock::new(&irq),
     );
     assert_eq!(
@@ -399,7 +460,7 @@ fn an_error_response_is_not_mistaken_for_a_random_number() {
     let spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 1, &[0x01, 0x03]);
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        CheckedDelay::new(&polls(0)),
+        CheckedDelay::new(&answered(0)),
         PinMock::new(&irq_exchange()),
     );
     assert_eq!(r.get_random_number(), Err(Error::TagError(0x03)));
@@ -512,7 +573,7 @@ fn the_transmit_interrupt_is_not_mistaken_for_the_tags_reply() {
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        CheckedDelay::new(&polls(0)),
+        CheckedDelay::new(&answered(0)),
         PinMock::new(&irq),
     );
     assert_eq!(
@@ -582,7 +643,7 @@ fn the_fifo_is_read_as_one_continuous_burst() {
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        CheckedDelay::new(&polls(0)),
+        CheckedDelay::new(&answered(0)),
         PinMock::new(&irq_exchange()),
     );
     assert_eq!(
@@ -663,7 +724,7 @@ fn a_fifo_interrupt_during_a_transmit_is_not_the_end_of_it() {
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        CheckedDelay::new(&polls(0)),
+        CheckedDelay::new(&answered(0)),
         PinMock::new(&irq),
     );
     let mut response = [0u8; MAX_RESPONSE];
@@ -713,7 +774,7 @@ fn a_reply_longer_than_the_fifo_warning_is_collected_in_full() {
 
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
-        CheckedDelay::new(&polls(0)),
+        CheckedDelay::new(&answered(0)),
         PinMock::new(&irq),
     );
     assert_eq!(

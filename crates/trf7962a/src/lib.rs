@@ -126,6 +126,22 @@ pub const IRQ_POLL_INTERVAL_US: u32 = 200;
 /// Poll count, giving a 20 ms window at the interval above.
 pub const IRQ_POLL_ATTEMPTS: u32 = 100;
 
+/// Quiet time the air is left after a tag has answered, before the next
+/// request may go out — ISO 15693-3 §9.1's t2, 4192 carrier periods at
+/// 13.56 MHz.
+///
+/// A tag is not listening again the instant it has finished replying, and the
+/// reader is much faster than it: two SPI reads and the next frame is already
+/// on the air. Nothing in this driver enforced the gap, and nothing in the
+/// TRF7962A does it for us, so a caller making two exchanges in a row — which
+/// is exactly what a privacy unlock is — got silence from the second about
+/// half the time. Silence is the one answer that cannot be told apart from an
+/// empty plate.
+///
+/// Rounded up from 309.1 µs, because the delay is a floor and a spare
+/// microsecond costs nothing against an exchange of several milliseconds.
+pub const T2_QUIET_US: u32 = 320;
+
 /// Settling time after a soft init, before the reader accepts configuration.
 pub const SOFT_INIT_SETTLE_MS: u32 = 1;
 
@@ -384,9 +400,11 @@ where
             // The FIFO flag is the reader asking to be emptied again; without
             // it this interrupt was the end of the reception.
             if status & IRQ_FIFO == 0 || received == response.len() {
+                self.delay.delay_us(T2_QUIET_US);
                 return Ok(received);
             }
             if !self.wait_for_response()? {
+                self.delay.delay_us(T2_QUIET_US);
                 return Ok(received);
             }
             status = self.read_irq_status()?;
