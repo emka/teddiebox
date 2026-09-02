@@ -93,6 +93,10 @@ impl Reader {
                 esp_println::println!("teddiebox: nfc no answer");
                 self.diagnose();
             }
+            Err(trf7962a::Error::ReceiveError(flags)) => {
+                report_receive_error(flags);
+                self.diagnose();
+            }
             Err(_) => {
                 esp_println::println!("teddiebox: nfc inventory failed");
                 self.diagnose();
@@ -196,11 +200,19 @@ impl Reader {
     /// otherwise look identical: a locked tag sitting on the plate, and no tag
     /// in the field at all. Without it, a wrong password and an empty plate
     /// report the same thing.
+    ///
+    /// The random number it spends is not the one the unlock uses; the driver
+    /// fetches its own, immediately before masking the password with it.
     pub fn unlock(&mut self, password: u32) {
         match self.trf.get_random_number() {
             Ok(random) => esp_println::println!(
                 "teddiebox: nfc tag answered GET RANDOM NUMBER ({random:#06x}) — present and SLIX"
             ),
+            Err(trf7962a::Error::ReceiveError(flags)) => {
+                report_receive_error(flags);
+                self.diagnose();
+                return;
+            }
             Err(_) => {
                 esp_println::println!(
                     "teddiebox: nfc no answer to GET RANDOM NUMBER — nothing in the field"
@@ -213,9 +225,35 @@ impl Reader {
         match self.trf.inventory_unlocked(password) {
             Ok(Some(uid)) => report_uid("unlocked tag", &uid),
             Ok(None) => esp_println::println!(
-                "teddiebox: nfc still silent after unlock — wrong password, or no tag"
+                "teddiebox: nfc still silent after unlock — wrong password, or still locked"
             ),
+            // A SLIX that refuses the password says so, rather than going
+            // quiet: ISO 15693-3 §7.4, an error response carrying a code.
+            Err(trf7962a::Error::TagError(code)) => {
+                esp_println::println!("teddiebox: nfc tag refused the password (error {code:#04x})")
+            }
+            Err(trf7962a::Error::ReceiveError(flags)) => report_receive_error(flags),
             Err(_) => esp_println::println!("teddiebox: nfc unlock failed"),
+        }
+    }
+}
+
+/// Names the reader's own reason for rejecting a reception.
+///
+/// SLOS757G Table 6-29, B4 to B1. A reply that arrives and fails CRC is a
+/// different problem from one the decoder could not frame at all, and at a
+/// bench that difference decides whether to look at the antenna or at the
+/// protocol settings.
+fn report_receive_error(flags: u8) {
+    esp_println::println!("teddiebox: nfc reader rejected the reply ({flags:#04x}):");
+    for (bit, meaning) in [
+        (0x10u8, "CRC error"),
+        (0x08, "parity error"),
+        (0x04, "byte framing or EOF error"),
+        (0x02, "collision, or noise in the receiver"),
+    ] {
+        if flags & bit != 0 {
+            esp_println::println!("teddiebox: nfc   {meaning}");
         }
     }
 }
