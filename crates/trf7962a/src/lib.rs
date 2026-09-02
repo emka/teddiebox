@@ -334,37 +334,53 @@ where
             status = self.read_irq_status()?;
         }
 
-        // CRC, parity, framing or collision: the reader heard something and
-        // could not turn it into a frame. Reading the FIFO anyway hands the
-        // caller a fragment that looks like a short reply.
-        if status & IRQ_ERRORS != 0 {
-            return Err(Error::ReceiveError(status & IRQ_ERRORS));
-        }
-        // Without a reception there is nothing in the FIFO to read, and the
-        // N-1 count cannot tell an empty FIFO from a one-byte one.
-        if status & IRQ_RX_STARTED == 0 {
-            return Ok(0);
-        }
+        // A reply longer than eight bytes arrives in more than one piece.
+        // SLOS757G §6.12.4: the reader interrupts once the ninth byte lands,
+        // "before the end of the receive operation", and "this is repeated
+        // until an RX complete interrupt is generated". An inventory reply is
+        // ten bytes, so this is every tag read there will ever be — stopping
+        // at the first interrupt returns nine and the caller rejects a good
+        // tag as malformed.
+        let mut received = 0;
+        loop {
+            // CRC, parity, framing or collision: the reader heard something
+            // and could not turn it into a frame. Reading the FIFO anyway
+            // hands the caller a fragment that looks like a short reply.
+            if status & IRQ_ERRORS != 0 {
+                return Err(Error::ReceiveError(status & IRQ_ERRORS));
+            }
+            // Without a reception there is nothing in the FIFO to read, and
+            // the N-1 count cannot tell an empty FIFO from a one-byte one.
+            if status & (IRQ_RX_STARTED | IRQ_FIFO) == 0 {
+                return Ok(received);
+            }
 
-        // B4 is the overflow flag and B3-B0 the unread byte count. Reading the
-        // raw byte as a count folds in the two level flags and hands the
-        // caller fabricated data.
-        let status = self.read_register(regs::FIFO_STATUS)?;
-        if status & FIFO_OVERFLOW != 0 {
-            return Err(Error::FifoOverflow);
+            // B4 is the overflow flag and B3-B0 the unread byte count.
+            // Reading the raw byte as a count folds in the two level flags
+            // and hands the caller fabricated data.
+            let fifo = self.read_register(regs::FIFO_STATUS)?;
+            if fifo & FIFO_OVERFLOW != 0 {
+                return Err(Error::FifoOverflow);
+            }
+            // The count reads as N-1 — SLOS757G §6.12.2, "if 8 bytes are in
+            // the FIFO, this number is 7". Confirmed at the bench: a GET
+            // RANDOM NUMBER reply counted 0x02 and held the three bytes it
+            // should, flags and a random number that differs every run.
+            let available = (fifo & FIFO_COUNT_MASK) as usize + 1;
+            let n = available.min(response.len() - received);
+            self.read_fifo(&mut response[received..received + n])?;
+            received += n;
+
+            // The FIFO flag is the reader asking to be emptied again; without
+            // it this interrupt was the end of the reception.
+            if status & IRQ_FIFO == 0 || received == response.len() {
+                return Ok(received);
+            }
+            if !self.wait_for_response()? {
+                return Ok(received);
+            }
+            status = self.read_irq_status()?;
         }
-        // The count reads as N-1: SLOS757C says so in §5.12.2 and again in
-        // Table 6-21, "if 8 bytes are in the FIFO, this number is 7". This
-        // runs only after the interrupt fired, so the FIFO holds at least one
-        // byte and the adjustment is always defined.
-        //
-        // **The least verified claim in this driver.** Off by one here either
-        // truncates every reply or reads one byte of rubbish past it, and no
-        // mock can tell which. Confirm at bench step 10, first thing.
-        let available = (status & FIFO_COUNT_MASK) as usize + 1;
-        let n = available.min(response.len());
-        self.read_fifo(&mut response[..n])?;
-        Ok(n)
     }
 
     /// Runs a single-slot inventory. `Ok(None)` means nothing answered, which

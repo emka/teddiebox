@@ -674,3 +674,52 @@ fn a_fifo_interrupt_during_a_transmit_is_not_the_end_of_it() {
     delay.done();
     irq.done();
 }
+
+/// A reply longer than eight bytes arrives in two parts.
+///
+/// SLOS757G §6.12.4: "if the received packet is longer than 8 bytes, the
+/// interrupt is sent before the end of the receive operation when the ninth
+/// byte is loaded into the FIFO... In the case of an IRQ_FIFO, the MCU should
+/// expect either another IRQ_FIFO or RX complete interrupt. This is repeated
+/// until an RX complete interrupt is generated." The datasheet's own example
+/// reads nine bytes and then collects the tenth, the UID's most significant
+/// byte, from a second interrupt 160 µs later (Figures 6-23 and 6-24).
+///
+/// An inventory reply is exactly ten bytes, so this is every tag read there
+/// will ever be. Stopping at the first interrupt returns nine, one short, and
+/// the caller rejects a perfectly good tag as a malformed response.
+#[test]
+fn a_reply_longer_than_the_fifo_warning_is_collected_in_full() {
+    let first = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02];
+    let last = [0x01u8];
+
+    let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00]);
+    spi.extend(spi_read_irq(0x80));
+    spi.extend(spi_write(vec![0x8F]));
+    // Reception under way, and the FIFO already carrying nine bytes.
+    spi.extend(spi_read_irq(0x60));
+    spi.extend(spi_read(0x5C, 0x08));
+    spi.extend(fifo_burst(&first));
+    // Reception complete, with the tenth byte still to collect.
+    spi.extend(spi_read_irq(0x40));
+    spi.extend(spi_read(0x5C, 0x00));
+    spi.extend(fifo_burst(&last));
+
+    let mut irq = irq_after(0);
+    irq.extend(irq_exchange());
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&polls(0)),
+        PinMock::new(&irq),
+    );
+    assert_eq!(
+        r.inventory().unwrap(),
+        Some([1, 2, 3, 4, 5, 6, 7, 8]),
+        "the last byte of the UID arrives on its own interrupt"
+    );
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
