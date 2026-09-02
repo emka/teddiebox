@@ -79,13 +79,18 @@ pub enum Sound {
     Startup,
     /// A short rising chime — "tada".
     Confirmation,
-    /// A short alert. **This is what a low battery plays on this box**, going
-    /// by ear, though the wiki lists the spoken warning at `00000009`; the two
-    /// are a chime and a sentence, and both are reasonably called the
-    /// battery-low sound.
-    Alert,
-    /// The spoken low-battery message asking to be charged.
-    LowBattery,
+    /// "Caution, battery is low." A warning: the box keeps playing.
+    ///
+    /// Identified by ear on this box. The wiki lists this one only as a
+    /// generic alert, so the pairing with `BatteryCritical` below comes from
+    /// the bench rather than from the table.
+    BatteryLow,
+    /// "Battery is critical, turning off now."
+    ///
+    /// Not a warning but an announcement, which makes it the one sound with an
+    /// ordering requirement: it has to finish before the box powers down, or
+    /// it says the box is turning off and then does not.
+    BatteryCritical,
     /// "Now I'm ready for the Tonies."
     Ready,
     /// A download was interrupted.
@@ -93,12 +98,27 @@ pub enum Sound {
 }
 
 impl Sound {
+    /// What the box should say about a pack in this state, if anything.
+    ///
+    /// The three pack states and the two battery sounds are the same three
+    /// cases, so they are paired here once rather than at each place that
+    /// notices a flat battery. Getting it wrong is not a silent bug: it tells
+    /// a child the box is turning off when it is not, or fails to tell them
+    /// when it is.
+    pub const fn for_pack_state(state: crate::power::PackState) -> Option<Self> {
+        match state {
+            crate::power::PackState::Healthy => None,
+            crate::power::PackState::Low => Some(Self::BatteryLow),
+            crate::power::PackState::Critical => Some(Self::BatteryCritical),
+        }
+    }
+
     pub const fn file(self) -> u32 {
         match self {
             Self::Startup => 0x0000_0000,
             Self::Confirmation => 0x0000_0001,
-            Self::Alert => 0x0000_0003,
-            Self::LowBattery => 0x0000_0009,
+            Self::BatteryLow => 0x0000_0003,
+            Self::BatteryCritical => 0x0000_0009,
             Self::Ready => 0x0000_0010,
             Self::NetworkError => 0x0000_000F,
         }
@@ -141,5 +161,35 @@ mod tests {
     #[test]
     fn the_startup_sound_is_the_first_file_of_a_language() {
         assert_eq!(Sound::Startup.file(), 0x0000_0000);
+    }
+
+    /// The pack states and the battery sounds are the same three cases, so
+    /// pairing them anywhere else is a chance to pair them wrongly.
+    #[test]
+    fn each_pack_state_names_the_sound_that_announces_it() {
+        use crate::power::PackState;
+        assert_eq!(
+            Sound::for_pack_state(PackState::Low),
+            Some(Sound::BatteryLow)
+        );
+        assert_eq!(
+            Sound::for_pack_state(PackState::Critical),
+            Some(Sound::BatteryCritical)
+        );
+        assert_eq!(
+            Sound::for_pack_state(PackState::Healthy),
+            None,
+            "a healthy pack has nothing to announce"
+        );
+    }
+
+    /// The two battery sounds say different things — "caution, battery is
+    /// low" against "battery is critical, turning off now" — and playing the
+    /// second when the first was meant tells a child the box is about to stop
+    /// when it is not.
+    #[test]
+    fn the_two_battery_sounds_are_not_the_same_file() {
+        assert_eq!(Sound::BatteryLow.file(), 0x0000_0003);
+        assert_eq!(Sound::BatteryCritical.file(), 0x0000_0009);
     }
 }
