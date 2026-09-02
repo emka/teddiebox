@@ -35,6 +35,8 @@ esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
 embedded-sdmmc = { version = "0.10", default-features = false }
 embedded-hal-bus = { version = "0.3", default-features = false }
 embassy-futures = "0.1"
+teddiebox-audio = { version = "0.1.0", path = "../crates/teddiebox-audio" }
+teddiebox-taf = { version = "0.1.0", path = "../crates/teddiebox-taf" }
 
 [profile.release]
 opt-level = "s"

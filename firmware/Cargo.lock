@@ -1702,6 +1702,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-audio"
+version = "0.1.0"
+dependencies = [
+ "teddiebox-opus-sys",
+ "teddiebox-taf",
+]
+
+[[package]]
 name = "teddiebox-core"
 version = "0.1.0"
 dependencies = [
@@ -1723,8 +1731,21 @@ dependencies = [
  "esp-println",
  "esp-rtos",
  "lis3dh",
+ "teddiebox-audio",
  "teddiebox-core",
+ "teddiebox-taf",
  "tlv320dac3100",
+]
+
+[[package]]
+name = "teddiebox-opus-sys"
+version = "0.1.0"
+
+[[package]]
+name = "teddiebox-taf"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
 ]
 
 [[package]]
