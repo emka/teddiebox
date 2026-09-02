@@ -416,27 +416,31 @@ async fn media(
                 }
             }
 
-            REQUEST_WAV => {
-                let (Some(tx), Some(buffer), Some(card)) =
-                    (i2s_tx.take(), wav_buffer.take(), card.as_ref())
-                else {
-                    esp_println::println!("teddiebox: I2S is already in use");
+            REQUEST_WAV | REQUEST_TAF => {
+                let Some(card) = card.as_ref() else {
                     continue;
                 };
-                if let Err(reason) = audio::play_first_wav(card, tx, buffer).await {
-                    esp_println::println!("teddiebox: wav failed — {reason}");
+                // Checked before anything is taken. Building a tuple of takes
+                // and matching on it afterwards drops whichever resource did
+                // come back when the other did not — which quietly destroyed
+                // the DMA buffer a later command still needed.
+                if i2s_tx.is_none() || wav_buffer.is_none() {
+                    esp_println::println!(
+                        "teddiebox: the audio hardware is already claimed — rb to run another"
+                    );
+                    continue;
                 }
-            }
-
-            REQUEST_TAF => {
-                let (Some(tx), Some(buffer), Some(card)) =
-                    (i2s_tx.take(), wav_buffer.take(), card.as_ref())
-                else {
-                    esp_println::println!("teddiebox: I2S is already in use");
+                let (Some(tx), Some(buffer)) = (i2s_tx.take(), wav_buffer.take()) else {
                     continue;
                 };
-                if let Err(reason) = audio::play_first_taf(card, tx, buffer).await {
-                    esp_println::println!("teddiebox: taf failed — {reason}");
+
+                let outcome = if request == REQUEST_WAV {
+                    audio::play_first_wav(card, tx, buffer).await
+                } else {
+                    audio::play_first_taf(card, tx, buffer).await
+                };
+                if let Err(reason) = outcome {
+                    esp_println::println!("teddiebox: playback failed — {reason}");
                 }
             }
 
