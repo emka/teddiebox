@@ -64,12 +64,24 @@ async fn heartbeat() {
 /// port and so cannot run while anything is watching the console.
 fn reboot(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_println::println!("teddiebox: rebooting");
+    drain_console();
     board.apply_all(&gates.release_for_reset());
     esp_hal::system::software_reset()
 }
 
+/// Lets the last words out before the reset swallows them.
+///
+/// `software_reset` does not wait for the UART, so everything printed on the
+/// way out arrives truncated or not at all — which is exactly the part of a
+/// reboot worth reading when something goes wrong during it. Blocking rather
+/// than awaiting, because the callers of this never return.
+fn drain_console() {
+    esp_hal::delay::Delay::new().delay_millis(20);
+}
+
 fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_println::println!("teddiebox: rebooting into download mode");
+    drain_console();
     board.apply_all(&gates.release_for_reset());
 
     // Hand the USB pads back before rebooting.
