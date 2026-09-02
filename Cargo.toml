@@ -24,4 +24,5 @@ license = "MIT OR Apache-2.0"
 heapless = { version = "0.8", default-features = false }
 embedded-hal = "1.0"
 embedded-hal-mock = { version = "0.11", features = ["eh1"] }
-embedded-io = "0.6"
+embedded-io = "0.7"
+embedded-io-async = "0.7"
