@@ -161,18 +161,46 @@ mod tests {
         assert_eq!(cursor.advance(Found::Nothing), Action::Finished);
     }
 
-    /// Four levels is the limit, so the fourth directory down is stepped over
-    /// rather than entered — and stepped over, not stuck on.
+    /// Descends to the deepest level the limit allows, leaving the cursor
+    /// poised on a directory it must refuse.
+    fn at_the_deepest_allowed_level() -> Cursor {
+        let mut cursor = Cursor::new();
+        while cursor.depth() < MAX_DEPTH - 1 {
+            cursor.advance(Found::Directory);
+        }
+        cursor
+    }
+
     #[test]
-    fn a_directory_below_the_depth_limit_is_skipped_rather_than_entered() {
+    fn descending_stops_at_the_depth_limit() {
+        let mut cursor = at_the_deepest_allowed_level();
+        assert_eq!(cursor.advance(Found::Directory), Action::TooDeep);
+    }
+
+    #[test]
+    fn a_directory_too_deep_to_enter_is_not_entered() {
+        let mut cursor = at_the_deepest_allowed_level();
+        cursor.advance(Found::Directory);
+        assert_eq!(cursor.depth(), MAX_DEPTH - 1);
+    }
+
+    /// The one that would catch an endless walk: refusing to descend has to
+    /// still step past the entry, or the same directory is offered forever.
+    #[test]
+    fn a_directory_too_deep_to_enter_is_still_stepped_over() {
+        let mut cursor = at_the_deepest_allowed_level();
+        let before = cursor.index();
+        cursor.advance(Found::Directory);
+        assert_eq!(cursor.index(), before + 1);
+    }
+
+    #[test]
+    fn every_level_above_the_limit_is_descended_into() {
         let mut cursor = Cursor::new();
         for expected_depth in 1..MAX_DEPTH {
             assert_eq!(cursor.advance(Found::Directory), Action::Descend);
             assert_eq!(cursor.depth(), expected_depth);
         }
-        assert_eq!(cursor.advance(Found::Directory), Action::TooDeep);
-        assert_eq!(cursor.depth(), MAX_DEPTH - 1, "it did not descend");
-        assert_eq!(cursor.index(), 1, "and it did not stall on the same entry");
     }
 
     #[test]
