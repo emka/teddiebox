@@ -44,6 +44,9 @@ pub const MFG_NXP: u8 = 0x04;
 
 pub const CMD_GET_RANDOM_NUMBER: u8 = 0xB2;
 pub const CMD_SET_PASSWORD: u8 = 0xB3;
+/// SL2S2602 §9.5.3.9. **One bit from DESTROY at `0xB9`** — see
+/// `enable_privacy_request`, which is why it is never sent addressed.
+pub const CMD_ENABLE_PRIVACY: u8 = 0xBA;
 
 /// Password identifier for the privacy password.
 pub const PASSWORD_ID_PRIVACY: u8 = 0x04;
@@ -98,6 +101,32 @@ pub fn set_password_request(password: u32, random: u16) -> [u8; 8] {
     ]
 }
 
+/// Builds the ENABLE PRIVACY request, which puts a tag back into privacy mode.
+///
+/// SL2S2602 §9.5.3.9, Table 39. The password is masked exactly as SET
+/// PASSWORD masks it, and there is **no password identifier byte** — the
+/// command names the password by being the command it is.
+///
+/// **Deliberately never addressed.** DESTROY sits one bit away at `B9h`,
+/// takes the same mask, and on a factory tag holds the same password; but
+/// §9.5.3.8 says it "can only be executed in addressed or selected mode".
+/// Leaving the Address flag clear therefore turns the one catastrophic slip
+/// this command is near into a request the tag declines to execute. That is
+/// worth more than a comment, so it is asserted in the tests below.
+pub fn enable_privacy_request(password: u32, random: u16) -> [u8; 7] {
+    let password = password.to_be_bytes();
+    let mask = random.to_le_bytes();
+    [
+        FLAGS,
+        CMD_ENABLE_PRIVACY,
+        MFG_NXP,
+        password[0] ^ mask[0],
+        password[1] ^ mask[1],
+        password[2] ^ mask[0],
+        password[3] ^ mask[1],
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +170,37 @@ mod tests {
     fn the_request_carries_the_privacy_password_identifier() {
         let request = set_password_request(1, 1);
         assert_eq!(request[3], PASSWORD_ID_PRIVACY);
+    }
+
+    /// The command code, spelled out rather than taken from the constant.
+    /// `0xB9` is DESTROY and is irreversible, so this is the one byte in the
+    /// driver where a typo cannot be allowed to agree with itself.
+    #[test]
+    fn the_privacy_request_carries_the_enable_privacy_command_and_not_destroy() {
+        let request = enable_privacy_request(0, 0);
+        assert_eq!(request[1], 0xBA, "0xB9 is DESTROY");
+    }
+
+    /// The safety property this command leans on: SL2S2602 §9.5.3.8 lets
+    /// DESTROY run only in addressed or selected mode, so an unaddressed
+    /// frame cannot destroy a tag whatever its command byte says. Setting the
+    /// Address flag here would throw that guarantee away.
+    #[test]
+    fn the_privacy_request_is_never_addressed_to_a_uid() {
+        assert_eq!(
+            &enable_privacy_request(0, 0)[..3],
+            &[0x02, 0xBA, 0x04],
+            "the Address flag is what keeps a slip to DESTROY inert"
+        );
+    }
+
+    /// No password identifier byte, unlike SET PASSWORD: Table 39 goes
+    /// straight from the manufacturer code to the masked password. An extra
+    /// byte here would shift the password by one and mean nothing to the tag.
+    #[test]
+    fn the_privacy_request_masks_the_password_with_no_identifier_byte() {
+        let request = enable_privacy_request(0x1122_3344, 0x0000);
+        assert_eq!(&request[3..], &[0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(request.len(), 7);
     }
 }

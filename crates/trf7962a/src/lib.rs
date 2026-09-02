@@ -493,6 +493,22 @@ where
         self.set_password(password, random)
     }
 
+    /// Puts a tag back into privacy mode, where it answers nothing but GET
+    /// RANDOM NUMBER until the password is presented again.
+    ///
+    /// The way back out is `unlock_privacy` with the same password
+    /// (SL2S2602 §9.5.3.9), so this is reversible — but only by whoever knows
+    /// the password, which is the entire point of it.
+    pub fn enable_privacy(&mut self, password: u32) -> Result<(), Error<E>> {
+        let random = self.get_random_number()?;
+        let mut buf = [0u8; MAX_RESPONSE];
+        let n = self.transceive(&slix::enable_privacy_request(password, random), &mut buf)?;
+        if n == 0 {
+            return Err(Error::Timeout);
+        }
+        tag_error(&buf[..n])
+    }
+
     /// Unlocks, then inventories. This is the operation the firmware calls;
     /// a locked tag is invisible to `inventory` alone.
     ///
