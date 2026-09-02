@@ -34,7 +34,7 @@ cross:
     #!/usr/bin/env bash
     set -euo pipefail
     for crate in teddiebox-taf teddiebox-core teddiebox-config teddiebox-cloud \
-                 tlv320dac3100 trf7962a lis3dh; do
+                 teddiebox-download tlv320dac3100 trf7962a lis3dh; do
         echo "--- $crate"
         cargo check -p "$crate" --target xtensa-esp32s3-none-elf -Z build-std=core
     done

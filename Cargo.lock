@@ -1034,6 +1034,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-download"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "teddiebox-cloud",
+ "teddiebox-taf",
+]
+
+[[package]]
 name = "teddiebox-opus-sys"
 version = "0.1.0"
 

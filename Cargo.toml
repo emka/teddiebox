@@ -6,6 +6,7 @@ members = [
     "crates/teddiebox-cloud",
     "crates/teddiebox-config",
     "crates/teddiebox-core",
+    "crates/teddiebox-download",
     "crates/teddiebox-opus-sys",
     "crates/teddiebox-taf",
     "crates/tlv320dac3100",
