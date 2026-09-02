@@ -148,25 +148,44 @@ impl Reader {
     ///
     /// Reading it clears it, so this runs once, immediately after the attempt.
     fn diagnose(&mut self) {
-        // 0x0F is the RSSI register (SLOS757C §6.13); the driver has no name
-        // for it because nothing in the protocol needs it, but at a bench it
-        // says whether there is any energy coming back.
-        const RSSI: u8 = 0x0F;
+        // The interrupt status first, and read the way SPI mode requires
+        // (address 0x6C plus a dummy byte, SLOS757C §6.12.6). Read as an
+        // ordinary register it never clears, so a stale or empty value here
+        // says nothing about whether the reader transmitted — and "the reader
+        // never transmits" is exactly the conclusion this bench has been
+        // drawing from it.
+        match self.trf.read_irq_status() {
+            Ok(value) => esp_println::println!("teddiebox: nfc   irq status {value:#04x} (0x6C)"),
+            Err(_) => esp_println::println!("teddiebox: nfc   irq status unreadable"),
+        }
 
+        // The line, separately from the register. They disagree in the one
+        // case worth naming: an interrupt the reader latched and the wiring
+        // never delivered, which is a wrong GPIO rather than a dead reader.
+        match self.trf.irq_asserted() {
+            Ok(true) => esp_println::println!("teddiebox: nfc   irq line high"),
+            Ok(false) => esp_println::println!("teddiebox: nfc   irq line low"),
+            Err(_) => esp_println::println!("teddiebox: nfc   irq line unreadable"),
+        }
+
+        // 0x0F is the RSSI register (SLOS757C §6.14.1.3.3); the driver has no
+        // name for it because nothing in the protocol needs it, but at a bench
+        // it says whether there is any energy coming back. 0x1D and 0x1E are
+        // the transmit length the driver just wrote: read back, they say
+        // whether the transmit setup reached the part at all.
         for (name, register) in [
-            ("irq status", trf7962a::regs::IRQ_STATUS),
-            ("fifo status", trf7962a::regs::FIFO_STATUS),
-            ("rssi", RSSI),
+            ("chip status 0x00", 0x00u8),
+            ("iso control 0x01", 0x01),
+            ("fifo status 0x1C", trf7962a::regs::FIFO_STATUS),
+            ("tx length 0x1D", trf7962a::regs::TX_LENGTH_BYTE1),
+            ("tx length 0x1E", trf7962a::regs::TX_LENGTH_BYTE2),
+            ("rssi 0x0F", 0x0F),
         ] {
             match self.trf.read_register(register) {
-                Ok(value) => esp_println::println!("teddiebox: nfc   {name} {value:#04x}"),
+                Ok(value) => esp_println::println!("teddiebox: nfc   {name} = {value:#04x}"),
                 Err(_) => esp_println::println!("teddiebox: nfc   {name} unreadable"),
             }
         }
-        esp_println::println!(
-            "teddiebox: nfc   irq 0x00 means nothing was received at all — \
-             wrong tag family, out of range, or no field"
-        );
     }
 
     /// Bench step 10b: unlock a Tonie's privacy mode, then read it.

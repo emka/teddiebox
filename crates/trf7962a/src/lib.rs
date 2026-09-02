@@ -209,6 +209,16 @@ where
         Ok(())
     }
 
+    /// Says whether the reader is asserting its interrupt line right now.
+    ///
+    /// The line and the interrupt status register can disagree, and the case
+    /// where they do is the one worth naming: the reader latched an interrupt
+    /// that the wiring never delivered. Separating those needs the level on
+    /// its own, outside an exchange.
+    pub fn irq_asserted(&mut self) -> Result<bool, Error<E>> {
+        self.irq.is_high().map_err(|_| Error::Pin)
+    }
+
     /// Waits for the reader to raise its interrupt line.
     ///
     /// `Ok(false)` means the window elapsed with no assertion, which is the

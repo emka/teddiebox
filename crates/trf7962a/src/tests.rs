@@ -417,6 +417,22 @@ fn the_field_is_turned_on_last() {
     );
 }
 
+/// The interrupt line is readable without an exchange in flight.
+///
+/// At a bench the register and the pin disagree in the one case that matters:
+/// the reader latched an interrupt the wiring never delivered. Telling those
+/// apart needs the level on its own, outside a transceive.
+#[test]
+fn the_interrupt_line_can_be_read_on_its_own() {
+    let mut r = Trf7962a::new(
+        SpiMock::new(&[]),
+        NoopDelay,
+        PinMock::new(&[PinTransaction::get(PinState::High)]),
+    );
+    assert_eq!(r.irq_asserted(), Ok(true));
+    check(r);
+}
+
 /// SLOS757G Figure 6-20, byte for byte: the datasheet's own single-slot
 /// inventory, in one slave-select window.
 ///
