@@ -90,13 +90,15 @@ pub async fn play_first_wav(
     // is created, so a buffer that is still empty at that moment is played as
     // silence and the stream runs off its end before the first sample arrives
     // — which is exactly how the step 6 tone failed.
-    let capacity = prefill(card, file, &mut buffer)?;
+    let filled = prefill(card, file, &mut buffer)?;
     // Prefill reads ahead of what it could fit, so put the file back exactly
     // where the buffer ends.
-    card.seek(file, format.data_offset + capacity as u32)?;
-    esp_println::println!("teddiebox: wav buffer {capacity} bytes pre-filled");
+    card.seek(file, format.data_offset + filled as u32)?;
+    esp_println::println!("teddiebox: wav buffer {filled} bytes pre-filled");
 
-    let mut remaining = format.data_len as usize - capacity;
+    // Saturating because a file shorter than the buffer is fully pre-filled,
+    // and there is then nothing left to stream.
+    let mut remaining = (format.data_len as usize).saturating_sub(filled);
     let mut transfer = match i2s_tx.write(buffer) {
         Ok(transfer) => transfer,
         Err(_) => {
@@ -105,7 +107,9 @@ pub async fn play_first_wav(
         }
     };
 
-    let mut cushion = Cushion::new(capacity as u32);
+    // The denominator is the whole buffer, not what pre-fill happened to fit:
+    // `available_bytes` reports free space across all of it.
+    let mut cushion = Cushion::new(BUFFER_BYTES as u32);
     cushion.start();
     let mut chunk = [0u8; CHUNK];
     let mut last_log = Instant::now();
@@ -113,7 +117,7 @@ pub async fn play_first_wav(
 
     while remaining > 0 {
         let free = transfer.available_bytes();
-        cushion.observe(capacity.saturating_sub(free) as u32);
+        cushion.observe(BUFFER_BYTES.saturating_sub(free) as u32);
 
         if free >= CHUNK.min(remaining) {
             let want = CHUNK.min(remaining);
@@ -277,12 +281,27 @@ pub async fn play_first_taf(
     // Pre-fill before the transfer starts, exactly as the WAV path does: a
     // buffer still empty when `write()` runs is played as silence and the
     // stream ends before the first sample arrives.
+    // Step 9's criterion is that the device's samples match the host's. The
+    // box cannot hand back a WAV, so it checksums the PCM it decoded and the
+    // host checksums what `taf2wav` produced from the same file — the same
+    // trick step 7 used for the card, and the same CRC-32.
+    //
+    // Both of these start here rather than after the pre-fill: the frames that
+    // fill the buffer are as much a part of the stream as the rest, and a
+    // checksum that skipped them could never match.
+    let mut pcm_crc = Crc32::new();
+    let mut frames: u32 = 0;
+
     let mut pending: core::ops::Range<usize> = 0..0;
     let mut ended = false;
     while !ended {
         if pending.is_empty() {
             match decoder.next_frame(&mut scratch.pcm) {
-                Ok(Some(samples)) => pending = 0..samples * 2,
+                Ok(Some(samples)) => {
+                    pcm_crc.update(as_bytes(&scratch.pcm[..samples]));
+                    frames += 1;
+                    pending = 0..samples * 2;
+                }
                 Ok(None) => break,
                 Err(_) => return Err("the first frames would not decode"),
             }
@@ -296,7 +315,6 @@ pub async fn play_first_taf(
         }
     }
 
-    let capacity = BUFFER_BYTES;
     let mut transfer = match i2s_tx.write(buffer) {
         Ok(transfer) => transfer,
         Err(_) => {
@@ -305,23 +323,17 @@ pub async fn play_first_taf(
         }
     };
 
-    let mut cushion = Cushion::new(capacity as u32);
+    let mut cushion = Cushion::new(BUFFER_BYTES as u32);
     cushion.start();
     let mut last_log = Instant::now();
     let started = Instant::now();
-    let mut frames: u32 = 0;
-    // Step 9's criterion is that the device's samples match the host's. The
-    // box cannot hand back a WAV, so it checksums what it decoded and the
-    // host checksums what `taf2wav` produced from the same file — the same
-    // trick step 7 used for the card, and the same CRC-32.
-    let mut pcm_crc = Crc32::new();
-    // And the other half of the criterion: how much of real time the decode
-    // actually costs. Accumulated rather than sampled, because a mean hides
-    // exactly the frames that would cause a dropout.
+    // The other half of the criterion: how much of real time the decode costs.
+    // Accumulated rather than sampled, because a mean hides exactly the frames
+    // that would cause a dropout.
     let mut decode_us: u64 = 0;
 
     loop {
-        cushion.observe(capacity.saturating_sub(transfer.available_bytes()) as u32);
+        cushion.observe(BUFFER_BYTES.saturating_sub(transfer.available_bytes()) as u32);
 
         if pending.is_empty() {
             let began = Instant::now();
