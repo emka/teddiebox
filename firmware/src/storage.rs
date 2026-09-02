@@ -33,6 +33,7 @@
 
 use core::fmt::Write as _;
 use core::ops::ControlFlow;
+use portable_atomic::{AtomicU64, Ordering};
 
 use embassy_futures::yield_now;
 use embassy_time::Instant;
@@ -67,6 +68,20 @@ const WALK_RATE_KHZ: u32 = 8_000;
 /// enough that the heartbeat keeps time and the console stays responsive,
 /// rarely enough that yielding is not what the walk spends its time on.
 const YIELD_EVERY_BLOCKS: u32 = 16;
+
+/// Microseconds spent inside [`CardPages::read_page`].
+///
+/// Playback measures how much of real time it costs to keep the codec fed, but
+/// that figure covers the decode *and* the card reads that feed it, because
+/// the reads happen underneath `next_frame`. Which of the two dominates
+/// decides which lever is worth pulling — a faster SPI clock, or a cheaper
+/// decoder — so they are counted apart.
+///
+/// 64-bit through `portable-atomic`, because Xtensa has no native 64-bit
+/// atomic and microseconds in a `u32` wrap after about seventy minutes — well
+/// inside the length of a single Tonie, and a wrapped figure would read as a
+/// suspiciously fast decode rather than as an error.
+pub static PAGE_READ_US: AtomicU64 = AtomicU64::new(0);
 
 /// Where a Toniebox keeps its audio, and what it calls it.
 ///
@@ -180,6 +195,23 @@ impl PageSource for CardPages<'_> {
     type Error = &'static str;
 
     fn read_page(&mut self, index: u32, buf: &mut [u8; PAGE_SIZE]) -> Result<(), Self::Error> {
+        let began = Instant::now();
+        let result = self.read_page_inner(index, buf);
+        PAGE_READ_US.fetch_add(began.elapsed().as_micros(), Ordering::Relaxed);
+        result
+    }
+
+    fn page_count(&self) -> u32 {
+        self.pages
+    }
+}
+
+impl CardPages<'_> {
+    fn read_page_inner(
+        &mut self,
+        index: u32,
+        buf: &mut [u8; PAGE_SIZE],
+    ) -> Result<(), &'static str> {
         let offset = index
             .checked_mul(PAGE_SIZE as u32)
             .ok_or("page index out of range")?;
@@ -201,10 +233,6 @@ impl PageSource for CardPages<'_> {
         // that were really there.
         buf[filled..].fill(0);
         Ok(())
-    }
-
-    fn page_count(&self) -> u32 {
-        self.pages
     }
 }
 

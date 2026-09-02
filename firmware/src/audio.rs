@@ -12,7 +12,8 @@
 //! [`teddiebox_core::wav`]; both are tested on the host. What is left here is
 //! the part that owns a DMA engine.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicBool;
+use portable_atomic::Ordering;
 
 use embassy_futures::yield_now;
 use embassy_time::{Duration, Instant, Timer};
@@ -25,7 +26,7 @@ use teddiebox_core::wav::{WavError, WavFormat};
 
 use teddiebox_audio::{LibOpus, OpusState, TafDecoder, MAX_FRAME_SAMPLES};
 
-use crate::storage::{CardPages, Mounted};
+use crate::storage::{CardPages, Mounted, PAGE_READ_US};
 
 /// The DMA buffer between the card and the codec.
 ///
@@ -392,12 +393,25 @@ pub async fn play_first_taf(
 
         if last_log.elapsed() >= LOG_EVERY {
             last_log = Instant::now();
+            let so_far = started.elapsed().as_micros().max(1);
+            // The checksum and the decode cost so far, not only at the end.
+            // A whole Tonie is over half an hour of loud audio in the room,
+            // and every figure step 9 wants is comparable at any frame count:
+            // `taf2wav --frames N` decodes exactly this many on the host.
             esp_println::println!(
-                "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns",
-                started.elapsed().as_secs(),
+                "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns,                  crc32 {:08X}, decode {}%",
+                so_far / 1_000_000,
                 cushion.percent(),
                 cushion.low_water_percent(),
-                cushion.underruns()
+                cushion.underruns(),
+                pcm_crc.finish(),
+                decode_us * 100 / so_far
+            );
+            let card_us = PAGE_READ_US.load(Ordering::Relaxed);
+            esp_println::println!(
+                "teddiebox: taf   of that, card reads {}% and decode {}%",
+                card_us * 100 / so_far,
+                decode_us.saturating_sub(card_us) * 100 / so_far
             );
         }
 
@@ -423,9 +437,12 @@ pub async fn play_first_taf(
     // the box can decode faster than it plays, and the margin is the headroom
     // step 9 asks to be measured rather than assumed.
     let played_us = elapsed.as_micros().max(1);
+    let card_us = PAGE_READ_US.load(Ordering::Relaxed);
     esp_println::println!(
-        "teddiebox: taf decode used {decode_us} us of {played_us} us — {}% of real time",
-        decode_us * 100 / played_us
+        "teddiebox: taf feeding the codec used {}% of real time — card reads {}%, decode {}%",
+        decode_us * 100 / played_us,
+        card_us * 100 / played_us,
+        decode_us.saturating_sub(card_us) * 100 / played_us
     );
     Ok(())
 }

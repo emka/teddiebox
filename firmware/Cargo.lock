@@ -1731,6 +1731,7 @@ dependencies = [
  "esp-println",
  "esp-rtos",
  "lis3dh",
+ "portable-atomic",
  "teddiebox-audio",
  "teddiebox-core",
  "teddiebox-taf",

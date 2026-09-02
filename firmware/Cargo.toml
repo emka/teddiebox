@@ -37,6 +37,7 @@ embedded-hal-bus = { version = "0.3", default-features = false }
 embassy-futures = "0.1"
 teddiebox-audio = { version = "0.1.0", path = "../crates/teddiebox-audio" }
 teddiebox-taf = { version = "0.1.0", path = "../crates/teddiebox-taf" }
+portable-atomic = "1.15.0"
 
 [profile.release]
 opt-level = "s"
