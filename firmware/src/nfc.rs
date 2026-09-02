@@ -132,7 +132,27 @@ impl Reader {
     }
 
     /// Bench step 10b: unlock a Tonie's privacy mode, then read it.
+    ///
+    /// GET RANDOM NUMBER is asked first, on its own. A SLIX in privacy mode
+    /// refuses inventory but *does* answer this — that is what makes the
+    /// unlock possible at all — so its answer separates the two silences that
+    /// otherwise look identical: a locked tag sitting on the plate, and no tag
+    /// in the field at all. Without it, a wrong password and an empty plate
+    /// report the same thing.
     pub fn unlock(&mut self, password: u32) {
+        match self.trf.get_random_number() {
+            Ok(random) => esp_println::println!(
+                "teddiebox: nfc tag answered GET RANDOM NUMBER ({random:#06x}) — present and SLIX"
+            ),
+            Err(_) => {
+                esp_println::println!(
+                    "teddiebox: nfc no answer to GET RANDOM NUMBER — nothing in the field"
+                );
+                self.diagnose();
+                return;
+            }
+        }
+
         match self.trf.inventory_unlocked(password) {
             Ok(Some(uid)) => report_uid("unlocked tag", &uid),
             Ok(None) => esp_println::println!(
