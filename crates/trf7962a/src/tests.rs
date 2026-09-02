@@ -207,10 +207,12 @@ fn initialisation_puts_exactly_this_sequence_on_the_bus() {
     spi.extend(spi_write(vec![0x00, 0x21])); // chip status: RF on, last
 
     // The reader needs to settle after a soft init before it takes
-    // configuration, so both commands are followed by a wait.
+    // configuration, so both commands are followed by a wait. The third wait
+    // is the field's, not the reader's — see `FIELD_SETTLE_MS`.
     let delay = [
         DelayTransaction::delay_ms(SOFT_INIT_SETTLE_MS),
         DelayTransaction::delay_ms(SOFT_INIT_SETTLE_MS),
+        DelayTransaction::delay_ms(FIELD_SETTLE_MS),
     ];
 
     let mut r = Trf7962a::new(

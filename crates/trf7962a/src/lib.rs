@@ -129,6 +129,15 @@ pub const IRQ_POLL_ATTEMPTS: u32 = 100;
 /// Settling time after a soft init, before the reader accepts configuration.
 pub const SOFT_INIT_SETTLE_MS: u32 = 1;
 
+/// Settling time after the field comes on, before a tag can be asked anything.
+///
+/// A passive tag has no power of its own: it rectifies the reader's field,
+/// and until its own supply has come up it cannot answer. Measured on the
+/// board — the first exchange after initialisation came back silent every
+/// time while the second, milliseconds later, answered — which reads exactly
+/// like an empty plate and is the reason this is worth spending.
+pub const FIELD_SETTLE_MS: u32 = 10;
+
 pub struct Trf7962a<SPI, D, IRQ> {
     spi: SPI,
     delay: D,
@@ -215,6 +224,7 @@ where
         for &(reg, value) in INIT_SEQUENCE {
             self.write_register(reg, value)?;
         }
+        self.delay.delay_ms(FIELD_SETTLE_MS);
         Ok(())
     }
 
