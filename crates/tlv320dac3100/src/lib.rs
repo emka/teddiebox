@@ -109,7 +109,9 @@ where
         for &(page, reg, value) in dac {
             self.write_reg(page, reg, value)?;
         }
-        Ok(())
+        // Last of all, with the drivers ramped and the DAC running, so the
+        // unmute has nothing left to expose.
+        self.unmute_speaker(delay)
     }
 
     fn read_reg(&mut self, page: u8, reg: u8) -> Result<u8, Error<E>> {
@@ -132,6 +134,29 @@ where
         // Bits 3 and 2 mute the left and right DAC channels.
         let value = if muted { 0x0C } else { 0x00 };
         self.write_reg(0, page0::DAC_MUTE_CTRL, value)
+    }
+
+    /// Unmutes the class-D driver and waits for the gain to take effect.
+    ///
+    /// The last step of a start-up, and deliberately so: the speaker is muted
+    /// through everything before it, because unmuting it while the drivers
+    /// ramp and the DAC comes up is — measured by ear — what made the box
+    /// click when it powered on.
+    ///
+    /// SLAS671C Table 6-110 gives D0 of the same register as "all programmed
+    /// gains to the Class-D driver have been applied", so the wait is on the
+    /// part rather than on a guess. Running on regardless after the poll
+    /// budget is the right failure: a box that plays is better than one that
+    /// refuses to finish starting.
+    pub fn unmute_speaker<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
+        self.write_reg(1, page1::SPK_DRIVER_GAIN, SPK_GAIN_UNMUTED)?;
+        for _ in 0..GAIN_POLLS {
+            if self.read_reg(1, page1::SPK_DRIVER_GAIN)? & SPK_GAINS_APPLIED != 0 {
+                return Ok(());
+            }
+            delay.delay_ms(GAIN_POLL_MS);
+        }
+        Ok(())
     }
 
     /// Runs the codec's own power-down and waits for it to finish.
@@ -242,7 +267,7 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // 6 dB, the lowest the class-D stage offers, and unmuted. 12 dB was
     // painfully loud on a bench with the box open; real content can raise it
     // deliberately rather than inheriting it.
-    (1, page1::SPK_DRIVER_GAIN, 0x04),
+    (1, page1::SPK_DRIVER_GAIN, SPK_GAIN_MUTED),
     // Pop removal, written rather than inherited. D7 set orders a software
     // power-down to take the amplifiers down before the DAC — Table 6-101's
     // own "this is to optimize power-down POP". D6-D3 (driver power-on time,
@@ -254,6 +279,19 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     (1, page1::HP_DRIVERS, 0xC4),
     (1, page1::SPK_AMP, 0x86),
 ];
+
+/// Class-D driver, 6 dB, muted — D2 clear. The speaker spends the whole
+/// start-up like this: unmuting it any earlier is, measured by ear on the
+/// box, the click that start-up made.
+pub const SPK_GAIN_MUTED: u8 = 0x00;
+/// The same 6 dB, unmuted. Written last, once there is nothing left to expose.
+pub const SPK_GAIN_UNMUTED: u8 = 0x04;
+/// D0 of the class-D driver register: all programmed gains have been applied.
+const SPK_GAINS_APPLIED: u8 = 0x01;
+/// How long between reads while waiting for the class-D gains to apply.
+pub const GAIN_POLL_MS: u32 = 5;
+/// How many such reads before going on regardless.
+pub const GAIN_POLLS: u32 = 40;
 
 /// D7 of page 1 register 46: device software power down enabled.
 const SOFTWARE_POWER_DOWN: u8 = 0x80;
@@ -359,13 +397,16 @@ mod tests {
             w(vec![0x26, 0x80]), // left analog volume to speaker: routed, 0 dB
             w(vec![0x28, 0x06]), // HPL driver gain
             w(vec![0x29, 0x06]), // HPR driver gain
-            w(vec![0x2A, 0x04]), // speaker driver gain: 6 dB, unmuted
+            w(vec![0x2A, 0x00]), // speaker driver gain: 6 dB, muted for now
             w(vec![0x21, 0xBE]), // pop removal: power down amps before the DAC
             w(vec![0x1F, 0xC4]), // headphone drivers: HPL and HPR powered up
             w(vec![0x20, 0x86]), // speaker amp on
             w(vec![0x00, 0x00]), // back to page 0
             w(vec![0x3F, 0xD4]), // DAC data path: on, both channels
             w(vec![0x40, 0x00]), // unmute
+            w(vec![0x00, 0x01]), // page 1
+            w(vec![0x2A, 0x04]), // speaker unmuted, last of all
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x2A], vec![0x05]),
         ];
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
@@ -396,6 +437,48 @@ mod tests {
     /// completely powered down. This is to optimize power-down POP". Its reset
     /// value is 0, which powers everything down together — and this driver was
     /// inheriting that.
+    /// Measured by ear on the box: muting the class-D driver for the whole of
+    /// the start-up sequence is what stops it clicking. So the speaker comes
+    /// up muted and is unmuted last, once the drivers have ramped and the DAC
+    /// is running — everything the unmute would otherwise expose.
+    #[test]
+    fn the_speaker_comes_up_muted() {
+        let &(_, _, value) = INIT_ANALOG
+            .iter()
+            .find(|&&(p, r, _)| p == 1 && r == page1::SPK_DRIVER_GAIN)
+            .expect("the sequence must set the speaker driver");
+        assert_eq!(
+            value & 0x04,
+            0x00,
+            "D2 set unmutes the class-D driver during start-up, which clicks"
+        );
+    }
+
+    /// SLAS671C Table 6-110: D0 of the class-D driver register reads back
+    /// whether "all programmed gains to the Class-D driver have been applied".
+    /// Unmuting is the last thing the sequence does, so the codec is only
+    /// really up once that clears — waiting on the part rather than on a
+    /// guessed delay.
+    #[test]
+    fn unmuting_the_speaker_waits_for_its_gains_to_be_applied() {
+        let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
+        let r =
+            |reg: u8, value: u8| Transaction::write_read(DEFAULT_ADDRESS, vec![reg], vec![value]);
+        let expected = [
+            w(vec![0x00, 0x01]), // page 1
+            w(vec![0x2A, 0x04]), // 6 dB, unmuted
+            r(0x2A, 0x04),       // D0 clear: gains not applied yet
+            r(0x2A, 0x05),       // D0 set: applied
+        ];
+
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        let mut delay = CheckedDelay::new(&[DelayTransaction::delay_ms(GAIN_POLL_MS)]);
+
+        assert_eq!(dac.unmute_speaker(&mut delay), Ok(()));
+        dac.release().done();
+        delay.done();
+    }
+
     #[test]
     fn the_pop_removal_register_orders_the_power_down_after_the_amplifiers() {
         let &(_, _, value) = INIT_ANALOG
@@ -471,6 +554,10 @@ mod tests {
                 w(vec![0x20, 0x86]),
                 w(vec![0x00, 0x00]),
                 w(vec![0x3F, 0xD4]),
+                // apply() always finishes by unmuting the speaker.
+                w(vec![0x00, 0x01]),
+                w(vec![0x2A, 0x04]),
+                Transaction::write_read(DEFAULT_ADDRESS, vec![0x2A], vec![0x05]),
             ]),
             DEFAULT_ADDRESS,
         );
