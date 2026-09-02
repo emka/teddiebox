@@ -237,7 +237,8 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     // The codec first: it is a one-shot configuration, after which the bus
     // goes back to the accelerometer, which needs it continuously.
     let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-    match dac.reset().and_then(|()| dac.init()) {
+    let mut dac_delay = esp_hal::delay::Delay::new();
+    match dac.reset().and_then(|()| dac.init(&mut dac_delay)) {
         Ok(()) => {
             esp_println::println!("teddiebox: codec configured");
 
@@ -258,6 +259,9 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             // What it says it did, rather than what we asked for. A silent
             // output with every configuration register correct is exactly the
             // case this separates: asked wrongly, or declined.
+            // Read after `init` has waited out the drivers' ramp. Read before
+            // it, HPL reports itself unpowered for 304 ms — measured — which
+            // is what "step 6's headphone half is unproven" rested on.
             match dac.power_flags() {
                 Ok(f) => esp_println::println!(
                     "teddiebox: codec powered dac_l={} dac_r={} class_d_l={} class_d_r={} hpl={}",

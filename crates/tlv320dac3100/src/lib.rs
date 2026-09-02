@@ -5,6 +5,7 @@
 
 pub mod regs;
 
+use embedded_hal::delay::DelayNs;
 use embedded_hal::i2c::I2c;
 use regs::{page0, page1, REG_PAGE_SELECT};
 
@@ -80,9 +81,28 @@ where
         Ok(())
     }
 
-    /// Applies `INIT_SEQUENCE`.
-    pub fn init(&mut self) -> Result<(), Error<E>> {
-        for &(page, reg, value) in INIT_SEQUENCE {
+    /// Applies `INIT_ANALOG`, waits out the drivers' ramp, then `INIT_DAC`.
+    pub fn init<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
+        self.apply(delay, INIT_ANALOG, INIT_DAC)
+    }
+
+    /// Writes `analog`, waits `DRIVER_RAMP_MS`, then writes `dac`.
+    ///
+    /// The wait is the whole point, so it is a step of this operation rather
+    /// than something a caller is trusted to remember — SLAS671C §6.3.10.14
+    /// puts it between powering the output drivers and powering the DAC, and
+    /// skipping it means the DAC unmutes into drivers that are still ramping.
+    pub fn apply<D: DelayNs>(
+        &mut self,
+        delay: &mut D,
+        analog: &[(u8, u8, u8)],
+        dac: &[(u8, u8, u8)],
+    ) -> Result<(), Error<E>> {
+        for &(page, reg, value) in analog {
+            self.write_reg(page, reg, value)?;
+        }
+        delay.delay_ms(DRIVER_RAMP_MS);
+        for &(page, reg, value) in dac {
             self.write_reg(page, reg, value)?;
         }
         Ok(())
@@ -164,7 +184,7 @@ pub struct PowerFlags {
 ///   both hold. The previous J=32 gave 49.152 MHz, under the floor, so the PLL
 ///   never locked at all.
 /// - **fS = 98.304 MHz / (NDAC=8 x MDAC=2 x DOSR=128) = 48000 Hz** exactly.
-pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
+pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // Clocking: PLL from BCLK, CODEC_CLKIN from PLL.
     (0, page0::CLOCK_GEN_MUX, 0x07),
     (0, page0::PLL_P_R, 0x91), // PLL on, P=1, R=1
@@ -181,10 +201,12 @@ pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
     // Headset detection is off after reset, so without this the jack reads as
     // permanently empty. 16 ms debounce, the reset default.
     (0, page0::HEADSET_DETECT, 0x80),
-    // Analog: power the output stages before unmuting.
-    // D7 and D6 power the HPL and HPR drivers; D2 is reserved and must be 1.
-    // Common mode stays at its 1.35 V reset value.
-    (1, page1::HP_DRIVERS, 0xC4),
+    // Analog, in the order SLAS671C §6.3.10.14 gives: route the DAC to the
+    // output amplifier (d), unmute and set the gain of the output drivers
+    // (e), and only then power the drivers up (f). Powering a driver first —
+    // as this sequence did — brings it up against the reset state, no routing
+    // and -78 dB, and then steps it to 0 dB once the gain arrives. The
+    // speaker reproduces that step.
     (1, page1::OUTPUT_MIXER_ROUTING, 0x44),
     // Route each analog volume control to its driver at 0 dB. Without D7 the
     // mixer reaches no amplifier at all, and the reset gain is -78 dB.
@@ -197,7 +219,25 @@ pub const INIT_SEQUENCE: &[(u8, u8, u8)] = &[
     // painfully loud on a bench with the box open; real content can raise it
     // deliberately rather than inheriting it.
     (1, page1::SPK_DRIVER_GAIN, 0x04),
+    // The drivers last. D7 and D6 power the HPL and HPR drivers; D2 is
+    // reserved and must be 1. Common mode stays at its 1.35 V reset value.
+    (1, page1::HP_DRIVERS, 0xC4),
     (1, page1::SPK_AMP, 0x86),
+];
+
+/// How long the output drivers are given to finish ramping.
+///
+/// SLAS671C Table 6-101 gives the reset driver power-on time as `0111`, which
+/// is 304 ms, and a ramp-up step time of 3.9 ms. §6.3.10.14 step 4 says to
+/// wait that out before the DAC is powered. Measured on the board: the HPL
+/// driver reads as unpowered immediately after the analog block is written
+/// and powered 400 ms later — the long-standing `hpl=false` was this ramp
+/// being read through, not a driver declining to come up.
+pub const DRIVER_RAMP_MS: u32 = 400;
+
+/// Powered only once the drivers are up, so nothing is converted into a
+/// half-ramped output stage.
+pub const INIT_DAC: &[(u8, u8, u8)] = &[
     // DAC on, both channels, then unmute.
     (0, page0::DAC_DATA_PATH, 0xD4),
     (0, page0::DAC_MUTE_CTRL, 0x00),
@@ -218,6 +258,7 @@ mod tests {
     use std::{vec, vec::Vec};
 
     use super::*;
+    use embedded_hal_mock::eh1::delay::{CheckedDelay, Transaction as DelayTransaction};
     use embedded_hal_mock::eh1::i2c::{Mock as I2cMock, Transaction};
 
     #[test]
@@ -274,7 +315,6 @@ mod tests {
             w(vec![0x3C, 0x08]), // DAC processing block
             w(vec![0x43, 0x80]), // headset detection on, 16 ms debounce
             w(vec![0x00, 0x01]), // select page 1
-            w(vec![0x1F, 0xC4]), // headphone drivers: HPL and HPR powered up
             w(vec![0x23, 0x44]), // DAC to output mixer routing
             w(vec![0x24, 0x80]), // left analog volume to HPL: routed, 0 dB
             w(vec![0x25, 0x80]), // right analog volume to HPR: routed, 0 dB
@@ -282,6 +322,7 @@ mod tests {
             w(vec![0x28, 0x06]), // HPL driver gain
             w(vec![0x29, 0x06]), // HPR driver gain
             w(vec![0x2A, 0x04]), // speaker driver gain: 6 dB, unmuted
+            w(vec![0x1F, 0xC4]), // headphone drivers: HPL and HPR powered up
             w(vec![0x20, 0x86]), // speaker amp on
             w(vec![0x00, 0x00]), // back to page 0
             w(vec![0x3F, 0xD4]), // DAC data path: on, both channels
@@ -289,22 +330,105 @@ mod tests {
         ];
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
-        dac.init().unwrap();
+        let mut delay = CheckedDelay::new(&[DelayTransaction::delay_ms(DRIVER_RAMP_MS)]);
+        dac.init(&mut delay).unwrap();
         dac.release().done();
+        delay.done();
+    }
+
+    /// SLAS671C §6.3.10.14 orders the analog block deliberately: (d) route the
+    /// DAC to the output amplifier, (e) unmute and set the gain of the output
+    /// drivers, and only then (f) power up the output drivers. A driver
+    /// powered before its routing exists comes up against the reset state —
+    /// no routing and −78 dB — and is then slammed to 0 dB once the gain
+    /// arrives, which is a step the speaker reproduces.
+    /// SLAS671C §6.3.10.14 step 4: after powering the output drivers, "apply
+    /// waiting time determined by the de-pop settings and the soft-stepping
+    /// settings of the driver gain" — and only then power up the DAC.
+    ///
+    /// The wait is not optional padding. Table 6-101 gives the reset driver
+    /// power-on time as 0111, 304 ms, so without it the DAC is powered and
+    /// unmuted while the output drivers are still ramping, and the speaker
+    /// hears the rest of that ramp. Measured on the board: the HPL driver
+    /// reports itself unpowered when read straight after init and powered
+    /// 400 ms later, which is the ramp this waits out.
+    #[test]
+    fn the_dac_is_powered_only_after_the_drivers_have_finished_ramping() {
+        let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
+        let mut dac = Tlv320Dac3100::new(
+            I2cMock::new(&[
+                w(vec![0x00, 0x01]),
+                w(vec![0x20, 0x86]),
+                w(vec![0x00, 0x00]),
+                w(vec![0x3F, 0xD4]),
+            ]),
+            DEFAULT_ADDRESS,
+        );
+        let mut delay = CheckedDelay::new(&[DelayTransaction::delay_ms(DRIVER_RAMP_MS)]);
+
+        dac.apply(
+            &mut delay,
+            &[(1, page1::SPK_AMP, 0x86)],
+            &[(0, page0::DAC_DATA_PATH, 0xD4)],
+        )
+        .unwrap();
+
+        dac.release().done();
+        delay.done();
+    }
+
+    #[test]
+    fn every_output_driver_is_powered_only_after_its_routing_and_gain() {
+        let at = |page: u8, reg: u8| {
+            INIT_ANALOG
+                .iter()
+                .position(|&(p, r, _)| p == page && r == reg)
+                .unwrap_or_else(|| panic!("sequence must write page {page} register {reg:#04x}"))
+        };
+
+        let routing = at(1, page1::OUTPUT_MIXER_ROUTING);
+        for (name, gain, driver) in [
+            (
+                "headphone",
+                at(1, page1::HPL_DRIVER_GAIN),
+                at(1, page1::HP_DRIVERS),
+            ),
+            (
+                "speaker",
+                at(1, page1::SPK_DRIVER_GAIN),
+                at(1, page1::SPK_AMP),
+            ),
+        ] {
+            assert!(
+                routing < driver,
+                "the {name} driver is powered before the DAC is routed to it"
+            );
+            assert!(
+                gain < driver,
+                "the {name} driver is powered before its gain is set"
+            );
+        }
     }
 
     #[test]
     fn the_sequence_unmutes_only_after_the_output_stages_are_powered() {
-        let mute_at = INIT_SEQUENCE
-            .iter()
-            .position(|&(_, r, _)| r == page0::DAC_MUTE_CTRL)
-            .expect("sequence must unmute");
-        let amp_at = INIT_SEQUENCE
-            .iter()
-            .position(|&(p, r, _)| p == 1 && r == page1::SPK_AMP)
-            .expect("sequence must power the speaker amp");
+        // Now structural rather than positional: the amp is in the analog
+        // table and the unmute in the one applied after the ramp, so the
+        // ordering holds by construction.
         assert!(
-            amp_at < mute_at,
+            INIT_ANALOG
+                .iter()
+                .any(|&(p, r, _)| p == 1 && r == page1::SPK_AMP),
+            "the speaker amp belongs to the analog block"
+        );
+        assert!(
+            INIT_DAC.iter().any(|&(_, r, _)| r == page0::DAC_MUTE_CTRL),
+            "unmuting must wait until after the drivers have ramped"
+        );
+        assert!(
+            !INIT_ANALOG
+                .iter()
+                .any(|&(_, r, _)| r == page0::DAC_MUTE_CTRL),
             "unmuting before the amp is powered produces an audible pop"
         );
     }
