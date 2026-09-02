@@ -3,6 +3,10 @@
 /firmware/target
 /.direnv
 
+# Bench credentials. `.envrc` is tracked; this is where the SLIX privacy
+# password lives so it stays out of the history.
+/.envrc.local
+
 # `nix build` output symlinks.
 /result
 /result-*
