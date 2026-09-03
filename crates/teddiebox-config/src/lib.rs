@@ -68,6 +68,10 @@ pub enum ConfigError {
     MalformedLine,
     /// A known key was given a value it does not accept.
     MalformedValue,
+    /// The read filled its buffer, so the file may have been cut short.
+    Truncated,
+    /// The bytes are not UTF-8, so they are not this file.
+    NotText,
 }
 
 /// Cuts a trailing `# comment` off a value.
@@ -105,6 +109,23 @@ fn parse_bool(value: &str) -> Result<bool, ConfigError> {
 }
 
 impl Config {
+    /// Parses a file that was read into a fixed buffer.
+    ///
+    /// `capacity` is how large that buffer was. **A read that filled it
+    /// exactly is refused**, because nothing distinguishes a file that just
+    /// fits from one that was cut off — and a config cut mid-line is the
+    /// dangerous kind of wrong. It still parses; it just parses into a
+    /// plausible-looking value nobody typed, and fails later somewhere the
+    /// cause is invisible. Refusing costs a bigger buffer; not refusing costs
+    /// an evening.
+    pub fn parse_read(raw: &[u8], capacity: usize) -> Result<Self, ConfigError> {
+        if raw.len() >= capacity {
+            return Err(ConfigError::Truncated);
+        }
+        let text = core::str::from_utf8(raw).map_err(|_| ConfigError::NotText)?;
+        Self::parse(text)
+    }
+
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let mut ssid: Option<String<MAX_SSID>> = None;
         let mut password: String<MAX_PASSWORD> = String::new();
@@ -353,5 +374,36 @@ mod tests {
     fn a_trailing_comment_is_not_part_of_the_insecure_value() {
         let c = Config::parse("ssid = A\nserver = s:1\ninsecure = yes # bench only\n").unwrap();
         assert!(c.insecure);
+    }
+    /// A read that exactly filled the buffer is indistinguishable from one
+    /// that ran out of room, so it is refused. The failure it prevents is the
+    /// quiet one: a file cut mid-line still parses, and `server = teddycloud.l`
+    /// is a plausible-looking wrong answer that fails much later and somewhere
+    /// else.
+    #[test]
+    fn a_read_that_filled_the_buffer_is_refused_rather_than_parsed() {
+        let raw = b"ssid = A\nserver = s:1\n";
+        assert_eq!(
+            Config::parse_read(raw, raw.len()),
+            Err(ConfigError::Truncated)
+        );
+    }
+
+    /// Room left over means the file ended on its own.
+    #[test]
+    fn a_read_with_room_to_spare_is_a_whole_file() {
+        let raw = b"ssid = A\nserver = s:1\n";
+        let c = Config::parse_read(raw, raw.len() + 1).unwrap();
+        assert_eq!(c.ssid.as_str(), "A");
+    }
+
+    /// A card can hold anything. Bytes that are not text are not a config
+    /// file, and saying so beats a parse error about a line nobody wrote.
+    #[test]
+    fn bytes_that_are_not_text_are_refused() {
+        assert_eq!(
+            Config::parse_read(&[0xFF, 0xFE, 0x00], 64),
+            Err(ConfigError::NotText)
+        );
     }
 }

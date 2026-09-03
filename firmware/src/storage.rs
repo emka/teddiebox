@@ -39,6 +39,8 @@ use portable_atomic::{AtomicU64, Ordering};
 use embassy_futures::yield_now;
 use embassy_time::Instant;
 use embedded_hal_bus::spi::ExclusiveDevice;
+use teddiebox_config::{Config, ConfigError};
+
 use embedded_sdmmc::{
     Mode, RawDirectory, RawFile, SdCard, ShortFileName, TimeSource, Timestamp, VolumeIdx,
     VolumeManager,
@@ -89,6 +91,23 @@ pub static PAGE_READ_US: AtomicU64 = AtomicU64::new(0);
 /// Fixed by the box's own layout rather than chosen here: every file step 7
 /// found on the real card sat at `CONTENT/<8 hex>/500304E0`.
 const TONIE_CONTENT_DIR: &str = "CONTENT";
+
+/// Why the card's configuration could not be used.
+///
+/// Three cases, kept apart because they call for different words: no file at
+/// all is the ordinary state of a fresh card, a file that will not read is a
+/// card or wiring fault, and a file that will not parse is a typo somebody can
+/// fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigTrouble {
+    /// No such file in the card's root.
+    Missing,
+    /// The file is there but the card would not give it up.
+    Unreadable,
+    /// The file read, and is not a configuration.
+    Refused(ConfigError),
+}
+
 const TONIE_AUDIO_FILE: &str = "500304E0";
 
 /// Writes `value` as eight upper-case hex digits, the way FAT holds a
@@ -469,6 +488,40 @@ impl Mounted {
             }
             (None, _) => Err("no such content file"),
         }
+    }
+
+    /// Reads and parses the card's configuration file.
+    ///
+    /// The card is the media task's, and the radio must never open a file —
+    /// so this is the one place `CONFIG.TXT` is read, and what comes back is a
+    /// parsed value rather than a handle.
+    ///
+    /// `buffer` comes from the caller because this is called once at boot and
+    /// a permanent buffer for a one-shot read would be paid for forever. Its
+    /// size is the file-size limit: a read that fills it is refused rather
+    /// than parsed, since a config cut mid-line still parses and does so into
+    /// a value nobody typed.
+    pub fn read_config(&self, buffer: &mut [u8]) -> Result<Config, ConfigTrouble> {
+        let name = ShortFileName::create_from_str(teddiebox_config::FILENAME)
+            .map_err(|_| ConfigTrouble::Missing)?;
+        let file = self.open_file(name).map_err(|_| ConfigTrouble::Missing)?;
+
+        let mut filled = 0;
+        let outcome = loop {
+            if filled == buffer.len() {
+                // Full, with no way to know whether more was coming.
+                break Err(ConfigTrouble::Refused(ConfigError::Truncated));
+            }
+            match self.read(file, &mut buffer[filled..]) {
+                Ok(0) => break Ok(filled),
+                Ok(n) => filled += n,
+                Err(_) => break Err(ConfigTrouble::Unreadable),
+            }
+        };
+        self.close_file(file);
+
+        let filled = outcome?;
+        Config::parse_read(&buffer[..filled], buffer.len()).map_err(ConfigTrouble::Refused)
     }
 
     /// Opens a file in the root directory for reading.

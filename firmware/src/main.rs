@@ -556,15 +556,12 @@ const NET_TLS: u8 = 5;
 /// from the card's `CONFIG.TXT`, which is why `net::Radio::acquire` takes
 /// a whole `Config` rather than two strings: when the card hands one over,
 /// this static goes away and `net.rs` does not change at all.
-static CREDENTIALS: CsMutex<RefCell<Credentials>> = CsMutex::new(RefCell::new(Credentials {
+static CONFIGURATION: CsMutex<RefCell<Config>> = CsMutex::new(RefCell::new(Config {
     ssid: String::new(),
     password: String::new(),
+    server: String::new(),
+    insecure: false,
 }));
-
-struct Credentials {
-    ssid: String<MAX_SSID>,
-    password: String<MAX_PASSPHRASE>,
-}
 
 /// How long to wait for a DHCP lease before calling it a failure.
 ///
@@ -573,11 +570,20 @@ struct Credentials {
 const DHCP_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn set_ssid(value: String<MAX_SSID>) {
-    critical_section::with(|cs| CREDENTIALS.borrow_ref_mut(cs).ssid = value);
+    critical_section::with(|cs| CONFIGURATION.borrow_ref_mut(cs).ssid = value);
 }
 
 fn set_password(value: String<MAX_PASSPHRASE>) {
-    critical_section::with(|cs| CREDENTIALS.borrow_ref_mut(cs).password = value);
+    critical_section::with(|cs| CONFIGURATION.borrow_ref_mut(cs).password = value);
+}
+
+/// Publishes what the card said.
+///
+/// The media task owns the card and calls this once at boot; the console
+/// writes over it afterwards, which is what makes a mistyped card
+/// diagnosable at the bench without pulling it.
+fn set_configuration(value: Config) {
+    critical_section::with(|cs| *CONFIGURATION.borrow_ref_mut(cs) = value);
 }
 
 /// The credentials shaped the way the radio wants them.
@@ -586,19 +592,11 @@ fn set_password(value: String<MAX_PASSPHRASE>) {
 /// string would fail association in a way that looks like a wrong password.
 fn credentials() -> Option<Config> {
     critical_section::with(|cs| {
-        let held = CREDENTIALS.borrow_ref(cs);
+        let held = CONFIGURATION.borrow_ref(cs);
         if held.ssid.is_empty() || held.password.is_empty() {
             return None;
         }
-        Some(Config {
-            ssid: held.ssid.clone(),
-            password: held.password.clone(),
-            // Association has no use for either. The server is the download's
-            // business, and certificate checking is the transport's; both
-            // arrive with the rest of the config from the card.
-            server: String::new(),
-            insecure: false,
-        })
+        Some(held.clone())
     })
 }
 
@@ -819,6 +817,60 @@ async fn quieten_codec() {
 /// and playback because its DMA buffer is a `static` claimed once whose
 /// pre-fill state this does not re-derive. `rb` restarts the box, which is the
 /// documented way to run another.
+/// How much room the card's configuration file is given.
+///
+/// A read that fills this is refused rather than parsed — see
+/// [`teddiebox_config::Config::parse_read`] — so this is the file-size limit,
+/// not a hint. The file as written is under a kilobyte; the rest is room for
+/// somebody to add comments without the box quietly disagreeing about what
+/// they configured.
+const CONFIG_BUFFER: usize = 2048;
+
+/// Reads `CONFIG.TXT` the first time the card is available, and says what it
+/// found.
+///
+/// **A card that cannot be configured does not stop the box.** Everything
+/// already on it still plays; only the network stays down. A typo in a text
+/// file must never cost a child their story, and the box is a toy before it is
+/// a network client.
+///
+/// It says so twice, because the two audiences are different: a line on the
+/// console for whoever has a cable, and the box's own words for whoever does
+/// not.
+fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
+    if *done {
+        return;
+    }
+    *done = true;
+
+    let mut buffer = [0u8; CONFIG_BUFFER];
+    match card.read_config(&mut buffer) {
+        Ok(config) => {
+            // The passphrase is not printed, here or anywhere. Its length is
+            // enough to tell a truncated card from a wrong one.
+            esp_println::println!(
+                "teddiebox: config ssid {}, server {}, passphrase {} chars{}",
+                config.ssid,
+                config.server,
+                config.password.len(),
+                if config.insecure {
+                    ", certificates NOT checked"
+                } else {
+                    ""
+                }
+            );
+            set_configuration(config);
+        }
+        Err(trouble) => {
+            esp_println::println!(
+                "teddiebox: config unusable — {trouble:?}. The network stays down; \
+                 everything on the card still plays."
+            );
+            SOUND_REQUEST.store(Sound::ConfigError.file(), Ordering::Relaxed);
+        }
+    }
+}
+
 #[embassy_executor::task]
 async fn media(
     spi: Spi<'static, esp_hal::Blocking>,
@@ -848,6 +900,10 @@ async fn media(
     // Every one of these is claimed once and not returned, so each is held in
     // an Option and taken when its command arrives.
     let mut card: Option<storage::Mounted> = None;
+    // The card is read for configuration once. A second read would undo a
+    // bench override typed since, which is the opposite of what the console
+    // commands are for.
+    let mut configured = false;
     let mut bus = Some((spi, cs));
     let mut i2s_tx = Some(i2s_tx);
     let mut tone_buffer = Some(tone_buffer);
@@ -877,7 +933,10 @@ async fn media(
             };
             Timer::after(Duration::from_millis(50)).await;
             match storage::Mounted::open(spi, cs, esp_hal::delay::Delay::new()) {
-                Ok(mounted) => card = Some(mounted),
+                Ok(mounted) => {
+                    read_configuration_once(&mounted, &mut configured);
+                    card = Some(mounted)
+                }
                 Err(reason) => {
                     // The bus was consumed by the attempt, so nothing needing
                     // the card can be retried without a restart.
