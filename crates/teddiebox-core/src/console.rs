@@ -86,6 +86,19 @@ pub enum Command {
     /// restores a bench tag to the state a figure actually arrives in — and
     /// without it the privacy path cannot be exercised twice.
     Lock,
+    /// Dump a tag's memory, `count` blocks starting at `first`.
+    ///
+    /// The bench instrument behind the auth token. teddyCloud relays the box's
+    /// `Authorization: BD <64 hex>` upstream without ever validating it, and
+    /// revvox's protocol analysis calls that value the memory content of the
+    /// tag — so it is readable with the reader already on this board.
+    ///
+    /// Which blocks hold it is *not* settled. An ICODE SLIX-L is understood to
+    /// carry eight four-byte blocks, exactly the token's 32 bytes with nothing
+    /// spare, but that is a hypothesis. The range is typed at the bench rather
+    /// than fixed here precisely so this command can contradict it: where the
+    /// tag stops answering is the measurement.
+    ReadMemory { first: u8, count: u8 },
     /// Override one register of the codec's start-up sequence.
     ///
     /// Which register decides whether the box clicks on start-up can only be
@@ -177,7 +190,8 @@ impl CommandWatch {
                     other => parse_password(other)
                         .or_else(|| parse_codec_set(other))
                         .or_else(|| parse_play_content(other))
-                        .or_else(|| parse_dump_pcm(other)),
+                        .or_else(|| parse_dump_pcm(other))
+                        .or_else(|| parse_read_memory(other)),
                 }
             };
             self.len = 0;
@@ -282,6 +296,34 @@ fn parse_codec_set(line: &[u8]) -> Option<Command> {
         register,
         value,
     })
+}
+
+/// Most blocks one `mem` command will read.
+///
+/// Bounds the reply buffer the firmware has to hold. Comfortably past the
+/// eight blocks a SLIX-L is believed to carry, so the hypothesis can be
+/// overshot and disproved rather than merely confirmed.
+pub const MAX_MEMORY_BLOCKS: u8 = 32;
+
+/// Reads `mem <2 hex first block> <2 hex block count>`.
+///
+/// Both are hex for the same reason the codec's are: block numbers are read
+/// off a datasheet's tables, not counted out.
+fn parse_read_memory(line: &[u8]) -> Option<Command> {
+    let rest = line.strip_prefix(b"mem ")?;
+    let mut parts = rest.split(|&b| b == b' ');
+    let first = hex_byte(parts.next()?)?;
+    let count = hex_byte(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    // Zero is a typo rather than a small request, and anything past the buffer
+    // would have to be truncated — which would print a short dump that reads
+    // exactly like a complete one.
+    if count == 0 || count > MAX_MEMORY_BLOCKS {
+        return None;
+    }
+    Some(Command::ReadMemory { first, count })
 }
 
 /// Reads `pw <8 hex digits>`.
@@ -636,5 +678,46 @@ mod tests {
     fn an_overlong_line_cannot_match_by_its_ending() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"aaaaaaaaaaaaadl\r"), None);
+    }
+
+    /// The instrument that answers "which blocks hold the token". The range is
+    /// typed rather than fixed, because pinning it to the eight-block guess
+    /// would stop it from ever disagreeing with that guess.
+    #[test]
+    fn a_memory_dump_names_its_first_block_and_a_count() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"mem 00 08\r"),
+            Some(Command::ReadMemory { first: 0, count: 8 })
+        );
+    }
+
+    /// Reading past the end is the point: where the tag stops answering is the
+    /// measurement, so a first block beyond the guessed user memory is legal.
+    #[test]
+    fn a_memory_dump_may_start_past_the_expected_end() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"mem 1f 01\r"),
+            Some(Command::ReadMemory {
+                first: 0x1F,
+                count: 1
+            })
+        );
+    }
+
+    /// The reply buffer is fixed, so a count it cannot hold is refused rather
+    /// than quietly truncated into a dump that reads as complete.
+    #[test]
+    fn a_memory_dump_longer_than_the_buffer_is_refused() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"mem 00 21\r"), None);
+    }
+
+    /// Nothing to read is a typo, not a request.
+    #[test]
+    fn a_memory_dump_of_no_blocks_is_refused() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"mem 00 00\r"), None);
     }
 }

@@ -15,6 +15,7 @@ use esp_hal::delay::Delay;
 use esp_hal::gpio::{Input, Output};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
+use teddiebox_core::console::MAX_MEMORY_BLOCKS;
 use trf7962a::{Trf7962a, INIT_SEQUENCE};
 
 /// The reader takes up to 2 Mbit/s (SLOS757C §5.12). Half that is plenty for
@@ -334,6 +335,95 @@ impl Reader {
             }
             Err(_) => esp_println::println!("teddiebox: nfc lock failed"),
         }
+    }
+
+    /// Bench instrument: read a tag's memory out, one block at a time.
+    ///
+    /// This is what settles where the teddyCloud auth token lives. teddyCloud
+    /// relays the box's `Authorization: BD <64 hex>` upstream verbatim and
+    /// never validates it, and revvox's protocol analysis calls that value the
+    /// memory content of the tag — so the reader already on this board can
+    /// read it. Which blocks carry it is not known: a SLIX-L is understood to
+    /// hold eight four-byte blocks, exactly 32 bytes with nothing spare, but
+    /// that is a hypothesis and this exists to test it rather than assume it.
+    ///
+    /// **Deliberately does not unlock first.** Whether a tag still in privacy
+    /// mode answers READ SINGLE BLOCK is the other open question, and
+    /// unlocking here would answer it by never asking. Use `pw` and `slix`
+    /// first to compare the two states.
+    ///
+    /// Blocks are read singly rather than through `read_memory` because that
+    /// stops at the first failure and does not say which block failed — and
+    /// which block first refuses is the measurement wanted here.
+    ///
+    /// The bytes this prints are a credential. They belong on a bench console
+    /// and not in a bug report.
+    pub fn dump_memory(&mut self, first: u8, count: u8) {
+        let mut whole = [0u8; 4 * MAX_MEMORY_BLOCKS as usize];
+        let mut read = 0usize;
+        let mut complete = true;
+
+        for index in 0..count {
+            let block = first.wrapping_add(index);
+            match self.trf.read_block(block) {
+                Ok(data) => {
+                    esp_println::println!(
+                        "teddiebox: nfc mem {:02X} {:02X}{:02X}{:02X}{:02X}",
+                        block,
+                        data[0],
+                        data[1],
+                        data[2],
+                        data[3]
+                    );
+                    whole[read..read + 4].copy_from_slice(&data);
+                    read += 4;
+                }
+                // A tag that refuses says so rather than going quiet
+                // (ISO 15693-3 §7.4), and reading past the last block is
+                // exactly how that refusal is provoked. This is a result, not
+                // a fault.
+                Err(trf7962a::Error::TagError(code)) => {
+                    esp_println::println!(
+                        "teddiebox: nfc mem {block:02X} refused (error {code:#04x})"
+                    );
+                    complete = false;
+                }
+                Err(trf7962a::Error::Timeout) => {
+                    esp_println::println!("teddiebox: nfc mem {block:02X} no answer");
+                    complete = false;
+                }
+                Err(trf7962a::Error::ReceiveError(flags)) => {
+                    esp_println::println!("teddiebox: nfc mem {block:02X}:");
+                    report_receive_error(flags);
+                    complete = false;
+                }
+                Err(_) => {
+                    esp_println::println!("teddiebox: nfc mem {block:02X} failed");
+                    complete = false;
+                }
+            }
+        }
+
+        // Only a run with no gap in it is printed whole. A dump assembled from
+        // the blocks that happened to answer would read exactly like a
+        // complete one, which is the mistake worth spending a branch on.
+        if !complete {
+            esp_println::println!(
+                "teddiebox: nfc mem — run incomplete, so not printed whole; \
+                 the first block to refuse is where the readable memory ends"
+            );
+            return;
+        }
+
+        esp_println::print!(
+            "teddiebox: nfc mem {:02X}..{:02X} ",
+            first,
+            first.wrapping_add(count - 1)
+        );
+        for byte in &whole[..read] {
+            esp_println::print!("{byte:02X}");
+        }
+        esp_println::println!(" ({read} bytes)");
     }
 }
 

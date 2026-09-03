@@ -527,12 +527,20 @@ const NFC_INVENTORY: u8 = 1;
 const NFC_UNLOCK: u8 = 2;
 const NFC_FORCE_UNLOCK: u8 = 3;
 const NFC_LOCK: u8 = 4;
+const NFC_READ_MEMORY: u8 = 5;
 
 /// The SLIX privacy password, as typed at the console.
 ///
 /// RAM only, and deliberately: it is a credential, it is never written to the
 /// card or committed, and it dies with the next reset.
 static NFC_PASSWORD: AtomicU32 = AtomicU32::new(0);
+
+/// The block range a pending `mem` carries: first block in the high byte,
+/// block count in the low one.
+///
+/// Packed into one word rather than kept in two, so the reader task cannot
+/// observe a first block from one command beside a count from the next.
+static NFC_MEM_RANGE: AtomicU32 = AtomicU32::new(0);
 
 /// The language this box speaks, from `TEDDIEBOX_LANGUAGE` in `.envrc.local`.
 ///
@@ -941,6 +949,10 @@ async fn nfc_reader(
                     reader.lock(password);
                 }
             }
+            NFC_READ_MEMORY => {
+                let range = NFC_MEM_RANGE.load(Ordering::Relaxed);
+                reader.dump_memory((range >> 8) as u8, range as u8);
+            }
             _ => {}
         }
         Timer::after(Duration::from_millis(100)).await;
@@ -1010,7 +1022,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock | cinit cdown cset cclr out spk | pcm <2hex>"
+        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> | cinit cdown cset cclr out spk | pcm <2hex>"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -1239,6 +1251,14 @@ async fn main(spawner: Spawner) {
                         if on { SPEAKER_UNMUTE } else { SPEAKER_MUTE },
                         Ordering::Relaxed,
                     );
+                }
+                Some(Command::ReadMemory { first, count }) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    NFC_MEM_RANGE.store(
+                        (u32::from(first) << 8) | u32::from(count),
+                        Ordering::Relaxed,
+                    );
+                    NFC_REQUEST.store(NFC_READ_MEMORY, Ordering::Relaxed);
                 }
                 Some(Command::Lock) => {
                     board.apply(gates.power(Rail::Storage, true));
