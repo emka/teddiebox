@@ -858,6 +858,135 @@ fn a_fifo_interrupt_during_a_transmit_is_not_the_end_of_it() {
     irq.done();
 }
 
+/// READ SINGLE BLOCK for block 5, spelled out rather than built by the driver.
+const READ_BLOCK_5: [u8; 3] = [0x02, 0x20, 0x05];
+
+#[test]
+fn a_block_read_returns_the_four_data_bytes_in_wire_order() {
+    // flags, then four data bytes in an order that would catch a reversal.
+    let response = [0x00u8, 0x11, 0x22, 0x33, 0x44];
+    let spi = transceive_transactions(&READ_BLOCK_5, [0x00, 0x30], 4, &response);
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&answered(0)),
+        PinMock::new(&irq_exchange()),
+    );
+    assert_eq!(
+        r.read_block(5),
+        Ok([0x11, 0x22, 0x33, 0x44]),
+        "block data has no byte-order convention and must come back as sent"
+    );
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+#[test]
+fn a_tag_error_on_a_block_read_is_reported_rather_than_returned_as_data() {
+    // ISO 15693-3 §7.4: bit 0 of the flags marks an error response, whose
+    // payload is a one-byte error code rather than four bytes of data.
+    let spi = transceive_transactions(&READ_BLOCK_5, [0x00, 0x30], 1, &[0x01, 0x0F]);
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&answered(0)),
+        PinMock::new(&irq_exchange()),
+    );
+    assert_eq!(
+        r.read_block(5),
+        Err(Error::TagError(0x0F)),
+        "a refused read must not look like a successful one"
+    );
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+#[test]
+fn a_short_block_response_is_rejected_rather_than_read_past() {
+    // Two bytes: flags and a single data byte, not the four the block
+    // promises. Reading past this would hand back stale or zeroed bytes as
+    // if they were the tag's memory.
+    let response = [0x00u8, 0x11];
+    let spi = transceive_transactions(&READ_BLOCK_5, [0x00, 0x30], 1, &response);
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&answered(0)),
+        PinMock::new(&irq_exchange()),
+    );
+    assert_eq!(r.read_block(5), Err(Error::BadResponse));
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+#[test]
+fn an_absent_block_response_is_a_timeout_not_a_read() {
+    let spi = transmit_transactions(&READ_BLOCK_5, [0x00, 0x30]);
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&polls(IRQ_POLL_ATTEMPTS as usize)),
+        PinMock::new(&irq_never()),
+    );
+    assert_eq!(r.read_block(5), Err(Error::Timeout));
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+#[test]
+fn reading_memory_issues_one_exchange_per_block_and_concatenates_in_order() {
+    let mut spi = transceive_transactions(
+        &[0x02, 0x20, 0x05],
+        [0x00, 0x30],
+        4,
+        &[0x00, 0x11, 0x22, 0x33, 0x44],
+    );
+    spi.extend(transceive_transactions(
+        &[0x02, 0x20, 0x06],
+        [0x00, 0x30],
+        4,
+        &[0x00, 0x55, 0x66, 0x77, 0x88],
+    ));
+
+    let mut irq = irq_exchange();
+    irq.extend(irq_exchange());
+    let mut delay = answered(0);
+    delay.extend(answered(0));
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&delay),
+        PinMock::new(&irq),
+    );
+    let mut out = [0u8; 8];
+    r.read_memory(5, &mut out).unwrap();
+    assert_eq!(
+        out,
+        [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+        "the second block's bytes must follow the first's, not precede them"
+    );
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+#[test]
+fn reading_memory_with_a_length_not_a_multiple_of_four_is_refused_before_any_bus_traffic() {
+    let mut r = reader(&[]);
+    let mut out = [0u8; 5];
+    assert_eq!(r.read_memory(0, &mut out), Err(Error::BadLength));
+    check(r);
+}
+
 /// A reply longer than eight bytes arrives in two parts.
 ///
 /// SLOS757G §6.12.4: "if the received packet is longer than 8 bytes, the

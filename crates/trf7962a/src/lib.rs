@@ -41,6 +41,11 @@ pub enum Error<E> {
     TagError(u8),
     /// The request will not fit the reader's FIFO in a single load.
     RequestTooLong,
+    /// `read_memory`'s output length was not a whole number of four-byte
+    /// blocks. A partial block cannot be represented, so the request is
+    /// refused outright rather than reading a truncated last block or
+    /// silently rounding the length down.
+    BadLength,
 }
 
 /// ISO 15693-3 §7.4: bit 0 of the response flags marks an error response,
@@ -92,6 +97,20 @@ const TRANSMIT_HEADER: usize = 5;
 /// eight — so the simpler scheme stands, and anything longer is refused rather
 /// than quietly overrunning the FIFO.
 pub const MAX_REQUEST: usize = 12;
+
+/// Non-addressed request flags for a plain ISO 15693-3 command.
+///
+/// Same value as `slix::FLAGS`, for the same reason: ISO 15693-3 §7.3.1 puts
+/// the Address flag in bit 6, and setting it would require carrying the
+/// tag's eight-byte UID, which a read by block number has no cause to know.
+/// Re-expressed here, rather than imported, because READ SINGLE BLOCK is a
+/// standard ISO 15693-3 command rather than one of NXP's custom ones, so it
+/// has no business living in `slix`.
+const FLAGS: u8 = slix::FLAGS;
+
+/// READ SINGLE BLOCK: ISO 15693-3's command code for reading four bytes of
+/// tag memory by block number.
+const CMD_READ_SINGLE_BLOCK: u8 = 0x20;
 
 /// FIFO status register (0x1C), per SLOS757C Table 6-21.
 ///
@@ -552,6 +571,78 @@ where
             }
         }
         Ok(None)
+    }
+
+    /// Reads one four-byte block of tag memory.
+    ///
+    /// `[flags, 0x20, block]`, three bytes, non-addressed — see `FLAGS`. The
+    /// reply is `flags(1) + 4 data bytes`.
+    ///
+    /// The four bytes are returned exactly as the tag sent them. Unlike
+    /// `inventory`'s UID, which ISO 15693 transmits least-significant byte
+    /// first and which this driver therefore reverses, block data is raw
+    /// memory with no such convention — reversing it here, the way
+    /// `inventory` reverses its eight bytes, would silently corrupt every
+    /// block read this way.
+    pub fn read_block(&mut self, block: u8) -> Result<[u8; 4], Error<E>> {
+        let request = [FLAGS, CMD_READ_SINGLE_BLOCK, block];
+        let mut buf = [0u8; MAX_RESPONSE];
+        let n = self.transceive(&request, &mut buf)?;
+        if n == 0 {
+            return Err(Error::Timeout);
+        }
+        tag_error(&buf[..n])?;
+        // flags(1) + 4 data bytes.
+        if n < 5 {
+            return Err(Error::BadResponse);
+        }
+        let mut data = [0u8; 4];
+        data.copy_from_slice(&buf[1..5]);
+        Ok(data)
+    }
+
+    /// Fills `out` from consecutive blocks starting at `first`, four bytes
+    /// at a time.
+    ///
+    /// One `read_block` exchange per block, rather than READ MULTIPLE BLOCKS
+    /// (`0x23`): eight blocks in a single reply would be `1 + 32 = 33`
+    /// bytes, one over `MAX_RESPONSE`, while a single-block reply is five
+    /// bytes and sits comfortably inside both that and the twelve-byte FIFO
+    /// that already ruled out addressed frames (see the handover note on
+    /// `WRITE PASSWORD`). That arithmetic, not a missed optimisation, is why
+    /// this stays as repeated single reads.
+    ///
+    /// `out.len()` must be a multiple of four; a partial block cannot be
+    /// represented, so a length that is not is rejected before any bus
+    /// traffic, the same way `transceive` rejects an oversized request
+    /// before sending it.
+    ///
+    /// This exists to fetch the 32-byte content-pass teddyCloud relays as
+    /// `Authorization: BD <64 hex>` — revvox's protocol analysis calls it
+    /// the tag's memory-content, read off the tag rather than derived. Two
+    /// things about that are still open, and neither is guessed at here:
+    ///
+    /// - **Which blocks hold it.** The strong *hypothesis* — unconfirmed —
+    ///   is the whole user memory: an ICODE SLIX-L carries 8 blocks × 4
+    ///   bytes = 32 bytes, exactly the token's size with nothing spare.
+    ///   Confirm at the bench against what teddyCloud logs for the same tag
+    ///   before relying on it.
+    /// - **Whether privacy must be unlocked first.** `inventory_unlocked`
+    ///   already unlocks before inventorying, so this probably composes the
+    ///   same way, but nothing has verified a memory read against a tag
+    ///   still in privacy mode.
+    pub fn read_memory(&mut self, first: u8, out: &mut [u8]) -> Result<(), Error<E>> {
+        // Checked before any bus traffic, matching `transceive`'s own length
+        // check: a rejected call must leave the reader exactly as it was
+        // found.
+        if !out.len().is_multiple_of(4) {
+            return Err(Error::BadLength);
+        }
+        for (i, chunk) in out.chunks_mut(4).enumerate() {
+            let block = first.wrapping_add(i as u8);
+            chunk.copy_from_slice(&self.read_block(block)?);
+        }
+        Ok(())
     }
 }
 
