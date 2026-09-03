@@ -10,10 +10,12 @@
 
 mod cache;
 mod sidecar;
+mod window;
 mod writer;
 
 pub use cache::{decide, Cached, Decision};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
+pub use window::{may_decode, Window, WindowError};
 pub use writer::{ContentSink, Writer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
