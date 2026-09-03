@@ -34,10 +34,13 @@ pub enum WindowError<E> {
 /// a time.
 ///
 /// **This is large.** At `BATCH = 8` the cache alone is 32 KB, which is a
-/// third of what the playback cushion and the decode scratch already cost. On
-/// the host it lives wherever a test puts it; on the device it belongs in a
-/// static or is constructed once and never moved, never built on a task's
-/// stack.
+/// third of what the playback cushion and the decode scratch already cost on a
+/// device with no PSRAM. On the host it lives wherever a test puts it; on the
+/// device it must be constructed *directly into* its final location using an
+/// in-place initialiser such as `StaticCell::init_with(|| Window::new(src))`,
+/// not built on a task's stack. (`new` returns by value, so
+/// `let w = Window::new(src)` materialises 32 KB inline, and return-place
+/// elision is not guaranteed.)
 pub struct Window<P, const BATCH: usize> {
     inner: P,
     cache: [[u8; PAGE_SIZE]; BATCH],
@@ -88,8 +91,9 @@ impl<P: PageSource, const BATCH: usize> Window<P, BATCH> {
         let available = self.pages_available();
         // Never read past what the download committed: those pages hold
         // whatever the card had there before, which decodes as noise or as the
-        // end of a previous story.
-        let wanted = (available - page).min(BATCH as u32);
+        // end of a previous story. Saturating to defend this safety property
+        // locally, not relying on the caller's guard.
+        let wanted = available.saturating_sub(page).min(BATCH as u32);
         self.held = 0;
         self.first = page;
         self.batches += 1;
@@ -226,6 +230,25 @@ mod tests {
         let mut buf = [0u8; PAGE_SIZE];
         w.read_page(0, &mut buf).unwrap();
         assert_eq!(w.reads(), 3, "three pages exist; the batch stops there");
+    }
+
+    /// Playing a file while it downloads: batch truncated by watermark, then
+    /// watermark advances, then the next page arrives and can be served.
+    #[test]
+    fn a_batch_truncated_by_watermark_extends_as_watermark_advances() {
+        let mut w = window(64);
+        w.set_watermark(3 * PAGE_SIZE as u32);
+        let mut buf = [0u8; PAGE_SIZE];
+        // First read fills a batch, truncated to three pages.
+        w.read_page(0, &mut buf).unwrap();
+        assert_eq!(w.reads(), 3);
+        // Page 3 is not yet available.
+        assert_eq!(w.read_page(3, &mut buf), Err(WindowError::NotYetDownloaded));
+        // Watermark advances, page 3 and beyond now exist.
+        w.set_watermark(8 * PAGE_SIZE as u32);
+        // Page 3 is fetched (and the batch refilled from page 3).
+        w.read_page(3, &mut buf).unwrap();
+        assert_eq!(buf[0], 3, "page 3 content delivered");
     }
 
     #[test]
