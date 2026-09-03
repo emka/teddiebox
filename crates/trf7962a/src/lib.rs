@@ -619,18 +619,26 @@ where
     ///
     /// This exists to fetch the 32-byte content-pass teddyCloud relays as
     /// `Authorization: BD <64 hex>` — revvox's protocol analysis calls it
-    /// the tag's memory-content, read off the tag rather than derived. Two
-    /// things about that are still open, and neither is guessed at here:
+    /// the tag's memory-content, read off the tag rather than derived. Both
+    /// of the questions this doc used to leave open were measured on a real
+    /// Tonie figure at the bench on 2026-09-03:
     ///
-    /// - **Which blocks hold it.** The strong *hypothesis* — unconfirmed —
-    ///   is the whole user memory: an ICODE SLIX-L carries 8 blocks × 4
-    ///   bytes = 32 bytes, exactly the token's size with nothing spare.
-    ///   Confirm at the bench against what teddyCloud logs for the same tag
-    ///   before relying on it.
-    /// - **Whether privacy must be unlocked first.** `inventory_unlocked`
-    ///   already unlocks before inventorying, so this probably composes the
-    ///   same way, but nothing has verified a memory read against a tag
-    ///   still in privacy mode.
+    /// - **Which blocks hold it.** The whole user memory, blocks 0 to 7, and
+    ///   nothing else: `first = 0` with a 32-byte `out`. Block 8 and beyond
+    ///   do not answer, in a single run that straddles the boundary, so the
+    ///   32 bytes are the token exactly with nothing spare.
+    /// - **Whether privacy must be unlocked first.** It must. A figure in
+    ///   privacy mode is *silent* to READ SINGLE BLOCK for every block,
+    ///   exactly as it is to inventory. Unlock with `inventory_unlocked`
+    ///   before calling this, or it returns `Timeout` for all of it.
+    ///
+    /// **Silence is ambiguous here, and callers must not read it as "past the
+    /// end".** A tag in privacy mode, a tag that is not there, and a block
+    /// beyond the last one all arrive as `Error::Timeout` — this tag answers
+    /// an out-of-range block with nothing rather than the ISO 15693-3 §7.4
+    /// error response ("block not available", code `0x03`) that would tell
+    /// them apart. Anything walking memory to discover its size will read an
+    /// absent or locked tag as a zero-length one.
     pub fn read_memory(&mut self, first: u8, out: &mut [u8]) -> Result<(), Error<E>> {
         // Checked before any bus traffic, matching `transceive`'s own length
         // check: a rejected call must leave the reader exactly as it was

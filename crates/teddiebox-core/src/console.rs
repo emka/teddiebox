@@ -93,11 +93,12 @@ pub enum Command {
     /// revvox's protocol analysis calls that value the memory content of the
     /// tag — so it is readable with the reader already on this board.
     ///
-    /// Which blocks hold it is *not* settled. An ICODE SLIX-L is understood to
-    /// carry eight four-byte blocks, exactly the token's 32 bytes with nothing
-    /// spare, but that is a hypothesis. The range is typed at the bench rather
-    /// than fixed here precisely so this command can contradict it: where the
-    /// tag stops answering is the measurement.
+    /// The range is typed at the bench rather than fixed here so that this
+    /// command can contradict the guess it was written to test. It did the
+    /// opposite on 2026-09-03: `mem 00 08` reads the token whole, and block 8
+    /// onward does not answer, so the token is the entire user memory with
+    /// nothing spare. The range stays typed because that is what found the
+    /// boundary, and what would find a different one on a different tag.
     ReadMemory { first: u8, count: u8 },
     /// Override one register of the codec's start-up sequence.
     ///

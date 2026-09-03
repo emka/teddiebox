@@ -343,14 +343,14 @@ impl Reader {
     /// relays the box's `Authorization: BD <64 hex>` upstream verbatim and
     /// never validates it, and revvox's protocol analysis calls that value the
     /// memory content of the tag — so the reader already on this board can
-    /// read it. Which blocks carry it is not known: a SLIX-L is understood to
-    /// hold eight four-byte blocks, exactly 32 bytes with nothing spare, but
-    /// that is a hypothesis and this exists to test it rather than assume it.
+    /// read it. Measured on a figure on 2026-09-03: the token is the whole
+    /// user memory, blocks 0 to 7, and block 8 onward does not answer.
     ///
-    /// **Deliberately does not unlock first.** Whether a tag still in privacy
-    /// mode answers READ SINGLE BLOCK is the other open question, and
-    /// unlocking here would answer it by never asking. Use `pw` and `slix`
-    /// first to compare the two states.
+    /// **Deliberately does not unlock first**, which is what let this settle
+    /// the second question: a figure in privacy mode is silent to every block,
+    /// exactly as it is to inventory, so `pw` and `slix` are a precondition
+    /// for reading the token rather than an optional step. Keeping the unlock
+    /// out of here is also what makes the two states comparable at all.
     ///
     /// Blocks are read singly rather than through `read_memory` because that
     /// stops at the first failure and does not say which block failed — and
