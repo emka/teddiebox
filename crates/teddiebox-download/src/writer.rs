@@ -187,4 +187,55 @@ mod tests {
         assert!(w.write(b"abc").is_err());
         assert_eq!(w.watermark(), Bytes(0));
     }
+
+    /// The design promises to "stop, and never leave a sidecar claiming a
+    /// file is complete" when the card fails or fills. That promise is about
+    /// the sidecar's length claim, not about the watermark: the bytes an
+    /// `append` accepted are genuinely on the card even if the flush that
+    /// would make their length durable then fails. Rolling the watermark
+    /// back here would stall the decoder on pages that are really present,
+    /// and would silently retire bytes that a retry should still flush.
+    #[test]
+    fn a_failed_flush_still_leaves_the_appended_bytes_on_the_watermark() {
+        #[derive(Default)]
+        struct AppendsButNeverFlushes {
+            appends: usize,
+            flushes: usize,
+        }
+
+        impl ContentSink for AppendsButNeverFlushes {
+            type Error = ();
+            fn append(&mut self, _: &[u8]) -> Result<(), ()> {
+                self.appends += 1;
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<(), ()> {
+                self.flushes += 1;
+                Err(())
+            }
+        }
+
+        let mut w = Writer::resuming(AppendsButNeverFlushes::default(), 0, 100);
+
+        // The append succeeds and reaches the interval, so a flush is
+        // attempted and fails; write() reports that failure.
+        assert!(w.write(&[0u8; 100]).is_err());
+        assert_eq!(w.sink().appends, 1);
+        assert_eq!(w.sink().flushes, 1);
+        assert_eq!(
+            w.watermark(),
+            Bytes(100),
+            "the appended bytes are on the card"
+        );
+
+        // The failed flush did not reset the interval counter, so the very
+        // next write retries the flush immediately rather than waiting out
+        // a fresh 100 bytes.
+        assert!(w.write(&[0u8; 1]).is_err());
+        assert_eq!(
+            w.sink().flushes,
+            2,
+            "a failed flush must be retried on the next write"
+        );
+    }
 }
