@@ -10,3 +10,4 @@ embedded-sdmmc = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 fatfs = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+teddiebox-config = { path = "../../crates/teddiebox-config" }

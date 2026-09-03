@@ -551,7 +551,7 @@ const NET_STATUS: u8 = 4;
 /// RAM only, gone at the next reset — the same treatment the SLIX password
 /// gets and for the same reason: a credential belongs neither in the image nor
 /// in the repository. **This is a stop-gap.** The design has these arriving
-/// from `teddiebox.conf` on the card, which is why `net::Radio::acquire` takes
+/// from the card's `CONFIG.TXT`, which is why `net::Radio::acquire` takes
 /// a whole `Config` rather than two strings: when the card hands one over,
 /// this static goes away and `net.rs` does not change at all.
 static CREDENTIALS: CsMutex<RefCell<Credentials>> = CsMutex::new(RefCell::new(Credentials {

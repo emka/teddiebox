@@ -268,3 +268,104 @@ fn a_files_recorded_length_only_becomes_true_at_a_flush() {
     );
     volumes.close_file(reopened).unwrap();
 }
+
+/// The card's config file is opened by name, and `open_file_in_dir` takes a
+/// short name — so the name has to *be* one. This runs the round trip the
+/// firmware will: create the file under the name the crate publishes, hand the
+/// bytes back, and parse them.
+#[test]
+fn the_config_file_can_be_opened_by_the_name_the_crate_publishes() {
+    const TEXT: &str = "ssid = HomeNet\npassword = hunter2\nserver = box.lan:80\n";
+
+    let volumes = mounted(blank_fat_image_in_memory(8));
+    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
+    let root = volumes.open_root_dir(volume).unwrap();
+
+    let written = volumes
+        .open_file_in_dir(root, teddiebox_config::FILENAME, Mode::ReadWriteCreate)
+        .expect("the published name is not one this filesystem can open");
+    volumes.write(written, TEXT.as_bytes()).unwrap();
+    volumes.close_file(written).unwrap();
+
+    let file = volumes
+        .open_file_in_dir(root, teddiebox_config::FILENAME, Mode::ReadOnly)
+        .unwrap();
+    let mut raw = [0u8; 128];
+    let read = volumes.read(file, &mut raw).unwrap();
+    volumes.close_file(file).unwrap();
+
+    let config = teddiebox_config::Config::parse(core::str::from_utf8(&raw[..read]).unwrap())
+        .expect("the bytes that came off the filesystem did not parse");
+    assert_eq!(config.ssid.as_str(), "HomeNet");
+    assert_eq!(config.server.as_str(), "box.lan:80");
+}
+
+/// What a long config filename would actually cost, since this project's
+/// documentation called the file `teddiebox.conf` first.
+///
+/// It is **not** impossible, which is what a reading of `open_file_in_dir`
+/// alone suggests: `ShortFileName` refuses the ninth character of the stem, but
+/// `open_long_name_file_in_dir` is a second door and it opens. The real
+/// difference is narrower — that call reassembles every long name in the
+/// directory looking for a match, it cannot *create* a long-name file, and it
+/// is a second way into the filesystem for the media task to own. A short name
+/// needs none of that and `Storage::open_file` already speaks it.
+///
+/// Both halves are asserted here so that neither can be repeated as folklore.
+#[test]
+fn a_long_config_filename_opens_only_through_the_long_name_call() {
+    const LONG: &str = "teddiebox.conf";
+    const TEXT: &str = "ssid = HomeNet\nserver = box.lan:80\n";
+
+    let disk = blank_fat_image_in_memory(8);
+    // Written the way it would really arrive: by the laptop, not by the box.
+    // `open_long_name_file_in_dir` cannot create one, which is the other half
+    // of why a short name is less trouble.
+    let disk = with_long_name_file(disk, LONG, TEXT.as_bytes());
+
+    let volumes = mounted(disk);
+    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
+    let root = volumes.open_root_dir(volume).unwrap();
+
+    let refusal = volumes
+        .open_file_in_dir(root, LONG, Mode::ReadOnly)
+        .expect_err("a short-name open of a long name must fail");
+    // The variant matters: `is_err()` would also pass for a missing file,
+    // which would say nothing about the shape of the name.
+    assert!(
+        matches!(
+            refusal,
+            Error::FilenameError(embedded_sdmmc::FilenameError::NameTooLong)
+        ),
+        "the refusal must be about the ninth character of the stem: {refusal:?}"
+    );
+
+    // And the second door, which does open.
+    let file = volumes
+        .open_long_name_file_in_dir(root, LONG, Mode::ReadOnly)
+        .expect("a long name does open through the long-name call");
+    let mut raw = [0u8; 128];
+    let read = volumes.read(file, &mut raw).unwrap();
+    volumes.close_file(file).unwrap();
+    assert_eq!(core::str::from_utf8(&raw[..read]).unwrap(), TEXT);
+}
+
+/// Puts a file with a long name into an image, the way a laptop would.
+///
+/// `embedded-sdmmc` cannot create one, so this goes through `fatfs`, which is
+/// already here to format the image.
+fn with_long_name_file(disk: RamDisk, name: &str, contents: &[u8]) -> RamDisk {
+    use std::io::Write;
+
+    let mut image = disk.into_bytes();
+    let partition_at = PARTITION_START_BLOCK as usize * 512;
+    {
+        let cursor = std::io::Cursor::new(&mut image[partition_at..]);
+        let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new())
+            .expect("could not mount the image to write the long name");
+        let mut file = fs.root_dir().create_file(name).expect("could not create");
+        file.write_all(contents).expect("could not write");
+        file.flush().expect("could not flush");
+    }
+    RamDisk::new(image)
+}

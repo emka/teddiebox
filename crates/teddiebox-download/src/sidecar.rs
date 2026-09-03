@@ -7,8 +7,8 @@
 //! by definition**, which is what makes a failed sidecar write safe rather
 //! than silently poisonous.
 //!
-//! Text, not a packed struct, for the same reason `teddiebox.conf` is text:
-//! it will be read on a laptop with a card reader on an evening when
+//! Text, not a packed struct, for the same reason the card's `CONFIG.TXT` is
+//! text: it will be read on a laptop with a card reader on an evening when
 //! something has already gone wrong.
 
 use crate::DownloadError;

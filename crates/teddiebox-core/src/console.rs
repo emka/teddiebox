@@ -117,8 +117,8 @@ pub enum Command {
     ///
     /// Typed at the bench, held in RAM, gone at the next reset — the same
     /// treatment [`Command::Password`] gets, and for the same reason. This is
-    /// a stop-gap: the design has credentials arriving from `teddiebox.conf`
-    /// on the card, which is why `net.rs` takes a whole `Config` rather than
+    /// a stop-gap: the design has credentials arriving from the card's
+    /// `CONFIG.TXT`, which is why `net.rs` takes a whole `Config` rather than
     /// two strings.
     NetSsid(String<MAX_SSID>),
     /// Remember the passphrase to associate with.

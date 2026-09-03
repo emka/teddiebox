@@ -423,6 +423,7 @@ version = "0.1.0"
 dependencies = [
  "embedded-sdmmc",
  "fatfs",
+ "teddiebox-config",
 ]
 
 [[package]]

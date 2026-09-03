@@ -1,6 +1,6 @@
 #![no_std]
 
-//! Parses `teddiebox.conf` from the SD card.
+//! Parses the box's configuration file from the SD card.
 //!
 //! Format is deliberately the dullest thing that works: `key = value`, one per
 //! line, `#` comments, blank lines ignored. A parent editing this file on a
@@ -13,6 +13,21 @@
 //! Everything after `password =` is the password.
 
 use heapless::String;
+
+/// The file's name in the card's root directory.
+///
+/// Short and upper case, so that `embedded-sdmmc` opens it with the ordinary
+/// `open_file_in_dir` — which takes a `ShortFileName` and refuses the ninth
+/// character of a stem. A long name such as `teddiebox.conf` is not out of
+/// reach: `open_long_name_file_in_dir` opens one. It just costs more than the
+/// name is worth — that call rescans the directory reassembling long names,
+/// cannot create a file, and would be a second way into the filesystem for the
+/// media task to own, while `Storage::open_file` already speaks short names.
+/// `tools/fat-assumptions` runs both doors against the real library.
+///
+/// `.TXT` over `.CNF` so that the laptop this gets edited on opens it in a text
+/// editor rather than asking what a `.CNF` is.
+pub const FILENAME: &str = "CONFIG.TXT";
 
 pub const MAX_SSID: usize = 32;
 pub const MAX_PASSWORD: usize = 63;
