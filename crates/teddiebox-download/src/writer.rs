@@ -147,7 +147,11 @@ mod tests {
             "one write past the interval is one flush, not two"
         );
         w.write(&[0u8; 60]).unwrap();
-        assert_eq!(w.sink().flushes, 1, "50 carried over plus 60 is not 100");
+        assert_eq!(
+            w.sink().flushes,
+            1,
+            "the 150-byte overshoot is discarded; after a flush the interval restarts from zero, so 60 is not yet 100"
+        );
         w.write(&[0u8; 60]).unwrap();
         assert_eq!(w.sink().flushes, 2);
     }

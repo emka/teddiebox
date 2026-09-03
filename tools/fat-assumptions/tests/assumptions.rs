@@ -219,10 +219,9 @@ fn the_same_file_cannot_be_opened_twice() {
     volumes.close_file(first).unwrap();
 }
 
-/// The sidecar exists because of this: a file's recorded length only becomes
-/// true at a flush, so a download interrupted between flushes leaves a file
-/// shorter than the bytes that reached the card. Resume reads the recorded
-/// length, which is the conservative of the two.
+/// A file's recorded length only becomes true at a flush, so the length
+/// written to disk lags behind what the live handle counts. This is why a
+/// separate sidecar is needed to know a download's intended length.
 ///
 /// The difference is only visible across a remount. `file_length` on a live
 /// handle reads `FileInfo.entry.size`, which `write` updates immediately, and

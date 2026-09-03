@@ -19,6 +19,14 @@ use teddiebox_cloud::ETag;
 /// Room for `length = 4294967295\n` plus `etag = ` and the longest ETag kept.
 pub const MAX_SIDECAR: usize = 128;
 
+/// The render must not silently truncate the very file that vouches for a
+/// download's completeness. The longest possible render is `length = ` (9) +
+/// u32::MAX (10 digits) + newline (1) + `etag = ` (7) + MAX_ETAG (64) + newline (1) = 92 bytes.
+const _: () = assert!(
+    MAX_SIDECAR > 9 + 10 + 1 + 7 + teddiebox_cloud::MAX_ETAG,
+    "MAX_SIDECAR must hold the longest possible sidecar render"
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sidecar {
     /// How long the whole file is meant to be, from the server.

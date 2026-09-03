@@ -29,11 +29,14 @@ pub struct ContentRequest<'a> {
     pub from: Option<u32>,
 }
 
-/// Writes a conditional GET for the content of `tag` into `out`.
+/// Writes a GET for the content of `tag` into `out`.
 ///
-/// When `etag` is present the request is conditional, so an unchanged file
-/// answers 304 and costs nothing but headers — which is what lets the box
-/// revalidate cached content without interrupting playback.
+/// A fresh request with an etag is conditional: an unchanged file answers 304,
+/// which revalidates the cache without interrupting playback. A resumed request
+/// is always a range request — the response is 206 (continue) or 200 (restart),
+/// never 304. This distinction matters: a 304 says nothing about whether the
+/// partial bytes already on the card are still the right prefix of the new
+/// content.
 pub fn build_content_request(
     request: &ContentRequest<'_>,
     out: &mut [u8],

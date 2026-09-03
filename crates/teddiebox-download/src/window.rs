@@ -12,14 +12,15 @@ use teddiebox_taf::{PageSource, PAGE_SIZE};
 
 /// Whether the decoder may be asked for another frame.
 ///
-/// `watermark` and `next_page` are both counted in **pages**. `margin_pages`
-/// is how many whole pages must be committed beyond the one about to be read,
-/// so that a frame spanning a page boundary does not run into bytes that have
-/// not arrived.
-pub fn may_decode(next_page: u32, watermark: u32, margin_pages: u32, complete: bool) -> bool {
+/// `watermark_pages` and `next_page` are both counted in **pages** (see
+/// [`Window::pages_available`] to convert from the writer's byte count).
+/// `margin_pages` is how many whole pages must be committed beyond the one
+/// about to be read, so that a frame spanning a page boundary does not run
+/// into bytes that have not arrived.
+pub fn may_decode(next_page: u32, watermark_pages: u32, margin_pages: u32, complete: bool) -> bool {
     // A finished file has nothing left to wait for; gating it would stall the
     // last frames of every story.
-    complete || watermark >= next_page.saturating_add(margin_pages).saturating_add(1)
+    complete || watermark_pages >= next_page.saturating_add(margin_pages).saturating_add(1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
