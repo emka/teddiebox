@@ -11,12 +11,14 @@
 mod cache;
 mod reconcile;
 mod sidecar;
+mod units;
 mod window;
 mod writer;
 
 pub use cache::{decide, Cached, Decision};
 pub use reconcile::{reconcile, Action, Mismatch};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
+pub use units::{Bytes, Pages};
 pub use window::{may_decode, Window, WindowError};
 pub use writer::{ContentSink, Writer};
 

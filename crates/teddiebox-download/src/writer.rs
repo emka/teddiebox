@@ -4,6 +4,8 @@
 //! bytes the sink accepted. Counting optimistically would clear the decoder to
 //! read pages that never reached the card.
 
+use crate::units::Bytes;
+
 /// Somewhere a download's bytes can be appended.
 ///
 /// **`append` must write at the end of the file**, whatever the underlying
@@ -62,8 +64,8 @@ impl<S: ContentSink> Writer<S> {
     }
 
     /// Bytes committed. This is what the reader is gated on.
-    pub fn watermark(&self) -> u32 {
-        self.watermark
+    pub fn watermark(&self) -> Bytes {
+        Bytes(self.watermark)
     }
 
     pub fn sink(&self) -> &S {
@@ -78,6 +80,7 @@ impl<S: ContentSink> Writer<S> {
 #[cfg(test)]
 mod tests {
     use super::{ContentSink, Writer};
+    use crate::units::Bytes;
     extern crate std;
     use std::vec::Vec;
 
@@ -103,7 +106,7 @@ mod tests {
     fn the_watermark_counts_every_byte_written() {
         let mut w = Writer::resuming(Recording::default(), 0, 1024);
         w.write(b"0123456789").unwrap();
-        assert_eq!(w.watermark(), 10);
+        assert_eq!(w.watermark(), Bytes(10));
     }
 
     /// A resumed download's watermark starts at what is already on the card,
@@ -112,9 +115,9 @@ mod tests {
     #[test]
     fn a_resumed_download_counts_from_what_is_already_there() {
         let mut w = Writer::resuming(Recording::default(), 4096, 1024);
-        assert_eq!(w.watermark(), 4096);
+        assert_eq!(w.watermark(), Bytes(4096));
         w.write(b"XYZ").unwrap();
-        assert_eq!(w.watermark(), 4099);
+        assert_eq!(w.watermark(), Bytes(4099));
     }
 
     #[test]
@@ -182,6 +185,6 @@ mod tests {
         }
         let mut w = Writer::resuming(Broken, 0, 1024);
         assert!(w.write(b"abc").is_err());
-        assert_eq!(w.watermark(), 0);
+        assert_eq!(w.watermark(), Bytes(0));
     }
 }
