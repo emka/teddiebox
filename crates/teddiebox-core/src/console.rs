@@ -100,6 +100,14 @@ pub enum Command {
     /// nothing spare. The range stays typed because that is what found the
     /// boundary, and what would find a different one on a different tag.
     ReadMemory { first: u8, count: u8 },
+    /// Ask the radio what access points it can hear.
+    ///
+    /// The first thing the radio is asked to do, and chosen because it needs
+    /// no credentials, no network stack and no card: a scan that comes back
+    /// empty is a statement about the radio or the antenna, never about a
+    /// password. That separation is the whole reason it exists before
+    /// anything that associates.
+    NetScan,
     /// Override one register of the codec's start-up sequence.
     ///
     /// Which register decides whether the box clicks on start-up can only be
@@ -188,6 +196,7 @@ impl CommandWatch {
                     b"out 0" => Some(Command::Output(false)),
                     b"spk 1" => Some(Command::Speaker(true)),
                     b"spk 0" => Some(Command::Speaker(false)),
+                    b"net scan" => Some(Command::NetScan),
                     other => parse_password(other)
                         .or_else(|| parse_codec_set(other))
                         .or_else(|| parse_play_content(other))
@@ -720,5 +729,22 @@ mod tests {
     fn a_memory_dump_of_no_blocks_is_refused() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"mem 00 00\r"), None);
+    }
+
+    /// The first radio command, and deliberately the one that needs no
+    /// credentials: a scan that finds nothing is a statement about the radio,
+    /// not about a password.
+    #[test]
+    fn the_scan_command_asks_the_radio_what_it_can_hear() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"net scan\r"), Some(Command::NetScan));
+    }
+
+    /// `net` alone does nothing yet, and must not be mistaken for a command
+    /// that does.
+    #[test]
+    fn net_without_a_verb_does_not_fire() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"net\r"), None);
     }
 }

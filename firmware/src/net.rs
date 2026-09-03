@@ -22,9 +22,11 @@
 
 use embassy_net::{Runner, Stack, StackResources};
 use esp_hal::peripherals::WIFI;
+use esp_hal::time::Duration as EspDuration;
 use esp_radio::wifi::{
-    sta::StationConfig, AuthenticationMethodConfig, Config as WifiConfig, ConnectionError,
-    ControllerConfig, Interface, Password, Ssid, WifiController, WifiError,
+    ap::AccessPointInfo, scan::ScanConfig, scan::ScanTypeConfig, sta::StationConfig,
+    AuthenticationMethodConfig, Config as WifiConfig, ConnectionError, ControllerConfig, Interface,
+    Password, Ssid, WifiController, WifiError,
 };
 use teddiebox_config::Config;
 
@@ -94,6 +96,56 @@ impl<'d> Radio<'d> {
             wifi,
             resources: StackResources::new(),
         }
+    }
+
+    /// Asks the radio what access points it can hear.
+    ///
+    /// Needs no credentials, no [`Interface`] and no network stack: a
+    /// controller is built, asked, and dropped again, so this both leaves the
+    /// modem powered down afterwards and never touches the station singleton
+    /// that [`acquire`](Self::acquire) competes for.
+    ///
+    /// That independence is the point. A scan is the one radio operation whose
+    /// failure cannot be blamed on a password or an address, which makes it
+    /// the right first thing to ask of a radio that has never been up: an
+    /// empty result is a statement about the radio, the antenna or the room.
+    ///
+    /// Fills `out` and returns how many entries were written; anything the
+    /// scan finds beyond `out.len()` is discarded, and the scan is asked to
+    /// stop there rather than collect more and throw them away.
+    ///
+    /// **This allocates.** `scan_async` builds its results in a `Vec` on the
+    /// radio heap, which is the only allocator this firmware has. They are
+    /// copied into `out` and the `Vec` dropped before returning, so the
+    /// allocation lives no longer than the call — which matters because that
+    /// heap is sized for the Wi-Fi driver's own buffers and nothing else.
+    ///
+    /// **Waits as long as the driver does**, for the same reason
+    /// [`Session::connect`] does: the caller is the one that knows how long a
+    /// box should wait, so the timeout belongs there and not here.
+    pub async fn scan(&mut self, out: &mut [AccessPointInfo]) -> Result<usize, Error> {
+        let mut controller =
+            WifiController::new(self.wifi.reborrow(), ControllerConfig::default())?;
+        // The driver's default dwell — 10 ms minimum, 20 ms maximum per
+        // channel — makes a single scan a *sample* rather than a census. Four
+        // consecutive scans at the bench on 2026-09-03 returned 7, 3, 6 and 8
+        // access points, and one of them missed the network the box was
+        // standing next to at -29 dBm. A scan that can miss the target answers
+        // "is it in range?" with a coin toss, which is the one question this
+        // exists to answer, so it waits appreciably longer per channel.
+        // Fourteen channels at 300 ms is still comfortably inside the caller's
+        // timeout.
+        let config =
+            ScanConfig::default()
+                .with_max(out.len())
+                .with_scan_type(ScanTypeConfig::Active {
+                    min: EspDuration::from_millis(100),
+                    max: EspDuration::from_millis(300),
+                });
+        let found = controller.scan_async(&config).await?;
+        let n = found.len().min(out.len());
+        out[..n].clone_from_slice(&found[..n]);
+        Ok(n)
     }
 
     /// Powers the modem and builds a DHCP network stack on it.

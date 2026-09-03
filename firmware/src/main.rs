@@ -11,6 +11,7 @@ mod storage;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use embassy_executor::Spawner;
+use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
 
 use esp_backtrace as _;
@@ -529,6 +530,48 @@ const NFC_FORCE_UNLOCK: u8 = 3;
 const NFC_LOCK: u8 = 4;
 const NFC_READ_MEMORY: u8 = 5;
 
+/// Set when the console asks the radio for a scan.
+///
+/// Its own signal rather than a variant of `NFC_REQUEST`: the radio and the
+/// reader share nothing but the console that drives them.
+static NET_REQUEST: AtomicU8 = AtomicU8::new(REQUEST_NONE);
+const NET_SCAN: u8 = 1;
+
+/// Access points one scan will report.
+///
+/// **16 is a measured ceiling, not a preference.** Raising it to 48 on
+/// 2026-09-03 wedged the scan permanently: `scan_async` was entered and never
+/// returned, on every attempt. The other tasks kept running — the heartbeat
+/// never missed — so only the radio task was lost, which is what made it look
+/// at first like the whole box had died. 16 has scanned cleanly many times
+/// either side of that experiment. The boundary between them has not been
+/// looked for, and `RADIO_HEAP` is the first thing to suspect: this is the
+/// only code that allocates, and 72 KiB was always a guess.
+///
+/// The cost of 16 is real. The driver fills the quota **in channel order, not
+/// by signal strength**, so in a crowded band it can stop before reaching a
+/// high channel — at this bench it filled up across channels 1 to 8 and never
+/// reached channel 11, where the access point the box was sitting next to at
+/// -29 dBm lives. A truncated list is therefore reported as truncated, because
+/// a survey that silently omits the strongest signal in the room is worse than
+/// one that admits it stopped early.
+const SCAN_LIMIT: usize = 16;
+
+/// How long a scan may take before it is called a failure.
+///
+/// `scan_async` waits for the driver to raise `ScanDone`, and a radio that
+/// never initialises raises nothing. `net.rs` deliberately holds no timeouts,
+/// so the bench command owns this one.
+///
+/// **It bounds less than it looks like it does.** Racing it with `select`
+/// only helps while the scan future actually yields: `select` re-checks the
+/// timer when the task is polled, so a future that blocks *inside* its own
+/// `poll` is never interrupted by it. That is exactly the failure seen at
+/// `SCAN_LIMIT` 48 — the timer expired and nothing was printed, because the
+/// task never came back to look. This catches a scan that waits forever for
+/// an event; it cannot catch one that never yields.
+const SCAN_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// The SLIX privacy password, as typed at the console.
 ///
 /// RAM only, and deliberately: it is a credential, it is never written to the
@@ -871,6 +914,64 @@ async fn media(
 /// Brings the NFC reader up on first use and answers the bench commands.
 ///
 /// Waits for a request rather than starting at boot: the reader shares the
+/// Brings the radio up on demand and reports what it hears.
+///
+/// The radio has never run on this board, so this exists before anything that
+/// associates: a scan needs no credentials, no card and no network stack, and
+/// so separates "the radio does not work" from "the password is wrong" once
+/// and for all.
+#[embassy_executor::task]
+async fn net(wifi: esp_hal::peripherals::WIFI<'static>) {
+    let mut radio = net::Radio::new(wifi);
+
+    loop {
+        if NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) == NET_SCAN {
+            esp_println::println!("teddiebox: net scanning");
+            // `AccessPointInfo` is `Clone` but not `Copy`, so the array
+            // repeat syntax will not build it.
+            let mut seen: [_; SCAN_LIMIT] = core::array::from_fn(|_| Default::default());
+
+            match select(radio.scan(&mut seen), Timer::after(SCAN_TIMEOUT)).await {
+                Either::First(Ok(0)) => esp_println::println!(
+                    "teddiebox: net heard nothing — radio came up, no access point in range"
+                ),
+                Either::First(Ok(found)) => {
+                    for ap in &seen[..found] {
+                        esp_println::println!(
+                            "teddiebox: net   {} ch{} {} dBm {:?}",
+                            ap.ssid.as_str(),
+                            ap.channel,
+                            ap.signal_strength,
+                            ap.auth_method
+                        );
+                    }
+                    esp_println::println!("teddiebox: net {found} access points");
+                    // Hitting the quota means the driver stopped collecting,
+                    // not that the band holds exactly this many — and what it
+                    // dropped is whatever sits on the highest channels.
+                    if found == SCAN_LIMIT {
+                        esp_println::println!(
+                            "teddiebox: net   list is truncated at {SCAN_LIMIT} — \
+                             the high channels were not reached"
+                        );
+                    }
+                }
+                Either::First(Err(e)) => {
+                    esp_println::println!("teddiebox: net scan failed — {e:?}")
+                }
+                // Nothing came back at all. The driver raises `ScanDone` even
+                // for an empty scan, so silence points at the radio never
+                // having started rather than at an empty band.
+                Either::Second(()) => esp_println::println!(
+                    "teddiebox: net scan timed out after {} s — the radio never answered",
+                    SCAN_TIMEOUT.as_secs()
+                ),
+            }
+        }
+        Timer::after(Duration::from_millis(100)).await;
+    }
+}
+
 /// storage rail, and raising that rail is the console loop's decision.
 #[embassy_executor::task]
 async fn nfc_reader(
@@ -991,6 +1092,7 @@ async fn main(spawner: Spawner) {
     let mut gates = Gates::at_reset();
 
     spawner.spawn(heartbeat().unwrap());
+    spawner.spawn(net(p.WIFI).unwrap());
 
     // Ears and wake are all active low, so they are read with a pull-up: an
     // unconnected input then reads as "not pressed" rather than floating into
@@ -1022,7 +1124,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> | cinit cdown cset cclr out spk | pcm <2hex>"
+        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> | net scan | cinit cdown cset cclr out spk | pcm <2hex>"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -1251,6 +1353,9 @@ async fn main(spawner: Spawner) {
                         if on { SPEAKER_UNMUTE } else { SPEAKER_MUTE },
                         Ordering::Relaxed,
                     );
+                }
+                Some(Command::NetScan) => {
+                    NET_REQUEST.store(NET_SCAN, Ordering::Relaxed);
                 }
                 Some(Command::ReadMemory { first, count }) => {
                     board.apply(gates.power(Rail::Storage, true));
