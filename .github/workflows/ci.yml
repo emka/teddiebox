@@ -10,6 +10,31 @@ jobs:
         with:
           extra_nix_config: "experimental-features = nix-command flakes"
 
+      # The firmware pins esp-radio to a git revision (see firmware/Cargo.toml),
+      # which costs roughly 190 MB of clones per run and makes a GitHub outage
+      # enough to red an otherwise-good build. Caching the downloads removes
+      # both.
+      #
+      # Only the authoritative copies are cached. `registry/src` and
+      # `git/checkouts` are unpacked from `registry/cache` and `git/db`, so
+      # caching them roughly doubles the size to store what cargo will happily
+      # regenerate.
+      #
+      # Both lockfiles key it: firmware/ is its own cargo workspace with its own
+      # lockfile, and a change to either should invalidate. `restore-keys` means
+      # a lockfile bump still starts from the previous cache and fetches only
+      # what actually changed, rather than everything.
+      - name: Cache cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'firmware/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
       # Each gate below is a justfile recipe, so `just check` locally runs
       # exactly what the pipeline runs. The steps stay separate only so a red
       # build names the gate that failed; why each gate exists is documented
