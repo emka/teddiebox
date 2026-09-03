@@ -4,6 +4,7 @@
 mod audio;
 mod led;
 mod libc_shim;
+mod net;
 mod nfc;
 mod pins;
 mod storage;
@@ -32,6 +33,16 @@ use teddiebox_core::tone;
 use tlv320dac3100::Tlv320Dac3100;
 
 use crate::pins::BoardPins;
+
+/// Bytes of heap handed to the radio stack.
+///
+/// A guess, not a measurement, and the one number here most worth replacing
+/// with one. `ControllerConfig::default()` asks the driver for 10 static RX
+/// buffers of roughly 1.6 KB each, plus 32 dynamic RX and 32 dynamic TX
+/// buffers, so 72 KiB is inside the plausible band and near the bottom of it.
+/// Named rather than written inline so that the device plan's measurement has
+/// exactly one place to land.
+const RADIO_HEAP: usize = 72 * 1024;
 
 // The ESP-IDF-style bootloader identifies an app by this descriptor. Without
 // it the image links but no flashing tool will accept it — a failure a build
@@ -939,6 +950,20 @@ async fn nfc_reader(
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
+
+    // esp-radio allocates. The rest of this firmware does not, and libopus in
+    // particular must not — its hardening path is the only thing that ever
+    // reaches libc, and it panics rather than allocating. This heap belongs to
+    // the radio stack alone.
+    //
+    // It is taken out of the main task's stack, not out of spare memory.
+    // `esp-hal`'s linker script puts `.stack` at the top of DRAM running down
+    // to wherever `.bss` ends, so the stack is whatever the static data leaves
+    // behind: adding this heap moved `_stack_start - _stack_end` from 219_788
+    // bytes to 137_104. That is the number a bench measures, not the heap
+    // size, because it is the one that decides whether the box still boots.
+    esp_alloc::heap_allocator!(size: RADIO_HEAP);
+
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
 

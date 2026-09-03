@@ -21,8 +21,9 @@
 //! file prints only once it is fully read, so a 114 MB file was seven minutes
 //! of silence indistinguishable from a hang. The traversal is now a cursor
 //! rather than a call stack, which is what lets this be a flat `async` loop
-//! that can await — recursion would need its futures boxed, and there is no
-//! allocator here to box them in.
+//! that can await — recursion would need its futures boxed, and this firmware
+//! deliberately does not allocate outside the radio stack, whose heap is the
+//! one allocator on the box and is sized for the Wi-Fi driver alone.
 //!
 //! **Names are the 8.3 short names**, because that is what the directory
 //! entries hold. A file stored with a long name prints here as its short alias
