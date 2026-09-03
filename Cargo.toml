@@ -11,6 +11,7 @@ members = [
     "crates/teddiebox-taf",
     "crates/tlv320dac3100",
     "crates/trf7962a",
+    "tools/fat-assumptions",
     "tools/fixturegen",
     "tools/taf2wav",
 ]
