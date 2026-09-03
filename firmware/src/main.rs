@@ -591,9 +591,11 @@ fn credentials() -> Option<Config> {
         Some(Config {
             ssid: held.ssid.clone(),
             password: held.password.clone(),
-            // Association has no use for it. The server is the download's
-            // business and arrives with the rest of the config from the card.
+            // Association has no use for either. The server is the download's
+            // business, and certificate checking is the transport's; both
+            // arrive with the rest of the config from the card.
             server: String::new(),
+            insecure: false,
         })
     })
 }

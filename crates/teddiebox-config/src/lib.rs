@@ -11,6 +11,11 @@
 //! is exempt**: it is opaque bytes, `#` is common in them, and a password
 //! truncated by a comment rule fails at the box where the cause is invisible.
 //! Everything after `password =` is the password.
+//!
+//! Unknown keys are ignored, so a card written for a newer firmware still boots
+//! an older one. A *known* key given a value it does not accept is refused —
+//! `insecure = ture` is a typo about certificate checking, and the box saying so
+//! beats the box guessing.
 
 use heapless::String;
 
@@ -39,6 +44,20 @@ pub struct Config {
     pub password: String<MAX_PASSWORD>,
     /// `host:port` of the teddyCloud server.
     pub server: String<MAX_SERVER>,
+    /// Accept the server's certificate without checking it.
+    ///
+    /// **An escape hatch, not the plan.** teddyCloud serves a certificate
+    /// signed by its own root and hands that root over in the chain, so the
+    /// ordinary answer is to trust that root and check against it.
+    ///
+    /// What this exists for is the box's missing clock. Validity dates cannot
+    /// be checked without one, and the box's time starts at boot: a box that
+    /// believes it is 1970 is *before* the window of a certificate issued in
+    /// 2004, and would refuse a good one. Until the box learns the time, this
+    /// is what gets it talking.
+    ///
+    /// Defaults to `false`. A file that says nothing gets the checking.
+    pub insecure: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +66,8 @@ pub enum ConfigError {
     MissingServer,
     ValueTooLong,
     MalformedLine,
+    /// A known key was given a value it does not accept.
+    MalformedValue,
 }
 
 /// Cuts a trailing `# comment` off a value.
@@ -65,11 +86,30 @@ fn strip_comment(value: &str) -> &str {
     value
 }
 
+/// Reads the one boolean this file has.
+///
+/// `yes`/`no` and `true`/`false`, in any case, because both spellings are what
+/// people reach for. Anything else is refused rather than defaulted: an
+/// unrecognised value means the line did not do what it was meant to, and the
+/// line in question decides whether certificates get checked. Being told at the
+/// box beats a silent guess in either direction.
+fn parse_bool(value: &str) -> Result<bool, ConfigError> {
+    // `eq_ignore_ascii_case` compares in place; there is no allocator here.
+    if value.eq_ignore_ascii_case("yes") || value.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("no") || value.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        Err(ConfigError::MalformedValue)
+    }
+}
+
 impl Config {
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let mut ssid: Option<String<MAX_SSID>> = None;
         let mut password: String<MAX_PASSWORD> = String::new();
         let mut server: Option<String<MAX_SERVER>> = None;
+        let mut insecure = false;
 
         for raw in text.lines() {
             let line = raw.trim();
@@ -96,6 +136,9 @@ impl Config {
                     let value = strip_comment(value);
                     server = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
                 }
+                "insecure" => {
+                    insecure = parse_bool(strip_comment(value))?;
+                }
                 // Unknown keys are ignored so a newer config file does not
                 // brick an older firmware.
                 _ => {}
@@ -112,6 +155,7 @@ impl Config {
             server: server
                 .filter(|s| !s.is_empty())
                 .ok_or(ConfigError::MissingServer)?,
+            insecure,
         })
     }
 }
@@ -237,5 +281,77 @@ mod tests {
         // 40 characters, over the 32-byte SSID limit.
         const TEXT: &str = "ssid = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nserver = s:1\n";
         assert_eq!(Config::parse(TEXT), Err(ConfigError::ValueTooLong));
+    }
+
+    /// The default has to be the safe one. A file that says nothing about
+    /// certificates must not quietly get less checking than one that does.
+    #[test]
+    fn a_missing_insecure_key_leaves_certificate_checking_on() {
+        let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
+        assert!(!c.insecure);
+    }
+
+    #[test]
+    fn insecure_yes_turns_certificate_checking_off() {
+        let c = Config::parse("ssid = A\nserver = s:1\ninsecure = yes\n").unwrap();
+        assert!(c.insecure);
+    }
+
+    #[test]
+    fn insecure_no_leaves_certificate_checking_on() {
+        let c = Config::parse("ssid = A\nserver = s:1\ninsecure = no\n").unwrap();
+        assert!(!c.insecure);
+    }
+
+    /// `true`/`false` as well as `yes`/`no`, because both are what people type,
+    /// and case is not a thing worth failing a box over.
+    #[test]
+    fn insecure_accepts_true_and_false_in_any_case() {
+        assert!(
+            Config::parse("ssid = A\nserver = s:1\ninsecure = TRUE\n")
+                .unwrap()
+                .insecure
+        );
+        assert!(
+            !Config::parse("ssid = A\nserver = s:1\ninsecure = False\n")
+                .unwrap()
+                .insecure
+        );
+        assert!(
+            Config::parse("ssid = A\nserver = s:1\ninsecure = Yes\n")
+                .unwrap()
+                .insecure
+        );
+    }
+
+    /// The dangerous direction is a typo that reads as "off". Refusing the
+    /// value outright means the parent is told, at the box, that the line did
+    /// not do what they meant — rather than the box silently checking
+    /// certificates they believed it was not, or not checking ones they
+    /// believed it was.
+    #[test]
+    fn an_unrecognised_insecure_value_is_refused_rather_than_guessed() {
+        assert_eq!(
+            Config::parse("ssid = A\nserver = s:1\ninsecure = ture\n"),
+            Err(ConfigError::MalformedValue)
+        );
+    }
+
+    /// An empty value is the same mistake as a misspelt one, and it is the
+    /// likelier typo: a line left half-written.
+    #[test]
+    fn an_empty_insecure_value_is_refused() {
+        assert_eq!(
+            Config::parse("ssid = A\nserver = s:1\ninsecure =\n"),
+            Err(ConfigError::MalformedValue)
+        );
+    }
+
+    /// It is comment-stripped, unlike `password`: there is no boolean that
+    /// needs a `#` in it.
+    #[test]
+    fn a_trailing_comment_is_not_part_of_the_insecure_value() {
+        let c = Config::parse("ssid = A\nserver = s:1\ninsecure = yes # bench only\n").unwrap();
+        assert!(c.insecure);
     }
 }
