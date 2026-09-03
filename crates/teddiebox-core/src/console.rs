@@ -3,8 +3,13 @@
 //! Line matching only, so it can be tested on the host. What a command *does*
 //! belongs to the firmware, which owns the hardware to do it with.
 
+use heapless::String;
+
 /// A command the box understands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: the credential commands carry a string, and a passphrase is not
+/// something to be duplicated by accident.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Reboot into the ROM's UART download mode, for flashing.
     DownloadMode,
@@ -108,6 +113,24 @@ pub enum Command {
     /// password. That separation is the whole reason it exists before
     /// anything that associates.
     NetScan,
+    /// Remember the network name to associate with.
+    ///
+    /// Typed at the bench, held in RAM, gone at the next reset — the same
+    /// treatment [`Command::Password`] gets, and for the same reason. This is
+    /// a stop-gap: the design has credentials arriving from `teddiebox.conf`
+    /// on the card, which is why `net.rs` takes a whole `Config` rather than
+    /// two strings.
+    NetSsid(String<MAX_SSID>),
+    /// Remember the passphrase to associate with.
+    ///
+    /// Never echoed, and the reason [`MAX_LINE`] is as long as it is.
+    NetPassword(String<MAX_PASSPHRASE>),
+    /// Associate with the remembered network and take a DHCP lease.
+    NetUp,
+    /// Drop the association and power the modem down.
+    NetDown,
+    /// Report whether the radio is up, and on what address.
+    NetStatus,
     /// Override one register of the codec's start-up sequence.
     ///
     /// Which register decides whether the box clicks on start-up can only be
@@ -137,12 +160,21 @@ pub enum Command {
     Speaker(bool),
 }
 
+/// Longest network name accepted, in octets. 802.11 says 32.
+pub const MAX_SSID: usize = 32;
+/// Longest passphrase accepted. A WPA2 personal passphrase runs to 63
+/// characters; the 64-character form is a raw PSK, which is a different thing
+/// and not what is typed here.
+pub const MAX_PASSPHRASE: usize = 63;
+
 /// Longest command line accepted. Anything longer cannot be a command, and is
 /// discarded rather than allowed to shift a buffer around.
 ///
-/// Long enough for `play <8 hex>/<8 hex>`, which is the longest thing typed
-/// here at twenty-one characters.
-const MAX_LINE: usize = 24;
+/// Sized for `net pw <63 characters>`, which at seventy is far and away the
+/// longest line this console takes — the next longest is `play <8 hex>/<8
+/// hex>` at twenty-one. It grew from 24 for exactly that reason: a passphrase
+/// silently truncated to fit would fail association with no hint why.
+const MAX_LINE: usize = 72;
 
 /// Watches a byte stream for a command line.
 ///
@@ -197,11 +229,15 @@ impl CommandWatch {
                     b"spk 1" => Some(Command::Speaker(true)),
                     b"spk 0" => Some(Command::Speaker(false)),
                     b"net scan" => Some(Command::NetScan),
+                    b"net up" => Some(Command::NetUp),
+                    b"net down" => Some(Command::NetDown),
+                    b"net status" => Some(Command::NetStatus),
                     other => parse_password(other)
                         .or_else(|| parse_codec_set(other))
                         .or_else(|| parse_play_content(other))
                         .or_else(|| parse_dump_pcm(other))
-                        .or_else(|| parse_read_memory(other)),
+                        .or_else(|| parse_read_memory(other))
+                        .or_else(|| parse_credential(other)),
                 }
             };
             self.len = 0;
@@ -314,6 +350,29 @@ fn parse_codec_set(line: &[u8]) -> Option<Command> {
 /// eight blocks a SLIX-L is believed to carry, so the hypothesis can be
 /// overshot and disproved rather than merely confirmed.
 pub const MAX_MEMORY_BLOCKS: u8 = 32;
+
+/// Reads `net ssid <name>` and `net pw <passphrase>`.
+///
+/// The value is taken verbatim to the end of the line: a passphrase may
+/// contain spaces, and trimming it to be tidy would change the credential.
+/// Empty is refused — it is a typo, and one the driver would otherwise be
+/// handed as though it were meant. Too long is refused rather than truncated,
+/// for the same reason.
+fn parse_credential(line: &[u8]) -> Option<Command> {
+    if let Some(rest) = line.strip_prefix(b"net ssid ") {
+        let text = core::str::from_utf8(rest).ok()?;
+        return String::try_from(text)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Command::NetSsid);
+    }
+    let rest = line.strip_prefix(b"net pw ")?;
+    let text = core::str::from_utf8(rest).ok()?;
+    String::try_from(text)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(Command::NetPassword)
+}
 
 /// Reads `mem <2 hex first block> <2 hex block count>`.
 ///
@@ -746,5 +805,68 @@ mod tests {
     fn net_without_a_verb_does_not_fire() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"net\r"), None);
+    }
+
+    /// Credentials are typed at the bench for now, so the console has to carry
+    /// a string rather than a number for the first time.
+    #[test]
+    fn the_ssid_command_carries_the_name_it_names() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"net ssid example-ssid\r"),
+            Some(Command::NetSsid(
+                heapless::String::try_from("example-ssid").unwrap()
+            ))
+        );
+    }
+
+    /// An SSID is 32 octets at most (802.11), and one octet more is a typo
+    /// rather than a name to be quietly cut down to fit.
+    #[test]
+    fn an_ssid_longer_than_the_standard_allows_is_refused() {
+        let mut watch = CommandWatch::new();
+        let mut line = heapless::Vec::<u8, 80>::new();
+        line.extend_from_slice(b"net ssid ").unwrap();
+        line.extend_from_slice(&[b'a'; 33]).unwrap();
+        line.push(b'\r').unwrap();
+        assert_eq!(feed_all(&mut watch, &line), None);
+    }
+
+    /// A WPA2 passphrase runs to 63 characters, which is longer than every
+    /// other line this console has ever accepted.
+    #[test]
+    fn a_passphrase_of_the_full_length_still_fits_a_line() {
+        let mut watch = CommandWatch::new();
+        let mut line = heapless::Vec::<u8, 80>::new();
+        line.extend_from_slice(b"net pw ").unwrap();
+        line.extend_from_slice(&[b'x'; 63]).unwrap();
+        line.push(b'\r').unwrap();
+        let raw = [b'x'; 63];
+        let expected = core::str::from_utf8(&raw).unwrap();
+        assert_eq!(
+            feed_all(&mut watch, &line),
+            Some(Command::NetPassword(
+                heapless::String::try_from(expected).unwrap()
+            ))
+        );
+    }
+
+    /// An empty credential is a typo, and one that would otherwise be handed
+    /// to the driver as if it were meant.
+    #[test]
+    fn an_empty_ssid_is_refused() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"net ssid \r"), None);
+    }
+
+    #[test]
+    fn the_radio_can_be_asked_up_down_and_for_its_state() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"net up\r"), Some(Command::NetUp));
+        assert_eq!(feed_all(&mut watch, b"net down\r"), Some(Command::NetDown));
+        assert_eq!(
+            feed_all(&mut watch, b"net status\r"),
+            Some(Command::NetStatus)
+        );
     }
 }

@@ -9,10 +9,16 @@ mod nfc;
 mod pins;
 mod storage;
 
+use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+
+use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
+use heapless::String;
+use teddiebox_config::Config;
+use teddiebox_core::console::{MAX_PASSPHRASE, MAX_SSID};
 
 use esp_backtrace as _;
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
@@ -536,6 +542,61 @@ const NFC_READ_MEMORY: u8 = 5;
 /// reader share nothing but the console that drives them.
 static NET_REQUEST: AtomicU8 = AtomicU8::new(REQUEST_NONE);
 const NET_SCAN: u8 = 1;
+const NET_UP: u8 = 2;
+const NET_DOWN: u8 = 3;
+const NET_STATUS: u8 = 4;
+
+/// Credentials typed at the bench.
+///
+/// RAM only, gone at the next reset — the same treatment the SLIX password
+/// gets and for the same reason: a credential belongs neither in the image nor
+/// in the repository. **This is a stop-gap.** The design has these arriving
+/// from `teddiebox.conf` on the card, which is why `net::Radio::acquire` takes
+/// a whole `Config` rather than two strings: when the card hands one over,
+/// this static goes away and `net.rs` does not change at all.
+static CREDENTIALS: CsMutex<RefCell<Credentials>> = CsMutex::new(RefCell::new(Credentials {
+    ssid: String::new(),
+    password: String::new(),
+}));
+
+struct Credentials {
+    ssid: String<MAX_SSID>,
+    password: String<MAX_PASSPHRASE>,
+}
+
+/// How long to wait for a DHCP lease before calling it a failure.
+///
+/// Association succeeding and addressing failing are different faults with
+/// different causes, so they are waited for — and reported — separately.
+const DHCP_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn set_ssid(value: String<MAX_SSID>) {
+    critical_section::with(|cs| CREDENTIALS.borrow_ref_mut(cs).ssid = value);
+}
+
+fn set_password(value: String<MAX_PASSPHRASE>) {
+    critical_section::with(|cs| CREDENTIALS.borrow_ref_mut(cs).password = value);
+}
+
+/// The credentials shaped the way the radio wants them.
+///
+/// `None` if either half is missing, because handing the driver an empty
+/// string would fail association in a way that looks like a wrong password.
+fn credentials() -> Option<Config> {
+    critical_section::with(|cs| {
+        let held = CREDENTIALS.borrow_ref(cs);
+        if held.ssid.is_empty() || held.password.is_empty() {
+            return None;
+        }
+        Some(Config {
+            ssid: held.ssid.clone(),
+            password: held.password.clone(),
+            // Association has no use for it. The server is the download's
+            // business and arrives with the rest of the config from the card.
+            server: String::new(),
+        })
+    })
+}
 
 /// Access points one scan will report.
 ///
@@ -914,6 +975,104 @@ async fn media(
 /// Brings the NFC reader up on first use and answers the bench commands.
 ///
 /// Waits for a request rather than starting at boot: the reader shares the
+/// Associates, takes a lease, and stays up until asked down.
+///
+/// The whole association lives inside one call because `acquire` lends the
+/// session and the link out of the radio: they cannot outlive it, and the link
+/// has to be polled for the entire time the session is wanted. So "up" is not
+/// a state this returns to the caller — it is a stretch of time spent inside
+/// here, ending only when the console asks for it to end.
+async fn bring_up(radio: &mut net::Radio<'_>) {
+    let Some(config) = credentials() else {
+        esp_println::println!(
+            "teddiebox: net no credentials — type `net ssid <name>` then `net pw <passphrase>`"
+        );
+        return;
+    };
+
+    // The stack seeds its port and transaction numbers from this, so it has to
+    // differ between boots. The moment somebody typed `net up` is as good a
+    // source as this firmware has and better than a constant.
+    let seed = Instant::now().as_micros();
+
+    let (mut session, mut link) = match radio.acquire(&config, seed) {
+        Ok(pair) => pair,
+        Err(e) => {
+            esp_println::println!("teddiebox: net could not power the radio — {e:?}");
+            return;
+        }
+    };
+    esp_println::println!("teddiebox: net associating with {}", config.ssid);
+
+    // The runner has to be polled throughout, not awaited first: it never
+    // returns, and nothing else here makes progress without it.
+    match select(link.run(), session.connect()).await {
+        Either::First(_) => unreachable!("the runner never returns"),
+        Either::Second(Err(e)) => {
+            esp_println::println!("teddiebox: net association refused — {e:?}");
+            net::release(session, link);
+            return;
+        }
+        Either::Second(Ok(())) => {}
+    }
+    esp_println::println!("teddiebox: net associated — asking for an address");
+
+    let stack = session.stack();
+    // Associated and addressed are different things and fail for different
+    // reasons; a box that joins the network and never gets a lease should say
+    // so rather than report success.
+    match select(
+        link.run(),
+        select(stack.wait_config_up(), Timer::after(DHCP_TIMEOUT)),
+    )
+    .await
+    {
+        Either::First(_) => unreachable!("the runner never returns"),
+        Either::Second(Either::Second(())) => {
+            esp_println::println!(
+                "teddiebox: net associated but no DHCP lease in {} s",
+                DHCP_TIMEOUT.as_secs()
+            );
+            net::release(session, link);
+            return;
+        }
+        Either::Second(Either::First(())) => report_address(&stack),
+    }
+
+    // Up. Stay here, polling the stack, until the console says otherwise —
+    // dropping the runner between requests would stall the very thing that
+    // keeps the lease alive.
+    let until_down = async {
+        loop {
+            match NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
+                NET_DOWN => break,
+                NET_STATUS => report_address(&stack),
+                _ => {}
+            }
+            Timer::after(Duration::from_millis(100)).await;
+        }
+    };
+    match select(link.run(), until_down).await {
+        Either::First(_) => unreachable!("the runner never returns"),
+        Either::Second(()) => {}
+    }
+
+    net::release(session, link);
+    esp_println::println!("teddiebox: net down");
+}
+
+/// Prints the lease, or says there is not one.
+fn report_address(stack: &embassy_net::Stack<'_>) {
+    match stack.config_v4() {
+        Some(config) => esp_println::println!(
+            "teddiebox: net up — {} gateway {:?}",
+            config.address,
+            config.gateway
+        ),
+        None => esp_println::println!("teddiebox: net associated, no address yet"),
+    }
+}
+
 /// Brings the radio up on demand and reports what it hears.
 ///
 /// The radio has never run on this board, so this exists before anything that
@@ -925,48 +1084,58 @@ async fn net(wifi: esp_hal::peripherals::WIFI<'static>) {
     let mut radio = net::Radio::new(wifi);
 
     loop {
-        if NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) == NET_SCAN {
-            esp_println::println!("teddiebox: net scanning");
-            // `AccessPointInfo` is `Clone` but not `Copy`, so the array
-            // repeat syntax will not build it.
-            let mut seen: [_; SCAN_LIMIT] = core::array::from_fn(|_| Default::default());
+        // One read of the request, dispatched once. Two reads would race: the
+        // first would consume a request the second was meant to handle, and
+        // `net up` would be swallowed by the scan's test and silently lost.
+        match NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
+            NET_SCAN => {
+                esp_println::println!("teddiebox: net scanning");
+                // `AccessPointInfo` is `Clone` but not `Copy`, so the array
+                // repeat syntax will not build it.
+                let mut seen: [_; SCAN_LIMIT] = core::array::from_fn(|_| Default::default());
 
-            match select(radio.scan(&mut seen), Timer::after(SCAN_TIMEOUT)).await {
-                Either::First(Ok(0)) => esp_println::println!(
-                    "teddiebox: net heard nothing — radio came up, no access point in range"
-                ),
-                Either::First(Ok(found)) => {
-                    for ap in &seen[..found] {
-                        esp_println::println!(
-                            "teddiebox: net   {} ch{} {} dBm {:?}",
-                            ap.ssid.as_str(),
-                            ap.channel,
-                            ap.signal_strength,
-                            ap.auth_method
-                        );
-                    }
-                    esp_println::println!("teddiebox: net {found} access points");
-                    // Hitting the quota means the driver stopped collecting,
-                    // not that the band holds exactly this many — and what it
-                    // dropped is whatever sits on the highest channels.
-                    if found == SCAN_LIMIT {
-                        esp_println::println!(
-                            "teddiebox: net   list is truncated at {SCAN_LIMIT} — \
+                match select(radio.scan(&mut seen), Timer::after(SCAN_TIMEOUT)).await {
+                    Either::First(Ok(0)) => esp_println::println!(
+                        "teddiebox: net heard nothing — radio came up, no access point in range"
+                    ),
+                    Either::First(Ok(found)) => {
+                        for ap in &seen[..found] {
+                            esp_println::println!(
+                                "teddiebox: net   {} ch{} {} dBm {:?}",
+                                ap.ssid.as_str(),
+                                ap.channel,
+                                ap.signal_strength,
+                                ap.auth_method
+                            );
+                        }
+                        esp_println::println!("teddiebox: net {found} access points");
+                        // Hitting the quota means the driver stopped collecting,
+                        // not that the band holds exactly this many — and what it
+                        // dropped is whatever sits on the highest channels.
+                        if found == SCAN_LIMIT {
+                            esp_println::println!(
+                                "teddiebox: net   list is truncated at {SCAN_LIMIT} — \
                              the high channels were not reached"
-                        );
+                            );
+                        }
                     }
+                    Either::First(Err(e)) => {
+                        esp_println::println!("teddiebox: net scan failed — {e:?}")
+                    }
+                    // Nothing came back at all. The driver raises `ScanDone` even
+                    // for an empty scan, so silence points at the radio never
+                    // having started rather than at an empty band.
+                    Either::Second(()) => esp_println::println!(
+                        "teddiebox: net scan timed out after {} s — the radio never answered",
+                        SCAN_TIMEOUT.as_secs()
+                    ),
                 }
-                Either::First(Err(e)) => {
-                    esp_println::println!("teddiebox: net scan failed — {e:?}")
-                }
-                // Nothing came back at all. The driver raises `ScanDone` even
-                // for an empty scan, so silence points at the radio never
-                // having started rather than at an empty band.
-                Either::Second(()) => esp_println::println!(
-                    "teddiebox: net scan timed out after {} s — the radio never answered",
-                    SCAN_TIMEOUT.as_secs()
-                ),
             }
+            NET_UP => bring_up(&mut radio).await,
+            // `net status` and `net down` are answered inside `bring_up` while
+            // it is running. Reaching them here means it is not.
+            NET_STATUS | NET_DOWN => esp_println::println!("teddiebox: net is down"),
+            _ => {}
         }
         Timer::after(Duration::from_millis(100)).await;
     }
@@ -1124,7 +1293,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> | net scan | cinit cdown cset cclr out spk | pcm <2hex>"
+        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> | net scan ssid <name> pw <pass> up down status | cinit cdown cset cclr out spk | pcm <2hex>"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -1356,6 +1525,24 @@ async fn main(spawner: Spawner) {
                 }
                 Some(Command::NetScan) => {
                     NET_REQUEST.store(NET_SCAN, Ordering::Relaxed);
+                }
+                Some(Command::NetSsid(value)) => {
+                    esp_println::println!("teddiebox: net ssid set to {value}");
+                    set_ssid(value);
+                }
+                // Deliberately not echoed, the way `pw` is not.
+                Some(Command::NetPassword(value)) => {
+                    esp_println::println!("teddiebox: net passphrase set ({} chars)", value.len());
+                    set_password(value);
+                }
+                Some(Command::NetUp) => {
+                    NET_REQUEST.store(NET_UP, Ordering::Relaxed);
+                }
+                Some(Command::NetDown) => {
+                    NET_REQUEST.store(NET_DOWN, Ordering::Relaxed);
+                }
+                Some(Command::NetStatus) => {
+                    NET_REQUEST.store(NET_STATUS, Ordering::Relaxed);
                 }
                 Some(Command::ReadMemory { first, count }) => {
                     board.apply(gates.power(Rail::Storage, true));

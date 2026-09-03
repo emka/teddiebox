@@ -26,6 +26,14 @@ esp-rtos = { version = "0.4", features = [
 # arena here breaks the build.
 embassy-executor = "0.10"
 embassy-time = "0.5"
+# Guards the bench-typed credentials shared between the console loop and the
+# radio task. Already in the tree under esp-hal; named here because this crate
+# reaches for it directly.
+critical-section = "1"
+# Pinned to the same 0.8 the workspace crates use: `teddiebox_config::Config`
+# is built from these strings, and a different heapless major would make
+# `String<32>` a different type.
+heapless = { version = "0.8", default-features = false }
 # default-features off: the default `auto` feature picks USB Serial/JTAG
 # over UART0 once a USB host has been seen, and GPIO19 (USB D-) is wired as
 # the red LED here. The design specifies UART0 unconditionally, so `uart`
