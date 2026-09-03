@@ -97,6 +97,25 @@ pub enum Sound {
     Ready,
     /// A download was interrupted.
     NetworkError,
+    /// "Help me with the config."
+    ///
+    /// For a `/CONFIG.TXT` that is missing, truncated or malformed. The box
+    /// keeps playing everything already on the card — a typo in a config file
+    /// must never cost a child their story — but a parent with no serial cable
+    /// needs some way to know, and this is the box's own word for it.
+    ConfigError,
+    /// "No Internet."
+    ///
+    /// The network could not be reached: association or DHCP failed, or the
+    /// server did not answer.
+    NoInternet,
+    /// "Wrong password."
+    ///
+    /// Specifically the Wi-Fi passphrase. The bench proved a wrong one reports
+    /// `FourWayHandshakeTimeout`, which is distinguishable from a network that
+    /// is simply out of range — so the box can say which of the two it is
+    /// rather than blaming the network for a typo.
+    WrongPassword,
 }
 
 impl Sound {
@@ -123,6 +142,9 @@ impl Sound {
             Self::BatteryCritical => 0x0000_0009,
             Self::Ready => 0x0000_0010,
             Self::NetworkError => 0x0000_000F,
+            Self::ConfigError => 0x0000_000B,
+            Self::NoInternet => 0x0000_0011,
+            Self::WrongPassword => 0x0000_0013,
         }
     }
 }
@@ -192,6 +214,40 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
+
+    /// Spelled out, like the language directories and for the same reason: a
+    /// table that agreed with itself could be wrong about every entry. These
+    /// three were identified on the bench.
+    #[test]
+    fn the_failure_sounds_name_the_files_the_bench_identified() {
+        assert_eq!(Sound::ConfigError.file(), 0x0000_000B);
+        assert_eq!(Sound::NoInternet.file(), 0x0000_0011);
+        assert_eq!(Sound::WrongPassword.file(), 0x0000_0013);
+    }
+
+    /// Two sounds sharing a file is the bug this catches: the box would say
+    /// something true about the wrong thing, which is worse than silence and
+    /// far harder to notice than a crash.
+    #[test]
+    fn no_two_sounds_share_a_file() {
+        let all = [
+            Sound::Startup,
+            Sound::Confirmation,
+            Sound::BatteryLow,
+            Sound::BatteryCritical,
+            Sound::Ready,
+            Sound::NetworkError,
+            Sound::ConfigError,
+            Sound::NoInternet,
+            Sound::WrongPassword,
+        ];
+        let mut seen: Vec<u32> = Vec::new();
+        for sound in all {
+            let file = sound.file();
+            assert!(!seen.contains(&file), "{sound:?} reuses file {file:#010X}");
+            seen.push(file);
+        }
+    }
 
     /// The four directories, spelled out rather than derived: these are the
     /// numbers on the card, and a table that agreed with itself could be
