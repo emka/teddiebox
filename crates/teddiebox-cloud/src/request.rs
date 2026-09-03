@@ -31,6 +31,20 @@ pub struct ContentRequest<'a> {
 
 /// Writes a GET for the content of `tag` into `out`.
 ///
+/// The path is `/v2/content/<ruid>` — teddyCloud's box-facing content route
+/// (`handleCloudContentV2` in its `server.c`/`handler_cloud.c`), not the
+/// similarly-named `/content/` which is that server's *web admin* API. Hitting
+/// the admin route would be a silent wrong-endpoint bug: same shape of URL,
+/// different handler.
+///
+/// `<ruid>` is the UID with its bytes reversed, not the UID itself: teddyCloud
+/// recovers the UID by byte-swapping whatever comes after `/v2/content/`
+/// (`handler_cloud.c`'s `bswap_64` on the parsed ruid), and builds that same
+/// ruid from a UID on its own side by reversing the eight hex-pair bytes
+/// (`handler.c`'s `getContentPathFromUID`). Sending the UID's own hex would
+/// look plausible — same sixteen characters, same charset — while asking the
+/// server for a different, generally nonexistent, tag.
+///
 /// A fresh request with an etag is conditional: an unchanged file answers 304,
 /// which revalidates the cache without interrupting playback. A resumed request
 /// is always a range request — the response is 206 (continue) or 200 (restart),
@@ -43,8 +57,8 @@ pub fn build_content_request(
 ) -> Result<usize, CloudError> {
     let mut buf = SliceWriter { out, used: 0 };
 
-    write!(buf, "GET /content/").map_err(|_| CloudError::RequestTooLong)?;
-    for b in request.uid {
+    write!(buf, "GET /v2/content/").map_err(|_| CloudError::RequestTooLong)?;
+    for b in request.uid.iter().rev() {
         write!(buf, "{b:02X}").map_err(|_| CloudError::RequestTooLong)?;
     }
     let server = request.server;
@@ -96,6 +110,13 @@ mod tests {
 
     const UID: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
 
+    /// A UID whose reversed hex starts with a leading zero byte, so a naive
+    /// `u64`-arithmetic reversal (bswap-then-format) that drops the leading
+    /// zero digits would be caught: reversed correctly this is
+    /// `0077665544332211`, not `77665544332211`.
+    const UID_WITH_LEADING_ZERO_WHEN_REVERSED: [u8; 8] =
+        [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x00];
+
     fn build(etag: Option<&ETag>) -> heapless::String<512> {
         let mut out = [0u8; 512];
         let request = ContentRequest {
@@ -120,11 +141,42 @@ mod tests {
         heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
     }
 
+    fn build_with_uid(uid: [u8; 8]) -> heapless::String<512> {
+        let mut out = [0u8; 512];
+        let request = ContentRequest {
+            uid,
+            etag: None,
+            server: "box.lan:8080",
+            from: None,
+        };
+        let n = build_content_request(&request, &mut out).unwrap();
+        heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
+    }
+
     #[test]
-    fn the_uid_is_uppercase_hex_in_the_path() {
+    fn the_route_is_the_box_facing_v2_content_endpoint() {
         let req = build(None);
         assert!(
-            req.starts_with("GET /content/0102030405060708 HTTP/1.1\r\n"),
+            req.starts_with("GET /v2/content/"),
+            "got: {req}; /content/ is teddyCloud's web-admin route, not the box's"
+        );
+    }
+
+    #[test]
+    fn the_identifier_is_the_byte_reversed_uid_as_uppercase_hex() {
+        // UID bytes 01 02 03 04 05 06 07 08 reversed is 08 07 06 05 04 03 02 01.
+        let req = build(None);
+        assert!(
+            req.starts_with("GET /v2/content/0807060504030201 HTTP/1.1\r\n"),
+            "got: {req}"
+        );
+    }
+
+    #[test]
+    fn reversing_the_uid_keeps_a_leading_zero_byte_visible() {
+        let req = build_with_uid(UID_WITH_LEADING_ZERO_WHEN_REVERSED);
+        assert!(
+            req.starts_with("GET /v2/content/0077665544332211 HTTP/1.1\r\n"),
             "got: {req}"
         );
     }
