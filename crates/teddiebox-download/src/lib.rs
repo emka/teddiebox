@@ -9,6 +9,7 @@
 //! a box.
 
 mod cache;
+mod content_path;
 mod reconcile;
 mod sidecar;
 mod units;
@@ -16,6 +17,7 @@ mod window;
 mod writer;
 
 pub use cache::{decide, Cached, Decision};
+pub use content_path::{content_path, ContentPath};
 pub use reconcile::{reconcile, Action, Mismatch};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
 pub use units::{Bytes, Pages};
