@@ -47,6 +47,43 @@ pub fn decide(cached: &Cached) -> Decision {
     }
 }
 
+/// Whether a complete cached file still matches what the server holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// Same length. What is on the card stands.
+    Fresh,
+    /// A different length. The cached file is not what the server has.
+    Stale,
+    /// The server said nothing about length, so nothing follows.
+    Unknown,
+}
+
+/// Compares a complete cached file against what the server currently reports.
+///
+/// **This is a weaker check than it looks, and deliberately so.** The design
+/// this project started from revalidated with `If-None-Match` and a `304`, but
+/// the teddyCloud on this LAN sends **no `ETag`** — nor `Last-Modified`, nor
+/// `Cache-Control` — on any content route. Measured, not assumed. The only
+/// thing it offers to compare is `Content-Length`, so that is what this
+/// compares, and a change that keeps the byte count is invisible to it. For a
+/// figure's audio, which does not change silently, that is a reasonable trade;
+/// stating it here is better than an ETag path that never runs.
+///
+/// **Silence keeps the file.** A server that gives no length has said nothing
+/// about whether ours is stale, and throwing away a good file on no evidence
+/// costs a child their story for as long as the download takes.
+///
+/// Nothing here fetches. The caller decides whether a probe is worth a round
+/// trip at all — and the design's rule that revalidation must never interrupt
+/// playback means the answer, on the path to a story, is usually no.
+pub fn revalidate(sidecar: &Sidecar, server_length: Option<u32>) -> Freshness {
+    match server_length {
+        None => Freshness::Unknown,
+        Some(length) if length == sidecar.length => Freshness::Fresh,
+        Some(_) => Freshness::Stale,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +205,37 @@ mod tests {
                 etag: None,
             }
         );
+    }
+    /// The ordinary case: the server still has a file of the length the
+    /// sidecar recorded, so what is on the card stands.
+    #[test]
+    fn a_file_the_length_the_server_still_reports_is_fresh() {
+        assert_eq!(revalidate(&sidecar(60975), Some(60975)), Freshness::Fresh);
+    }
+
+    /// A different length is the only evidence of change this server offers.
+    #[test]
+    fn a_different_length_means_the_cached_file_is_stale() {
+        assert_eq!(revalidate(&sidecar(60975), Some(61000)), Freshness::Stale);
+        assert_eq!(revalidate(&sidecar(60975), Some(1)), Freshness::Stale);
+    }
+
+    /// A server that will not say how long the file is has said nothing about
+    /// whether ours is current — which is not the same as saying it is wrong.
+    /// Discarding a good file on no evidence costs a child their story for the
+    /// length of a download, so silence keeps what is already there.
+    #[test]
+    fn a_server_that_gives_no_length_leaves_the_cached_file_alone() {
+        assert_eq!(revalidate(&sidecar(60975), None), Freshness::Unknown);
+    }
+
+    /// Length is a weak validator and this pins the weakness rather than
+    /// hiding it: an edit that keeps the byte count is invisible here. It is
+    /// what this server makes available, and the alternative was pretending an
+    /// ETag exists.
+    #[test]
+    fn a_same_length_change_is_not_detectable() {
+        let before = sidecar(60975);
+        assert_eq!(revalidate(&before, Some(60975)), Freshness::Fresh);
     }
 }
