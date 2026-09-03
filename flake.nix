@@ -204,7 +204,14 @@
             # The recipes in ./justfile mirror the CI gates, so a commit can be
             # checked the way the pipeline will check it.
             pkgs.just
+            # mbedtls-rs-sys runs bindgen over MbedTLS's headers, and bindgen
+            # loads libclang at run time to do it. The C itself is compiled by
+            # the Xtensa GCC above; this is only the header parser.
+            pkgs.libclang.lib
           ];
+
+          # bindgen finds libclang by this variable and by nothing else.
+          LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
 
           # Tell prost-build to use the nixpkgs protoc rather than its
           # vendored binary.

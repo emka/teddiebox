@@ -8,6 +8,7 @@ mod net;
 mod nfc;
 mod pins;
 mod storage;
+mod tls;
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
@@ -545,6 +546,7 @@ const NET_SCAN: u8 = 1;
 const NET_UP: u8 = 2;
 const NET_DOWN: u8 = 3;
 const NET_STATUS: u8 = 4;
+const NET_TLS: u8 = 5;
 
 /// Credentials typed at the bench.
 ///
@@ -984,7 +986,7 @@ async fn media(
 /// has to be polled for the entire time the session is wanted. So "up" is not
 /// a state this returns to the caller — it is a stretch of time spent inside
 /// here, ending only when the console asks for it to end.
-async fn bring_up(radio: &mut net::Radio<'_>) {
+async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReference<'_>>) {
     let Some(config) = credentials() else {
         esp_println::println!(
             "teddiebox: net no credentials — type `net ssid <name>` then `net pw <passphrase>`"
@@ -1049,6 +1051,22 @@ async fn bring_up(radio: &mut net::Radio<'_>) {
             match NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
                 NET_DOWN => break,
                 NET_STATUS => report_address(&stack),
+                // The probe runs here rather than in the outer task because it
+                // needs the stack, and the stack only exists between
+                // `acquire` and `release`. It is awaited inline, so the runner
+                // beside it keeps polling for its whole length — a handshake
+                // is several round trips and would stall without it.
+                NET_TLS => match tls {
+                    None => esp_println::println!(
+                        "teddiebox: tls context unavailable — mbedtls would not start"
+                    ),
+                    Some(tls) => {
+                        match tls::probe(tls, &stack, &config.server, config.insecure).await {
+                            Ok(()) => esp_println::println!("teddiebox: tls ok"),
+                            Err(e) => esp_println::println!("teddiebox: tls failed — {e:?}"),
+                        }
+                    }
+                },
                 _ => {}
             }
             Timer::after(Duration::from_millis(100)).await;
@@ -1084,6 +1102,13 @@ fn report_address(stack: &embassy_net::Stack<'_>) {
 #[embassy_executor::task]
 async fn net(wifi: esp_hal::peripherals::WIFI<'static>) {
     let mut radio = net::Radio::new(wifi);
+    // Built once, before anything associates. mbedtls keeps global state, and
+    // the statics behind this can only be filled once — so a failure here is
+    // permanent for this boot rather than something to retry per connection.
+    let tls = tls::init();
+    if tls.is_none() {
+        esp_println::println!("teddiebox: tls could not be initialised");
+    }
 
     loop {
         // One read of the request, dispatched once. Two reads would race: the
@@ -1133,10 +1158,12 @@ async fn net(wifi: esp_hal::peripherals::WIFI<'static>) {
                     ),
                 }
             }
-            NET_UP => bring_up(&mut radio).await,
+            NET_UP => bring_up(&mut radio, tls).await,
             // `net status` and `net down` are answered inside `bring_up` while
             // it is running. Reaching them here means it is not.
-            NET_STATUS | NET_DOWN => esp_println::println!("teddiebox: net is down"),
+            NET_STATUS | NET_DOWN | NET_TLS => {
+                esp_println::println!("teddiebox: net is down")
+            }
             _ => {}
         }
         Timer::after(Duration::from_millis(100)).await;
@@ -1542,6 +1569,9 @@ async fn main(spawner: Spawner) {
                 }
                 Some(Command::NetDown) => {
                     NET_REQUEST.store(NET_DOWN, Ordering::Relaxed);
+                }
+                Some(Command::NetTls) => {
+                    NET_REQUEST.store(NET_TLS, Ordering::Relaxed);
                 }
                 Some(Command::NetStatus) => {
                     NET_REQUEST.store(NET_STATUS, Ordering::Relaxed);

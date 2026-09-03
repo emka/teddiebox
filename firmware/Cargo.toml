@@ -49,6 +49,49 @@ esp-println = { version = "0.18", default-features = false, features = [
 esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
 embedded-sdmmc = { version = "0.10", default-features = false }
+
+# TLS, because the teddyCloud on this LAN speaks TLS 1.2 and nothing else.
+# `embedded-tls` is TLS 1.3 only and cannot reach it at all; this crate (once
+# `esp-mbedtls`) is published, carries no `esp-hal` dependency, and speaks the
+# same `embedded-io-async` 0.7 that `embassy-net` and `teddiebox-cloud` already
+# do, so it drops between them without an adapter.
+#
+# The features are cut to the one handshake this server offers —
+# ECDHE-RSA-AES256-GCM-SHA384 over secp256r1, TLS 1.2 — because everything
+# named here is C that has to fit in flash beside the decoder. No TLS 1.3, no
+# server side, no other curve or key exchange. Hardware acceleration is on by
+# default; the `nohook-*` features would turn it off.
+#
+# The content lengths are the reason this is worth reviewing: they size
+# mbedtls's record buffers, which come from the same heap that was carved out
+# of the decoder's stack. 16384 is the default and does not fit here.
+mbedtls-rs = { version = "0.2", default-features = false, features = [
+    # Build the C with the Xtensa GCC the flake already provides for libopus;
+    # the default is clang, which this shell does not carry.
+    "use-gcc",
+    "tls-core",
+    "tls-client",
+    "tls-proto-tls12",
+    "kex-ecdhe-rsa",
+    "curve-secp256r1",
+    "alg-aes",
+    "alg-gcm",
+    "alg-ecdh",
+    "alg-ecp",
+    "alg-rsa",
+    "alg-sha256",
+    "alg-sha512",
+    "x509-parse",
+    "pem-parse",
+    "pk",
+    "entropy",
+    "drbg-ctr",
+    "ssl-in-content-len-8192",
+    "ssl-out-content-len-2048",
+] }
+static_cell = "2"
+rand_core = { version = "0.10", default-features = false }
+embedded-io-async = "0.7"
 embedded-hal = { version = "1.0" }
 embedded-hal-bus = { version = "0.3", default-features = false }
 embassy-futures = "0.1"

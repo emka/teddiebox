@@ -127,6 +127,13 @@ pub enum Command {
     NetPassword(String<MAX_PASSPHRASE>),
     /// Associate with the remembered network and take a DHCP lease.
     NetUp,
+    /// Open a TLS connection to the configured server and hang up.
+    ///
+    /// The smallest thing that exercises the transport on its own. Kept apart
+    /// from fetching content deliberately: a failure here is the handshake,
+    /// the cipher suite or the record layer, and a failure in a download is
+    /// not — which is the difference between a bisect and a guess.
+    NetTls,
     /// Drop the association and power the modem down.
     NetDown,
     /// Report whether the radio is up, and on what address.
@@ -230,6 +237,7 @@ impl CommandWatch {
                     b"spk 0" => Some(Command::Speaker(false)),
                     b"net scan" => Some(Command::NetScan),
                     b"net up" => Some(Command::NetUp),
+                    b"net tls" => Some(Command::NetTls),
                     b"net down" => Some(Command::NetDown),
                     b"net status" => Some(Command::NetStatus),
                     other => parse_password(other)
@@ -868,5 +876,14 @@ mod tests {
             feed_all(&mut watch, b"net status\r"),
             Some(Command::NetStatus)
         );
+    }
+    /// `net tls` is the smallest thing that exercises the transport: it
+    /// connects, handshakes, asks one question and hangs up. Separate from
+    /// `get` on purpose — a failure here is the transport, and a failure there
+    /// is not.
+    #[test]
+    fn net_tls_is_recognised() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"net tls\n"), Some(Command::NetTls));
     }
 }
