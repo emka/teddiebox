@@ -134,6 +134,14 @@ pub enum Command {
     /// the cipher suite or the record layer, and a failure in a download is
     /// not — which is the difference between a bisect and a guess.
     NetTls,
+    /// Check the server's certificate, or don't.
+    ///
+    /// A bench override of the card's `insecure` key, the way
+    /// [`Command::NetSsid`] overrides its `ssid`. It exists because the card
+    /// lives inside the box and the bench does not, and because whether
+    /// certificates are checked is the setting most worth being able to flip
+    /// without a screwdriver.
+    NetInsecure(bool),
     /// Drop the association and power the modem down.
     NetDown,
     /// Report whether the radio is up, and on what address.
@@ -238,6 +246,8 @@ impl CommandWatch {
                     b"net scan" => Some(Command::NetScan),
                     b"net up" => Some(Command::NetUp),
                     b"net tls" => Some(Command::NetTls),
+                    b"net insecure yes" | b"net insecure true" => Some(Command::NetInsecure(true)),
+                    b"net insecure no" | b"net insecure false" => Some(Command::NetInsecure(false)),
                     b"net down" => Some(Command::NetDown),
                     b"net status" => Some(Command::NetStatus),
                     other => parse_password(other)
@@ -881,6 +891,34 @@ mod tests {
     /// connects, handshakes, asks one question and hangs up. Separate from
     /// `get` on purpose — a failure here is the transport, and a failure there
     /// is not.
+    /// The card is the place this belongs, but the card is inside the box and
+    /// the bench is not. Same relationship `net ssid` has to the card's ssid.
+    #[test]
+    fn net_insecure_takes_the_same_words_the_config_file_takes() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"net insecure yes\n"),
+            Some(Command::NetInsecure(true))
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"net insecure no\n"),
+            Some(Command::NetInsecure(false))
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"net insecure true\n"),
+            Some(Command::NetInsecure(true))
+        );
+    }
+
+    /// A word nobody recognises must not resolve to "off" quietly, for the
+    /// same reason the config file refuses one: this line decides whether
+    /// certificates are checked.
+    #[test]
+    fn an_unrecognised_insecure_word_is_not_a_command() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"net insecure maybe\n"), None);
+    }
+
     #[test]
     fn net_tls_is_recognised() {
         let mut watch = CommandWatch::new();

@@ -1381,7 +1381,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> | net scan ssid <name> pw <pass> up down status | cinit cdown cset cclr out spk | pcm <2hex>"
+        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> | net scan ssid <name> pw <pass> insecure yes|no up down tls status | cinit cdown cset cclr out spk | pcm <2hex>"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -1628,6 +1628,15 @@ async fn main(spawner: Spawner) {
                 }
                 Some(Command::NetDown) => {
                     NET_REQUEST.store(NET_DOWN, Ordering::Relaxed);
+                }
+                Some(Command::NetInsecure(insecure)) => {
+                    critical_section::with(|cs| {
+                        CONFIGURATION.borrow_ref_mut(cs).insecure = insecure
+                    });
+                    esp_println::println!(
+                        "teddiebox: net certificates {} — takes effect on the next connection",
+                        if insecure { "NOT checked" } else { "checked" }
+                    );
                 }
                 Some(Command::NetTls) => {
                     NET_REQUEST.store(NET_TLS, Ordering::Relaxed);
