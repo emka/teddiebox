@@ -40,6 +40,7 @@ use teddiebox_core::pipe::Pipe;
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
+use teddiebox_download::{Pages, Throttle};
 use tlv320dac3100::Tlv320Dac3100;
 
 use crate::pins::BoardPins;
@@ -586,6 +587,23 @@ static DOWNLOAD_FILE: AtomicU32 = AtomicU32::new(0);
 /// Set when the consumer cannot write, so the producer stops rather than
 /// wedging against a pipe nobody is draining.
 static DOWNLOAD_ABORT: AtomicBool = AtomicBool::new(false);
+/// Set while audio is being fed, so the download can leave the radio alone.
+static PLAYING: AtomicBool = AtomicBool::new(false);
+
+/// How far ahead the download is of whatever is waiting on it.
+///
+/// Nothing streams yet: `get` fetches a file nobody is playing, so no decoder
+/// can run out and the honest answer is "nobody is waiting". Saying that in the
+/// throttle's own vocabulary — an unreachable lead — keeps one concept rather
+/// than adding a second. When playback and download meet on the same file this
+/// becomes the watermark minus the decoder's position, and the thresholds below
+/// start earning their keep.
+const NOTHING_WAITING: Pages = Pages(u32::MAX);
+/// Fetch again once the decoder is within this many pages of the write head.
+const RESUME_BELOW: Pages = Pages(8);
+/// Stop once it is this far ahead. The gap between the two is what stops the
+/// radio starting and stopping on every page the decoder consumes.
+const PAUSE_ABOVE: Pages = Pages(32);
 
 /// A download being written to the card.
 struct CacheWrite {
@@ -1165,6 +1183,12 @@ async fn media(
                 // the next playback to start.
                 audio::STOP.store(false, Ordering::Relaxed);
 
+                // Raised around every path that feeds the DMA, so the
+                // download knows to leave the radio alone. Cleared on the way
+                // out whatever happened — a download paused for ever because
+                // playback failed would be a worse bug than the glitch this
+                // avoids.
+                PLAYING.store(true, Ordering::Relaxed);
                 if request == REQUEST_WAV {
                     if let Err(reason) = audio::play_first_wav(card, tx, buffer).await {
                         esp_println::println!("teddiebox: playback failed — {reason}");
@@ -1191,6 +1215,7 @@ async fn media(
                     // being driven.
                     OUTPUT_REQUEST.store(OUTPUT_DOWN, Ordering::Relaxed);
                 }
+                PLAYING.store(false, Ordering::Relaxed);
             }
 
             _ => {}
@@ -1299,6 +1324,15 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                         DOWNLOAD_STATE.store(DOWNLOAD_RUNNING, Ordering::Relaxed);
 
                         DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
+                        let mut throttle = Throttle::new();
+                        let mut may_fetch = || {
+                            throttle.update(
+                                PLAYING.load(Ordering::Relaxed),
+                                NOTHING_WAITING,
+                                RESUME_BELOW,
+                                PAUSE_ABOVE,
+                            )
+                        };
                         let mut into_pipe = |bytes: &[u8]| -> usize {
                             // Nobody is draining. Swallow the rest so the
                             // download ends and reports, rather than blocking
@@ -1319,6 +1353,7 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                             config.insecure,
                             ruid,
                             &mut into_pipe,
+                            &mut may_fetch,
                         )
                         .await;
                         // Ended either way: the consumer must stop waiting for

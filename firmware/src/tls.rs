@@ -38,6 +38,18 @@ use teddiebox_core::checksum::Crc32;
 /// How long it actually takes is a bench measurement nobody has taken.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How long the data socket may sit idle before `embassy-net` abandons it.
+///
+/// Longer than the connect timeout on purpose: once a download is throttled it
+/// stops reading for as long as a story plays, and at twenty seconds the
+/// connection would be aborted a few frames in. teddyCloud advertises
+/// `Keep-Alive: timeout=300`, so this sits under what the server will hold and
+/// above any pause the throttle can impose.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(240);
+
+/// How long to wait before asking the throttle again.
+const THROTTLE_WAIT: Duration = Duration::from_millis(50);
+
 /// Socket buffers for the TLS transport.
 ///
 /// Separate from mbedtls's own record buffers, which are sized by the
@@ -360,6 +372,7 @@ pub async fn fetch(
     insecure: bool,
     ruid: [u8; 8],
     sink: &mut dyn FnMut(&[u8]) -> usize,
+    may_fetch: &mut dyn FnMut() -> bool,
 ) -> Result<Fetched, Error> {
     let mut name = [0u8; MAX_NAME];
     let (name_len, port) = split_server(server, &mut name)?;
@@ -382,6 +395,8 @@ pub async fn fetch(
         .connect((address, port))
         .await
         .map_err(|_| Error::Connect)?;
+    // Connected, so the deadline that matters now is the idle one.
+    socket.set_timeout(Some(IDLE_TIMEOUT));
 
     let server_name =
         CStr::from_bytes_with_nul(&name[..name_len]).map_err(|_| Error::MalformedServer)?;
@@ -428,6 +443,12 @@ pub async fn fetch(
     // from a hang, which is the thing this bench has mistaken twice already.
     let mut announced = 0u32;
     while !body.is_complete() {
+        // Asked before reading rather than after: the point is to leave the
+        // radio quiet while audio has a deadline, and a read already taken is
+        // a packet already received.
+        while !may_fetch() {
+            Timer::after(THROTTLE_WAIT).await;
+        }
         let n = body
             .read(&mut session, &mut buf)
             .await
