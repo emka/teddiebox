@@ -16,7 +16,7 @@ fmt:
     cargo fmt --all --check
     cd firmware && cargo fmt --all --check
 
-lint:
+lint: vendor
     cargo clippy --workspace --all-targets -- -D warnings
     # No --all-targets here: xtensa-esp32s3-none-elf is bare-metal and has
     # no `test` crate, so building a test harness for it fails outright.
@@ -60,8 +60,18 @@ fixtures:
     diff "$out/chapters.taf" crates/teddiebox-taf/tests/data/chapters.taf
 
 # the device firmware compiles and links for the target
-firmware:
+firmware: vendor
     cd firmware && cargo build --release
+
+# firmware/Cargo.toml patches `mbedtls-rs-sys` to a copy of the published crate
+# with one version bound widened, and cargo cannot even parse the manifest
+# until that copy exists. Every recipe that builds firmware/ depends on this;
+# it is a no-op once the copy is there. The why is beside the patch entry in
+# firmware/Cargo.toml.
+
+# fetch and patch the vendored mbedtls-rs-sys
+vendor:
+    ./scripts/vendor-mbedtls-rs-sys.sh
 
 # format the tree rather than checking it
 fix:

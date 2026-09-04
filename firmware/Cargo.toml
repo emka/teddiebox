@@ -69,6 +69,7 @@ mbedtls-rs = { version = "0.2", default-features = false, features = [
     # Build the C with the Xtensa GCC the flake already provides for libopus;
     # the default is clang, which this shell does not carry.
     "use-gcc",
+    "esp32s3",
     "tls-core",
     "tls-client",
     "tls-proto-tls12",
@@ -130,6 +131,21 @@ esp-rtos = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f43
 esp-radio = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
 esp-alloc = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
 esp-rom-sys = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
+
+# `mbedtls-rs-sys` 0.2.0 declares `esp-hal = "~1.1.0"`, which excludes the
+# 1.2.0-rc.0 above, so the `esp32s3` feature — the whole of the hardware
+# acceleration — cannot resolve against it. Nothing else is in the way: all
+# nine `esp-hal` APIs the hooks use exist unchanged in 1.2. So the patch is the
+# published crate with that one bound widened, materialised by
+# `scripts/vendor-mbedtls-rs-sys.sh` (run by `just vendor`, which every gate
+# that builds this crate depends on) rather than committed, because 8.8 MB of
+# upstream C in the history is a lot to carry for eleven characters.
+#
+# `firmware/vendor/` is gitignored, so a fresh clone needs `just vendor` — or
+# any `just` recipe that builds — before a bare `cargo build` will resolve.
+#
+# Drop this line once mbedtls-rs-sys widens the bound upstream.
+mbedtls-rs-sys = { path = "vendor/mbedtls-rs-sys" }
 
 [profile.release]
 opt-level = "s"

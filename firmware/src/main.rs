@@ -1354,12 +1354,20 @@ fn report_address(stack: &embassy_net::Stack<'_>) {
 /// so separates "the radio does not work" from "the password is wrong" once
 /// and for all.
 #[embassy_executor::task]
-async fn net(wifi: esp_hal::peripherals::WIFI<'static>) {
+async fn net(
+    wifi: esp_hal::peripherals::WIFI<'static>,
+    sha: esp_hal::peripherals::SHA<'static>,
+    rsa: esp_hal::peripherals::RSA<'static>,
+    aes: esp_hal::peripherals::AES<'static>,
+) {
     let mut radio = net::Radio::new(wifi);
     // Built once, before anything associates. mbedtls keeps global state, and
     // the statics behind this can only be filled once — so a failure here is
     // permanent for this boot rather than something to retry per connection.
-    let tls = tls::init();
+    // The three crypto peripherals come along because the hooks that route
+    // mbedtls onto them have to be registered before this call builds the
+    // first mbedtls context; see `tls::init`.
+    let tls = tls::init(sha, rsa, aes);
     if tls.is_none() {
         esp_println::println!("teddiebox: tls could not be initialised");
     }
@@ -1544,7 +1552,7 @@ async fn main(spawner: Spawner) {
     let mut gates = Gates::at_reset();
 
     spawner.spawn(heartbeat().unwrap());
-    spawner.spawn(net(p.WIFI).unwrap());
+    spawner.spawn(net(p.WIFI, p.SHA, p.RSA, p.AES).unwrap());
 
     // Ears and wake are all active low, so they are read with a pull-up: an
     // unconnected input then reads as "not pressed" rather than floating into

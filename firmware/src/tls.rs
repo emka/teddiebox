@@ -19,6 +19,8 @@ use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_time::{Duration, Instant, Timer};
+use esp_hal::peripherals::{AES, RSA, SHA};
+use mbedtls_rs::sys::hook::backend::esp::{EspAccel, EspAccelQueue, EspHooksGuard};
 use mbedtls_rs::{
     AuthMode, ClientSessionConfig, Session, SessionConfig, SessionError, Tls, TlsReference,
     TlsVersion,
@@ -30,11 +32,10 @@ use teddiebox_core::checksum::Crc32;
 
 /// How long to wait for the TCP connect and the handshake.
 ///
-/// Generous, because the handshake is RSA and ECDHE in software: this build
-/// leaves out the `esp32s3` feature that routes those onto the chip's crypto
-/// accelerators, because that feature drags in `esp-hal ~1.1.0` and this
-/// firmware is on `1.2.0-rc.0`. How long it actually takes is a bench
-/// measurement nobody has taken.
+/// Still generous. The SHA, RSA and AES peripherals now carry the handshake
+/// (see [`init`]), but the ECDHE point multiplication has no accelerator on
+/// this chip and stays in software, so the handshake is not uniformly fast.
+/// How long it actually takes is a bench measurement nobody has taken.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Socket buffers for the TLS transport.
@@ -97,6 +98,18 @@ pub struct Fetched {
 static RNG: StaticCell<HardwareRng> = StaticCell::new();
 static TLS: StaticCell<Tls<'static>> = StaticCell::new();
 
+/// The crypto accelerators, and the hooks that route mbedtls onto them.
+///
+/// `mbedtls-rs` treats dropping the hook guard as undefined behaviour while
+/// mbedtls state initialised under the hooks is still alive, and dropping a
+/// running backend out from under a registered hook leaves the next call on
+/// that algorithm waiting on a queue nobody services. [`TLS`] above is exactly
+/// such state and is never dropped, so neither may these — hence statics,
+/// rather than values held in a scope that could end.
+static ACCEL: StaticCell<EspAccel<'static>> = StaticCell::new();
+static QUEUES: StaticCell<EspAccelQueue<'static, 'static>> = StaticCell::new();
+static HOOKS: StaticCell<EspHooksGuard<'static>> = StaticCell::new();
+
 /// The ESP32's random number generator, in the shape `rand_core` 0.10 asks for.
 ///
 /// `esp-hal` implements `rand_core` 0.6 and 0.9; `mbedtls-rs` wants 0.10, which
@@ -141,11 +154,47 @@ impl rand_core::TryRng for HardwareRng {
 /// [`HardwareRng`] is the argument for.
 impl rand_core::TryCryptoRng for HardwareRng {}
 
-/// Builds the mbedtls context. Call once.
+/// Starts the crypto accelerators and builds the mbedtls context. Call once.
+///
+/// The three peripherals are taken by value because that is the only way to
+/// say "nothing else may drive them". Nothing else in this firmware does; if
+/// something ever wants to, it has to take them from here rather than from
+/// `Peripherals::take`, and the type system will say so.
+///
+/// **The order in this function is the whole point.** `mbedtls-rs` routes an
+/// algorithm to hardware in two independent steps: a *backend* services the
+/// `esp-hal` work queue, and a *hook* points mbedtls at that queue's client.
+/// A hooked algorithm whose queue nobody services blocks forever, and a hook
+/// registered after mbedtls state already exists leaves that state holding a
+/// software context the hardware path cannot read. So: start the backends,
+/// hook exactly what was started, and only then call `Tls::new` — which
+/// initialises the CTR-DRBG, the first mbedtls state in this firmware.
+/// `EspAccelQueue::hook` is what makes the first half of that safe by
+/// construction; the second half is this ordering.
+///
+/// SHA-256/384/512 and RSA carry the handshake, AES-GCM carries the bulk. The
+/// ESP32-S3 has no ECC peripheral, so the ECDHE point multiplication stays in
+/// software — `EspAccel` has no `with_ecc` on this chip at all.
 ///
 /// Returns `None` if it has already been called, because the statics behind it
 /// can only be filled once and a second caller would otherwise panic.
-pub fn init() -> Option<TlsReference<'static>> {
+pub fn init(
+    sha: SHA<'static>,
+    rsa: RSA<'static>,
+    aes: AES<'static>,
+) -> Option<TlsReference<'static>> {
+    let accel = ACCEL.try_init(EspAccel::new().with_sha(sha).with_rsa(rsa).with_aes(aes))?;
+    let queues: &'static EspAccelQueue<'static, 'static> = QUEUES.try_init(accel.start())?;
+
+    // SAFETY: the hooks are registered before the first mbedtls call in this
+    // firmware — `Tls::new` below is that call, and nothing reaches mbedtls
+    // earlier. `hook` selects exactly the algorithms whose queues `queues`
+    // services, so none of them can block on an unserviced queue. The guard
+    // goes into a static and is never dropped, so it cannot be unregistered
+    // while the `Tls` below is alive.
+    let hooks = unsafe { queues.hook() };
+    HOOKS.try_init(hooks)?;
+
     let rng = RNG.try_init(HardwareRng(esp_hal::rng::Rng::new()))?;
     let tls = Tls::new(rng).ok()?;
     Some(TLS.try_init(tls)?.reference())
