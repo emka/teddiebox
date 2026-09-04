@@ -416,7 +416,13 @@ async fn hand_over(bytes: &[u8], sink: &mut dyn FnMut(&[u8]) -> usize) {
         let taken = sink(&bytes[at..]);
         at += taken;
         if taken == 0 {
-            Timer::after(Duration::from_millis(2)).await;
+            // Back off to roughly the consumer's own cadence. Two
+            // milliseconds meant waking five hundred times a second to take a
+            // critical section and find the pipe still full — and critical
+            // sections mask interrupts, including the one that keeps the audio
+            // DMA fed. Retrying faster than the drain can possibly happen buys
+            // nothing and costs the thing that must not be interrupted.
+            Timer::after(Duration::from_millis(20)).await;
         }
     }
 }

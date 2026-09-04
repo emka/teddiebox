@@ -289,8 +289,16 @@ type Card = SdCard<ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'stat
 /// as it is deep. Setting them independently would let the depth limit grow
 /// past the handle limit, and the walk would then stop with `TooManyOpenDirs`
 /// on a card that is merely deep — which reads as an unreadable directory.
-/// One file is open at a time, and there is one volume.
-type Volumes = VolumeManager<Card, NoClock, MAX_DEPTH, 1, 1>;
+/// **Two files**, and there is one volume. One was enough while the card was
+/// only ever read, and it is what a download makes insufficient: the cache file
+/// stays open for the length of a download, and with a single handle the box
+/// could not open *anything else* while one ran — no story, no system sound.
+/// A box that cannot play while it downloads is the thing this design exists to
+/// avoid, so the second handle is not a convenience.
+///
+/// Two, not more: reading and writing the *same* file still shares one handle,
+/// because `embedded-sdmmc` refuses a second on one file whatever this says.
+type Volumes = VolumeManager<Card, NoClock, MAX_DEPTH, 2, 1>;
 
 /// A mounted card, and the handles that keep it open.
 ///
@@ -555,13 +563,21 @@ impl Mounted {
         let file_name =
             core::str::from_utf8(&file_name).map_err(|_| "the file name is not text")?;
 
+        // Every handle is closed on the way back out, including on the error
+        // paths. Directory handles are a budget of MAX_DEPTH shared with the
+        // walk, and leaking two per download meant the *second* download could
+        // not create its directory — which reported as an unwritable card
+        // rather than as a handle that was never given back.
         let cache = self.open_or_make_dir(self.root, CACHE_DIR)?;
-        let folder = self.open_or_make_dir(cache, folder_name)?;
-        let handle = self
-            .volumes
-            .open_file_in_dir(folder, file_name, Mode::ReadWriteCreateOrTruncate)
-            .map_err(|_| "the cache file would not open")?;
-        Ok(handle)
+        let folder = self.open_or_make_dir(cache, folder_name);
+        let _ = self.volumes.close_dir(cache);
+        let folder = folder?;
+
+        let handle =
+            self.volumes
+                .open_file_in_dir(folder, file_name, Mode::ReadWriteCreateOrTruncate);
+        let _ = self.volumes.close_dir(folder);
+        handle.map_err(|_| "the cache file would not open")
     }
 
     /// Opens a subdirectory, creating it if this is the first download.
