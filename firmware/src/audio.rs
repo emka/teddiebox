@@ -26,7 +26,7 @@ use teddiebox_core::wav::{WavError, WavFormat};
 
 use teddiebox_audio::{LibOpus, OpusState, TafDecoder, MAX_FRAME_SAMPLES};
 
-use crate::storage::{CardPages, Mounted, PAGE_READ_US};
+use crate::storage::{CardPages, Mounted, PAGE_READ_MAX_US, PAGE_READ_US};
 
 /// The DMA buffer between the card and the codec.
 ///
@@ -505,6 +505,12 @@ async fn play_taf_inner(
     // that would cause a dropout.
     let mut decode_us: u64 = 0;
 
+    // The quantity that decides everything: how long the loop is ever away.
+    // The DMA stops if it drains the queued descriptors before this loop links
+    // another one on, so "how late does the media task get" is the whole
+    // question and every other explanation has been a proxy for it.
+    let mut longest_gap_us: u64 = 0;
+    let mut last_pass = Instant::now();
     let mut stopped = false;
     // How many times the DMA ran off the end of its descriptor chain and had
     // to be started again. Zero is the only good number; anything else is
@@ -537,6 +543,13 @@ async fn play_taf_inner(
         // the alternative is silence for the rest of the story.
         if transfer.is_done() {
             restarts += 1;
+            // *When* matters. Restarts bunched at the first frame are a
+            // priming problem and fixable; ones spread through playback are
+            // the descriptor race and are not.
+            esp_println::println!(
+                "teddiebox: taf restart {restarts} at frame {frames}, {} ms in",
+                started.elapsed().as_millis()
+            );
             let (tx, buf) = transfer.stop();
             transfer = match tx.write(buf) {
                 Ok(started) => started,
@@ -623,6 +636,11 @@ async fn play_taf_inner(
             );
             let card_us = PAGE_READ_US.load(Ordering::Relaxed);
             esp_println::println!(
+                "teddiebox: taf   longest card read {} ms, longest loop gap {} ms",
+                PAGE_READ_MAX_US.load(Ordering::Relaxed) / 1000,
+                longest_gap_us / 1000
+            );
+            esp_println::println!(
                 "teddiebox: taf   of that, card reads {}% and decode {}%",
                 card_us * 100 / so_far,
                 decode_us.saturating_sub(card_us) * 100 / so_far
@@ -630,6 +648,11 @@ async fn play_taf_inner(
         }
 
         yield_now().await;
+        let gap = last_pass.elapsed().as_micros();
+        if gap > longest_gap_us {
+            longest_gap_us = gap;
+        }
+        last_pass = Instant::now();
     }
 
     // A stop must not wait for the buffer to drain — that is most of a second

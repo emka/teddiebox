@@ -86,6 +86,14 @@ const YIELD_EVERY_BLOCKS: u32 = 16;
 /// suspiciously fast decode rather than as an error.
 pub static PAGE_READ_US: AtomicU64 = AtomicU64::new(0);
 
+/// The longest single page read, in microseconds.
+///
+/// The total says how much of real time the card costs; this says whether any
+/// *one* read was long enough to matter. Those are different questions and only
+/// the second explains a missed deadline: the audio cushion is about 170 ms, so
+/// a single read over that starves the DMA however small the average is.
+pub static PAGE_READ_MAX_US: AtomicU64 = AtomicU64::new(0);
+
 /// Where a Toniebox keeps its audio, and what it calls it.
 ///
 /// Fixed by the box's own layout rather than chosen here: every file step 7
@@ -233,7 +241,9 @@ impl PageSource for CardPages<'_> {
     fn read_page(&mut self, index: u32, buf: &mut [u8; PAGE_SIZE]) -> Result<(), Self::Error> {
         let began = Instant::now();
         let result = self.read_page_inner(index, buf);
-        PAGE_READ_US.fetch_add(began.elapsed().as_micros(), Ordering::Relaxed);
+        let took = began.elapsed().as_micros();
+        PAGE_READ_US.fetch_add(took, Ordering::Relaxed);
+        PAGE_READ_MAX_US.fetch_max(took, Ordering::Relaxed);
         result
     }
 
