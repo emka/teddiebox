@@ -20,7 +20,8 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_time::Duration;
 use mbedtls_rs::{
-    AuthMode, ClientSessionConfig, Session, SessionConfig, Tls, TlsReference, TlsVersion,
+    AuthMode, ClientSessionConfig, Session, SessionConfig, SessionError, Tls, TlsReference,
+    TlsVersion,
 };
 use static_cell::StaticCell;
 
@@ -45,7 +46,15 @@ const TCP_BUFFER: usize = 2048;
 /// build one in.
 const MAX_NAME: usize = 80;
 
+/// Why a TLS connection could not be made.
+///
+/// The `SessionError` payloads look unread to rustc because nothing destructures
+/// them — they reach a human through `Debug`, on the console, which dead-code
+/// analysis does not count. They earn their place: `CIPHER_ALLOC_FAILED` and
+/// `CA_CHAIN_REQUIRED` are both "the handshake failed" without them, and one is
+/// a heap that needs growing while the other is a setting.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum Error {
     /// `server` in the config was not `host:port`.
     MalformedServer,
@@ -54,9 +63,17 @@ pub enum Error {
     /// The TCP connection could not be made.
     Connect,
     /// The TLS handshake failed.
-    Handshake,
+    ///
+    /// Carries mbedtls's own code, because "the handshake failed" is not a
+    /// diagnosis: a missing cipher suite, a record buffer too small for the
+    /// certificate chain and a hash algorithm left out of the build all look
+    /// identical without it.
+    Handshake(SessionError),
     /// Reading or writing the encrypted stream failed.
-    Stream,
+    ///
+    /// `mbedtls-rs` runs the handshake lazily on first use, so this is where a
+    /// handshake failure actually surfaces.
+    Stream(SessionError),
 }
 
 /// The one-time mbedtls context, and the RNG it holds.
@@ -192,7 +209,10 @@ pub async fn probe(
         .await
         .map_err(|_| Error::NoSuchHost)?;
     let address = *addresses.first().ok_or(Error::NoSuchHost)?;
-    esp_println::println!("teddiebox: tls {host}:{port} is {address}");
+    esp_println::println!(
+        "teddiebox: tls {host}:{port} is {address}, certificates {}",
+        if insecure { "NOT checked" } else { "checked" }
+    );
 
     let mut rx = [0u8; TCP_BUFFER];
     let mut tx = [0u8; TCP_BUFFER];
@@ -204,6 +224,16 @@ pub async fn probe(
         .map_err(|_| Error::Connect)?;
     esp_println::println!("teddiebox: tls connected, starting the handshake");
 
+    // The heap is the Wi-Fi driver's, and mbedtls is a guest on it. A session
+    // allocates its record buffers and cipher contexts here, and when it does
+    // not fit the failure is `MBEDTLS_ERR_CIPHER_ALLOC_FAILED` — or, worse, a
+    // fatal alert from the server, which reads like a protocol fault rather
+    // than an out-of-memory. So the number is printed either way.
+    esp_println::println!(
+        "teddiebox: tls heap free {} bytes before the session",
+        esp_alloc::HEAP.free()
+    );
+
     let server_name =
         CStr::from_bytes_with_nul(&name[..name_len]).map_err(|_| Error::MalformedServer)?;
     let mut session = Session::new(
@@ -211,24 +241,24 @@ pub async fn probe(
         socket,
         &SessionConfig::Client(client_config(insecure, server_name)),
     )
-    .map_err(|_| Error::Handshake)?;
+    .map_err(Error::Handshake)?;
 
     use mbedtls_rs::io::Write;
     session
         .write_all(b"HEAD / HTTP/1.1\r\nHost: ")
         .await
-        .map_err(|_| Error::Stream)?;
+        .map_err(Error::Stream)?;
     session
         .write_all(host.as_bytes())
         .await
-        .map_err(|_| Error::Stream)?;
+        .map_err(Error::Stream)?;
     session
         .write_all(b"\r\nConnection: close\r\n\r\n")
         .await
-        .map_err(|_| Error::Stream)?;
+        .map_err(Error::Stream)?;
 
     let mut buffer = [0u8; 128];
-    let read = session.read(&mut buffer).await.map_err(|_| Error::Stream)?;
+    let read = session.read(&mut buffer).await.map_err(Error::Stream)?;
     // The status line and nothing more. Enough to say the record layer works
     // in both directions, which is all this is for.
     let line = core::str::from_utf8(&buffer[..read])
@@ -236,7 +266,10 @@ pub async fn probe(
         .lines()
         .next()
         .unwrap_or("<empty>");
-    esp_println::println!("teddiebox: tls server said {line}");
+    esp_println::println!(
+        "teddiebox: tls server said {line} — heap free {} bytes with the session open",
+        esp_alloc::HEAP.free()
+    );
 
     let _ = session.close().await;
     Ok(())
