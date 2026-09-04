@@ -9,6 +9,7 @@ mod gesture;
 pub mod i2c;
 pub mod input;
 mod led;
+pub mod pipe;
 mod playback;
 pub mod power;
 pub mod sounds;
