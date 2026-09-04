@@ -18,7 +18,7 @@ use core::ffi::CStr;
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
-use embassy_time::{Duration, Instant};
+use embassy_time::{Duration, Instant, Timer};
 use mbedtls_rs::{
     AuthMode, ClientSessionConfig, Session, SessionConfig, SessionError, Tls, TlsReference,
     TlsVersion,
@@ -310,6 +310,7 @@ pub async fn fetch(
     server: &str,
     insecure: bool,
     ruid: [u8; 8],
+    sink: &mut dyn FnMut(&[u8]) -> usize,
 ) -> Result<Fetched, Error> {
     let mut name = [0u8; MAX_NAME];
     let (name_len, port) = split_server(server, &mut name)?;
@@ -370,6 +371,7 @@ pub async fn fetch(
     let mut crc = Crc32::new();
     crc.update(&buf[prefix.clone()]);
     let mut received = prefix.len() as u32;
+    hand_over(&buf[prefix.clone()], sink).await;
     let mut body = Body::new(body_length, received);
     esp_println::println!("teddiebox: get {body_length} bytes to read");
 
@@ -383,6 +385,7 @@ pub async fn fetch(
             .map_err(Error::Cloud)?;
         crc.update(&buf[..n]);
         received += n as u32;
+        hand_over(&buf[..n], sink).await;
         if received - announced >= 1_048_576 {
             announced = received;
             esp_println::println!("teddiebox: get {received}/{body_length}");
@@ -395,4 +398,25 @@ pub async fn fetch(
         crc32: crc.finish(),
         seconds: started.elapsed().as_secs() as u32,
     })
+}
+
+/// Pushes every byte into the sink, waiting when it will not take them.
+///
+/// The sink is a fixed-size queue drained by whoever owns the card, so a full
+/// one is the ordinary way it says "not yet" rather than a fault. Waiting here
+/// is what turns that into back-pressure on the server: the socket stops being
+/// read, the window closes, and the download slows to the speed the card is
+/// being written at instead of overflowing.
+///
+/// It yields rather than spins, so the task draining the other end actually
+/// gets to run.
+async fn hand_over(bytes: &[u8], sink: &mut dyn FnMut(&[u8]) -> usize) {
+    let mut at = 0;
+    while at < bytes.len() {
+        let taken = sink(&bytes[at..]);
+        at += taken;
+        if taken == 0 {
+            Timer::after(Duration::from_millis(2)).await;
+        }
+    }
 }

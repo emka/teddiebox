@@ -35,6 +35,7 @@ use teddiebox_core::board::{self, Colour, Gates, Rail};
 use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
+use teddiebox_core::pipe::Pipe;
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
@@ -555,6 +556,127 @@ const NET_GET: u8 = 6;
 /// console writes it before raising the request that reads it.
 static GET_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 
+/// Bytes waiting to move from the network to the card.
+///
+/// The two ends run in different tasks and neither may wait for the other: a
+/// media loop that awaited the network would underrun the moment the server
+/// paused, and a network task that awaited the card would stall the socket
+/// behind a decode. This absorbs the difference.
+///
+/// Sized against the measured download rate. At ~47 KB/s the media task's idle
+/// poll leaves about 4.7 KB between drains, so eight kibibytes keeps the socket
+/// moving even when a drain is late. A full pipe is back-pressure, not a fault.
+const DOWNLOAD_PIPE_BYTES: usize = 8192;
+static DOWNLOAD_PIPE: CsMutex<RefCell<Pipe<DOWNLOAD_PIPE_BYTES>>> =
+    CsMutex::new(RefCell::new(Pipe::new()));
+
+/// Nothing is downloading.
+const DOWNLOAD_IDLE: u8 = 0;
+/// The producer is still reading from the network.
+const DOWNLOAD_RUNNING: u8 = 1;
+/// The producer has stopped. Whatever is still in the pipe is the last of it.
+const DOWNLOAD_ENDED: u8 = 2;
+static DOWNLOAD_STATE: AtomicU8 = AtomicU8::new(DOWNLOAD_IDLE);
+/// Bytes the producer has handed to the pipe. The consumer is done when it has
+/// written this many and the producer has ended.
+static DOWNLOAD_SENT: AtomicU32 = AtomicU32::new(0);
+static DOWNLOAD_DIR: AtomicU32 = AtomicU32::new(0);
+static DOWNLOAD_FILE: AtomicU32 = AtomicU32::new(0);
+/// Set when the consumer cannot write, so the producer stops rather than
+/// wedging against a pipe nobody is draining.
+static DOWNLOAD_ABORT: AtomicBool = AtomicBool::new(false);
+
+/// A download being written to the card.
+struct CacheWrite {
+    file: embedded_sdmmc::RawFile,
+    written: u32,
+    crc: teddiebox_core::checksum::Crc32,
+}
+
+/// Moves whatever the network has produced onto the card.
+///
+/// Called from the media task's idle poll, and it **never waits**: it writes
+/// what is in the pipe and returns. That is what keeps the card's owner free to
+/// answer a play request while a download is in flight — the thing that makes
+/// downloading and playing at the same time possible at all.
+///
+/// Returns whether a download is still in flight, so the caller can poll
+/// faster while one is.
+fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWrite>) -> bool {
+    let state = DOWNLOAD_STATE.load(Ordering::Relaxed);
+    if state == DOWNLOAD_IDLE {
+        return false;
+    }
+
+    if write.is_none() {
+        let dir = DOWNLOAD_DIR.load(Ordering::Relaxed);
+        let file = DOWNLOAD_FILE.load(Ordering::Relaxed);
+        let opened = card.ok_or("the card is not mounted").and_then(|card| {
+            card.open_cache_for_write(dir, file)
+                .map(|handle| (card, handle))
+        });
+        match opened {
+            Ok((_, handle)) => {
+                esp_println::println!("teddiebox: get writing /CACHE/{dir:08X}/{file:08X}");
+                *write = Some(CacheWrite {
+                    file: handle,
+                    written: 0,
+                    crc: teddiebox_core::checksum::Crc32::new(),
+                });
+            }
+            Err(reason) => {
+                // Abort rather than let the pipe fill: a producer waiting on a
+                // sink nobody drains never returns, and the box would look
+                // hung rather than broken.
+                esp_println::println!("teddiebox: get cannot write — {reason}");
+                DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
+                DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
+                return false;
+            }
+        }
+    }
+
+    let (Some(card), Some(active)) = (card, write.as_mut()) else {
+        return false;
+    };
+
+    let mut buf = [0u8; 512];
+    loop {
+        let taken = critical_section::with(|cs| DOWNLOAD_PIPE.borrow_ref_mut(cs).read(&mut buf));
+        if taken == 0 {
+            break;
+        }
+        if let Err(reason) = card.append(active.file, &buf[..taken]) {
+            esp_println::println!("teddiebox: get write failed — {reason}");
+            DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
+            break;
+        }
+        active.crc.update(&buf[..taken]);
+        active.written += taken as u32;
+    }
+
+    // Done only when the producer has stopped *and* everything it handed over
+    // has reached the card. Stopping at the first of those would truncate the
+    // file by whatever was still in the pipe.
+    let sent = DOWNLOAD_SENT.load(Ordering::Relaxed);
+    if state == DOWNLOAD_ENDED && active.written >= sent {
+        if let Err(reason) = card.flush(active.file) {
+            esp_println::println!("teddiebox: get flush failed — {reason}");
+        }
+        esp_println::println!(
+            "teddiebox: get wrote {} bytes, crc32 {:08X}",
+            active.written,
+            active.crc.finish()
+        );
+        card.close_file(active.file);
+        *write = None;
+        DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
+        DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+
 /// Credentials typed at the bench.
 ///
 /// RAM only, gone at the next reset — the same treatment the SLIX password
@@ -919,10 +1041,18 @@ async fn media(
     // as long as the tone should play — which is until the box restarts.
     let mut _tone_transfer = None;
 
+    let mut download: Option<CacheWrite> = None;
+
     loop {
         let request = REQUEST.swap(REQUEST_NONE, Ordering::Relaxed);
         if request == REQUEST_NONE {
-            Timer::after(Duration::from_millis(100)).await;
+            // Serviced here rather than in a branch of its own, so a download
+            // makes progress in the gaps without ever owning the loop.
+            let downloading = service_download(card.as_ref(), &mut download);
+            // A late drain stalls the socket, so poll hard while bytes are
+            // moving and idle politely when they are not.
+            let gap = if downloading { 5 } else { 100 };
+            Timer::after(Duration::from_millis(gap)).await;
             continue;
         }
 
@@ -1126,9 +1256,52 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                     None => esp_println::println!("teddiebox: tls context unavailable"),
                     Some(tls) => {
                         let ruid = GET_RUID.load(Ordering::Relaxed).to_be_bytes();
-                        match tls::fetch(tls, &stack, &config.server, config.insecure, ruid).await {
+                        // `content_path` takes the UID and reverses it itself,
+                        // and what the console typed is already reversed.
+                        let mut uid = ruid;
+                        uid.reverse();
+                        let path = teddiebox_download::content_path(uid);
+
+                        DOWNLOAD_DIR.store(path.directory, Ordering::Relaxed);
+                        DOWNLOAD_FILE.store(path.file, Ordering::Relaxed);
+                        DOWNLOAD_SENT.store(0, Ordering::Relaxed);
+                        critical_section::with(|cs| {
+                            *DOWNLOAD_PIPE.borrow_ref_mut(cs) = Pipe::new()
+                        });
+                        // Raised before the first byte, so the consumer has the
+                        // file open by the time the pipe has anything in it.
+                        DOWNLOAD_STATE.store(DOWNLOAD_RUNNING, Ordering::Relaxed);
+
+                        DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
+                        let mut into_pipe = |bytes: &[u8]| -> usize {
+                            // Nobody is draining. Swallow the rest so the
+                            // download ends and reports, rather than blocking
+                            // forever on a pipe that will never empty.
+                            if DOWNLOAD_ABORT.load(Ordering::Relaxed) {
+                                return bytes.len();
+                            }
+                            let taken = critical_section::with(|cs| {
+                                DOWNLOAD_PIPE.borrow_ref_mut(cs).write(bytes)
+                            });
+                            DOWNLOAD_SENT.fetch_add(taken as u32, Ordering::Relaxed);
+                            taken
+                        };
+                        let outcome = tls::fetch(
+                            tls,
+                            &stack,
+                            &config.server,
+                            config.insecure,
+                            ruid,
+                            &mut into_pipe,
+                        )
+                        .await;
+                        // Ended either way: the consumer must stop waiting for
+                        // bytes that are never coming.
+                        DOWNLOAD_STATE.store(DOWNLOAD_ENDED, Ordering::Relaxed);
+
+                        match outcome {
                             Ok(got) => esp_println::println!(
-                                "teddiebox: get done — {} bytes, crc32 {:08X}, {} s",
+                                "teddiebox: get received {} bytes, crc32 {:08X}, {} s",
                                 got.bytes,
                                 got.crc32,
                                 got.seconds

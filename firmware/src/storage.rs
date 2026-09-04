@@ -92,6 +92,13 @@ pub static PAGE_READ_US: AtomicU64 = AtomicU64::new(0);
 /// found on the real card sat at `CONTENT/<8 hex>/500304E0`.
 const TONIE_CONTENT_DIR: &str = "CONTENT";
 
+/// Where downloads are cached, laid out exactly like `CONTENT`.
+///
+/// Same `<8 hex>/<8 hex>` split, so a file that finishes downloading sits
+/// where a stock one would and nothing has to translate between two
+/// conventions later.
+const CACHE_DIR: &str = "CACHE";
+
 /// Why the card's configuration could not be used.
 ///
 /// Three cases, kept apart because they call for different words: no file at
@@ -522,6 +529,81 @@ impl Mounted {
 
         let filled = outcome?;
         Config::parse_read(&buffer[..filled], buffer.len()).map_err(ConfigTrouble::Refused)
+    }
+
+    /// Opens `/CACHE/<directory>/<file>` for writing, creating whatever is
+    /// missing, and **discards anything already there**.
+    ///
+    /// Truncating is the honest behaviour until a sidecar exists. Resuming
+    /// needs to know how far a previous run got, and the only trustworthy
+    /// answer is what survived the last *flush* — `embedded-sdmmc` makes a
+    /// file's recorded length truthful only then. Appending without that
+    /// record would grow a file past its real content and fail a checksum a
+    /// long way from the cause; starting again is slower and correct.
+    ///
+    /// **One handle, opened once.** The reader and the writer share it — the
+    /// library refuses a second handle on the same file — so this is called
+    /// once per download and the offset moves between reads and appends, which
+    /// is why [`Mounted::append`] seeks to the end itself.
+    pub fn open_cache_for_write(&self, directory: u32, file: u32) -> Result<RawFile, &'static str> {
+        let mut folder_name = [0u8; 8];
+        let mut file_name = [0u8; 8];
+        write_hex8(&mut folder_name, directory);
+        write_hex8(&mut file_name, file);
+        let folder_name =
+            core::str::from_utf8(&folder_name).map_err(|_| "the directory name is not text")?;
+        let file_name =
+            core::str::from_utf8(&file_name).map_err(|_| "the file name is not text")?;
+
+        let cache = self.open_or_make_dir(self.root, CACHE_DIR)?;
+        let folder = self.open_or_make_dir(cache, folder_name)?;
+        let handle = self
+            .volumes
+            .open_file_in_dir(folder, file_name, Mode::ReadWriteCreateOrTruncate)
+            .map_err(|_| "the cache file would not open")?;
+        Ok(handle)
+    }
+
+    /// Opens a subdirectory, creating it if this is the first download.
+    ///
+    /// Creating first and opening second would fail on every run after the
+    /// first, so it is the other way round.
+    fn open_or_make_dir(
+        &self,
+        parent: RawDirectory,
+        name: &str,
+    ) -> Result<RawDirectory, &'static str> {
+        if let Ok(dir) = self.volumes.open_dir(parent, name) {
+            return Ok(dir);
+        }
+        self.volumes
+            .make_dir_in_dir(parent, name)
+            .map_err(|_| "could not create the cache directory")?;
+        self.volumes
+            .open_dir(parent, name)
+            .map_err(|_| "the cache directory would not open after being created")
+    }
+
+    /// Appends to a cache file, **seeking to the end first**.
+    ///
+    /// The seek is the point. This handle is shared with the reader, so by the
+    /// time more bytes arrive the offset is wherever the decoder left it — and
+    /// a write there overwrites part of the story instead of extending it,
+    /// silently, in bytes the decoder has already been promised.
+    pub fn append(&self, file: RawFile, bytes: &[u8]) -> Result<(), &'static str> {
+        self.volumes
+            .file_seek_from_end(file, 0)
+            .map_err(|_| "could not seek to the end")?;
+        self.volumes
+            .write(file, bytes)
+            .map_err(|_| "the write failed")
+    }
+
+    /// Makes what has been written durable and the recorded length truthful.
+    pub fn flush(&self, file: RawFile) -> Result<(), &'static str> {
+        self.volumes
+            .flush_file(file)
+            .map_err(|_| "the flush failed")
     }
 
     /// Opens a file in the root directory for reading.
