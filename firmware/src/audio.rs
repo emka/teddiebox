@@ -53,6 +53,11 @@ const LOG_EVERY: Duration = Duration::from_secs(5);
 /// five-minute run for no benefit.
 const BUFFER_FULL_WAIT: Duration = Duration::from_millis(1);
 
+/// How many consecutive full-buffer waits mean something is wrong rather than
+/// busy. At one millisecond each, this is a second of a buffer that holds
+/// about 170 ms.
+const STALL_REPORT_AFTER: u32 = 1000;
+
 type Blocking = esp_hal::Blocking;
 
 /// Plays the first `.WAV` in the card's root directory.
@@ -501,9 +506,26 @@ async fn play_taf_inner(
     let mut decode_us: u64 = 0;
 
     let mut stopped = false;
+    let mut underran = false;
+    // Consecutive milliseconds the buffer has refused a byte.
+    let mut stalled: u32 = 0;
     loop {
         if STOP.swap(false, Ordering::Relaxed) {
             stopped = true;
+            break;
+        }
+        // Checked before the buffer level, because the level cannot tell this
+        // apart. `available_bytes` counts descriptors the CPU owns, so zero
+        // means either "full" or "the DMA has stopped owning nothing back" —
+        // and `DmaTxStreamBuf` stops for good when its chain runs dry. Read as
+        // fullness it produces a loop that waits for ever on a buffer that is
+        // actually empty and dead, reporting 100% and no underruns while a
+        // child hears silence.
+        if transfer.is_done() {
+            esp_println::println!(
+                "teddiebox: taf underran after {frames} frames — the DMA ran dry and stopped"
+            );
+            underran = true;
             break;
         }
         cushion.observe(BUFFER_BYTES.saturating_sub(transfer.available_bytes()) as u32);
@@ -532,6 +554,22 @@ async fn play_taf_inner(
         if pushed == 0 {
             // The buffer is full and a frame is waiting. Let the DMA drain.
             Timer::after(BUFFER_FULL_WAIT).await;
+            stalled += 1;
+            // A full buffer is normal for a millisecond. A full buffer for a
+            // second means nothing is draining it, and "full" is then a lie:
+            // `available_bytes` counts descriptors owned by the CPU, so a DMA
+            // that has stopped owns them all and reads as full rather than as
+            // dead. Say which it is, once.
+            if stalled == STALL_REPORT_AFTER {
+                esp_println::println!(
+                    "teddiebox: taf buffer has not drained in {} ms — dma done {}, available {}",
+                    STALL_REPORT_AFTER,
+                    transfer.is_done(),
+                    transfer.available_bytes()
+                );
+            }
+        } else {
+            stalled = 0;
         }
 
         if last_log.elapsed() >= LOG_EVERY {
@@ -550,6 +588,16 @@ async fn play_taf_inner(
                 pcm_crc.finish(),
                 decode_us * 100 / so_far
             );
+            // `available_bytes` counts descriptors the CPU owns, so a DMA that
+            // has stopped reads as a *full* buffer rather than an empty one —
+            // which is why a stall reports 100% and no underruns. These two
+            // say which it really is.
+            esp_println::println!(
+                "teddiebox: taf   dma done {}, available {} bytes, pending {}",
+                transfer.is_done(),
+                transfer.available_bytes(),
+                pending.len()
+            );
             let card_us = PAGE_READ_US.load(Ordering::Relaxed);
             esp_println::println!(
                 "teddiebox: taf   of that, card reads {}% and decode {}%",
@@ -564,7 +612,7 @@ async fn play_taf_inner(
     // A stop must not wait for the buffer to drain — that is most of a second
     // of audio after the word was typed, which does not read as having
     // stopped.
-    if !stopped {
+    if !stopped && !underran {
         while !transfer.is_done() {
             yield_now().await;
         }
@@ -582,10 +630,19 @@ async fn play_taf_inner(
         );
     }
     esp_println::println!(
-        "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns",
+        // The underrun count comes from the cushion, which watches the buffer
+        // level and cannot see this one: a stopped DMA reads as a full buffer,
+        // so the level never reaches zero. Reported alongside rather than
+        // folded in, so the cushion keeps meaning what it measures.
+        "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns{}",
         elapsed.as_secs(),
         cushion.low_water_percent(),
-        cushion.underruns()
+        cushion.underruns(),
+        if underran {
+            " + the DMA ran dry and stopped"
+        } else {
+            ""
+        }
     );
     esp_println::println!("teddiebox: taf pcm crc32 {:08X}", pcm_crc.finish());
 
