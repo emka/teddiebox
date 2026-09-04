@@ -50,7 +50,7 @@ use crate::pins::BoardPins;
 /// buffers, so 72 KiB is inside the plausible band and near the bottom of it.
 /// Named rather than written inline so that the device plan's measurement has
 /// exactly one place to land.
-const RADIO_HEAP: usize = 72 * 1024;
+const RADIO_HEAP: usize = 88 * 1024;
 
 // The ESP-IDF-style bootloader identifies an app by this descriptor. Without
 // it the image links but no flashing tool will accept it — a failure a build
