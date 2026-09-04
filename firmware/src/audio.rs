@@ -506,7 +506,10 @@ async fn play_taf_inner(
     let mut decode_us: u64 = 0;
 
     let mut stopped = false;
-    let mut underran = false;
+    // How many times the DMA ran off the end of its descriptor chain and had
+    // to be started again. Zero is the only good number; anything else is
+    // audible.
+    let mut restarts: u32 = 0;
     // Consecutive milliseconds the buffer has refused a byte.
     let mut stalled: u32 = 0;
     loop {
@@ -521,12 +524,32 @@ async fn play_taf_inner(
         // fullness it produces a loop that waits for ever on a buffer that is
         // actually empty and dead, reporting 100% and no underruns while a
         // child hears silence.
+        // The chain has ended. `DmaTxStreamBuf` links each filled descriptor
+        // onto a list that always terminates in a null `next`, so if the DMA
+        // reaches that tail before the CPU appends the next one it runs off the
+        // end and *stops* — and writing `prev.next` afterwards does not revive
+        // it. Every append is a chance to lose that race, which is why load
+        // makes it likelier and why it happens with the buffer still two-thirds
+        // full rather than empty.
+        //
+        // So this is not something to be fast enough to avoid. Restart the
+        // transfer and carry on: a gap of a few milliseconds is a glitch, and
+        // the alternative is silence for the rest of the story.
         if transfer.is_done() {
-            esp_println::println!(
-                "teddiebox: taf underran after {frames} frames — the DMA ran dry and stopped"
-            );
-            underran = true;
-            break;
+            restarts += 1;
+            let (tx, buf) = transfer.stop();
+            transfer = match tx.write(buf) {
+                Ok(started) => started,
+                Err((_, tx, buffer)) => {
+                    esp_println::println!(
+                        "teddiebox: taf could not restart the DMA after {frames} frames"
+                    );
+                    card.close_file(file);
+                    release_scratch();
+                    return Err(("the DMA would not restart", tx, buffer));
+                }
+            };
+            continue;
         }
         cushion.observe(BUFFER_BYTES.saturating_sub(transfer.available_bytes()) as u32);
 
@@ -612,7 +635,7 @@ async fn play_taf_inner(
     // A stop must not wait for the buffer to drain — that is most of a second
     // of audio after the word was typed, which does not read as having
     // stopped.
-    if !stopped && !underran {
+    if !stopped {
         while !transfer.is_done() {
             yield_now().await;
         }
@@ -634,15 +657,11 @@ async fn play_taf_inner(
         // level and cannot see this one: a stopped DMA reads as a full buffer,
         // so the level never reaches zero. Reported alongside rather than
         // folded in, so the cushion keeps meaning what it measures.
-        "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns{}",
+        "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns, {} dma restarts",
         elapsed.as_secs(),
         cushion.low_water_percent(),
         cushion.underruns(),
-        if underran {
-            " + the DMA ran dry and stopped"
-        } else {
-            ""
-        }
+        restarts
     );
     esp_println::println!("teddiebox: taf pcm crc32 {:08X}", pcm_crc.finish());
 
