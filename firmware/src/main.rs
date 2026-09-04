@@ -7,6 +7,7 @@ mod libc_shim;
 mod net;
 mod nfc;
 mod pins;
+mod stack;
 mod storage;
 mod tls;
 
@@ -1560,6 +1561,11 @@ async fn main(spawner: Spawner) {
     // behind: adding this heap moved `_stack_start - _stack_end` from 219_788
     // bytes to 137_104. That is the number a bench measures, not the heap
     // size, because it is the one that decides whether the box still boots.
+    // Before anything has had a chance to go deep. Everything below this
+    // frame is free right now, and whatever is used before this point is
+    // invisible to the measurement afterwards.
+    stack::paint();
+
     esp_alloc::heap_allocator!(size: RADIO_HEAP);
 
     let timg0 = TimerGroup::new(p.TIMG0);
@@ -1609,7 +1615,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> | net scan ssid <name> pw <pass> insecure yes|no up down tls status | cinit cdown cset cclr out spk | pcm <2hex>"
+        "teddiebox: dl rb | t wav taf play <id>/<id> stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> | net scan ssid <name> pw <pass> insecure yes|no up down tls status | stack | cinit cdown cset cclr out spk | pcm <2hex>"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -1868,6 +1874,29 @@ async fn main(spawner: Spawner) {
                     GET_RUID.store(u64::from_be_bytes(ruid), Ordering::Relaxed);
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);
                 }
+                Some(Command::StackReport) => match stack::high_water() {
+                    None => esp_println::println!("teddiebox: stack was never painted"),
+                    Some(used) => {
+                        if used.exhausted {
+                            // A floor, not an answer. Saying "deepest" here
+                            // would be the same mistake that has already cost
+                            // two bench sessions.
+                            esp_println::println!(
+                                "teddiebox: stack at least {} of {} bytes — the paint is gone \
+                                 everywhere, so this is a floor",
+                                used.bytes,
+                                used.total
+                            );
+                        } else {
+                            esp_println::println!(
+                                "teddiebox: stack deepest {} of {} bytes, {} spare",
+                                used.bytes,
+                                used.total,
+                                used.total.saturating_sub(used.bytes)
+                            );
+                        }
+                    }
+                },
                 Some(Command::NetTls) => {
                     NET_REQUEST.store(NET_TLS, Ordering::Relaxed);
                 }

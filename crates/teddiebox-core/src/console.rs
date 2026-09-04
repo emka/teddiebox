@@ -134,6 +134,12 @@ pub enum Command {
     /// the cipher suite or the record layer, and a failure in a download is
     /// not — which is the difference between a bisect and a guess.
     NetTls,
+    /// Report how deep the stack has ever gone.
+    ///
+    /// Sizing anything that shares DRAM with the stack — the audio buffer, a
+    /// second core's stack — needs this number, and until now it has only ever
+    /// been assumed.
+    StackReport,
     /// Check the server's certificate, or don't.
     ///
     /// A bench override of the card's `insecure` key, the way
@@ -254,6 +260,7 @@ impl CommandWatch {
                     b"net scan" => Some(Command::NetScan),
                     b"net up" => Some(Command::NetUp),
                     b"net tls" => Some(Command::NetTls),
+                    b"stack" => Some(Command::StackReport),
                     b"net insecure yes" | b"net insecure true" => Some(Command::NetInsecure(true)),
                     b"net insecure no" | b"net insecure false" => Some(Command::NetInsecure(false)),
                     b"net down" => Some(Command::NetDown),
@@ -988,5 +995,11 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304E00\n"), None);
         assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304EZ\n"), None);
         assert_eq!(feed_all(&mut watch, b"get \n"), None);
+    }
+    /// The measurement three experiments this session guessed at instead.
+    #[test]
+    fn stack_is_recognised() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"stack\n"), Some(Command::StackReport));
     }
 }
