@@ -547,6 +547,13 @@ const NET_UP: u8 = 2;
 const NET_DOWN: u8 = 3;
 const NET_STATUS: u8 = 4;
 const NET_TLS: u8 = 5;
+const NET_GET: u8 = 6;
+
+/// The identifier `get` was last handed, as its eight bytes.
+///
+/// A `u64` rather than a mutex because that is exactly the width, and the
+/// console writes it before raising the request that reads it.
+static GET_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 
 /// Credentials typed at the bench.
 ///
@@ -1115,6 +1122,21 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                 // `acquire` and `release`. It is awaited inline, so the runner
                 // beside it keeps polling for its whole length — a handshake
                 // is several round trips and would stall without it.
+                NET_GET => match tls {
+                    None => esp_println::println!("teddiebox: tls context unavailable"),
+                    Some(tls) => {
+                        let ruid = GET_RUID.load(Ordering::Relaxed).to_be_bytes();
+                        match tls::fetch(tls, &stack, &config.server, config.insecure, ruid).await {
+                            Ok(got) => esp_println::println!(
+                                "teddiebox: get done — {} bytes, crc32 {:08X}, {} s",
+                                got.bytes,
+                                got.crc32,
+                                got.seconds
+                            ),
+                            Err(e) => esp_println::println!("teddiebox: get failed — {e:?}"),
+                        }
+                    }
+                },
                 NET_TLS => match tls {
                     None => esp_println::println!(
                         "teddiebox: tls context unavailable — mbedtls would not start"
@@ -1220,7 +1242,7 @@ async fn net(wifi: esp_hal::peripherals::WIFI<'static>) {
             NET_UP => bring_up(&mut radio, tls).await,
             // `net status` and `net down` are answered inside `bring_up` while
             // it is running. Reaching them here means it is not.
-            NET_STATUS | NET_DOWN | NET_TLS => {
+            NET_STATUS | NET_DOWN | NET_TLS | NET_GET => {
                 esp_println::println!("teddiebox: net is down")
             }
             _ => {}
@@ -1637,6 +1659,10 @@ async fn main(spawner: Spawner) {
                         "teddiebox: net certificates {} — takes effect on the next connection",
                         if insecure { "NOT checked" } else { "checked" }
                     );
+                }
+                Some(Command::Get(ruid)) => {
+                    GET_RUID.store(u64::from_be_bytes(ruid), Ordering::Relaxed);
+                    NET_REQUEST.store(NET_GET, Ordering::Relaxed);
                 }
                 Some(Command::NetTls) => {
                     NET_REQUEST.store(NET_TLS, Ordering::Relaxed);

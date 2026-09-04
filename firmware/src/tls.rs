@@ -18,12 +18,15 @@ use core::ffi::CStr;
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
-use embassy_time::Duration;
+use embassy_time::{Duration, Instant};
 use mbedtls_rs::{
     AuthMode, ClientSessionConfig, Session, SessionConfig, SessionError, Tls, TlsReference,
     TlsVersion,
 };
 use static_cell::StaticCell;
+use teddiebox_cloud::stream::{self, Begun, Body};
+use teddiebox_cloud::{CloudError, ContentRequest, Route};
+use teddiebox_core::checksum::Crc32;
 
 /// How long to wait for the TCP connect and the handshake.
 ///
@@ -74,6 +77,17 @@ pub enum Error {
     /// `mbedtls-rs` runs the handshake lazily on first use, so this is where a
     /// handshake failure actually surfaces.
     Stream(SessionError),
+    /// The server answered, and the answer was not a body.
+    Cloud(CloudError),
+    /// The server has nothing filed under that identifier.
+    NoContent,
+}
+
+/// What a fetch found. Nothing is written to the card.
+pub struct Fetched {
+    pub bytes: u32,
+    pub crc32: u32,
+    pub seconds: u32,
 }
 
 /// The one-time mbedtls context, and the RNG it holds.
@@ -273,4 +287,112 @@ pub async fn probe(
 
     let _ = session.close().await;
     Ok(())
+}
+
+/// Downloads one content file and checksums it, **writing nothing**.
+///
+/// This is the transport and protocol proven end to end, on its own: TLS, the
+/// request shape, the range rule and the body stream, against a file whose
+/// length and checksum the host already knows. Keeping the card out of it means
+/// a first failure is in one of those and not in the filesystem — and it side-
+/// steps, for now, the open question of how a download and the media task share
+/// a card that `embedded-sdmmc` will not open twice.
+///
+/// `ruid` is the identifier as it appears in the URL. `ContentRequest` reverses
+/// what it is given, so it is handed over backwards to come out the right way.
+///
+/// **Route V1, deliberately.** `/v2` accepts the connection on this server and
+/// then never answers; `/v1` returns the file. Measured, unexplained, and
+/// written up in the design.
+pub async fn fetch(
+    tls: TlsReference<'_>,
+    stack: &Stack<'_>,
+    server: &str,
+    insecure: bool,
+    ruid: [u8; 8],
+) -> Result<Fetched, Error> {
+    let mut name = [0u8; MAX_NAME];
+    let (name_len, port) = split_server(server, &mut name)?;
+    let host = core::str::from_utf8(&name[..name_len - 1]).map_err(|_| Error::MalformedServer)?;
+
+    let addresses = stack
+        .dns_query(host, DnsQueryType::A)
+        .await
+        .map_err(|_| Error::NoSuchHost)?;
+    let address = *addresses.first().ok_or(Error::NoSuchHost)?;
+
+    // The socket and the session borrow these, so they have to be built in the
+    // frame that uses them — which is why this repeats `probe`'s setup rather
+    // than calling a helper that returns a session.
+    let mut rx = [0u8; TCP_BUFFER];
+    let mut tx = [0u8; TCP_BUFFER];
+    let mut socket = TcpSocket::new(*stack, &mut rx, &mut tx);
+    socket.set_timeout(Some(CONNECT_TIMEOUT));
+    socket
+        .connect((address, port))
+        .await
+        .map_err(|_| Error::Connect)?;
+
+    let server_name =
+        CStr::from_bytes_with_nul(&name[..name_len]).map_err(|_| Error::MalformedServer)?;
+    let mut session = Session::new(
+        tls,
+        socket,
+        &SessionConfig::Client(client_config(insecure, server_name)),
+    )
+    .map_err(Error::Handshake)?;
+
+    let mut uid = ruid;
+    uid.reverse();
+    let request = ContentRequest {
+        uid,
+        route: Route::V1,
+        etag: None,
+        server,
+        from: None,
+    };
+
+    let started = Instant::now();
+    let mut buf = [0u8; 1024];
+    let begun = stream::begin(&mut session, &request, &mut buf)
+        .await
+        .map_err(Error::Cloud)?;
+
+    let (body_length, prefix) = match begun {
+        Begun::NotFound | Begun::Unchanged => return Err(Error::NoContent),
+        Begun::Content {
+            body_length,
+            prefix,
+            ..
+        } => (body_length, prefix),
+    };
+
+    let mut crc = Crc32::new();
+    crc.update(&buf[prefix.clone()]);
+    let mut received = prefix.len() as u32;
+    let mut body = Body::new(body_length, received);
+    esp_println::println!("teddiebox: get {body_length} bytes to read");
+
+    // A forty-megabyte file takes long enough that silence is indistinguishable
+    // from a hang, which is the thing this bench has mistaken twice already.
+    let mut announced = 0u32;
+    while !body.is_complete() {
+        let n = body
+            .read(&mut session, &mut buf)
+            .await
+            .map_err(Error::Cloud)?;
+        crc.update(&buf[..n]);
+        received += n as u32;
+        if received - announced >= 1_048_576 {
+            announced = received;
+            esp_println::println!("teddiebox: get {received}/{body_length}");
+        }
+    }
+
+    let _ = session.close().await;
+    Ok(Fetched {
+        bytes: received,
+        crc32: crc.finish(),
+        seconds: started.elapsed().as_secs() as u32,
+    })
 }

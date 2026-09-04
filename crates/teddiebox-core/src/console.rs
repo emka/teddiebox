@@ -142,6 +142,14 @@ pub enum Command {
     /// certificates are checked is the setting most worth being able to flip
     /// without a screwdriver.
     NetInsecure(bool),
+    /// Download one content file and check it, without writing to the card.
+    ///
+    /// The eight bytes are the identifier **as it appears in the URL and in
+    /// teddyCloud's listing** — the reversed UID — so that what is typed can
+    /// be copied from the server and compared against it. `request.rs`
+    /// reverses again on the way out, which is why the caller hands these
+    /// over backwards.
+    Get([u8; 8]),
     /// Drop the association and power the modem down.
     NetDown,
     /// Report whether the radio is up, and on what address.
@@ -255,7 +263,8 @@ impl CommandWatch {
                         .or_else(|| parse_play_content(other))
                         .or_else(|| parse_dump_pcm(other))
                         .or_else(|| parse_read_memory(other))
-                        .or_else(|| parse_credential(other)),
+                        .or_else(|| parse_credential(other))
+                        .or_else(|| parse_get(other)),
                 }
             };
             self.len = 0;
@@ -322,6 +331,23 @@ fn parse_play_content(line: &[u8]) -> Option<Command> {
 /// Exactly two, because a register or a value written with one digit is a
 /// typo rather than a small number, and these go to a live codec where a
 /// wrong register is a write to something unrelated.
+/// Parses `get <16 hex>` into the eight identifier bytes.
+///
+/// All or nothing: an identifier a digit short names a different figure, and
+/// the server answers that with a `404` the box would report as "no content"
+/// — a wrong answer wearing the shape of a right one.
+fn parse_get(line: &[u8]) -> Option<Command> {
+    let rest = line.strip_prefix(b"get ")?;
+    if rest.len() != 16 {
+        return None;
+    }
+    let mut uid = [0u8; 8];
+    for (byte, digits) in uid.iter_mut().zip(rest.chunks_exact(2)) {
+        *byte = hex_byte(digits)?;
+    }
+    Some(Command::Get(uid))
+}
+
 fn hex_byte(digits: &[u8]) -> Option<u8> {
     if digits.len() != 2 {
         return None;
@@ -923,5 +949,44 @@ mod tests {
     fn net_tls_is_recognised() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"net tls\n"), Some(Command::NetTls));
+    }
+    /// `get` takes the identifier **as it appears in the URL and in
+    /// teddyCloud's own listing** — the reversed UID — because that is the
+    /// string a person can copy from the server and compare against. The
+    /// figure on the bench is UID `E0040350503F2E1D`, which teddyCloud files
+    /// under `1D2E3F50500304E0`.
+    #[test]
+    fn get_takes_the_reversed_uid_as_it_appears_on_the_server() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"get 1D2E3F50500304E0\n"),
+            Some(Command::Get([
+                0x1D, 0x2E, 0x3F, 0x50, 0x50, 0x03, 0x04, 0xE0
+            ]))
+        );
+    }
+
+    #[test]
+    fn get_accepts_lower_case_hex() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"get 1a2b3c4d500304e0\n"),
+            Some(Command::Get([
+                0x1A, 0x2B, 0x3C, 0x4D, 0x50, 0x03, 0x04, 0xE0
+            ]))
+        );
+    }
+
+    /// Short, long, or not hex is not a command. An identifier one digit out
+    /// names a different figure, and the server answers that with a 404 the
+    /// box would report as "no content" — a wrong answer that looks like a
+    /// right one.
+    #[test]
+    fn a_malformed_identifier_is_not_a_command() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304E\n"), None);
+        assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304E00\n"), None);
+        assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304EZ\n"), None);
+        assert_eq!(feed_all(&mut watch, b"get \n"), None);
     }
 }
