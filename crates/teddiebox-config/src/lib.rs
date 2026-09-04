@@ -108,6 +108,54 @@ fn parse_bool(value: &str) -> Result<bool, ConfigError> {
     }
 }
 
+/// Which settings the bench has typed, so a later card read cannot undo them.
+///
+/// The card is read **lazily**, at the first mount, which can happen after
+/// somebody has already typed an override — the mount is triggered by whatever
+/// first needs the card, and on this box that is often a network command. So
+/// "the card is read at boot, the console overrides it afterwards" is not true
+/// in the order it happens, and replacing the whole config on a card read
+/// silently undid the override. That cost an hour at the bench: certificates
+/// were checked immediately after the box confirmed it would not check them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Overridden {
+    pub ssid: bool,
+    pub password: bool,
+    pub server: bool,
+    pub insecure: bool,
+}
+
+impl Overridden {
+    /// Takes the card's value for every setting the bench has *not* typed.
+    ///
+    /// Per field rather than all-or-nothing: typing a passphrase must not pin
+    /// the ssid to whatever happened to be in memory before the card was read.
+    pub fn merge(self, card: Config, held: &Config) -> Config {
+        Config {
+            ssid: if self.ssid {
+                held.ssid.clone()
+            } else {
+                card.ssid
+            },
+            password: if self.password {
+                held.password.clone()
+            } else {
+                card.password
+            },
+            server: if self.server {
+                held.server.clone()
+            } else {
+                card.server
+            },
+            insecure: if self.insecure {
+                held.insecure
+            } else {
+                card.insecure
+            },
+        }
+    }
+}
+
 impl Config {
     /// Parses a file that was read into a fixed buffer.
     ///
@@ -405,5 +453,59 @@ mod tests {
             Config::parse_read(&[0xFF, 0xFE, 0x00], 64),
             Err(ConfigError::NotText)
         );
+    }
+    fn card() -> Config {
+        Config::parse("ssid = FromCard\npassword = cardpw\nserver = card:1\ninsecure = no\n")
+            .unwrap()
+    }
+
+    /// The bug this exists to prevent, caught on the bench: the card is read
+    /// lazily, at the first mount, which can be *after* somebody has typed an
+    /// override. Replacing the whole struct then silently undid it, and the box
+    /// checked certificates the bench had just told it not to.
+    #[test]
+    fn a_later_card_read_does_not_undo_what_the_bench_set() {
+        let mut held = card();
+        held.insecure = true;
+        let overridden = Overridden {
+            insecure: true,
+            ..Overridden::default()
+        };
+
+        let merged = overridden.merge(card(), &held);
+        assert!(merged.insecure, "the card undid the override");
+        assert_eq!(
+            merged.ssid.as_str(),
+            "FromCard",
+            "and the rest still came from the card"
+        );
+    }
+
+    /// Nothing overridden means the card wins outright, which is the ordinary
+    /// boot.
+    #[test]
+    fn an_untouched_setting_is_taken_from_the_card() {
+        let held = Config::parse("ssid = Old\nserver = old:1\n").unwrap();
+        let merged = Overridden::default().merge(card(), &held);
+        assert_eq!(merged.ssid.as_str(), "FromCard");
+        assert_eq!(merged.server.as_str(), "card:1");
+        assert!(!merged.insecure);
+    }
+
+    /// Each field is independent: overriding the passphrase must not pin the
+    /// ssid to whatever was in RAM before the card was read.
+    #[test]
+    fn overrides_are_per_field() {
+        let mut held = card();
+        held.password = heapless::String::try_from("typed").unwrap();
+        let overridden = Overridden {
+            password: true,
+            ..Overridden::default()
+        };
+
+        let merged = overridden.merge(card(), &held);
+        assert_eq!(merged.password.as_str(), "typed");
+        assert_eq!(merged.ssid.as_str(), "FromCard");
+        assert_eq!(merged.server.as_str(), "card:1");
     }
 }

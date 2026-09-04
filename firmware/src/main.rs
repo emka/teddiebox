@@ -18,7 +18,7 @@ use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
 use heapless::String;
-use teddiebox_config::Config;
+use teddiebox_config::{Config, Overridden};
 use teddiebox_core::console::{MAX_PASSPHRASE, MAX_SSID};
 
 use esp_backtrace as _;
@@ -698,12 +698,33 @@ static CONFIGURATION: CsMutex<RefCell<Config>> = CsMutex::new(RefCell::new(Confi
 /// different causes, so they are waited for — and reported — separately.
 const DHCP_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// What the bench has typed, so the card cannot undo it.
+static OVERRIDDEN: CsMutex<RefCell<Overridden>> = CsMutex::new(RefCell::new(Overridden {
+    ssid: false,
+    password: false,
+    server: false,
+    insecure: false,
+}));
+
 fn set_ssid(value: String<MAX_SSID>) {
-    critical_section::with(|cs| CONFIGURATION.borrow_ref_mut(cs).ssid = value);
+    critical_section::with(|cs| {
+        CONFIGURATION.borrow_ref_mut(cs).ssid = value;
+        OVERRIDDEN.borrow_ref_mut(cs).ssid = true;
+    });
 }
 
 fn set_password(value: String<MAX_PASSPHRASE>) {
-    critical_section::with(|cs| CONFIGURATION.borrow_ref_mut(cs).password = value);
+    critical_section::with(|cs| {
+        CONFIGURATION.borrow_ref_mut(cs).password = value;
+        OVERRIDDEN.borrow_ref_mut(cs).password = true;
+    });
+}
+
+fn set_insecure(value: bool) {
+    critical_section::with(|cs| {
+        CONFIGURATION.borrow_ref_mut(cs).insecure = value;
+        OVERRIDDEN.borrow_ref_mut(cs).insecure = true;
+    });
 }
 
 /// Publishes what the card said.
@@ -712,7 +733,11 @@ fn set_password(value: String<MAX_PASSPHRASE>) {
 /// writes over it afterwards, which is what makes a mistyped card
 /// diagnosable at the bench without pulling it.
 fn set_configuration(value: Config) {
-    critical_section::with(|cs| *CONFIGURATION.borrow_ref_mut(cs) = value);
+    critical_section::with(|cs| {
+        let overridden = *OVERRIDDEN.borrow_ref(cs);
+        let mut held = CONFIGURATION.borrow_ref_mut(cs);
+        *held = overridden.merge(value, &held);
+    });
 }
 
 /// The credentials shaped the way the radio wants them.
@@ -1833,9 +1858,7 @@ async fn main(spawner: Spawner) {
                     NET_REQUEST.store(NET_DOWN, Ordering::Relaxed);
                 }
                 Some(Command::NetInsecure(insecure)) => {
-                    critical_section::with(|cs| {
-                        CONFIGURATION.borrow_ref_mut(cs).insecure = insecure
-                    });
+                    set_insecure(insecure);
                     esp_println::println!(
                         "teddiebox: net certificates {} — takes effect on the next connection",
                         if insecure { "NOT checked" } else { "checked" }
