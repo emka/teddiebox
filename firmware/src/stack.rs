@@ -23,6 +23,13 @@ unsafe extern "C" {
     /// One past the highest address the stack occupies. It grows *down* from
     /// here.
     static _stack_start: u32;
+    /// The stack canary, at `_stack_end + ESP_HAL_CONFIG_STACK_GUARD_OFFSET`.
+    ///
+    /// **Never write here.** With `stack_guard_monitoring` the chip holds a
+    /// watchpoint on this word, so a single store traps immediately — which is
+    /// what a first attempt at this file did, taking the box down to a silent
+    /// boot that needed a J100 recovery to undo.
+    static __stack_chk_guard: u32;
 }
 
 /// The word written into free stack. Chosen to be implausible as data: a
@@ -46,7 +53,17 @@ static PAINTED_TO: AtomicUsize = AtomicUsize::new(0);
 /// frame is free at that moment, and anything already used before this runs is
 /// invisible to the measurement afterwards.
 pub fn paint() {
-    let low = &raw const _stack_end as usize;
+    // Start *above* the canary, never at `_stack_end`. Anything deeper than
+    // this is the guard's business and would trap on the write.
+    let low = (&raw const __stack_chk_guard as usize) + 4;
+    let floor = &raw const _stack_end as usize;
+    let ceiling = &raw const _stack_start as usize;
+    // Refuse rather than guess if the symbols are not the shape expected: a
+    // wrong address here writes over live memory and the box comes back
+    // silent, with nothing on the console to say why.
+    if low <= floor || low >= ceiling {
+        return;
+    }
     // A local's address is a good enough stand-in for the stack pointer, and
     // it does not need inline assembly to obtain.
     let here = {
@@ -54,7 +71,7 @@ pub fn paint() {
         &probe as *const u32 as usize
     };
     let stop = here.saturating_sub(HEADROOM);
-    if stop <= low {
+    if stop <= low || stop > ceiling {
         return;
     }
 
@@ -80,7 +97,7 @@ pub fn high_water() -> Option<Used> {
     if painted_to == 0 {
         return None;
     }
-    let low = &raw const _stack_end as usize;
+    let low = (&raw const __stack_chk_guard as usize) + 4;
     let high = &raw const _stack_start as usize;
 
     let mut at = low;
@@ -103,7 +120,7 @@ pub fn high_water() -> Option<Used> {
 pub struct Used {
     /// Bytes between the deepest point reached and the top of the stack.
     pub bytes: usize,
-    /// The whole stack, for comparison.
+    /// The stack from the canary up, which is all of it that may be used.
     pub total: usize,
     /// The paint was gone everywhere it was applied, so `bytes` is a floor and
     /// not the answer.

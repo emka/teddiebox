@@ -1564,7 +1564,14 @@ async fn main(spawner: Spawner) {
     // Before anything has had a chance to go deep. Everything below this
     // frame is free right now, and whatever is used before this point is
     // invisible to the measurement afterwards.
+    //
+    // Bracketed by prints because the first version of this trapped on the
+    // stack canary and the box came back **silent** — no console, no panic,
+    // nothing to say which line did it, and a J100 recovery to undo. A pair of
+    // lines costs nothing and turns that into a bisect of one.
+    esp_println::println!("teddiebox: painting the stack");
     stack::paint();
+    esp_println::println!("teddiebox: stack painted");
 
     esp_alloc::heap_allocator!(size: RADIO_HEAP);
 
