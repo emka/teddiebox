@@ -83,6 +83,7 @@ impl embedded_io_async::Write for Fake {
 fn request(from: Option<u32>) -> ContentRequest<'static> {
     ContentRequest {
         uid: UID,
+        route: teddiebox_cloud::Route::V2,
         etag: None,
         server: "box.lan:8080",
         from,
@@ -293,6 +294,7 @@ fn an_unchanged_file_reports_unchanged_and_reads_no_body() {
     let mut buf = [0u8; 256];
     let request = ContentRequest {
         uid: UID,
+        route: teddiebox_cloud::Route::V2,
         etag: Some(&etag),
         server: "box.lan:8080",
         from: None,

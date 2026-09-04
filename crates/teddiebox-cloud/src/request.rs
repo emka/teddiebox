@@ -20,6 +20,8 @@ pub type ETag = String<MAX_ETAG>;
 #[derive(Debug, Clone)]
 pub struct ContentRequest<'a> {
     pub uid: [u8; 8],
+    /// Which content route to ask.
+    pub route: Route,
     /// Echoed back as `If-None-Match` on a fresh request, or as `If-Range`
     /// when resuming.
     pub etag: Option<&'a ETag>,
@@ -27,6 +29,31 @@ pub struct ContentRequest<'a> {
     pub server: &'a str,
     /// Where to resume. `Some(n)` asks for `bytes=n-`.
     pub from: Option<u32>,
+}
+
+/// Which of teddyCloud's two content routes to ask.
+///
+/// [`Route::V2`] is the box's real endpoint and the default. [`Route::V1`]
+/// exists because the teddyCloud this project talks to does not answer on
+/// `/v2` at all — measured 2026-09-03, the connection is accepted and then
+/// nothing comes back, with and without an `Authorization` header, until the
+/// client times out. `/v1` returns the file. Upstream's source has `/v1` pass
+/// `noPassword = TRUE`, which is the likely difference, but the hang itself is
+/// unexplained and this is a way round it rather than a fix for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Route {
+    V1,
+    #[default]
+    V2,
+}
+
+impl Route {
+    const fn path(self) -> &'static str {
+        match self {
+            Route::V1 => "/v1/content/",
+            Route::V2 => "/v2/content/",
+        }
+    }
 }
 
 /// Writes a GET for the content of `tag` into `out`.
@@ -57,7 +84,7 @@ pub fn build_content_request(
 ) -> Result<usize, CloudError> {
     let mut buf = SliceWriter { out, used: 0 };
 
-    write!(buf, "GET /v2/content/").map_err(|_| CloudError::RequestTooLong)?;
+    write!(buf, "GET {}", request.route.path()).map_err(|_| CloudError::RequestTooLong)?;
     for b in request.uid.iter().rev() {
         write!(buf, "{b:02X}").map_err(|_| CloudError::RequestTooLong)?;
     }
@@ -121,6 +148,7 @@ mod tests {
         let mut out = [0u8; 512];
         let request = ContentRequest {
             uid: UID,
+            route: Route::V2,
             etag,
             server: "box.lan:8080",
             from: None,
@@ -133,6 +161,7 @@ mod tests {
         let mut out = [0u8; 512];
         let request = ContentRequest {
             uid: UID,
+            route: Route::V2,
             etag,
             server: "box.lan:8080",
             from,
@@ -145,6 +174,7 @@ mod tests {
         let mut out = [0u8; 512];
         let request = ContentRequest {
             uid,
+            route: Route::V2,
             etag: None,
             server: "box.lan:8080",
             from: None,
@@ -213,6 +243,7 @@ mod tests {
         let mut out = [0u8; 1024];
         let request = ContentRequest {
             uid: UID,
+            route: Route::V2,
             etag: None,
             server: &server,
             from: None,
@@ -227,6 +258,7 @@ mod tests {
         let mut out = [0u8; 8];
         let request = ContentRequest {
             uid: UID,
+            route: Route::V2,
             etag: None,
             server: "box.lan:8080",
             from: None,
@@ -278,5 +310,46 @@ mod tests {
         // unconditional GET and silently discard the etag check.
         let req = build_from(Some(0), None);
         assert!(req.contains("Range: bytes=0-\r\n"), "got: {req}");
+    }
+    /// `/v1` exists because `/v2` does not answer on the teddyCloud this
+    /// project talks to: measured 2026-09-03, `/v2/content/<ruid>` accepts the
+    /// connection and then hangs with zero bytes until the client gives up,
+    /// with and without an Authorization header, while `/v1` returns the file.
+    /// The route is selectable rather than swapped so that the default stays
+    /// the box's real endpoint.
+    #[test]
+    fn the_v1_route_is_written_when_it_is_asked_for() {
+        let mut out = [0u8; 512];
+        let request = ContentRequest {
+            uid: UID,
+            etag: None,
+            server: "box.lan:8080",
+            from: None,
+            route: Route::V1,
+        };
+        let n = build_content_request(&request, &mut out).unwrap();
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(
+            text.starts_with("GET /v1/content/"),
+            "wrote: {}",
+            text.lines().next().unwrap_or("")
+        );
+    }
+
+    /// And the default is unchanged, so selecting a route cannot silently
+    /// move every other caller onto it.
+    #[test]
+    fn the_default_route_is_still_v2() {
+        let mut out = [0u8; 512];
+        let request = ContentRequest {
+            uid: UID,
+            etag: None,
+            server: "box.lan:8080",
+            from: None,
+            route: Route::default(),
+        };
+        let n = build_content_request(&request, &mut out).unwrap();
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(text.starts_with("GET /v2/content/"), "wrote: {text}");
     }
 }

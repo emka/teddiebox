@@ -1,6 +1,6 @@
 //! One request/response exchange over any byte transport.
 
-use crate::{build_content_request, parse_head, CloudError, ContentRequest, ETag};
+use crate::{build_content_request, parse_head, CloudError, ContentRequest, ETag, Route};
 use embedded_io::{Read, Write};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +30,7 @@ pub fn fetch<T: Read + Write>(
     let n = build_content_request(
         &ContentRequest {
             uid,
+            route: Route::default(),
             etag,
             server,
             from: None,
