@@ -34,6 +34,12 @@ if pgrep -f "bench-console.*$PORT" >/dev/null 2>&1; then
     die "something is already reading $PORT; the port takes one owner — stop it first"
 fi
 
+# A box already sitting in download mode is silent, and asking it for `dl`
+# just times out. SKIP_DL=1 goes straight to flashing.
+if [ "${SKIP_DL:-0}" = "1" ]; then
+    echo "flash: assuming the box is already in download mode"
+else
+
 # Ask the firmware to reboot into the ROM's download mode. This is the only
 # software route in, and it needs the console to be listening: a box whose
 # console has stopped reading, or which crashes before the console starts, can
@@ -53,6 +59,8 @@ if ! grep -q "waiting for download" "$capture"; then
     die "no answer from the box on $PORT.
      If it is already in download mode this is expected — rerun with SKIP_DL=1.
      Otherwise short J100 and apply power cold."
+fi
+
 fi
 
 echo "flash: writing $ELF"
