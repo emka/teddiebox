@@ -107,6 +107,15 @@ const TONIE_CONTENT_DIR: &str = "CONTENT";
 /// conventions later.
 const CACHE_DIR: &str = "CACHE";
 
+/// Where the box's own certificates live, mirroring the `cert/` directory the
+/// stock firmware keeps them in on flash.
+///
+/// The same three files a teddyCloud setup extracts: `CLIENT.DER` identifies
+/// this box to the server, `PRIVATE.DER` proves it, `CA.DER` is Boxine's own
+/// authority. All three are 8.3 names already, so `open_file_in_dir` reaches
+/// them directly.
+const CERT_DIR: &str = "CERT";
+
 /// Why the card's configuration could not be used.
 ///
 /// Three cases, kept apart because they call for different words: no file at
@@ -649,6 +658,40 @@ impl Mounted {
         self.volumes
             .flush_file(file)
             .map_err(|_| "the flush failed")
+    }
+
+    /// Reads one of the box's certificates off the card.
+    ///
+    /// Returns how many bytes were read. A read that fills the buffer is
+    /// refused rather than truncated: half a DER structure is not a smaller
+    /// certificate, it is a parse failure several layers away from here.
+    ///
+    /// **`PRIVATE.DER` is the key that identifies this box to the tonies
+    /// cloud.** It is read into memory and never printed, and the card it sits
+    /// on is readable by anything with a card reader — which is a property of
+    /// where the stock firmware keeps it too, but worth knowing.
+    pub fn read_certificate(&self, name: &str, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        let dir = self
+            .volumes
+            .open_dir(self.root, CERT_DIR)
+            .map_err(|_| "no CERT directory on the card")?;
+        let file = self.volumes.open_file_in_dir(dir, name, Mode::ReadOnly);
+        let _ = self.volumes.close_dir(dir);
+        let file = file.map_err(|_| "no such certificate")?;
+
+        let mut filled = 0;
+        let outcome = loop {
+            if filled == buffer.len() {
+                break Err("the certificate is larger than its buffer");
+            }
+            match self.volumes.read(file, &mut buffer[filled..]) {
+                Ok(0) => break Ok(filled),
+                Ok(n) => filled += n,
+                Err(_) => break Err("the certificate would not read"),
+            }
+        };
+        self.close_file(file);
+        outcome
     }
 
     /// Opens a file in the root directory for reading.

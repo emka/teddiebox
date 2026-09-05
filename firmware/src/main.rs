@@ -1008,6 +1008,40 @@ async fn quieten_codec() {
 /// they configured.
 const CONFIG_BUFFER: usize = 2048;
 
+/// Reads the box's certificate and private key off the card, if they are there.
+///
+/// Optional by design: without them the box can still fetch anything the server
+/// already holds, which is most of what a bench does. They are what let
+/// teddyCloud tell *which* box is asking, and so what lets it fetch a figure it
+/// has no copy of.
+///
+/// Nothing about the key is printed but its length.
+fn read_identity(card: &storage::Mounted) {
+    let mut certificate = [0u8; tls::CERT_BYTES];
+    let mut key = [0u8; tls::CERT_BYTES];
+
+    let read = card
+        .read_certificate("CLIENT.DER", &mut certificate)
+        .and_then(|c| {
+            card.read_certificate("PRIVATE.DER", &mut key)
+                .map(|k| (c, k))
+        });
+
+    match read {
+        Ok((c, k)) => {
+            if tls::set_identity(&certificate[..c], &key[..k]) {
+                // The certificate's length, never the key's contents.
+                esp_println::println!("teddiebox: identity {c} byte certificate, {k} byte key");
+            } else {
+                esp_println::println!("teddiebox: identity already set");
+            }
+        }
+        Err(reason) => esp_println::println!(
+            "teddiebox: identity none — {reason}; the server will not know which box is asking"
+        ),
+    }
+}
+
 /// Reads `CONFIG.TXT` the first time the card is available, and says what it
 /// found.
 ///
@@ -1024,6 +1058,8 @@ fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
         return;
     }
     *done = true;
+
+    read_identity(card);
 
     let mut buffer = [0u8; CONFIG_BUFFER];
     match card.read_config(&mut buffer) {

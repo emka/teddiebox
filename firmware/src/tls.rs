@@ -15,6 +15,8 @@
 
 use core::ffi::CStr;
 
+use core::cell::RefCell;
+use critical_section::Mutex as CsMutex;
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
@@ -22,8 +24,8 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_hal::peripherals::{AES, RSA, SHA};
 use mbedtls_rs::sys::hook::backend::esp::{EspAccel, EspAccelQueue, EspHooksGuard};
 use mbedtls_rs::{
-    AuthMode, ClientSessionConfig, Session, SessionConfig, SessionError, Tls, TlsReference,
-    TlsVersion,
+    AuthMode, Certificate, ClientSessionConfig, Credentials, PrivateKey, Session, SessionConfig,
+    SessionError, Tls, TlsReference, TlsVersion, X509,
 };
 use static_cell::StaticCell;
 use teddiebox_cloud::stream::{self, Begun, Body};
@@ -101,6 +103,67 @@ pub struct Fetched {
     pub bytes: u32,
     pub crc32: u32,
     pub seconds: u32,
+}
+
+/// How much room each of the box's two credential files is given.
+///
+/// The real ones are 1030 and 1190 bytes; this leaves room for a re-issued
+/// certificate without silently failing to fit, and a file that fills its
+/// buffer is refused rather than truncated.
+pub const CERT_BYTES: usize = 1536;
+
+/// The box's certificate and the key that proves it.
+///
+/// Held for the life of the firmware because a session borrows the certificate
+/// rather than copying it, and there is a session per download.
+struct Identity {
+    certificate: [u8; CERT_BYTES],
+    certificate_len: usize,
+    key: [u8; CERT_BYTES],
+    key_len: usize,
+}
+
+impl Identity {
+    fn certificate(&self) -> &[u8] {
+        &self.certificate[..self.certificate_len]
+    }
+
+    fn key(&self) -> &[u8] {
+        &self.key[..self.key_len]
+    }
+}
+
+static IDENTITY_CELL: StaticCell<Identity> = StaticCell::new();
+static IDENTITY: CsMutex<RefCell<Option<&'static Identity>>> = CsMutex::new(RefCell::new(None));
+
+/// Publishes the box's identity, once.
+///
+/// Called by whoever owns the card. Returns whether it took: a second call is
+/// refused rather than replacing credentials a session may be holding.
+pub fn set_identity(certificate: &[u8], key: &[u8]) -> bool {
+    if certificate.len() > CERT_BYTES || key.len() > CERT_BYTES {
+        return false;
+    }
+    let mut held = Identity {
+        certificate: [0; CERT_BYTES],
+        certificate_len: certificate.len(),
+        key: [0; CERT_BYTES],
+        key_len: key.len(),
+    };
+    held.certificate[..certificate.len()].copy_from_slice(certificate);
+    held.key[..key.len()].copy_from_slice(key);
+
+    match IDENTITY_CELL.try_init(held) {
+        Some(id) => {
+            critical_section::with(|cs| *IDENTITY.borrow_ref_mut(cs) = Some(id));
+            true
+        }
+        None => false,
+    }
+}
+
+fn identity() -> Option<&'static Identity> {
+    critical_section::with(|cs| *IDENTITY.borrow_ref(cs))
 }
 
 /// The one-time mbedtls context, and the RNG it holds.
@@ -230,8 +293,13 @@ pub fn init(
 /// `min_version` is pinned to 1.2 rather than left at the default because this
 /// server offers nothing else; a build that quietly negotiated something else
 /// would be talking to a server this project has not measured.
-pub fn client_config<'a>(insecure: bool, server_name: &'a CStr) -> ClientSessionConfig<'a> {
+pub fn client_config<'a>(
+    insecure: bool,
+    server_name: &'a CStr,
+    creds: Option<Credentials<'a>>,
+) -> ClientSessionConfig<'a> {
     ClientSessionConfig {
+        creds,
         server_name: Some(server_name),
         auth_mode: if insecure {
             AuthMode::None
@@ -314,7 +382,7 @@ pub async fn probe(
     let mut session = Session::new(
         tls,
         socket,
-        &SessionConfig::Client(client_config(insecure, server_name)),
+        &SessionConfig::Client(client_config(insecure, server_name, None)),
     )
     .map_err(Error::Handshake)?;
 
@@ -430,7 +498,7 @@ pub async fn fetch(
     let mut session = Session::new(
         tls,
         socket,
-        &SessionConfig::Client(client_config(insecure, server_name)),
+        &SessionConfig::Client(client_config(insecure, server_name, credentials())),
     )
     .map_err(Error::Handshake)?;
 
@@ -533,4 +601,19 @@ async fn hand_over(bytes: &[u8], sink: &mut dyn FnMut(&[u8]) -> usize) {
             Timer::after(Duration::from_millis(20)).await;
         }
     }
+}
+
+/// The box's credentials, if the card carried them.
+///
+/// `None` is not a failure: without them the box can still fetch anything the
+/// server already holds. They are what let teddyCloud tell *which* box is
+/// asking, and so what lets it fetch a figure it has no copy of.
+fn credentials() -> Option<Credentials<'static>> {
+    let held = identity()?;
+    Some(Credentials {
+        // Borrowed rather than copied, which is why the identity is a static:
+        // mbedtls reads it for the length of the session.
+        certificate: Certificate::new_no_copy(held.certificate()).ok()?,
+        private_key: PrivateKey::new(X509::DER(held.key()), None).ok()?,
+    })
 }
