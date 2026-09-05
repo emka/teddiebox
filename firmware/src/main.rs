@@ -1020,6 +1020,20 @@ fn read_identity(card: &storage::Mounted) {
     let mut certificate = [0u8; tls::CERT_BYTES];
     let mut key = [0u8; tls::CERT_BYTES];
 
+    // The authority first, and separately: verifying the server is useful even
+    // on a box that cannot prove who it is, and the two failures want different
+    // words.
+    match card.read_certificate("TCCA.DER", &mut certificate) {
+        Ok(n) if tls::set_anchor(&certificate[..n]) => {
+            esp_println::println!("teddiebox: identity server verified against a {n} byte CA")
+        }
+        Ok(_) => esp_println::println!("teddiebox: identity CA already set"),
+        Err(reason) => esp_println::println!(
+            "teddiebox: identity no CA — {reason}; the server cannot be verified, \
+             so `insecure = yes` is the only way it will connect"
+        ),
+    }
+
     let read = card
         .read_certificate("CLIENT.DER", &mut certificate)
         .and_then(|c| {

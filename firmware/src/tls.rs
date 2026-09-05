@@ -13,8 +13,6 @@
 //!
 //! **Certificates are not checked yet.** See [`client_config`].
 
-use core::ffi::CStr;
-
 use core::cell::RefCell;
 use critical_section::Mutex as CsMutex;
 use embassy_net::dns::DnsQueryType;
@@ -121,6 +119,39 @@ struct Identity {
     certificate_len: usize,
     key: [u8; CERT_BYTES],
     key_len: usize,
+}
+
+/// The authority the server's certificate is checked against.
+struct Anchor {
+    certificate: [u8; CERT_BYTES],
+    len: usize,
+}
+
+static ANCHOR_CELL: StaticCell<Anchor> = StaticCell::new();
+static ANCHOR: CsMutex<RefCell<Option<&'static Anchor>>> = CsMutex::new(RefCell::new(None));
+
+/// Publishes the CA the server is verified against, once.
+pub fn set_anchor(certificate: &[u8]) -> bool {
+    if certificate.len() > CERT_BYTES {
+        return false;
+    }
+    let mut held = Anchor {
+        certificate: [0; CERT_BYTES],
+        len: certificate.len(),
+    };
+    held.certificate[..certificate.len()].copy_from_slice(certificate);
+    match ANCHOR_CELL.try_init(held) {
+        Some(anchor) => {
+            critical_section::with(|cs| *ANCHOR.borrow_ref_mut(cs) = Some(anchor));
+            true
+        }
+        None => false,
+    }
+}
+
+fn anchor() -> Option<Certificate<'static>> {
+    let held = critical_section::with(|cs| *ANCHOR.borrow_ref(cs))?;
+    Certificate::new_no_copy(&held.certificate[..held.len]).ok()
 }
 
 impl Identity {
@@ -277,30 +308,38 @@ pub fn init(
 
 /// The client configuration for one connection.
 ///
-/// **`insecure` turns certificate checking off entirely**, and until the box
-/// knows what time it is that is the only setting that works. teddyCloud signs
-/// with its own root and sends that root in the chain, so trusting it is a
-/// solved problem — but a certificate's validity dates cannot be judged without
-/// a clock, the box's time starts at zero every boot, and this certificate's
-/// window opens in 2004. A box that believes it is 1970 refuses a good
-/// certificate.
+/// **The clock is not the obstacle it looked like.** This build compiles
+/// mbedtls with `MBEDTLS_HAVE_TIME_DATE` undefined, so `notBefore` and
+/// `notAfter` are never examined — the checks are inside `#if defined(...)` in
+/// `x509_crt.c` and are simply absent. A box that has no idea what year it is
+/// can still verify a chain; it just cannot notice an expired certificate.
 ///
-/// So the honest description of `insecure = yes` is *encrypted but not
-/// authenticated*, which is a defensible thing to be on a LAN and an
-/// indefensible one anywhere else. Turning it off is what SNTP plus an embedded
-/// `CN=TeddyCloud CA Root Certificate` buys.
+/// So with the CA on the card the server *is* verified: the chain is checked
+/// against `CN=TeddyCloud CA Root Certificate`, and `insecure = yes` is now a
+/// deliberate escape hatch rather than the only thing that works.
+///
+/// **The name is not checked**, and cannot be: teddyCloud's certificate carries
+/// no `subjectAltName` and a common name of "TeddyCloud Server", which is not a
+/// hostname and will never match `teddycloud.local`. Passing a server name would
+/// only fail the handshake. Against a private authority that signs exactly one
+/// server the chain is the check that carries the meaning, and claiming
+/// otherwise by naming the certificate's CN as though it were a host would be
+/// theatre.
 ///
 /// `min_version` is pinned to 1.2 rather than left at the default because this
 /// server offers nothing else; a build that quietly negotiated something else
 /// would be talking to a server this project has not measured.
 pub fn client_config<'a>(
     insecure: bool,
-    server_name: &'a CStr,
     creds: Option<Credentials<'a>>,
 ) -> ClientSessionConfig<'a> {
+    let ca_chain = if insecure { None } else { anchor() };
     ClientSessionConfig {
         creds,
-        server_name: Some(server_name),
+        ca_chain,
+        // Deliberately unset: see above. The certificate has no name that could
+        // match, so asking for one only fails.
+        server_name: None,
         auth_mode: if insecure {
             AuthMode::None
         } else {
@@ -377,12 +416,10 @@ pub async fn probe(
         esp_alloc::HEAP.free()
     );
 
-    let server_name =
-        CStr::from_bytes_with_nul(&name[..name_len]).map_err(|_| Error::MalformedServer)?;
     let mut session = Session::new(
         tls,
         socket,
-        &SessionConfig::Client(client_config(insecure, server_name, None)),
+        &SessionConfig::Client(client_config(insecure, None)),
     )
     .map_err(Error::Handshake)?;
 
@@ -493,12 +530,10 @@ pub async fn fetch(
     // Connected, so the deadline that matters now is the idle one.
     socket.set_timeout(Some(IDLE_TIMEOUT));
 
-    let server_name =
-        CStr::from_bytes_with_nul(&name[..name_len]).map_err(|_| Error::MalformedServer)?;
     let mut session = Session::new(
         tls,
         socket,
-        &SessionConfig::Client(client_config(insecure, server_name, credentials())),
+        &SessionConfig::Client(client_config(insecure, credentials())),
     )
     .map_err(Error::Handshake)?;
 
