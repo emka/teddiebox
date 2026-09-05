@@ -14,7 +14,9 @@
 //! **Certificates are not checked yet.** See [`client_config`].
 
 use core::cell::RefCell;
+use core::ffi::CStr;
 use critical_section::Mutex as CsMutex;
+
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
@@ -109,6 +111,36 @@ pub struct Fetched {
 /// certificate without silently failing to fit, and a file that fills its
 /// buffer is refused rather than truncated.
 pub const CERT_BYTES: usize = 1536;
+
+/// The common name teddyCloud's server certificate carries.
+///
+/// Unused, and the reason is worth keeping. `mbedtls_ssl_set_hostname` sets two
+/// things at once: the name a certificate is verified against, *and* the SNI
+/// extension sent to the server. Neither value available here works for both.
+///
+/// - This CN verifies correctly — there is no `subjectAltName`, so mbedtls
+///   compares against the common name — but it contains a space, is therefore
+///   not a valid SNI host, and teddyCloud answers the malformed extension with
+///   a fatal alert. Measured: `MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE`.
+/// - The real host, `teddycloud.local`, is a valid SNI and matches nothing in the
+///   certificate.
+/// - Leaving it unset makes mbedtls refuse to verify at all:
+///   `CERTIFICATE_VERIFICATION_WITHOUT_HOSTNAME`. It distinguishes "you forgot"
+///   from "you opted out deliberately", and `mbedtls-rs` can only express the
+///   first — `server_name: None` means it never calls the function, rather than
+///   calling it with NULL.
+///
+/// The way out is the build option mbedtls names in that error's own
+/// documentation:
+/// `MBEDTLS_SSL_CLI_ALLOW_WEAK_CERTIFICATE_VERIFICATION_WITHOUT_HOSTNAME`. This
+/// project already patches the vendored `mbedtls-rs-sys`, so adding a define is
+/// the same kind of change as the one already there.
+///
+/// Until then the connection is encrypted and the *box* is authenticated to the
+/// server — which is the direction that was actually missing — but the server is
+/// not authenticated to the box.
+#[allow(dead_code)]
+const SERVER_IDENTITY: &CStr = c"TeddyCloud Server";
 
 /// The box's certificate and the key that proves it.
 ///
@@ -318,13 +350,22 @@ pub fn init(
 /// against `CN=TeddyCloud CA Root Certificate`, and `insecure = yes` is now a
 /// deliberate escape hatch rather than the only thing that works.
 ///
-/// **The name is not checked**, and cannot be: teddyCloud's certificate carries
-/// no `subjectAltName` and a common name of "TeddyCloud Server", which is not a
-/// hostname and will never match `teddycloud.local`. Passing a server name would
-/// only fail the handshake. Against a private authority that signs exactly one
-/// server the chain is the check that carries the meaning, and claiming
-/// otherwise by naming the certificate's CN as though it were a host would be
-/// theatre.
+/// **The name checked is the server's identity, not its address.** teddyCloud's
+/// certificate carries no `subjectAltName` and a common name of "TeddyCloud
+/// Server", which is not a hostname and will never match `teddycloud.local`. So
+/// that CN is what is asserted here, and mbedtls falls back to comparing
+/// against it when there is no SAN.
+///
+/// That is a real check rather than a formality: it says the chain reaches our
+/// CA *and* the certificate names the entity we meant to reach. What it does
+/// not say is that `teddycloud.local` resolves to that entity — against a private
+/// authority signing exactly one server, that distinction is thin, but it is
+/// the honest description.
+///
+/// Leaving the name unset is not an option: mbedtls refuses to verify at all
+/// without one, with `CERTIFICATE_VERIFICATION_WITHOUT_HOSTNAME`. It
+/// distinguishes "forgot" from "deliberately opted out", and this wrapper can
+/// only express the former.
 ///
 /// `min_version` is pinned to 1.2 rather than left at the default because this
 /// server offers nothing else; a build that quietly negotiated something else
@@ -337,9 +378,15 @@ pub fn client_config<'a>(
     ClientSessionConfig {
         creds,
         ca_chain,
-        // Deliberately unset: see above. The certificate has no name that could
-        // match, so asking for one only fails.
-        server_name: None,
+        // The identity teddyCloud's certificate actually carries. Hardcoded
+        // because it comes from teddyCloud's own certificate generation rather
+        // than from this deployment; if it ever varies it belongs in the card's
+        // config beside the server address.
+        server_name: if insecure {
+            None
+        } else {
+            Some(SERVER_IDENTITY)
+        },
         auth_mode: if insecure {
             AuthMode::None
         } else {
