@@ -367,9 +367,10 @@ pub async fn probe(
 /// `ruid` is the identifier as it appears in the URL. `ContentRequest` reverses
 /// what it is given, so it is handed over backwards to come out the right way.
 ///
-/// **Route V1, deliberately.** `/v2` accepts the connection on this server and
-/// then never answers; `/v1` returns the file. Measured, unexplained, and
-/// written up in the design.
+/// **The route follows the token.** `/v1` passes `noPassword = TRUE` at the
+/// server and so ignores any token sent with it; `/v2` is the endpoint that
+/// spends one. Without a token `/v1` is the only one that has ever answered on
+/// this server.
 /// What to fetch, and what to prove it with.
 ///
 /// A struct rather than four more parameters because they belong together and
@@ -437,7 +438,17 @@ pub async fn fetch(
     uid.reverse();
     let request = ContentRequest {
         uid,
-        route: Route::V1,
+        // The route follows the token, because the two are the same decision.
+        // `/v1` passes `noPassword = TRUE` at the server, which tells it not to
+        // use the token at all — so sending one there is wasted and the
+        // upstream fetch is refused. `/v2` is the box's real endpoint and the
+        // one that spends it. Without a token `/v1` is what answers at all,
+        // since `/v2` has never returned a byte on this server.
+        route: if token.is_some() {
+            Route::V2
+        } else {
+            Route::V1
+        },
         etag: None,
         server,
         from: None,
