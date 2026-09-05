@@ -21,9 +21,17 @@ use heapless::String;
 
 /// The file's name in the card's root directory.
 ///
-/// Short and upper case, so that `embedded-sdmmc` opens it with the ordinary
+/// **Short**, so that `embedded-sdmmc` opens it with the ordinary
 /// `open_file_in_dir` — which takes a `ShortFileName` and refuses the ninth
-/// character of a stem. A long name such as `teddiebox.conf` is not out of
+/// character of a stem.
+///
+/// Upper case here because that is how FAT *stores* an 8.3 name, not because
+/// the card has to show it that way: a lower-case `config.txt` is the same
+/// directory entry with two "display lower case" flag bits set, and is opened
+/// by this same upper-case name. The card carries it lower case, to match the
+/// certificates beside it. `tools/fat-assumptions` proves the two are one
+/// entry, for a directory as well as a file, rather than leaving it as the sort
+/// of assumption that has cost this project a bench session before. A long name such as `teddiebox.conf` is not out of
 /// reach: `open_long_name_file_in_dir` opens one. It just costs more than the
 /// name is worth — that call rescans the directory reassembling long names,
 /// cannot create a file, and would be a second way into the filesystem for the

@@ -369,3 +369,65 @@ fn with_long_name_file(disk: RamDisk, name: &str, contents: &[u8]) -> RamDisk {
     }
     RamDisk::new(image)
 }
+
+/// Whether a lower-case name written by a host is reachable by the box.
+///
+/// FAT stores an 8.3 name in an upper-case field and records "display this
+/// lower case" in two flag bits, so `config.txt` and `CONFIG.TXT` should be the
+/// *same* short entry — no long-name record, and reachable by the upper-case
+/// name `ShortFileName` produces. Should. The card's files are written by a
+/// laptop and opened by `embedded-sdmmc`, and those are different
+/// implementations of that claim, which is the kind of gap this file exists to
+/// close.
+#[test]
+fn a_lower_case_name_is_the_same_file_as_its_upper_case_short_name() {
+    const TEXT: &str = "ssid = HomeNet\nserver = box.lan:80\n";
+
+    let disk = blank_fat_image_in_memory(8);
+    // Written the way the card's is: by the host, in lower case.
+    let disk = with_long_name_file(disk, "config.txt", TEXT.as_bytes());
+
+    let volumes = mounted(disk);
+    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
+    let root = volumes.open_root_dir(volume).unwrap();
+
+    let file = volumes
+        .open_file_in_dir(root, "CONFIG.TXT", Mode::ReadOnly)
+        .expect("a lower-case 8.3 name must be reachable by its short name");
+    let mut raw = [0u8; 128];
+    let read = volumes.read(file, &mut raw).unwrap();
+    volumes.close_file(file).unwrap();
+
+    assert_eq!(core::str::from_utf8(&raw[..read]).unwrap(), TEXT);
+}
+
+/// And the same for a directory, since the certificates live in one.
+#[test]
+fn a_lower_case_directory_is_reachable_by_its_short_name() {
+    let mut image = blank_fat_image_in_memory(8).into_bytes();
+    {
+        let cursor = std::io::Cursor::new(&mut image[PARTITION_START_BLOCK as usize * 512..]);
+        let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new()).unwrap();
+        let dir = fs.root_dir().create_dir("cert").unwrap();
+        use std::io::Write;
+        let mut file = dir.create_file("client.der").unwrap();
+        file.write_all(&[0x30, 0x82, 0x01, 0x02]).unwrap();
+        file.flush().unwrap();
+    }
+
+    let volumes = mounted(RamDisk::new(image));
+    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
+    let root = volumes.open_root_dir(volume).unwrap();
+
+    let dir = volumes
+        .open_dir(root, "CERT")
+        .expect("a lower-case directory must be reachable by its short name");
+    let file = volumes
+        .open_file_in_dir(dir, "CLIENT.DER", Mode::ReadOnly)
+        .expect("and so must a lower-case file inside it");
+    let mut raw = [0u8; 8];
+    let read = volumes.read(file, &mut raw).unwrap();
+    volumes.close_file(file).unwrap();
+    let _ = volumes.close_dir(dir);
+    assert_eq!(&raw[..read], &[0x30, 0x82, 0x01, 0x02]);
+}
