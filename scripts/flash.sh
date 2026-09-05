@@ -47,14 +47,22 @@ else
 echo "flash: asking the box to enter download mode"
 capture=$(mktemp)
 trap 'rm -f "$capture"' EXIT
-python3 scripts/bench-console.py --port "$PORT" --send dl --send-after 2.0 \
-    --until "waiting for download" --timeout 20 --out "$capture" >/dev/null 2>&1 || true
+# Three seconds, not two. The console is up long before that, but a box that
+# is mid-request answers late, and a `dl` sent too early is simply dropped —
+# which reads exactly like a box that has stopped listening, and cost a
+# misdiagnosis and very nearly a needless J100.
+python3 scripts/bench-console.py --port "$PORT" --send dl --send-after 3.0 \
+    --until "waiting for download" --timeout 25 --out "$capture" >/dev/null 2>&1 || true
 
 if ! grep -q "waiting for download" "$capture"; then
     if [ -s "$capture" ]; then
         die "the box is talking but did not accept 'dl'.
-     Its console is not reading. Short J100 and apply power cold, then rerun.
-     NOT running esptool: after a failed entry it wedges the box further."
+     Try once more before assuming the worst: a box busy with a request answers
+     late, and that looks identical to one that has stopped listening. Send it
+     any command by hand — if it answers, its console is fine and this was
+     impatience.
+     If it truly ignores everything, short J100 and apply power cold.
+     NOT running esptool either way: after a failed entry it wedges the box."
     fi
     die "no answer from the box on $PORT.
      If it is already in download mode this is expected — rerun with SKIP_DL=1.
