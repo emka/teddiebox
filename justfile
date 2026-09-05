@@ -73,6 +73,16 @@ firmware: vendor
 vendor:
     ./scripts/vendor-mbedtls-rs-sys.sh
 
+# put the box in download mode, flash it, and start it again
+#
+# The order in scripts/flash.sh is not arbitrary: this board has no wired
+# reset, espflash must touch the port before esptool ever does, and esptool
+# must not run at all if espflash failed. Getting any of those wrong costs a
+# J100 cold boot with the case open, which is why it is a recipe and not
+# something to retype.
+flash: firmware
+    ./scripts/flash.sh
+
 # format the tree rather than checking it
 fix:
     cargo fmt --all

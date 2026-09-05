@@ -208,6 +208,12 @@
             # loads libclang at run time to do it. The C itself is compiled by
             # the Xtensa GCC above; this is only the header parser.
             pkgs.libclang.lib
+            # Flashing. Both, and in the shell rather than fetched ad hoc:
+            # `just flash` has to run them in a fixed order with fixed flags,
+            # and a recipe that reaches outside the environment for its tools
+            # is one whose behaviour depends on what the network felt like.
+            pkgs.espflash
+            pkgs.esptool
           ];
 
           # bindgen finds libclang by this variable and by nothing else.
