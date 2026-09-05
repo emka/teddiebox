@@ -362,6 +362,8 @@ pub enum Source {
     First,
     /// One named `CONTENT/<directory>/<file>`.
     Content { directory: u32, file: u32 },
+    /// One a download put in `CACHE/<directory>/<file>`.
+    Cache { directory: u32, file: u32 },
 }
 
 /// Plays one TAF, handing back the hardware it borrowed.
@@ -404,6 +406,7 @@ async fn play_taf_inner(
     // anything being written to it.
     let opened = match source {
         Source::Content { directory, file } => card.open_content(directory, file),
+        Source::Cache { directory, file } => card.open_cache(directory, file),
         Source::First => match card.find_by_extension(b"TAF") {
             Some((name, size)) => {
                 esp_println::println!("teddiebox: taf /{name}, {size} bytes");

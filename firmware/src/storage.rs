@@ -453,12 +453,31 @@ impl Mounted {
     }
 
     /// Opens `CONTENT/<directory>/<file>`, the path the box keeps audio under.
+    pub fn open_content(&self, directory: u32, file: u32) -> Result<(RawFile, u32), &'static str> {
+        self.open_audio_under(TONIE_CONTENT_DIR, directory, file)
+    }
+
+    /// Opens `CACHE/<directory>/<file>`, where a download lands.
+    ///
+    /// The same layout as `CONTENT`, deliberately, so a file that finishes
+    /// downloading sits where a stock one would and this is the same call with
+    /// a different tree.
+    pub fn open_cache(&self, directory: u32, file: u32) -> Result<(RawFile, u32), &'static str> {
+        self.open_audio_under(CACHE_DIR, directory, file)
+    }
+
+    /// Opens `<tree>/<directory>/<file>` for reading, and says how long it is.
     ///
     /// Names are the eight upper-case hex digits FAT stores, formatted here
     /// rather than taken from the caller: a lower-case or short name is a
     /// different file on a FAT volume, and the failure would be "not found"
     /// rather than anything that points at the cause.
-    pub fn open_content(&self, directory: u32, file: u32) -> Result<(RawFile, u32), &'static str> {
+    fn open_audio_under(
+        &self,
+        tree: &str,
+        directory: u32,
+        file: u32,
+    ) -> Result<(RawFile, u32), &'static str> {
         let mut folder_name = [0u8; 8];
         let mut file_name = [0u8; 8];
         write_hex8(&mut folder_name, directory);
@@ -470,13 +489,13 @@ impl Mounted {
 
         let content = self
             .volumes
-            .open_dir(self.root, TONIE_CONTENT_DIR)
-            .map_err(|_| "no CONTENT directory on the card")?;
+            .open_dir(self.root, tree)
+            .map_err(|_| "no such tree on the card")?;
         let folder = match self.volumes.open_dir(content, folder_name) {
             Ok(folder) => folder,
             Err(_) => {
                 let _ = self.volumes.close_dir(content);
-                return Err("no such content directory");
+                return Err("no such directory in that tree");
             }
         };
 
@@ -503,7 +522,7 @@ impl Mounted {
         match (opened, size) {
             (Some(handle), Some(size)) => {
                 esp_println::println!(
-                    "teddiebox: content /CONTENT/{folder_name}/{file_name}, {size} bytes"
+                    "teddiebox: content /{tree}/{folder_name}/{file_name}, {size} bytes"
                 );
                 Ok((handle, size))
             }

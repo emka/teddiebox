@@ -156,6 +156,12 @@ pub enum Command {
     /// reverses again on the way out, which is why the caller hands these
     /// over backwards.
     Get([u8; 8]),
+    /// Play a file a download put in `/CACHE/`.
+    ///
+    /// Named by the same sixteen digits that fetched it, so `get X` and
+    /// `play X` are the two halves of one job. The halves are already split
+    /// here because that is how the directory and file are named on the card.
+    PlayCache { directory: u32, file: u32 },
     /// Drop the association and power the modem down.
     NetDown,
     /// Report whether the radio is up, and on what address.
@@ -316,6 +322,14 @@ fn parse_dump_pcm(line: &[u8]) -> Option<Command> {
 /// Reads `play <8 hex>/<8 hex>`, the path the box keeps its audio under.
 fn parse_play_content(line: &[u8]) -> Option<Command> {
     let rest = line.strip_prefix(b"play ")?;
+    // Sixteen digits is an identifier rather than a path: it is what `get`
+    // takes, and what a download is filed under. Checked before the split so
+    // that the two shorter forms keep their meaning exactly.
+    if rest.len() == 16 {
+        let directory = hex_u32(&rest[..8])?;
+        let file = hex_u32(&rest[8..])?;
+        return Some(Command::PlayCache { directory, file });
+    }
     let mut halves = rest.split(|&b| b == b'/');
     let first = hex_u32(halves.next()?)?;
     // One half names a sound in the box's own language; two name a path, which
@@ -1001,5 +1015,38 @@ mod tests {
     fn stack_is_recognised() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"stack\n"), Some(Command::StackReport));
+    }
+    /// The other half of `get`. A download lands in `/CACHE/` under the same
+    /// identifier that fetched it, so the same sixteen digits play it back —
+    /// which is what closes the loop from "the box fetched a story" to "the box
+    /// tells it".
+    #[test]
+    fn play_takes_a_ruid_to_mean_the_cache() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"play 1A2B3C4D500304E0\n"),
+            Some(Command::PlayCache {
+                directory: 0x1A2B_3C4D,
+                file: 0x5003_04E0
+            })
+        );
+    }
+
+    /// And the two older forms keep their meaning: eight digits is a sound in
+    /// the box's own language, eight and eight is a path under `CONTENT`.
+    #[test]
+    fn the_shorter_play_forms_still_mean_what_they_did() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"play 00000010\n"),
+            Some(Command::PlaySound { file: 0x10 })
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"play 00000001/00000000\n"),
+            Some(Command::PlayContent {
+                directory: 1,
+                file: 0
+            })
+        );
     }
 }

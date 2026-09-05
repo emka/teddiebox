@@ -527,6 +527,7 @@ const REQUEST_WAV: u8 = 3;
 const REQUEST_TAF: u8 = 4;
 const REQUEST_CONTENT: u8 = 5;
 const REQUEST_PCM: u8 = 6;
+const REQUEST_CACHE: u8 = 7;
 
 /// What the console has asked the NFC reader to do.
 ///
@@ -1105,7 +1106,12 @@ async fn media(
         // an unsettled rail is what invented an I2C device at 0x09 in step 4.
         if matches!(
             request,
-            REQUEST_WALK | REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT | REQUEST_PCM
+            REQUEST_WALK
+                | REQUEST_WAV
+                | REQUEST_TAF
+                | REQUEST_CONTENT
+                | REQUEST_CACHE
+                | REQUEST_PCM
         ) && card.is_none()
         {
             let Some((spi, cs)) = bus.take() else {
@@ -1161,7 +1167,7 @@ async fn media(
                 }
             }
 
-            REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT => {
+            REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT | REQUEST_CACHE => {
                 let Some(card) = card.as_ref() else {
                     continue;
                 };
@@ -1194,13 +1200,16 @@ async fn media(
                         esp_println::println!("teddiebox: playback failed — {reason}");
                     }
                 } else {
-                    let source = if request == REQUEST_CONTENT {
-                        audio::Source::Content {
+                    let source = match request {
+                        REQUEST_CONTENT => audio::Source::Content {
                             directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
                             file: CONTENT_FILE.load(Ordering::Relaxed),
-                        }
-                    } else {
-                        audio::Source::First
+                        },
+                        REQUEST_CACHE => audio::Source::Cache {
+                            directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
+                            file: CONTENT_FILE.load(Ordering::Relaxed),
+                        },
+                        _ => audio::Source::First,
                     };
                     // The hardware comes back, so playing again needs no
                     // reboot — which is what makes stopping worth anything.
@@ -1939,6 +1948,12 @@ async fn main(spawner: Spawner) {
                         }
                     }
                 },
+                Some(Command::PlayCache { directory, file }) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    CONTENT_DIRECTORY.store(directory, Ordering::Relaxed);
+                    CONTENT_FILE.store(file, Ordering::Relaxed);
+                    REQUEST.store(REQUEST_CACHE, Ordering::Relaxed);
+                }
                 Some(Command::NetTls) => {
                     NET_REQUEST.store(NET_TLS, Ordering::Relaxed);
                 }
