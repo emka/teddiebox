@@ -101,8 +101,11 @@ pub fn build_content_request(
     let mut buf = SliceWriter { out, used: 0 };
 
     write!(buf, "GET {}", request.route.path()).map_err(|_| CloudError::RequestTooLong)?;
+    // Lower case, deliberately: teddyCloud compares these characters against a
+    // lower-case literal to decide whether the figure is home-made, and marks
+    // the tag `nocloud` for good when they do not match. See the test.
     for b in request.uid.iter().rev() {
-        write!(buf, "{b:02X}").map_err(|_| CloudError::RequestTooLong)?;
+        write!(buf, "{b:02x}").map_err(|_| CloudError::RequestTooLong)?;
     }
     let server = request.server;
     write!(buf, " HTTP/1.1\r\nHost: {server}\r\n").map_err(|_| CloudError::RequestTooLong)?;
@@ -433,5 +436,37 @@ mod tests {
         let n = build_content_request(&request, &mut out).unwrap();
         let text = core::str::from_utf8(&out[..n]).unwrap();
         assert!(!text.contains("Authorization"), "wrote: {text}");
+    }
+    /// **Lower case, and it is not cosmetic.** teddyCloud decides whether a tag
+    /// is a "custom tonie" by comparing characters 10 to 15 of the identifier
+    /// against the literal `0304e0` — in lower case, byte by byte
+    /// (`checkCustomTonie` in `handler_cloud.c`). An upper-case `E` fails that
+    /// comparison, the server concludes the figure is home-made, and it *marks
+    /// the tag* `nocloud` in its own metadata. Every later request for that
+    /// figure is then refused with a 404 and no upstream fetch, permanently,
+    /// until someone clears the flag.
+    ///
+    /// So this is a request that quietly damages the server's state rather than
+    /// merely failing. It cost a day of looking at the wrong end of the wire.
+    /// teddyCloud upper-cases the identifier itself when building its on-disk
+    /// path, which is the tell that the wire format was always lower case.
+    #[test]
+    fn the_identifier_is_written_in_lower_case() {
+        let mut out = [0u8; 512];
+        let request = ContentRequest {
+            uid: [0xE0, 0x04, 0x03, 0x50, 0x50, 0x3F, 0x2E, 0x1D],
+            route: Route::V2,
+            etag: None,
+            server: "box.lan:8080",
+            from: None,
+            auth: None,
+        };
+        let n = build_content_request(&request, &mut out).unwrap();
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(
+            text.starts_with("GET /v2/content/1d2e3f50500304e0 "),
+            "wrote: {}",
+            text.lines().next().unwrap_or("")
+        );
     }
 }
