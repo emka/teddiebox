@@ -156,6 +156,12 @@ pub enum Command {
     /// reverses again on the way out, which is why the caller hands these
     /// over backwards.
     Get([u8; 8]),
+    /// Read the tag's memory and keep it, to spend on a download.
+    ///
+    /// Distinct from [`Command::ReadMemory`], which prints blocks for a person
+    /// to read. This one keeps them and prints nothing but their length: what
+    /// it holds is the credential that fetches this figure's audio.
+    ReadToken,
     /// Play a file a download put in `/CACHE/`.
     ///
     /// Named by the same sixteen digits that fetched it, so `get X` and
@@ -266,6 +272,7 @@ impl CommandWatch {
                     b"net scan" => Some(Command::NetScan),
                     b"net up" => Some(Command::NetUp),
                     b"net tls" => Some(Command::NetTls),
+                    b"token" => Some(Command::ReadToken),
                     b"stack" => Some(Command::StackReport),
                     b"net insecure yes" | b"net insecure true" => Some(Command::NetInsecure(true)),
                     b"net insecure no" | b"net insecure false" => Some(Command::NetInsecure(false)),
@@ -1048,5 +1055,13 @@ mod tests {
                 file: 0
             })
         );
+    }
+    /// Reading the token is separate from `mem` because it is not for looking
+    /// at: `mem` prints blocks so a person can compare them, this keeps them so
+    /// the box can spend them.
+    #[test]
+    fn token_is_recognised() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"token\n"), Some(Command::ReadToken));
     }
 }

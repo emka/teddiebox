@@ -34,6 +34,7 @@ pub fn fetch<T: Read + Write>(
             etag,
             server,
             from: None,
+            auth: None,
         },
         &mut request_buf,
     )?;

@@ -358,6 +358,26 @@ impl Reader {
     ///
     /// The bytes this prints are a credential. They belong on a bench console
     /// and not in a bug report.
+    /// Reads the tag's whole user memory, which is its cloud token.
+    ///
+    /// Eight blocks of four bytes: thirty-two, the length teddyCloud reads
+    /// after `Authorization: BD `. All or nothing — a token assembled from the
+    /// blocks that happened to answer would be silently wrong, and the server
+    /// that rejects it is two network hops away from the cause.
+    ///
+    /// **Does not unlock.** A privacy-locked tag is silent to every block, so
+    /// `pw` and `slix` come first, exactly as for `mem`.
+    ///
+    /// **What this returns is a credential.** It is deliberately not printed.
+    pub fn read_token(&mut self) -> Option<[u8; 32]> {
+        let mut token = [0u8; 32];
+        for block in 0..8u8 {
+            let data = self.trf.read_block(block).ok()?;
+            token[block as usize * 4..][..4].copy_from_slice(&data);
+        }
+        Some(token)
+    }
+
     pub fn dump_memory(&mut self, first: u8, count: u8) {
         let mut whole = [0u8; 4 * MAX_MEMORY_BLOCKS as usize];
         let mut read = 0usize;

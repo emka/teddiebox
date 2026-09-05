@@ -29,7 +29,23 @@ pub struct ContentRequest<'a> {
     pub server: &'a str,
     /// Where to resume. `Some(n)` asks for `bytes=n-`.
     pub from: Option<u32>,
+    /// The tag's own memory, sent as `Authorization: BD <64 hex>`.
+    ///
+    /// teddyCloud never checks this. It forwards it to the tonies cloud when
+    /// it does not already hold the content, and that is what accepts or
+    /// rejects it — so supplying it is the difference between a `403` and a
+    /// story for any figure the server has not already got.
+    ///
+    /// `None` for content the server holds, which needs no token at all.
+    pub auth: Option<&'a [u8; TOKEN_BYTES]>,
 }
+
+/// Length of a tag's authentication token: the whole of its user memory.
+///
+/// `TONIE_AUTH_TOKEN_LENGTH` in teddyCloud's `include/net_config.h`, and eight
+/// four-byte ICODE SLIX-L blocks at the other end — the two agree, which is
+/// what made "the token is the tag's memory" checkable rather than a guess.
+pub const TOKEN_BYTES: usize = 32;
 
 /// Which of teddyCloud's two content routes to ask.
 ///
@@ -104,6 +120,14 @@ pub fn build_content_request(
         (None, None) => {}
     }
 
+    if let Some(token) = request.auth {
+        write!(buf, "Authorization: BD ").map_err(|_| CloudError::RequestTooLong)?;
+        for byte in token {
+            write!(buf, "{byte:02X}").map_err(|_| CloudError::RequestTooLong)?;
+        }
+        write!(buf, "\r\n").map_err(|_| CloudError::RequestTooLong)?;
+    }
+
     write!(buf, "Connection: close\r\n\r\n").map_err(|_| CloudError::RequestTooLong)?;
 
     Ok(buf.used)
@@ -152,6 +176,7 @@ mod tests {
             etag,
             server: "box.lan:8080",
             from: None,
+            auth: None,
         };
         let n = build_content_request(&request, &mut out).unwrap();
         heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
@@ -165,6 +190,7 @@ mod tests {
             etag,
             server: "box.lan:8080",
             from,
+            auth: None,
         };
         let n = build_content_request(&request, &mut out).unwrap();
         heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
@@ -178,6 +204,7 @@ mod tests {
             etag: None,
             server: "box.lan:8080",
             from: None,
+            auth: None,
         };
         let n = build_content_request(&request, &mut out).unwrap();
         heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
@@ -247,6 +274,7 @@ mod tests {
             etag: None,
             server: &server,
             from: None,
+            auth: None,
         };
         let n = build_content_request(&request, &mut out).unwrap();
         assert!(n > 512, "built {n} bytes");
@@ -262,6 +290,7 @@ mod tests {
             etag: None,
             server: "box.lan:8080",
             from: None,
+            auth: None,
         };
         assert_eq!(
             build_content_request(&request, &mut out),
@@ -325,6 +354,7 @@ mod tests {
             etag: None,
             server: "box.lan:8080",
             from: None,
+            auth: None,
             route: Route::V1,
         };
         let n = build_content_request(&request, &mut out).unwrap();
@@ -346,10 +376,62 @@ mod tests {
             etag: None,
             server: "box.lan:8080",
             from: None,
+            auth: None,
             route: Route::default(),
         };
         let n = build_content_request(&request, &mut out).unwrap();
         let text = core::str::from_utf8(&out[..n]).unwrap();
         assert!(text.starts_with("GET /v2/content/"), "wrote: {text}");
+    }
+    /// The header that lets teddyCloud fetch a figure it does not already
+    /// hold. It never checks the token itself — it forwards it to the tonies
+    /// cloud, which is what rejects a bad one — so the box supplying it is the
+    /// difference between a `403` and a story.
+    ///
+    /// Upper-case hex, and all thirty-two bytes: `src/server.c` reads
+    /// `TONIE_AUTH_TOKEN_LENGTH` of them after the literal `"BD "`.
+    #[test]
+    fn a_token_is_written_as_the_authorization_header() {
+        let mut out = [0u8; 512];
+        let token = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
+            0xCC, 0xDD, 0xEE, 0xFF,
+        ];
+        let request = ContentRequest {
+            uid: UID,
+            route: Route::V1,
+            etag: None,
+            server: "box.lan:8080",
+            from: None,
+            auth: Some(&token),
+        };
+        let n = build_content_request(&request, &mut out).unwrap();
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(
+            text.contains(
+                "Authorization: BD 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF\r\n"
+            ),
+            "wrote: {text}"
+        );
+    }
+
+    /// No tag on the plate, no header. An empty or absent token must not become
+    /// `Authorization: BD ` with nothing after it, which is a malformed header
+    /// rather than an absent one.
+    #[test]
+    fn no_token_means_no_authorization_header() {
+        let mut out = [0u8; 512];
+        let request = ContentRequest {
+            uid: UID,
+            route: Route::V1,
+            etag: None,
+            server: "box.lan:8080",
+            from: None,
+            auth: None,
+        };
+        let n = build_content_request(&request, &mut out).unwrap();
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(!text.contains("Authorization"), "wrote: {text}");
     }
 }

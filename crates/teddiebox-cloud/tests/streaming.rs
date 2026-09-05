@@ -84,6 +84,7 @@ fn request(from: Option<u32>) -> ContentRequest<'static> {
     ContentRequest {
         uid: UID,
         route: teddiebox_cloud::Route::V2,
+        auth: None,
         etag: None,
         server: "box.lan:8080",
         from,
@@ -295,6 +296,7 @@ fn an_unchanged_file_reports_unchanged_and_reads_no_body() {
     let request = ContentRequest {
         uid: UID,
         route: teddiebox_cloud::Route::V2,
+        auth: None,
         etag: Some(&etag),
         server: "box.lan:8080",
         from: None,

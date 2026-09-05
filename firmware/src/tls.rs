@@ -359,21 +359,47 @@ pub async fn probe(
 /// steps, for now, the open question of how a download and the media task share
 /// a card that `embedded-sdmmc` will not open twice.
 ///
+/// `token` is the tag's own memory, and it is what makes a figure teddyCloud
+/// does not already hold fetchable at all: the server forwards it to the tonies
+/// cloud, which is what accepts or rejects it. `None` is right for content the
+/// server already has, which needs no token.
+///
 /// `ruid` is the identifier as it appears in the URL. `ContentRequest` reverses
 /// what it is given, so it is handed over backwards to come out the right way.
 ///
 /// **Route V1, deliberately.** `/v2` accepts the connection on this server and
 /// then never answers; `/v1` returns the file. Measured, unexplained, and
 /// written up in the design.
+/// What to fetch, and what to prove it with.
+///
+/// A struct rather than four more parameters because they belong together and
+/// travel together: the server, whether to check its certificate, which figure,
+/// and the token that authorises it. Passing them separately is also how a
+/// caller silently transposes two of them.
+pub struct Wanted<'a> {
+    /// `host:port` of the teddyCloud server.
+    pub server: &'a str,
+    /// Accept the server's certificate without checking it.
+    pub insecure: bool,
+    /// The identifier as it appears in the URL.
+    pub ruid: [u8; 8],
+    /// The tag's own memory, or `None` for content the server already holds.
+    pub token: Option<&'a [u8; 32]>,
+}
+
 pub async fn fetch(
     tls: TlsReference<'_>,
     stack: &Stack<'_>,
-    server: &str,
-    insecure: bool,
-    ruid: [u8; 8],
+    wanted: &Wanted<'_>,
     sink: &mut dyn FnMut(&[u8]) -> usize,
     may_fetch: &mut dyn FnMut() -> bool,
 ) -> Result<Fetched, Error> {
+    let Wanted {
+        server,
+        insecure,
+        ruid,
+        token,
+    } = *wanted;
     let mut name = [0u8; MAX_NAME];
     let (name_len, port) = split_server(server, &mut name)?;
     let host = core::str::from_utf8(&name[..name_len - 1]).map_err(|_| Error::MalformedServer)?;
@@ -415,6 +441,7 @@ pub async fn fetch(
         etag: None,
         server,
         from: None,
+        auth: token,
     };
 
     let started = Instant::now();

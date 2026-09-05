@@ -540,6 +540,14 @@ const NFC_UNLOCK: u8 = 2;
 const NFC_FORCE_UNLOCK: u8 = 3;
 const NFC_LOCK: u8 = 4;
 const NFC_READ_MEMORY: u8 = 5;
+const NFC_READ_TOKEN: u8 = 6;
+
+/// The tag's memory, kept to spend on a download.
+///
+/// RAM only, gone at the next reset, and never printed — the same treatment the
+/// SLIX password and the Wi-Fi passphrase get, for the same reason. It is what
+/// the tonies cloud accepts in place of proof that this box owns this figure.
+static TAG_TOKEN: CsMutex<RefCell<Option<[u8; 32]>>> = CsMutex::new(RefCell::new(None));
 
 /// Set when the console asks the radio for a scan.
 ///
@@ -1333,6 +1341,13 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                         DOWNLOAD_STATE.store(DOWNLOAD_RUNNING, Ordering::Relaxed);
 
                         DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
+                        // Taken once, before the request is built: the plate
+                        // can be emptied mid-download and the token is what
+                        // this fetch was authorised with.
+                        let token = critical_section::with(|cs| *TAG_TOKEN.borrow_ref(cs));
+                        if token.is_some() {
+                            esp_println::println!("teddiebox: get sending the tag's token");
+                        }
                         let mut throttle = Throttle::new();
                         let mut may_fetch = || {
                             throttle.update(
@@ -1355,16 +1370,14 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                             DOWNLOAD_SENT.fetch_add(taken as u32, Ordering::Relaxed);
                             taken
                         };
-                        let outcome = tls::fetch(
-                            tls,
-                            &stack,
-                            &config.server,
-                            config.insecure,
+                        let wanted = tls::Wanted {
+                            server: &config.server,
+                            insecure: config.insecure,
                             ruid,
-                            &mut into_pipe,
-                            &mut may_fetch,
-                        )
-                        .await;
+                            token: token.as_ref(),
+                        };
+                        let outcome =
+                            tls::fetch(tls, &stack, &wanted, &mut into_pipe, &mut may_fetch).await;
                         // Ended either way: the consumer must stop waiting for
                         // bytes that are never coming.
                         DOWNLOAD_STATE.store(DOWNLOAD_ENDED, Ordering::Relaxed);
@@ -1584,6 +1597,19 @@ async fn nfc_reader(
                 let range = NFC_MEM_RANGE.load(Ordering::Relaxed);
                 reader.dump_memory((range >> 8) as u8, range as u8);
             }
+            NFC_READ_TOKEN => match reader.read_token() {
+                Some(token) => {
+                    critical_section::with(|cs| *TAG_TOKEN.borrow_ref_mut(cs) = Some(token));
+                    // The length, never the value.
+                    esp_println::println!(
+                        "teddiebox: nfc token read, {} bytes — `get` will send it",
+                        token.len()
+                    );
+                }
+                None => esp_println::println!(
+                    "teddiebox: nfc token unreadable — unlock first with `pw` then `slix`"
+                ),
+            },
             _ => {}
         }
         Timer::after(Duration::from_millis(100)).await;
@@ -1948,6 +1974,10 @@ async fn main(spawner: Spawner) {
                         }
                     }
                 },
+                Some(Command::ReadToken) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    NFC_REQUEST.store(NFC_READ_TOKEN, Ordering::Relaxed);
+                }
                 Some(Command::PlayCache { directory, file }) => {
                     board.apply(gates.power(Rail::Storage, true));
                     CONTENT_DIRECTORY.store(directory, Ordering::Relaxed);
