@@ -22,32 +22,38 @@ pub trait ContentSink {
     fn flush(&mut self) -> Result<(), Self::Error>;
 }
 
-pub struct Writer<S> {
-    sink: S,
+/// How far a download has got, and when its bytes are made durable.
+///
+/// The sink is passed in per write rather than owned, because on device it
+/// cannot be owned: the media task is handed the card for the length of one
+/// call so that a download in flight never holds a borrow the rest of the
+/// loop needs. Only the counting outlives a call, which is exactly what this
+/// holds — rebuilding it around each sink would restart the flush interval
+/// every time and the flush would never arrive.
+pub struct Writer {
     watermark: u32,
     since_flush: u32,
     flush_every: u32,
 }
 
-impl<S: ContentSink> Writer<S> {
+impl Writer {
     /// `already_on_card` is where a resumed download continues from; zero for
     /// a fresh one. `flush_every` trades a directory-entry write against how
     /// much of an interrupted download is lost.
-    pub fn resuming(sink: S, already_on_card: u32, flush_every: u32) -> Self {
+    pub fn resuming(already_on_card: u32, flush_every: u32) -> Self {
         Self {
-            sink,
             watermark: already_on_card,
             since_flush: 0,
             flush_every,
         }
     }
 
-    pub fn write(&mut self, bytes: &[u8]) -> Result<(), S::Error> {
-        self.sink.append(bytes)?;
+    pub fn write<S: ContentSink>(&mut self, sink: &mut S, bytes: &[u8]) -> Result<(), S::Error> {
+        sink.append(bytes)?;
         self.watermark += bytes.len() as u32;
         self.since_flush += bytes.len() as u32;
         if self.since_flush >= self.flush_every {
-            self.sink.flush()?;
+            sink.flush()?;
             self.since_flush = 0;
         }
         Ok(())
@@ -55,9 +61,9 @@ impl<S: ContentSink> Writer<S> {
 
     /// Flushes the tail. The last bytes are the ones that make the file
     /// complete, and completeness is read back off the card.
-    pub fn finish(&mut self) -> Result<(), S::Error> {
+    pub fn finish<S: ContentSink>(&mut self, sink: &mut S) -> Result<(), S::Error> {
         if self.since_flush > 0 {
-            self.sink.flush()?;
+            sink.flush()?;
             self.since_flush = 0;
         }
         Ok(())
@@ -66,14 +72,6 @@ impl<S: ContentSink> Writer<S> {
     /// Bytes committed. This is what the reader is gated on.
     pub fn watermark(&self) -> Bytes {
         Bytes(self.watermark)
-    }
-
-    pub fn sink(&self) -> &S {
-        &self.sink
-    }
-
-    pub fn into_sink(self) -> S {
-        self.sink
     }
 }
 
@@ -104,8 +102,9 @@ mod tests {
 
     #[test]
     fn the_watermark_counts_every_byte_written() {
-        let mut w = Writer::resuming(Recording::default(), 0, 1024);
-        w.write(b"0123456789").unwrap();
+        let mut card = Recording::default();
+        let mut w = Writer::resuming(0, 1024);
+        w.write(&mut card, b"0123456789").unwrap();
         assert_eq!(w.watermark(), Bytes(10));
     }
 
@@ -114,18 +113,20 @@ mod tests {
     /// refuse to decode pages that are sitting right there.
     #[test]
     fn a_resumed_download_counts_from_what_is_already_there() {
-        let mut w = Writer::resuming(Recording::default(), 4096, 1024);
+        let mut card = Recording::default();
+        let mut w = Writer::resuming(4096, 1024);
         assert_eq!(w.watermark(), Bytes(4096));
-        w.write(b"XYZ").unwrap();
+        w.write(&mut card, b"XYZ").unwrap();
         assert_eq!(w.watermark(), Bytes(4099));
     }
 
     #[test]
     fn the_bytes_reach_the_sink_unchanged_and_in_order() {
-        let mut w = Writer::resuming(Recording::default(), 0, 1024);
-        w.write(b"abc").unwrap();
-        w.write(b"def").unwrap();
-        assert_eq!(w.into_sink().bytes, b"abcdef");
+        let mut card = Recording::default();
+        let mut w = Writer::resuming(0, 1024);
+        w.write(&mut card, b"abc").unwrap();
+        w.write(&mut card, b"def").unwrap();
+        assert_eq!(card.bytes, b"abcdef");
     }
 
     /// Flushing is what makes the on-card length truthful, and a resume reads
@@ -133,40 +134,54 @@ mod tests {
     /// per chunk; never flushing loses the whole download to a flat battery.
     #[test]
     fn a_flush_happens_once_the_interval_is_passed_and_not_before() {
-        let mut w = Writer::resuming(Recording::default(), 0, 100);
-        w.write(&[0u8; 60]).unwrap();
-        assert_eq!(w.sink().flushes, 0, "60 bytes is not yet 100");
-        w.write(&[0u8; 60]).unwrap();
-        assert_eq!(w.sink().flushes, 1);
+        let mut card = Recording::default();
+        let mut w = Writer::resuming(0, 100);
+        w.write(&mut card, &[0u8; 60]).unwrap();
+        assert_eq!(card.flushes, 0, "60 bytes is not yet 100");
+        w.write(&mut card, &[0u8; 60]).unwrap();
+        assert_eq!(card.flushes, 1);
     }
 
     #[test]
     fn the_flush_interval_restarts_after_each_flush() {
-        let mut w = Writer::resuming(Recording::default(), 0, 100);
-        w.write(&[0u8; 250]).unwrap();
+        let mut card = Recording::default();
+        let mut w = Writer::resuming(0, 100);
+        w.write(&mut card, &[0u8; 250]).unwrap();
         assert_eq!(
-            w.sink().flushes,
-            1,
+            card.flushes, 1,
             "one write past the interval is one flush, not two"
         );
-        w.write(&[0u8; 60]).unwrap();
+        w.write(&mut card, &[0u8; 60]).unwrap();
         assert_eq!(
-            w.sink().flushes,
-            1,
+            card.flushes, 1,
             "the 150-byte overshoot is discarded; after a flush the interval restarts from zero, so 60 is not yet 100"
         );
-        w.write(&[0u8; 60]).unwrap();
-        assert_eq!(w.sink().flushes, 2);
+        w.write(&mut card, &[0u8; 60]).unwrap();
+        assert_eq!(card.flushes, 2);
     }
 
     /// The last bytes of a download are the ones that make the file complete,
     /// and a completeness check reads the length off the card.
     #[test]
     fn finishing_flushes_whatever_is_left() {
-        let mut w = Writer::resuming(Recording::default(), 0, 1024);
-        w.write(b"tail").unwrap();
-        w.finish().unwrap();
-        assert_eq!(w.sink().flushes, 1);
+        let mut card = Recording::default();
+        let mut w = Writer::resuming(0, 1024);
+        w.write(&mut card, b"tail").unwrap();
+        w.finish(&mut card).unwrap();
+        assert_eq!(card.flushes, 1);
+    }
+
+    /// Nothing to make durable, nothing to write: the interval has just been
+    /// flushed, so the file's recorded length is already truthful and another
+    /// directory-entry write would say the same thing twice.
+    #[test]
+    fn finishing_on_the_flush_boundary_writes_nothing_further() {
+        let mut card = Recording::default();
+        let mut w = Writer::resuming(0, 100);
+        w.write(&mut card, &[0u8; 100]).unwrap();
+        assert_eq!(card.flushes, 1);
+        w.finish(&mut card).unwrap();
+        assert_eq!(card.flushes, 1);
     }
 
     /// A failed write must not advance the watermark: the reader would then
@@ -183,9 +198,43 @@ mod tests {
                 Ok(())
             }
         }
-        let mut w = Writer::resuming(Broken, 0, 1024);
-        assert!(w.write(b"abc").is_err());
+        let mut w = Writer::resuming(0, 1024);
+        assert!(w.write(&mut Broken, b"abc").is_err());
         assert_eq!(w.watermark(), Bytes(0));
+    }
+
+    /// On the box the sink cannot be owned for the length of a download: the
+    /// media task is handed the card for one call at a time, so that a
+    /// download in flight never holds a borrow the rest of the loop needs.
+    /// The cadence therefore has to outlive every sink it writes through. A
+    /// writer that owned its sink would have to be rebuilt for each call, and
+    /// a rebuilt writer starts its interval again from zero — with 512-byte
+    /// chunks and a megabyte interval, the flush would then never come at all.
+    #[test]
+    fn the_flush_interval_survives_a_sink_that_lives_for_one_call_only() {
+        struct ForOneCall<'a>(&'a mut Recording);
+
+        impl ContentSink for ForOneCall<'_> {
+            type Error = ();
+            fn append(&mut self, bytes: &[u8]) -> Result<(), ()> {
+                self.0.append(bytes)
+            }
+            fn flush(&mut self) -> Result<(), ()> {
+                self.0.flush()
+            }
+        }
+
+        let mut card = Recording::default();
+        let mut w = Writer::resuming(0, 100);
+
+        w.write(&mut ForOneCall(&mut card), &[0u8; 60]).unwrap();
+        assert_eq!(card.flushes, 0, "60 bytes is not yet 100");
+
+        w.write(&mut ForOneCall(&mut card), &[0u8; 60]).unwrap();
+        assert_eq!(
+            card.flushes, 1,
+            "the second call continues the first call's interval"
+        );
     }
 
     /// The design promises to "stop, and never leave a sidecar claiming a
@@ -215,13 +264,14 @@ mod tests {
             }
         }
 
-        let mut w = Writer::resuming(AppendsButNeverFlushes::default(), 0, 100);
+        let mut card = AppendsButNeverFlushes::default();
+        let mut w = Writer::resuming(0, 100);
 
         // The append succeeds and reaches the interval, so a flush is
         // attempted and fails; write() reports that failure.
-        assert!(w.write(&[0u8; 100]).is_err());
-        assert_eq!(w.sink().appends, 1);
-        assert_eq!(w.sink().flushes, 1);
+        assert!(w.write(&mut card, &[0u8; 100]).is_err());
+        assert_eq!(card.appends, 1);
+        assert_eq!(card.flushes, 1);
         assert_eq!(
             w.watermark(),
             Bytes(100),
@@ -231,10 +281,9 @@ mod tests {
         // The failed flush did not reset the interval counter, so the very
         // next write retries the flush immediately rather than waiting out
         // a fresh 100 bytes.
-        assert!(w.write(&[0u8; 1]).is_err());
+        assert!(w.write(&mut card, &[0u8; 1]).is_err());
         assert_eq!(
-            w.sink().flushes,
-            2,
+            card.flushes, 2,
             "a failed flush must be retried on the next write"
         );
     }
