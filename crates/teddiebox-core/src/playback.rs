@@ -88,12 +88,21 @@ impl Playback {
 
     pub fn on_tag_absent(&mut self) -> Actions {
         let mut actions = Actions::new();
-        if let State::Playing(tag) = self.state {
-            let _ = actions.push(Action::SavePosition {
-                tag,
-                pos: self.position,
-            });
-            let _ = actions.push(Action::Pause);
+        match self.state {
+            State::Playing(tag) => {
+                let _ = actions.push(Action::SavePosition {
+                    tag,
+                    pos: self.position,
+                });
+                let _ = actions.push(Action::Pause);
+            }
+            // Nobody is waiting for these bytes any more. What is already on
+            // the card keeps its sidecar, so placing the figure again resumes
+            // instead of starting over.
+            State::Fetching(_) => {
+                let _ = actions.push(Action::AbortFetch);
+            }
+            State::Idle | State::Failed => {}
         }
         self.state = State::Idle;
         actions
@@ -289,5 +298,41 @@ mod tests {
         p.on_tag_present(TAG, &unknown());
         let actions = p.on_content_missing(OTHER, Unavailable::NoContent);
         assert!(actions.is_empty());
+    }
+
+    /// Lifting a figure mid-download stops the download. The partial file and
+    /// its sidecar stay on the card, so placing it again resumes rather than
+    /// starting over — which is only cheap because resume works.
+    #[test]
+    fn lifting_a_figure_that_is_still_fetching_abandons_the_download() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unknown());
+        assert_eq!(p.kind(), PlaybackKind::Fetching);
+        let actions = p.on_tag_absent();
+        assert_eq!(actions.as_slice(), &[Action::AbortFetch]);
+        assert_eq!(p.kind(), PlaybackKind::Idle);
+    }
+
+    #[test]
+    fn lifting_a_playing_figure_does_not_abort_anything() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &known(7));
+        let actions = p.on_tag_absent();
+        assert_eq!(
+            actions.as_slice(),
+            &[
+                Action::SavePosition {
+                    tag: TAG,
+                    pos: Position { page: 7 }
+                },
+                Action::Pause
+            ]
+        );
+    }
+
+    #[test]
+    fn lifting_from_an_empty_plate_does_nothing() {
+        let mut p = Playback::new();
+        assert!(p.on_tag_absent().is_empty());
     }
 }

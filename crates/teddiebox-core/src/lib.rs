@@ -88,6 +88,8 @@ pub enum Action {
         pos: Position,
     },
     RequestContent(TagUid),
+    /// Stop a download nobody is waiting for any more.
+    AbortFetch,
     PlayPrompt(Prompt),
     PowerOff,
 }
