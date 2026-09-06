@@ -40,7 +40,7 @@ use teddiebox_core::pipe::Pipe;
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
-use teddiebox_download::{Landing, Pages, Placement, Throttle};
+use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
 
 use crate::pins::BoardPins;
@@ -659,12 +659,41 @@ const RESUME_BELOW: Pages = Pages(8);
 const PAUSE_ABOVE: Pages = Pages(32);
 
 /// A download being written to the card.
+///
+/// The card is deliberately not in here. It is handed to `service_download`
+/// for one call at a time, so that a download in flight never holds a borrow
+/// the media loop needs for anything else; what has to outlive a call is the
+/// counting, and that is all this keeps.
 struct CacheWrite {
     file: embedded_sdmmc::RawFile,
-    written: u32,
-    /// `written` as at the last flush, so the next one is a subtraction.
-    flushed: u32,
+    writer: Writer,
     crc: teddiebox_core::checksum::Crc32,
+}
+
+/// The card end of a download, for as long as one call needs it.
+struct CardFile<'a> {
+    card: &'a storage::Mounted,
+    file: embedded_sdmmc::RawFile,
+}
+
+impl ContentSink for CardFile<'_> {
+    type Error = &'static str;
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        self.card.append(self.file, bytes)
+    }
+
+    fn flush(&mut self) -> Result<(), &'static str> {
+        // Reported rather than returned. A failed flush is not fatal to the
+        // download — the bytes are on the card, only the recorded length is
+        // behind — so it costs a longer resume rather than a broken file, and
+        // returning it would stop a download that is still perfectly able to
+        // continue.
+        if let Err(reason) = self.card.flush(self.file) {
+            esp_println::println!("teddiebox: get flush failed — {reason}");
+        }
+        Ok(())
+    }
 }
 
 /// How much of a download may be in flight before it is made durable.
@@ -821,8 +850,10 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
                 }
                 *write = Some(CacheWrite {
                     file: handle,
-                    written: 0,
-                    flushed: 0,
+                    // From zero even for a resume: what this counts is
+                    // measured against what the producer has sent this time
+                    // round, not against the length of the file on the card.
+                    writer: Writer::resuming(0, FLUSH_EVERY),
                     crc: teddiebox_core::checksum::Crc32::new(),
                 });
             }
@@ -842,42 +873,35 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         return false;
     };
 
+    let mut sink = CardFile {
+        card,
+        file: active.file,
+    };
     let mut buf = [0u8; 512];
     loop {
         let taken = critical_section::with(|cs| DOWNLOAD_PIPE.borrow_ref_mut(cs).read(&mut buf));
         if taken == 0 {
             break;
         }
-        if let Err(reason) = card.append(active.file, &buf[..taken]) {
+        if let Err(reason) = active.writer.write(&mut sink, &buf[..taken]) {
             esp_println::println!("teddiebox: get write failed — {reason}");
             DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
             break;
         }
         active.crc.update(&buf[..taken]);
-        active.written += taken as u32;
-
-        if active.written - active.flushed >= FLUSH_EVERY {
-            // A failure here is not fatal to the download — the bytes are
-            // written, only the recorded length is behind — so it costs a
-            // longer resume rather than a broken file.
-            if let Err(reason) = card.flush(active.file) {
-                esp_println::println!("teddiebox: get flush failed — {reason}");
-            }
-            active.flushed = active.written;
-        }
     }
 
     // Done only when the producer has stopped *and* everything it handed over
     // has reached the card. Stopping at the first of those would truncate the
     // file by whatever was still in the pipe.
     let sent = DOWNLOAD_SENT.load(Ordering::Relaxed);
-    if state == DOWNLOAD_ENDED && active.written >= sent {
-        if let Err(reason) = card.flush(active.file) {
-            esp_println::println!("teddiebox: get flush failed — {reason}");
-        }
+    if state == DOWNLOAD_ENDED && active.writer.watermark() >= Bytes(sent) {
+        // Whatever this reports the sink has already said; there is nothing
+        // here that could act on it.
+        let _ = active.writer.finish(&mut sink);
         esp_println::println!(
             "teddiebox: get wrote {} bytes, crc32 {:08X}",
-            active.written,
+            active.writer.watermark().0,
             active.crc.finish()
         );
         card.close_file(active.file);
