@@ -243,6 +243,18 @@ impl Reader {
         }
     }
 
+    /// Whatever is on the plate right now, unlocked if it needs to be —
+    /// quietly.
+    ///
+    /// The poll loop's instrument: `unlock` prints for a person reading a
+    /// console, and a reading taken several times a second has no person
+    /// reading it. Delegates to the same `inventory_unlocked` and the same
+    /// password list `unlock` builds, so the two paths cannot silently
+    /// disagree about which passwords a poll is willing to try.
+    pub fn inventory_unlocked(&mut self, password: u32) -> Option<[u8; 8]> {
+        self.trf.inventory_unlocked(&passwords(password)).ok()?
+    }
+
     /// Bench instrument: put SET PASSWORD on the air whatever the tag's state.
     ///
     /// `unlock` cannot reach it on a tag that is already out of privacy mode,

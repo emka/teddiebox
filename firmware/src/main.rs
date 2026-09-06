@@ -18,6 +18,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use heapless::String;
 use teddiebox_config::{Config, Overridden};
@@ -38,9 +40,11 @@ use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::pipe::Pipe;
+use teddiebox_core::plate::{Presence, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEAVE};
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
+use teddiebox_core::TagUid;
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
 
@@ -1039,6 +1043,45 @@ static NFC_PASSWORD: AtomicU32 = AtomicU32::new(0);
 /// observe a first block from one command beside a count from the next.
 static NFC_MEM_RANGE: AtomicU32 = AtomicU32::new(0);
 
+/// Whether the reader polls the plate on its own. Off at boot.
+///
+/// A poller that unlocks tags by itself would contaminate any bench
+/// measurement that involves a figure, so this stays off until `plate on`
+/// asks for it in a session that is watching.
+static PLATE_POLLING: AtomicBool = AtomicBool::new(false);
+
+/// What is on the plate right now — the current state, not a queue of edges.
+///
+/// A `Signal` rather than a channel because the media task can be away for as
+/// long as a decode takes, and a queue would need a depth nobody can justify.
+/// Holding the latest state instead is idempotent and cannot overflow; the
+/// cost is that a figure placed and lifted inside one media pass is invisible,
+/// which is the right answer anyway.
+static PLATE_TAG: Signal<CriticalSectionRawMutex, PlateState> = Signal::new();
+
+/// The token travels with the UID it was read from. As two separate statics
+/// it would be possible to send one figure's token for another's story.
+// TODO(task 8): read by the task that turns a plate event into a story.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+enum PlateState {
+    Present {
+        uid: [u8; 8],
+        token: Option<[u8; 32]>,
+    },
+    Absent,
+}
+
+/// How often the reader looks, when it is looking at all — counted in the
+/// `nfc_reader` loop's existing 100 ms ticks, so five is half a second.
+///
+/// Provisional and uncalibrated. Not a free parameter: every poll is a full
+/// transaction with the field up, this pack has no protection circuit, and the
+/// one unexplained brownout in this project happened while transmitting into a
+/// coupled tag. A poller is the first thing that transmits on a schedule
+/// rather than when a person asks.
+const PLATE_POLL_TICKS: u8 = 5;
+
 /// The language this box speaks, from `TEDDIEBOX_LANGUAGE` in `.envrc.local`.
 ///
 /// Chosen at build time rather than read off the card: it is a property of the
@@ -1853,6 +1896,9 @@ async fn nfc_reader(
         }
     };
 
+    let mut presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
+    let mut ticks_since_poll: u8 = 0;
+
     loop {
         match NFC_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
             NFC_INVENTORY => {
@@ -1927,6 +1973,34 @@ async fn nfc_reader(
             },
             _ => {}
         }
+
+        if PLATE_POLLING.load(Ordering::Relaxed) {
+            ticks_since_poll = ticks_since_poll.saturating_add(1);
+            if ticks_since_poll >= PLATE_POLL_TICKS {
+                ticks_since_poll = 0;
+
+                let password = NFC_PASSWORD.load(Ordering::Relaxed);
+                let seen = reader.inventory_unlocked(password);
+
+                if let Some(event) = presence.feed(seen.map(TagUid)) {
+                    match event {
+                        TagEvent::Arrived(TagUid(uid)) => {
+                            // Read the token in the same session that found
+                            // the tag: it is only readable while the figure
+                            // is on the plate and unlocked, and it is needed
+                            // when teddyCloud has to go upstream for the
+                            // story.
+                            let token = reader.read_token();
+                            PLATE_TAG.signal(PlateState::Present { uid, token });
+                        }
+                        TagEvent::Left => PLATE_TAG.signal(PlateState::Absent),
+                    }
+                }
+            }
+        } else {
+            ticks_since_poll = 0;
+        }
+
         Timer::after(Duration::from_millis(100)).await;
     }
 }
@@ -2316,6 +2390,13 @@ async fn main(spawner: Spawner) {
                 Some(Command::Lock) => {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_LOCK, Ordering::Relaxed);
+                }
+                Some(Command::Plate(on)) => {
+                    PLATE_POLLING.store(on, Ordering::Relaxed);
+                    esp_println::println!(
+                        "teddiebox: plate polling {}",
+                        if on { "on" } else { "off" }
+                    );
                 }
                 Some(Command::Password(value)) => {
                     NFC_PASSWORD.store(value, Ordering::Relaxed);

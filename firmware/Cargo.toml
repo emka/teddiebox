@@ -26,6 +26,9 @@ esp-rtos = { version = "0.4", features = [
 # arena here breaks the build.
 embassy-executor = "0.10"
 embassy-time = "0.5"
+# `Signal`, to hand the poll loop's latest plate reading to whichever task
+# asks for it without a queue neither side can size.
+embassy-sync = "0.8"
 # Guards the bench-typed credentials shared between the console loop and the
 # radio task. Already in the tree under esp-hal; named here because this crate
 # reaches for it directly.

@@ -199,6 +199,12 @@ pub enum Command {
     /// runs when it has a clock — which it does not have until audio is
     /// playing. Separating the two needs the mute reachable at any moment.
     Speaker(bool),
+    /// Whether the reader polls the plate on its own.
+    ///
+    /// Off at boot, deliberately: a poller that unlocks tags by itself would
+    /// contaminate any bench measurement that involves a figure, and the
+    /// download tests are exactly that.
+    Plate(bool),
 }
 
 /// Longest network name accepted, in octets. 802.11 says 32.
@@ -278,6 +284,8 @@ impl CommandWatch {
                     b"net insecure no" | b"net insecure false" => Some(Command::NetInsecure(false)),
                     b"net down" => Some(Command::NetDown),
                     b"net status" => Some(Command::NetStatus),
+                    b"plate on" => Some(Command::Plate(true)),
+                    b"plate off" => Some(Command::Plate(false)),
                     other => parse_password(other)
                         .or_else(|| parse_codec_set(other))
                         .or_else(|| parse_play_content(other))
@@ -1063,5 +1071,19 @@ mod tests {
     fn token_is_recognised() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"token\n"), Some(Command::ReadToken));
+    }
+
+    #[test]
+    fn the_plate_poller_can_be_switched_from_the_console() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"plate on\r"),
+            Some(Command::Plate(true))
+        );
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"plate off\r"),
+            Some(Command::Plate(false))
+        );
     }
 }
