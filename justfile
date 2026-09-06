@@ -63,15 +63,17 @@ fixtures:
 firmware: vendor
     cd firmware && cargo build --release
 
-# firmware/Cargo.toml patches `mbedtls-rs-sys` to a copy of the published crate
-# with one version bound widened, and cargo cannot even parse the manifest
-# until that copy exists. Every recipe that builds firmware/ depends on this;
-# it is a no-op once the copy is there. The why is beside the patch entry in
-# firmware/Cargo.toml.
+# firmware/Cargo.toml patches both mbedtls crates to copies of the published
+# ones — `mbedtls-rs-sys` for a widened version bound and a define it will not
+# let go of, `mbedtls-rs` for a call it never makes — and cargo cannot even
+# parse the manifest until those copies exist. Every recipe that builds
+# firmware/ depends on this; it is a no-op once they are there. The why is
+# beside each patch entry in firmware/Cargo.toml and at the head of each script.
 
-# fetch and patch the vendored mbedtls-rs-sys
+# fetch and patch the vendored mbedtls crates
 vendor:
     ./scripts/vendor-mbedtls-rs-sys.sh
+    ./scripts/vendor-mbedtls-rs.sh
 
 # put the box in download mode, flash it, and start it again
 #

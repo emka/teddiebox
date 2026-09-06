@@ -147,5 +147,15 @@ esp-rom-sys = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553
 # Drop this line once mbedtls-rs-sys widens the bound upstream.
 mbedtls-rs-sys = { path = "vendor/mbedtls-rs-sys" }
 
+# `mbedtls-rs` 0.2.0 never calls `mbedtls_ssl_conf_max_frag_len` and keeps the
+# `mbedtls_ssl_config` private, so nothing downstream can tell the server how
+# large a record this box can take. It has to be told: the input buffer above
+# cannot hold CycloneSSL's 16 KB records, and cannot be grown to, because that
+# heap is what the handshake's RSA private operation needs.
+# `scripts/vendor-mbedtls-rs.sh` adds the one call, and explains the measurements.
+#
+# Drop this line once mbedtls-rs exposes the setting.
+mbedtls-rs = { path = "vendor/mbedtls-rs" }
+
 [profile.release]
 opt-level = "s"
