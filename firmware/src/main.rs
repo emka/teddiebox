@@ -1880,7 +1880,9 @@ async fn nfc_reader(
     cs: Output<'static>,
     irq: Input<'static>,
 ) {
-    while NFC_REQUEST.load(Ordering::Relaxed) == REQUEST_NONE {
+    while NFC_REQUEST.load(Ordering::Relaxed) == REQUEST_NONE
+        && !PLATE_POLLING.load(Ordering::Relaxed)
+    {
         Timer::after(Duration::from_millis(100)).await;
     }
 
@@ -2392,6 +2394,9 @@ async fn main(spawner: Spawner) {
                     NFC_REQUEST.store(NFC_LOCK, Ordering::Relaxed);
                 }
                 Some(Command::Plate(on)) => {
+                    if on {
+                        board.apply(gates.power(Rail::Storage, true));
+                    }
                     PLATE_POLLING.store(on, Ordering::Relaxed);
                     esp_println::println!(
                         "teddiebox: plate polling {}",
