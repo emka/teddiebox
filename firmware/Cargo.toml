@@ -56,15 +56,30 @@ embedded-sdmmc = { version = "0.10", default-features = false }
 # same `embedded-io-async` 0.7 that `embassy-net` and `teddiebox-cloud` already
 # do, so it drops between them without an adapter.
 #
-# The features are cut to the one handshake this server offers —
+# The features name the one handshake this server offers —
 # ECDHE-RSA-AES256-GCM-SHA384 over secp256r1, TLS 1.2 — because everything
-# named here is C that has to fit in flash beside the decoder. No TLS 1.3, no
-# server side, no other curve or key exchange. Hardware acceleration is on by
-# default; the `nohook-*` features would turn it off.
+# named here is C that has to fit in flash beside the decoder. Hardware
+# acceleration is on by default; the `nohook-*` features would turn it off.
+#
+# What this list cannot do is take anything away. `mbedtls-rs` names
+# `tls-core`, `tls-server` and `tls-proto-tls13` in its own dependency on
+# `mbedtls-rs-sys` rather than behind optional features, so TLS 1.3, the server
+# side and ECDHE-ECDSA are compiled in whatever is written here — an earlier
+# version of this comment claimed the opposite, and editing the list to act on
+# that claim produces a build that changes nothing at all, quietly. A define
+# has to be removed where the crate is materialised instead; both
+# `scripts/vendor-mbedtls-rs-sys.sh` and `scripts/vendor-mbedtls-rs.sh` exist
+# for exactly that. The entries that genuinely decide something here are
+# `use-gcc`, `esp32s3`, `kex-ecdhe-rsa`, `alg-rsa`, `alg-sha512` and the two
+# content lengths; the rest are already on, and are kept because the list is
+# also the record of what this box needs.
 #
 # The content lengths are the reason this is worth reviewing: they size
 # mbedtls's record buffers, which come from the same heap that was carved out
-# of the decoder's stack. 16384 is the default and does not fit here.
+# of the decoder's stack. 16384 is the default and does not fit — measured: the
+# handshake's RSA private operation then dies for want of heap. Nor can 8192 be
+# left to face a 16 KB record, which is why the box asks for a smaller one; see
+# `scripts/vendor-mbedtls-rs.sh` for both measurements.
 mbedtls-rs = { version = "0.2", default-features = false, features = [
     # Build the C with the Xtensa GCC the flake already provides for libopus;
     # the default is clang, which this shell does not carry.
