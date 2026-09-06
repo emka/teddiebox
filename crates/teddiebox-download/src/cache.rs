@@ -47,6 +47,76 @@ pub fn decide(cached: &Cached) -> Decision {
     }
 }
 
+/// Where a response body belongs on the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Throw away whatever is there and write from the start.
+    Restart,
+    /// Continue the file that is already there.
+    Continue,
+    /// These bytes belong somewhere this file cannot take them.
+    Refuse,
+}
+
+/// What is known about a body when its response head arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Landing {
+    /// Where the server says this body starts in the file.
+    pub offset: u32,
+    /// How long the content file was when the download was planned.
+    pub length_on_card: u32,
+    /// What the sidecar promised the whole file would be, if there was one.
+    pub expected: Option<u32>,
+    /// What the server now says the whole file is, if it said at all.
+    pub total: Option<u32>,
+}
+
+/// Decides where a body goes, or that it cannot go anywhere.
+///
+/// Three things can go wrong, and only the first is obvious.
+///
+/// A server may **decline the range**, answering `200` with the whole file;
+/// that arrives as `offset: 0`, and appending it to a partial download would
+/// splice the beginning of the story onto its middle. Restarting is the only
+/// correct answer, and the writer has to take it, because by then the request
+/// is long sent.
+///
+/// A server may **honour the range against a file that has changed**. Nothing
+/// in the response says so — the offset is exactly what was asked for — and the
+/// result would be the tail of one file appended to the head of another,
+/// finishing at precisely the length the sidecar promised. That is the one
+/// corruption a length check can never catch, so the lengths are compared here
+/// instead: a total that disagrees with what the sidecar recorded means the
+/// bytes in hand belong to a file whose beginning is not on the card. There is
+/// nothing to salvage, because a body starting mid-file cannot be written from
+/// the start; refusing costs a refetch, which is the cheap half of the trade.
+///
+/// A server may simply **place bytes somewhere the file cannot take them**,
+/// leaving a gap or an overlap. Same answer, same reason.
+///
+/// Silence is not evidence: a server that sends no total has said nothing about
+/// whether its copy changed, and refusing on that would make resume impossible
+/// against a server that never sends a length.
+pub fn place(landing: &Landing) -> Placement {
+    // Nothing is spliced when the body is the whole file, so this holds
+    // whether or not the server's copy is still the one that was promised.
+    if landing.offset == 0 {
+        return Placement::Restart;
+    }
+
+    if let (Some(expected), Some(total)) = (landing.expected, landing.total) {
+        if expected != total {
+            return Placement::Refuse;
+        }
+    }
+
+    if landing.offset == landing.length_on_card {
+        Placement::Continue
+    } else {
+        Placement::Refuse
+    }
+}
+
 /// Whether a complete cached file still matches what the server holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Freshness {
@@ -88,6 +158,109 @@ pub fn revalidate(sidecar: &Sidecar, server_length: Option<u32>) -> Freshness {
 mod tests {
     use super::*;
     use teddiebox_cloud::ETag;
+
+    /// A resume that everything agrees about: half a 8192-byte file is there,
+    /// and the server is sending the rest of that same file.
+    fn agreeing() -> Landing {
+        Landing {
+            offset: 4096,
+            length_on_card: 4096,
+            expected: Some(8192),
+            total: Some(8192),
+        }
+    }
+
+    #[test]
+    fn a_body_that_starts_at_zero_replaces_what_is_there() {
+        let declined = Landing {
+            offset: 0,
+            total: Some(8192),
+            ..agreeing()
+        };
+        assert_eq!(place(&declined), Placement::Restart);
+    }
+
+    #[test]
+    fn a_body_that_starts_where_the_file_ends_continues_it() {
+        assert_eq!(place(&agreeing()), Placement::Continue);
+    }
+
+    #[test]
+    fn a_body_that_starts_past_the_end_is_refused() {
+        assert_eq!(
+            place(&Landing {
+                offset: 8192,
+                ..agreeing()
+            }),
+            Placement::Refuse
+        );
+    }
+
+    #[test]
+    fn a_body_that_starts_before_the_end_is_refused() {
+        assert_eq!(
+            place(&Landing {
+                offset: 1024,
+                ..agreeing()
+            }),
+            Placement::Refuse
+        );
+    }
+
+    #[test]
+    fn an_empty_file_takes_a_body_from_the_start() {
+        assert_eq!(
+            place(&Landing {
+                offset: 0,
+                length_on_card: 0,
+                expected: None,
+                total: Some(8192),
+            }),
+            Placement::Restart
+        );
+    }
+
+    #[test]
+    fn a_tail_of_a_file_that_is_no_longer_the_one_promised_is_refused() {
+        // The server honoured the range against a file of a different length,
+        // so these bytes are the middle of something whose beginning is not on
+        // the card. Appending them would leave the file exactly as long as the
+        // sidecar promised, which is the one thing a length check cannot catch.
+        assert_eq!(
+            place(&Landing {
+                total: Some(9000),
+                ..agreeing()
+            }),
+            Placement::Refuse
+        );
+    }
+
+    #[test]
+    fn a_server_that_gives_no_total_is_taken_at_its_word_about_the_offset() {
+        // Silence is not evidence of a changed file, and refusing on it would
+        // make resume impossible against a server that never sends a length.
+        assert_eq!(
+            place(&Landing {
+                total: None,
+                ..agreeing()
+            }),
+            Placement::Continue
+        );
+    }
+
+    #[test]
+    fn a_whole_file_answer_is_a_restart_even_when_the_length_changed() {
+        // Nothing is being spliced: the body starts at zero, so it replaces
+        // whatever was there whether or not it is the same file.
+        assert_eq!(
+            place(&Landing {
+                offset: 0,
+                total: Some(9000),
+                ..agreeing()
+            }),
+            Placement::Restart
+        );
+    }
 
     fn sidecar(length: u32) -> Sidecar {
         Sidecar {

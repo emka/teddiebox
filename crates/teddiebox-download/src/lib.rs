@@ -17,7 +17,7 @@ mod units;
 mod window;
 mod writer;
 
-pub use cache::{decide, revalidate, Cached, Decision, Freshness};
+pub use cache::{decide, place, revalidate, Cached, Decision, Freshness, Landing, Placement};
 pub use content_path::{content_path, ContentPath};
 pub use reconcile::{reconcile, Action, Mismatch};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
