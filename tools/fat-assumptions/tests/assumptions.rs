@@ -401,6 +401,77 @@ fn a_lower_case_name_is_the_same_file_as_its_upper_case_short_name() {
     assert_eq!(core::str::from_utf8(&raw[..read]).unwrap(), TEXT);
 }
 
+/// `CardIndex` asks `CONTENT/` first and treats any error as "not on the stock
+/// card". If a directory that was never created did anything but fail cleanly,
+/// every unknown figure would take the wrong branch.
+#[test]
+fn a_content_path_that_does_not_exist_fails_rather_than_panicking() {
+    let volumes = mounted(blank_fat_image_in_memory(8));
+    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
+    let root = volumes.open_root_dir(volume).unwrap();
+
+    assert!(
+        volumes.open_dir(root, "CONTENT").is_err(),
+        "a directory that was never created must not open"
+    );
+}
+
+/// The two trees are independent, which is the whole basis of the ordering
+/// that makes writing to a stock card safe: a downloaded story must not be
+/// reachable through `CONTENT/`, and its sidecar must survive the same
+/// directory machinery the content file goes through — a sidecar that cannot
+/// be read back is a complete file refetched for ever.
+#[test]
+fn a_cached_story_and_its_sidecar_live_only_under_the_cache_tree() {
+    const BODY: &[u8] = &[0x00, 0x00, 0x0f, 0xfc];
+    const SIDECAR: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF, 0x0A];
+
+    let mut image = blank_fat_image_in_memory(8).into_bytes();
+    {
+        let cursor = std::io::Cursor::new(&mut image[PARTITION_START_BLOCK as usize * 512..]);
+        let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new()).unwrap();
+        let dir = fs
+            .root_dir()
+            .create_dir("CACHE")
+            .unwrap()
+            .create_dir("1C2D3E4F")
+            .unwrap();
+        use std::io::Write;
+        let mut body = dir.create_file("500304E0").unwrap();
+        body.write_all(BODY).unwrap();
+        body.flush().unwrap();
+        let mut met = dir.create_file("500304E0.MET").unwrap();
+        met.write_all(SIDECAR).unwrap();
+        met.flush().unwrap();
+    }
+
+    let volumes = mounted(RamDisk::new(image));
+    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
+    let root = volumes.open_root_dir(volume).unwrap();
+
+    assert!(
+        volumes.open_dir(root, "CONTENT").is_err(),
+        "a cached story must not be reachable through the stock tree"
+    );
+
+    let cache = volumes.open_dir(root, "CACHE").unwrap();
+    let dir = volumes.open_dir(cache, "1C2D3E4F").unwrap();
+
+    let body = volumes
+        .open_file_in_dir(dir, "500304E0", Mode::ReadOnly)
+        .expect("the cached story must open");
+    assert_eq!(volumes.file_length(body).unwrap(), BODY.len() as u32);
+    volumes.close_file(body).unwrap();
+
+    let met = volumes
+        .open_file_in_dir(dir, "500304E0.MET", Mode::ReadOnly)
+        .expect("the sidecar must open beside it");
+    let mut raw = [0u8; 8];
+    let read = volumes.read(met, &mut raw).unwrap();
+    volumes.close_file(met).unwrap();
+    assert_eq!(&raw[..read], SIDECAR);
+}
+
 /// And the same for a directory, since the certificates live in one.
 #[test]
 fn a_lower_case_directory_is_reachable_by_its_short_name() {

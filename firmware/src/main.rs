@@ -2,6 +2,7 @@
 #![no_main]
 
 mod audio;
+mod index;
 mod led;
 mod libc_shim;
 mod net;
