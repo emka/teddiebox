@@ -23,7 +23,7 @@ pub mod wav;
 pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
 pub use gesture::{Gesture, GestureConfig, GestureDetector};
 pub use led::{led_for, PlaybackKind};
-pub use playback::{ContentIndex, Playback};
+pub use playback::{ContentIndex, Playback, Unavailable};
 pub use types::*;
 pub use volume::VolumeModel;
 
@@ -61,8 +61,8 @@ pub enum Event {
     TrackFinished,
     /// Content for this tag is now available locally.
     ContentReady(TagUid),
-    /// Content for this tag could not be obtained.
-    ContentMissing(TagUid),
+    /// Content for this tag could not be obtained, and why.
+    ContentMissing(TagUid, Unavailable),
 }
 
 /// Everything the firmware may be asked to do.
@@ -166,7 +166,7 @@ impl Core {
             Event::TagPresent(_)
             | Event::TagAbsent
             | Event::ContentReady(_)
-            | Event::ContentMissing(_) => {
+            | Event::ContentMissing(..) => {
                 self.last_activity = self.last_tick;
             }
             Event::Battery { .. } | Event::Charger(_) | Event::TrackFinished => {}
@@ -233,8 +233,8 @@ impl Core {
                 }
             }
 
-            Event::ContentMissing(tag) => {
-                let a = self.playback.on_content_missing(tag);
+            Event::ContentMissing(tag, why) => {
+                let a = self.playback.on_content_missing(tag, why);
                 for act in a {
                     let _ = actions.push(act);
                 }

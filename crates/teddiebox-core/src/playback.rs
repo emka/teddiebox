@@ -17,6 +17,20 @@ enum State {
     Failed,
 }
 
+/// Why a figure's story could not be produced.
+///
+/// The split is what a person holding the box can act on. A network they can
+/// go and look at is worth naming; a figure the server simply has no story
+/// for is not their fault and not their problem to fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unavailable {
+    /// Association, DHCP, TLS, the socket, a timeout, or a server that
+    /// answered with a fault of its own.
+    Unreachable,
+    /// The server was reached and has nothing for this figure.
+    NoContent,
+}
+
 #[derive(Debug)]
 pub struct Playback {
     state: State,
@@ -98,13 +112,16 @@ impl Playback {
         actions
     }
 
-    pub fn on_content_missing(&mut self, tag: TagUid) -> Actions {
+    pub fn on_content_missing(&mut self, tag: TagUid, why: Unavailable) -> Actions {
         let mut actions = Actions::new();
         if self.state != State::Fetching(tag) {
             return actions;
         }
         self.state = State::Failed;
-        let _ = actions.push(Action::PlayPrompt(Prompt::NoContent));
+        let _ = actions.push(Action::PlayPrompt(match why {
+            Unavailable::Unreachable => Prompt::NoNetwork,
+            Unavailable::NoContent => Prompt::NoContent,
+        }));
         actions
     }
 }
@@ -247,11 +264,30 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_download_prompts_and_gives_up() {
+    fn a_figure_the_server_has_no_story_for_says_so() {
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
-        let actions = p.on_content_missing(TAG);
+        let actions = p.on_content_missing(TAG, Unavailable::NoContent);
         assert_eq!(actions.as_slice(), &[Action::PlayPrompt(Prompt::NoContent)]);
         assert_eq!(p.kind(), PlaybackKind::Failed);
+    }
+
+    /// The split a person can act on: a network they can go and look at,
+    /// against a figure nothing can be done about.
+    #[test]
+    fn a_figure_that_could_not_be_reached_blames_the_network() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unknown());
+        let actions = p.on_content_missing(TAG, Unavailable::Unreachable);
+        assert_eq!(actions.as_slice(), &[Action::PlayPrompt(Prompt::NoNetwork)]);
+        assert_eq!(p.kind(), PlaybackKind::Failed);
+    }
+
+    #[test]
+    fn a_failure_for_a_figure_already_lifted_is_ignored() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unknown());
+        let actions = p.on_content_missing(OTHER, Unavailable::NoContent);
+        assert!(actions.is_empty());
     }
 }
