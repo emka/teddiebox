@@ -30,7 +30,7 @@ use mbedtls_rs::{
 };
 use static_cell::StaticCell;
 use teddiebox_cloud::stream::{self, Begun, Body};
-use teddiebox_cloud::{CloudError, ContentRequest, Route};
+use teddiebox_cloud::{CloudError, ContentRequest, ETag, Route};
 use teddiebox_core::checksum::Crc32;
 
 /// How long to wait for the TCP connect and the handshake.
@@ -537,12 +537,45 @@ pub struct Wanted<'a> {
     pub ruid: [u8; 8],
     /// The tag's own memory, or `None` for content the server already holds.
     pub token: Option<&'a [u8; 32]>,
+    /// Where to continue an interrupted download, or `None` for the whole file.
+    pub from: Option<u32>,
+    /// What the server should check that resume against, when there is one.
+    ///
+    /// Sent as `If-Range`, and **this server ignores it**. Measured against
+    /// teddyCloud v0.7.0: a range request carrying a deliberately wrong
+    /// validator was answered `206` with the tail, where RFC 7233 requires
+    /// `200` and the whole file. Content it serves from its own disk carries no
+    /// `ETag` to send in the first place.
+    ///
+    /// So this is sent in hope, not in trust, and nothing depends on it. What
+    /// actually stops a resume against a file the server has replaced is the
+    /// length comparison in [`teddiebox_download::place`] — worth knowing
+    /// before anyone deletes that check as redundant.
+    pub etag: Option<&'a ETag>,
+}
+
+/// What the response head said, handed over before a single body byte moves.
+///
+/// The card's owner needs this and cannot ask for it: it is on the far side of
+/// a pipe, and by the time bytes arrive the head is gone. Chiefly it needs
+/// `total`, because that is what the `.MET` sidecar records and the sidecar has
+/// to be on the card *before* the content it vouches for.
+pub struct Head<'a> {
+    /// Length of the whole file, when the server said.
+    pub total: Option<u32>,
+    /// Where this body's first byte belongs in the file. Zero unless a range
+    /// was asked for and honoured — so zero is also how a declined range
+    /// arrives, and means "start again".
+    pub offset: u32,
+    /// What a later resume can be validated against.
+    pub etag: Option<&'a ETag>,
 }
 
 pub async fn fetch(
     tls: TlsReference<'_>,
     stack: &Stack<'_>,
     wanted: &Wanted<'_>,
+    on_head: &mut dyn FnMut(Head<'_>),
     sink: &mut dyn FnMut(&[u8]) -> usize,
     may_fetch: &mut dyn FnMut() -> bool,
 ) -> Result<Fetched, Error> {
@@ -551,6 +584,8 @@ pub async fn fetch(
         insecure,
         ruid,
         token,
+        from,
+        etag,
     } = *wanted;
     let mut name = [0u8; MAX_NAME];
     let (name_len, port) = split_server(server, &mut name)?;
@@ -598,9 +633,9 @@ pub async fn fetch(
         } else {
             Route::V1
         },
-        etag: None,
+        etag,
         server,
-        from: None,
+        from,
         auth: token,
     };
 
@@ -617,8 +652,20 @@ pub async fn fetch(
         Begun::Content {
             body_length,
             prefix,
-            ..
-        } => (body_length, prefix),
+            offset,
+            total,
+            etag,
+        } => {
+            // Before `hand_over` below puts the first byte in the pipe, so the
+            // card's owner has the file open and the sidecar written by the
+            // time anything needs writing.
+            on_head(Head {
+                total,
+                offset,
+                etag: etag.as_ref(),
+            });
+            (body_length, prefix)
+        }
     };
 
     let mut crc = Crc32::new();

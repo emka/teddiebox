@@ -40,7 +40,7 @@ use teddiebox_core::pipe::Pipe;
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
-use teddiebox_download::{Pages, Throttle};
+use teddiebox_download::{Landing, Pages, Placement, Throttle};
 use tlv320dac3100::Tlv320Dac3100;
 
 use crate::pins::BoardPins;
@@ -587,12 +587,56 @@ const DOWNLOAD_IDLE: u8 = 0;
 const DOWNLOAD_RUNNING: u8 = 1;
 /// The producer has stopped. Whatever is still in the pipe is the last of it.
 const DOWNLOAD_ENDED: u8 = 2;
+/// The card is being asked what it already has. Only its owner can answer, and
+/// the answer decides what the request asks for, so the producer waits here.
+const DOWNLOAD_PREPARING: u8 = 3;
+/// The card has answered. The producer may build its request.
+const DOWNLOAD_PLANNED: u8 = 4;
 static DOWNLOAD_STATE: AtomicU8 = AtomicU8::new(DOWNLOAD_IDLE);
 /// Bytes the producer has handed to the pipe. The consumer is done when it has
 /// written this many and the producer has ended.
 static DOWNLOAD_SENT: AtomicU32 = AtomicU32::new(0);
 static DOWNLOAD_DIR: AtomicU32 = AtomicU32::new(0);
 static DOWNLOAD_FILE: AtomicU32 = AtomicU32::new(0);
+
+/// Where this download starts, or [`NOTHING_TO_FETCH`] when the card has it all.
+///
+/// Written by the card's owner during [`DOWNLOAD_PREPARING`] and read by the
+/// producer, which cannot touch the card itself.
+static DOWNLOAD_FROM: AtomicU32 = AtomicU32::new(0);
+
+/// `DOWNLOAD_FROM`'s answer for "there is nothing to ask the server for".
+///
+/// A sentinel rather than another flag because it is the same question — where
+/// does this download start — and `u32::MAX` is not a plausible offset in a
+/// file the card could hold.
+const NOTHING_TO_FETCH: u32 = u32::MAX;
+
+/// What the sidecar says a resume should be validated against.
+static DOWNLOAD_RESUME_ETAG: CsMutex<RefCell<Option<teddiebox_cloud::ETag>>> =
+    CsMutex::new(RefCell::new(None));
+
+/// How many bytes the content file held when the download was planned.
+static DOWNLOAD_ON_CARD: AtomicU32 = AtomicU32::new(0);
+
+/// How long the sidecar promised the whole file would be, or zero for none.
+///
+/// Kept so the writer can tell a resume of *this* file from a resume against a
+/// file the server has since replaced, which is otherwise indistinguishable.
+static DOWNLOAD_EXPECT: AtomicU32 = AtomicU32::new(0);
+
+/// Where the server said this body belongs. Zero means it declined the range.
+static DOWNLOAD_AT: AtomicU32 = AtomicU32::new(0);
+
+/// How long the server says the whole file is, or zero for "it did not say".
+///
+/// The card's owner writes the sidecar and is on the far side of the pipe from
+/// the response head, so the length has to be left here for it to find.
+static DOWNLOAD_TOTAL: AtomicU32 = AtomicU32::new(0);
+
+/// What a later resume can be validated against, when the server offered one.
+static DOWNLOAD_ETAG: CsMutex<RefCell<Option<teddiebox_cloud::ETag>>> =
+    CsMutex::new(RefCell::new(None));
 /// Set when the consumer cannot write, so the producer stops rather than
 /// wedging against a pipe nobody is draining.
 static DOWNLOAD_ABORT: AtomicBool = AtomicBool::new(false);
@@ -618,7 +662,88 @@ const PAUSE_ABOVE: Pages = Pages(32);
 struct CacheWrite {
     file: embedded_sdmmc::RawFile,
     written: u32,
+    /// `written` as at the last flush, so the next one is a subtraction.
+    flushed: u32,
     crc: teddiebox_core::checksum::Crc32,
+}
+
+/// How much of a download may be in flight before it is made durable.
+///
+/// This is what makes an interrupted download worth resuming rather than
+/// merely worth deleting: `embedded-sdmmc` only makes a file's recorded length
+/// truthful at a flush, so bytes written since the last one are invisible to
+/// the next boot however safely they reached the card. Without this the answer
+/// to "how far did we get" is always zero.
+///
+/// A megabyte is roughly twenty-four seconds at the rate this box downloads —
+/// little enough to lose, seldom enough not to spend the card's life on flushes.
+const FLUSH_EVERY: u32 = 1 << 20;
+
+/// Asks the card what it already has, and leaves the answer for the producer.
+///
+/// This runs here because only this task may touch the card, and it runs
+/// *before* the request because what the card holds is what the request has to
+/// ask for. A box with no card plans a whole download: the failure then comes
+/// from the write, which says so, rather than from a resume against a file
+/// nobody could read.
+fn plan_download(card: Option<&storage::Mounted>) {
+    let dir = DOWNLOAD_DIR.load(Ordering::Relaxed);
+    let file = DOWNLOAD_FILE.load(Ordering::Relaxed);
+    critical_section::with(|cs| *DOWNLOAD_RESUME_ETAG.borrow_ref_mut(cs) = None);
+
+    let mut from = 0;
+    let mut on_card = 0;
+    let mut expected = 0;
+
+    if let Some(card) = card {
+        let length_on_card = card.cache_length(dir, file);
+        on_card = length_on_card.unwrap_or(0);
+
+        let mut buffer = [0u8; teddiebox_download::MAX_SIDECAR];
+        let sidecar = card
+            .read_sidecar(dir, file, &mut buffer)
+            .and_then(|filled| core::str::from_utf8(&buffer[..filled]).ok())
+            .and_then(|text| teddiebox_download::Sidecar::parse(text).ok());
+
+        expected = sidecar.as_ref().map_or(0, |held| held.length);
+        let cached = teddiebox_download::Cached {
+            sidecar,
+            length_on_card,
+        };
+        match teddiebox_download::decide(&cached) {
+            teddiebox_download::Decision::Play => from = NOTHING_TO_FETCH,
+            teddiebox_download::Decision::Fetch => {}
+            teddiebox_download::Decision::Resume { from: at, etag } => {
+                from = at;
+                critical_section::with(|cs| *DOWNLOAD_RESUME_ETAG.borrow_ref_mut(cs) = etag);
+            }
+        }
+    }
+
+    DOWNLOAD_FROM.store(from, Ordering::Relaxed);
+    DOWNLOAD_ON_CARD.store(on_card, Ordering::Relaxed);
+    DOWNLOAD_EXPECT.store(expected, Ordering::Relaxed);
+    DOWNLOAD_STATE.store(DOWNLOAD_PLANNED, Ordering::Relaxed);
+}
+
+/// Records how long the file beside it is meant to be.
+///
+/// Best effort on purpose. A content file with no sidecar is incomplete by
+/// definition, so a failure here costs a refetch — where a download that
+/// pressed on and later *looked* complete would cost a story that stops in the
+/// middle. Silence when the server gave no length is the same bargain: nothing
+/// is claimed that was not said.
+fn write_sidecar(card: &storage::Mounted, dir: u32, file: u32) {
+    let length = DOWNLOAD_TOTAL.load(Ordering::Relaxed);
+    if length == 0 {
+        esp_println::println!("teddiebox: get no length from the server — not vouching for it");
+        return;
+    }
+    let etag = critical_section::with(|cs| DOWNLOAD_ETAG.borrow_ref(cs).clone());
+    let sidecar = teddiebox_download::Sidecar { length, etag };
+    if let Err(reason) = card.write_sidecar(dir, file, sidecar.render().as_bytes()) {
+        esp_println::println!("teddiebox: get sidecar not written — {reason}");
+    }
 }
 
 /// Moves whatever the network has produced onto the card.
@@ -632,23 +757,72 @@ struct CacheWrite {
 /// faster while one is.
 fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWrite>) -> bool {
     let state = DOWNLOAD_STATE.load(Ordering::Relaxed);
-    if state == DOWNLOAD_IDLE {
-        return false;
+    match state {
+        DOWNLOAD_IDLE => return false,
+        // Both are brief and neither writes anything: one answers the
+        // producer, the other waits for a response head that has not arrived.
+        // Reported as busy so the loop keeps its fast cadence across them.
+        DOWNLOAD_PREPARING => {
+            plan_download(card);
+            return true;
+        }
+        DOWNLOAD_PLANNED => return true,
+        _ => {}
     }
 
     if write.is_none() {
+        // A request that failed before the head arrived handed over nothing.
+        // Opening the file here would create — or truncate — a cache entry on
+        // behalf of a download that never asked the server for a byte.
+        if state == DOWNLOAD_ENDED && DOWNLOAD_SENT.load(Ordering::Relaxed) == 0 {
+            DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
+            return false;
+        }
+
         let dir = DOWNLOAD_DIR.load(Ordering::Relaxed);
         let file = DOWNLOAD_FILE.load(Ordering::Relaxed);
+        // Where the server put this body decides whether the partial file on
+        // the card is continued or thrown away, and getting that backwards
+        // splices the start of a story onto its middle at exactly the right
+        // length for nothing downstream to notice.
+        let expected = DOWNLOAD_EXPECT.load(Ordering::Relaxed);
+        let total = DOWNLOAD_TOTAL.load(Ordering::Relaxed);
+        let placement = teddiebox_download::place(&Landing {
+            offset: DOWNLOAD_AT.load(Ordering::Relaxed),
+            length_on_card: DOWNLOAD_ON_CARD.load(Ordering::Relaxed),
+            // Zero is this firmware's "nothing was said", which is what the
+            // crate spells `None`.
+            expected: (expected != 0).then_some(expected),
+            total: (total != 0).then_some(total),
+        });
         let opened = card.ok_or("the card is not mounted").and_then(|card| {
-            card.open_cache_for_write(dir, file)
-                .map(|handle| (card, handle))
+            match placement {
+                Placement::Restart => card.open_cache_for_write(dir, file),
+                Placement::Continue => card.open_cache_for_append(dir, file),
+                Placement::Refuse => Err("the server answered with a range this file cannot take"),
+            }
+            .map(|handle| (card, handle))
         });
         match opened {
-            Ok((_, handle)) => {
-                esp_println::println!("teddiebox: get writing /CACHE/{dir:08X}/{file:08X}");
+            Ok((card, handle)) => {
+                match placement {
+                    Placement::Continue => esp_println::println!(
+                        "teddiebox: get resuming /CACHE/{dir:08X}/{file:08X} at {}",
+                        DOWNLOAD_AT.load(Ordering::Relaxed)
+                    ),
+                    _ => {
+                        esp_println::println!("teddiebox: get writing /CACHE/{dir:08X}/{file:08X}");
+                        // Only when starting over. A resumed download is
+                        // continuing the file this sidecar already vouches
+                        // for, and rewriting it would claim the server said
+                        // something about a file it was only asked for part of.
+                        write_sidecar(card, dir, file);
+                    }
+                }
                 *write = Some(CacheWrite {
                     file: handle,
                     written: 0,
+                    flushed: 0,
                     crc: teddiebox_core::checksum::Crc32::new(),
                 });
             }
@@ -681,6 +855,16 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         }
         active.crc.update(&buf[..taken]);
         active.written += taken as u32;
+
+        if active.written - active.flushed >= FLUSH_EVERY {
+            // A failure here is not fatal to the download — the bytes are
+            // written, only the recorded length is behind — so it costs a
+            // longer resume rather than a broken file.
+            if let Err(reason) = card.flush(active.file) {
+                esp_println::println!("teddiebox: get flush failed — {reason}");
+            }
+            active.flushed = active.written;
+        }
     }
 
     // Done only when the producer has stopped *and* everything it handed over
@@ -1386,60 +1570,116 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                         critical_section::with(|cs| {
                             *DOWNLOAD_PIPE.borrow_ref_mut(cs) = Pipe::new()
                         });
-                        // Raised before the first byte, so the consumer has the
-                        // file open by the time the pipe has anything in it.
-                        DOWNLOAD_STATE.store(DOWNLOAD_RUNNING, Ordering::Relaxed);
-
-                        DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
-                        // Taken once, before the request is built: the plate
-                        // can be emptied mid-download and the token is what
-                        // this fetch was authorised with.
-                        let token = critical_section::with(|cs| *TAG_TOKEN.borrow_ref(cs));
-                        if token.is_some() {
-                            esp_println::println!("teddiebox: get sending the tag's token");
+                        // The card is the only thing that knows what is
+                        // already downloaded, and only its owner may ask it. So
+                        // the request waits here until it has been told what to
+                        // ask for — a resume asks for the rest, and asking for
+                        // the whole file again is a quarter of an hour thrown
+                        // away with the story still not playing.
+                        DOWNLOAD_FROM.store(0, Ordering::Relaxed);
+                        DOWNLOAD_AT.store(0, Ordering::Relaxed);
+                        DOWNLOAD_STATE.store(DOWNLOAD_PREPARING, Ordering::Relaxed);
+                        // Bounded, because a media task that never answers must
+                        // not wedge the console. Timing out leaves DOWNLOAD_FROM
+                        // at zero, which fetches the whole file — slow, and
+                        // correct, which is the right way round for a fallback.
+                        let mut waited = 0;
+                        while DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_PREPARING
+                            && waited < 500
+                        {
+                            Timer::after(Duration::from_millis(10)).await;
+                            waited += 1;
                         }
-                        let mut throttle = Throttle::new();
-                        let mut may_fetch = || {
-                            throttle.update(
-                                PLAYING.load(Ordering::Relaxed),
-                                NOTHING_WAITING,
-                                RESUME_BELOW,
-                                PAUSE_ABOVE,
-                            )
-                        };
-                        let mut into_pipe = |bytes: &[u8]| -> usize {
-                            // Nobody is draining. Swallow the rest so the
-                            // download ends and reports, rather than blocking
-                            // forever on a pipe that will never empty.
-                            if DOWNLOAD_ABORT.load(Ordering::Relaxed) {
-                                return bytes.len();
-                            }
-                            let taken = critical_section::with(|cs| {
-                                DOWNLOAD_PIPE.borrow_ref_mut(cs).write(bytes)
-                            });
-                            DOWNLOAD_SENT.fetch_add(taken as u32, Ordering::Relaxed);
-                            taken
-                        };
-                        let wanted = tls::Wanted {
-                            server: &config.server,
-                            insecure: config.insecure,
-                            ruid,
-                            token: token.as_ref(),
-                        };
-                        let outcome =
-                            tls::fetch(tls, &stack, &wanted, &mut into_pipe, &mut may_fetch).await;
-                        // Ended either way: the consumer must stop waiting for
-                        // bytes that are never coming.
-                        DOWNLOAD_STATE.store(DOWNLOAD_ENDED, Ordering::Relaxed);
 
-                        match outcome {
-                            Ok(got) => esp_println::println!(
-                                "teddiebox: get received {} bytes, crc32 {:08X}, {} s",
-                                got.bytes,
-                                got.crc32,
-                                got.seconds
-                            ),
-                            Err(e) => esp_println::println!("teddiebox: get failed — {e:?}"),
+                        let from = DOWNLOAD_FROM.load(Ordering::Relaxed);
+                        if from == NOTHING_TO_FETCH {
+                            esp_println::println!(
+                                "teddiebox: get the card already holds all of it"
+                            );
+                            DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
+                        } else {
+                            if from > 0 {
+                                esp_println::println!("teddiebox: get resuming from {from}");
+                            }
+                            DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
+                            // Taken once, before the request is built: the plate
+                            // can be emptied mid-download and the token is what
+                            // this fetch was authorised with.
+                            let token = critical_section::with(|cs| *TAG_TOKEN.borrow_ref(cs));
+                            if token.is_some() {
+                                esp_println::println!("teddiebox: get sending the tag's token");
+                            }
+                            let mut throttle = Throttle::new();
+                            let mut may_fetch = || {
+                                throttle.update(
+                                    PLAYING.load(Ordering::Relaxed),
+                                    NOTHING_WAITING,
+                                    RESUME_BELOW,
+                                    PAUSE_ABOVE,
+                                )
+                            };
+                            let mut into_pipe = |bytes: &[u8]| -> usize {
+                                // Nobody is draining. Swallow the rest so the
+                                // download ends and reports, rather than blocking
+                                // forever on a pipe that will never empty.
+                                if DOWNLOAD_ABORT.load(Ordering::Relaxed) {
+                                    return bytes.len();
+                                }
+                                let taken = critical_section::with(|cs| {
+                                    DOWNLOAD_PIPE.borrow_ref_mut(cs).write(bytes)
+                                });
+                                DOWNLOAD_SENT.fetch_add(taken as u32, Ordering::Relaxed);
+                                taken
+                            };
+                            let resume_etag = critical_section::with(|cs| {
+                                DOWNLOAD_RESUME_ETAG.borrow_ref(cs).clone()
+                            });
+                            let wanted = tls::Wanted {
+                                server: &config.server,
+                                insecure: config.insecure,
+                                ruid,
+                                token: token.as_ref(),
+                                from: (from > 0).then_some(from),
+                                etag: resume_etag.as_ref(),
+                            };
+                            // Raised here rather than before the request. Until the
+                            // head arrives there is nothing to write and nothing to
+                            // write it with — and opening the file any earlier
+                            // truncates a partial download on behalf of a request
+                            // that may yet fail before asking for a byte.
+                            let mut on_head = |head: tls::Head<'_>| {
+                                DOWNLOAD_TOTAL.store(head.total.unwrap_or(0), Ordering::Relaxed);
+                                // Where the body actually belongs, which is not
+                                // always where it was asked to start: a server
+                                // that declined the range says so with zero.
+                                DOWNLOAD_AT.store(head.offset, Ordering::Relaxed);
+                                critical_section::with(|cs| {
+                                    *DOWNLOAD_ETAG.borrow_ref_mut(cs) = head.etag.cloned();
+                                });
+                                DOWNLOAD_STATE.store(DOWNLOAD_RUNNING, Ordering::Relaxed);
+                            };
+                            let outcome = tls::fetch(
+                                tls,
+                                &stack,
+                                &wanted,
+                                &mut on_head,
+                                &mut into_pipe,
+                                &mut may_fetch,
+                            )
+                            .await;
+                            // Ended either way: the consumer must stop waiting for
+                            // bytes that are never coming.
+                            DOWNLOAD_STATE.store(DOWNLOAD_ENDED, Ordering::Relaxed);
+
+                            match outcome {
+                                Ok(got) => esp_println::println!(
+                                    "teddiebox: get received {} bytes, crc32 {:08X}, {} s",
+                                    got.bytes,
+                                    got.crc32,
+                                    got.seconds
+                                ),
+                                Err(e) => esp_println::println!("teddiebox: get failed — {e:?}"),
+                            }
                         }
                     }
                 },

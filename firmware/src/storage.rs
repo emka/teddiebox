@@ -592,6 +592,31 @@ impl Mounted {
     /// once per download and the offset moves between reads and appends, which
     /// is why [`Mounted::append`] seeks to the end itself.
     pub fn open_cache_for_write(&self, directory: u32, file: u32) -> Result<RawFile, &'static str> {
+        self.open_cache_in_mode(directory, file, Mode::ReadWriteCreateOrTruncate)
+    }
+
+    /// Opens the same file **keeping what is already in it**, to continue an
+    /// interrupted download.
+    ///
+    /// Only ever right when a sidecar vouches for where the file stops and the
+    /// server has agreed to carry on from there — [`teddiebox_download::place`]
+    /// is what decides that. Appending to a file the server did not resume
+    /// splices the start of a story onto its middle, and the result is the
+    /// right length, so nothing downstream would catch it.
+    pub fn open_cache_for_append(
+        &self,
+        directory: u32,
+        file: u32,
+    ) -> Result<RawFile, &'static str> {
+        self.open_cache_in_mode(directory, file, Mode::ReadWriteCreateOrAppend)
+    }
+
+    fn open_cache_in_mode(
+        &self,
+        directory: u32,
+        file: u32,
+        mode: Mode,
+    ) -> Result<RawFile, &'static str> {
         let mut folder_name = [0u8; 8];
         let mut file_name = [0u8; 8];
         write_hex8(&mut folder_name, directory);
@@ -611,11 +636,118 @@ impl Mounted {
         let _ = self.volumes.close_dir(cache);
         let folder = folder?;
 
+        let handle = self.volumes.open_file_in_dir(folder, file_name, mode);
+        let _ = self.volumes.close_dir(folder);
+        handle.map_err(|_| "the cache file would not open")
+    }
+
+    /// How long the cached content file is, or `None` if there is not one.
+    ///
+    /// Opened and closed here rather than handed back: the writer needs one
+    /// handle on that file and the library will not give out a second, so the
+    /// length has to be learned before the download opens it.
+    pub fn cache_length(&self, directory: u32, file: u32) -> Option<u32> {
+        let (handle, length) = self.open_cache(directory, file).ok()?;
+        self.close_file(handle);
+        Some(length)
+    }
+
+    /// Reads `/CACHE/<directory>/<file>.MET` into `buffer`.
+    ///
+    /// Returns how many bytes it held. Every failure is the same answer to the
+    /// caller — no sidecar — because a sidecar that cannot be read vouches for
+    /// nothing, and the content beside it is incomplete by definition.
+    pub fn read_sidecar(&self, directory: u32, file: u32, buffer: &mut [u8]) -> Option<usize> {
+        let mut folder_name = [0u8; 8];
+        let mut stem = [0u8; 8];
+        write_hex8(&mut folder_name, directory);
+        write_hex8(&mut stem, file);
+        let folder_name = core::str::from_utf8(&folder_name).ok()?;
+
+        let mut file_name = [0u8; 12];
+        file_name[..8].copy_from_slice(&stem);
+        file_name[8..].copy_from_slice(b".MET");
+        let file_name = core::str::from_utf8(&file_name).ok()?;
+
+        // Nothing is created on this path. A read that makes a directory would
+        // leave the card littered by the act of asking whether anything is
+        // there.
+        let cache = self.volumes.open_dir(self.root, CACHE_DIR).ok()?;
+        let folder = match self.volumes.open_dir(cache, folder_name) {
+            Ok(folder) => folder,
+            Err(_) => {
+                let _ = self.volumes.close_dir(cache);
+                return None;
+            }
+        };
+        let _ = self.volumes.close_dir(cache);
+
+        let handle = self
+            .volumes
+            .open_file_in_dir(folder, file_name, Mode::ReadOnly);
+        let _ = self.volumes.close_dir(folder);
+        let handle = handle.ok()?;
+
+        let filled = self.volumes.read(handle, buffer).ok();
+        self.close_file(handle);
+        filled
+    }
+
+    /// Writes `/CACHE/<directory>/<file>.MET`, the record that says how long
+    /// the content beside it is meant to be.
+    ///
+    /// **Written before the first body byte, and closed before returning.** It
+    /// is only worth having if it survives the interruption that makes it
+    /// worth having, and a handle held open for the length of a download is a
+    /// handle whose bytes are still in a buffer when the battery goes flat. A
+    /// content file with no sidecar beside it is incomplete by definition, so
+    /// failing to write this is safe in the direction that matters: the
+    /// download is refetched rather than trusted.
+    pub fn write_sidecar(
+        &self,
+        directory: u32,
+        file: u32,
+        bytes: &[u8],
+    ) -> Result<(), &'static str> {
+        let mut folder_name = [0u8; 8];
+        let mut stem = [0u8; 8];
+        write_hex8(&mut folder_name, directory);
+        write_hex8(&mut stem, file);
+        let folder_name =
+            core::str::from_utf8(&folder_name).map_err(|_| "the directory name is not text")?;
+
+        // `<8 hex>.MET`, which is an 8.3 name exactly as FAT wants it.
+        let mut file_name = [0u8; 12];
+        file_name[..8].copy_from_slice(&stem);
+        file_name[8..].copy_from_slice(b".MET");
+        let file_name =
+            core::str::from_utf8(&file_name).map_err(|_| "the sidecar name is not text")?;
+
+        // Same handle discipline as `open_cache_for_write`: directory handles
+        // are a budget shared with the walk, and every path here gives both
+        // back before returning.
+        let cache = self.open_or_make_dir(self.root, CACHE_DIR)?;
+        let folder = self.open_or_make_dir(cache, folder_name);
+        let _ = self.volumes.close_dir(cache);
+        let folder = folder?;
+
         let handle =
             self.volumes
                 .open_file_in_dir(folder, file_name, Mode::ReadWriteCreateOrTruncate);
         let _ = self.volumes.close_dir(folder);
-        handle.map_err(|_| "the cache file would not open")
+        let handle = handle.map_err(|_| "the sidecar would not open")?;
+
+        let wrote = self
+            .volumes
+            .write(handle, bytes)
+            .map_err(|_| "the sidecar write failed")
+            .and_then(|()| {
+                self.volumes
+                    .flush_file(handle)
+                    .map_err(|_| "the sidecar flush failed")
+            });
+        self.close_file(handle);
+        wrote
     }
 
     /// Opens a subdirectory, creating it if this is the first download.
