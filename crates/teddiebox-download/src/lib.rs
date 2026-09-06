@@ -8,6 +8,7 @@
 //! the decoder the writer has got — so that all of them can be tested without
 //! a box.
 
+mod availability;
 mod cache;
 mod content_path;
 mod reconcile;
@@ -17,6 +18,7 @@ mod units;
 mod window;
 mod writer;
 
+pub use availability::playable_now;
 pub use cache::{decide, place, revalidate, Cached, Decision, Freshness, Landing, Placement};
 pub use content_path::{content_path, ContentPath};
 pub use reconcile::{reconcile, Action, Mismatch};
