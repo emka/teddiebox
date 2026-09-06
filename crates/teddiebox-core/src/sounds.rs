@@ -134,6 +134,23 @@ impl Sound {
         }
     }
 
+    /// What the box should say for a prompt, if it has words for it.
+    ///
+    /// `None` is a real answer and not an oversight. Three failure sounds were
+    /// identified by ear on this card — the config, the network and the
+    /// passphrase — and "I have no story for this figure" was not among them.
+    /// Pointing it at a sound that says something else would have the box say
+    /// something true about the wrong thing, which is the failure this module
+    /// already guards against elsewhere. Finding that file is bench work.
+    pub const fn for_prompt(prompt: crate::Prompt) -> Option<Self> {
+        match prompt {
+            crate::Prompt::Startup => Some(Self::Startup),
+            crate::Prompt::NoNetwork => Some(Self::NoInternet),
+            crate::Prompt::BatteryLow => Some(Self::BatteryLow),
+            crate::Prompt::NoContent | crate::Prompt::Shutdown | crate::Prompt::VolumeLimit => None,
+        }
+    }
+
     pub const fn file(self) -> u32 {
         match self {
             Self::Startup => 0x0000_0000,
@@ -214,6 +231,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
+    use crate::Prompt;
 
     /// Spelled out, like the language directories and for the same reason: a
     /// table that agreed with itself could be wrong about every entry. These
@@ -375,5 +393,29 @@ mod tests {
             spoken.extend(announcer.observe(PackState::Low));
         }
         assert_eq!(spoken, [Sound::BatteryLow, Sound::BatteryLow]);
+    }
+
+    #[test]
+    fn the_prompts_with_a_known_file_map_to_it() {
+        assert_eq!(Sound::for_prompt(Prompt::Startup), Some(Sound::Startup));
+        assert_eq!(
+            Sound::for_prompt(Prompt::NoNetwork),
+            Some(Sound::NoInternet)
+        );
+        assert_eq!(
+            Sound::for_prompt(Prompt::BatteryLow),
+            Some(Sound::BatteryLow)
+        );
+    }
+
+    /// Nobody has found the file that says "I have no story for this figure",
+    /// and guessing would have the box say something true about the wrong
+    /// thing. Silence with a log line is the honest answer until the bench
+    /// identifies it by ear, the way the two battery sounds were identified.
+    #[test]
+    fn the_prompts_with_no_identified_file_map_to_nothing() {
+        assert_eq!(Sound::for_prompt(Prompt::NoContent), None);
+        assert_eq!(Sound::for_prompt(Prompt::Shutdown), None);
+        assert_eq!(Sound::for_prompt(Prompt::VolumeLimit), None);
     }
 }
