@@ -11,7 +11,8 @@
 //! [`Session`], and so is `teddiebox-cloud`. Nothing here adapts anything; the
 //! session is a socket-shaped thing that happens to encrypt.
 //!
-//! **Certificates are not checked yet.** See [`client_config`].
+//! The server is verified against a CA read from the card. See
+//! [`client_config`] and [`SERVER_IDENTITY`].
 
 use core::cell::RefCell;
 use core::ffi::CStr;
@@ -114,32 +115,32 @@ pub const CERT_BYTES: usize = 1536;
 
 /// The common name teddyCloud's server certificate carries.
 ///
-/// Unused, and the reason is worth keeping. `mbedtls_ssl_set_hostname` sets two
-/// things at once: the name a certificate is verified against, *and* the SNI
-/// extension sent to the server. Neither value available here works for both.
+/// `mbedtls_ssl_set_hostname` sets two things at once: the name a certificate
+/// is verified against, *and* the SNI extension sent to the server. That looks
+/// like a dilemma, because neither value available here works for both — this
+/// CN contains a space and is not a valid SNI host, the real host
+/// `teddycloud.local` matches nothing in the certificate, and leaving it unset
+/// makes mbedtls refuse to verify at all with
+/// `CERTIFICATE_VERIFICATION_WITHOUT_HOSTNAME`.
 ///
-/// - This CN verifies correctly — there is no `subjectAltName`, so mbedtls
-///   compares against the common name — but it contains a space, is therefore
-///   not a valid SNI host, and teddyCloud answers the malformed extension with
-///   a fatal alert. Measured: `MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE`.
-/// - The real host, `teddycloud.local`, is a valid SNI and matches nothing in the
-///   certificate.
-/// - Leaving it unset makes mbedtls refuse to verify at all:
-///   `CERTIFICATE_VERIFICATION_WITHOUT_HOSTNAME`. It distinguishes "you forgot"
-///   from "you opted out deliberately", and `mbedtls-rs` can only express the
-///   first — `server_name: None` means it never calls the function, rather than
-///   calling it with NULL.
+/// It is not a dilemma, because the two are only welded together by a build
+/// option. `MBEDTLS_SSL_SERVER_NAME_INDICATION` guards the client's SNI write
+/// and nothing else; certificate verification reads the same hostname through
+/// `get_hostname_for_verification`, which that option does not touch. So
+/// `scripts/vendor-mbedtls-rs-sys.sh` takes that define out of the vendored
+/// crate — it cannot be done from `Cargo.toml`, because `mbedtls-rs` names
+/// `tls-core` in its own dependency rather than behind a feature. No SNI goes
+/// out, and this name does exactly one job: naming the entity to verify.
 ///
-/// The way out is the build option mbedtls names in that error's own
-/// documentation:
-/// `MBEDTLS_SSL_CLI_ALLOW_WEAK_CERTIFICATE_VERIFICATION_WITHOUT_HOSTNAME`. This
-/// project already patches the vendored `mbedtls-rs-sys`, so adding a define is
-/// the same kind of change as the one already there.
+/// Sending an SNI is not merely useless here, it is harmful. teddyCloud
+/// switches certificates on it — any non-empty SNI selects a `tbs2.tonie.cloud`
+/// chain on secp384r1, a curve this build does not carry, and the handshake
+/// ends in `MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE`. Without one it answers with
+/// the RSA certificate this constant names, issued by the CA on the card.
 ///
-/// Until then the connection is encrypted and the *box* is authenticated to the
-/// server — which is the direction that was actually missing — but the server is
-/// not authenticated to the box.
-#[allow(dead_code)]
+/// Hardcoded because it comes from teddyCloud's own certificate generation
+/// rather than from this deployment; if it ever varies it belongs in the card's
+/// config beside the server address.
 const SERVER_IDENTITY: &CStr = c"TeddyCloud Server";
 
 /// The box's certificate and the key that proves it.
@@ -378,10 +379,8 @@ pub fn client_config<'a>(
     ClientSessionConfig {
         creds,
         ca_chain,
-        // The identity teddyCloud's certificate actually carries. Hardcoded
-        // because it comes from teddyCloud's own certificate generation rather
-        // than from this deployment; if it ever varies it belongs in the card's
-        // config beside the server address.
+        // Names the entity to verify, and — because this build carries no
+        // SNI — nothing else. See [`SERVER_IDENTITY`].
         server_name: if insecure {
             None
         } else {
