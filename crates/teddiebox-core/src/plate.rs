@@ -10,7 +10,7 @@ use crate::TagUid;
 /// Consecutive readings of the same tag before it counts as arrived.
 ///
 /// Provisional. Nothing has calibrated this: it trades how fast a placement
-/// feels against a false arrival. The precedent is `power::READINGS_TO_AGREE`,
+/// feels against a false arrival. The precedent is `sounds::READINGS_TO_AGREE`,
 /// which is 4 for a quantity that changes far more slowly than a hand.
 pub const ARRIVALS_TO_AGREE: u8 = 2;
 
@@ -79,6 +79,8 @@ impl Presence {
             }
 
             // A different tag restarts the count rather than inheriting it.
+            // No departure is announced because nothing had arrived yet, so this
+            // reading counts toward the newcomer's tally.
             (State::Arriving { .. }, Some(now)) => {
                 self.state = State::Arriving { tag: now, seen: 1 };
                 self.settle_arrival(now, 1)
@@ -101,7 +103,9 @@ impl Presence {
             }
 
             // Another figure while one is present: report the departure now,
-            // and let the newcomer earn its own arrival.
+            // and let the newcomer earn its own arrival. This reading announces
+            // the departure and is spent on that event, so it doesn't count toward
+            // the newcomer's tally.
             (State::Present { .. }, Some(now)) => {
                 self.state = State::Arriving { tag: now, seen: 0 };
                 Some(TagEvent::Left)
@@ -208,5 +212,15 @@ mod tests {
         assert_eq!(p.feed(None), None);
         assert_eq!(p.feed(None), None);
         assert_eq!(p.feed(None), None);
+    }
+
+    /// A figure that displaces another mid-Arriving counts the displacing
+    /// reading toward its own tally, since no departure is announced.
+    #[test]
+    fn a_figure_swapped_before_the_first_one_settled_starts_its_own_count() {
+        let mut p = Presence::new(2, 4);
+        p.feed(Some(A)); // A begins arriving but hasn't confirmed
+        assert_eq!(p.feed(Some(B)), None); // B displaces mid-arriving A
+        assert_eq!(p.feed(Some(B)), Some(TagEvent::Arrived(B))); // B arrives on second reading
     }
 }
