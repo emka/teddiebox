@@ -44,10 +44,11 @@ use teddiebox_core::plate::{Presence, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEA
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
-use teddiebox_core::TagUid;
+use teddiebox_core::{Action, Core, CoreConfig, Event, TagUid, Unavailable};
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
 
+use crate::index::CardIndex;
 use crate::pins::BoardPins;
 
 /// Bytes of heap handed to the radio stack.
@@ -645,6 +646,52 @@ static DOWNLOAD_ETAG: CsMutex<RefCell<Option<teddiebox_cloud::ETag>>> =
 /// Set when the consumer cannot write, so the producer stops rather than
 /// wedging against a pipe nobody is draining.
 static DOWNLOAD_ABORT: AtomicBool = AtomicBool::new(false);
+
+/// What the last download came to, for whoever asked for it.
+///
+/// The fetch runs in the network task and ends on the card in the media task,
+/// while the only thing that can decide what to do about it — the reducer —
+/// lives in the media task's loop. So the answer is left here rather than
+/// returned: it crosses two task boundaries and neither can call the other.
+///
+/// Deliberately coarse. `Unavailable` has two words for failure and the
+/// console keeps the real one; this carries only what the reducer can act on.
+static FETCH_OUTCOME: AtomicU8 = AtomicU8::new(FETCH_NOTHING);
+/// No download has ended since the last one was read.
+const FETCH_NOTHING: u8 = 0;
+/// The bytes are on the card.
+const FETCH_COMPLETED: u8 = 1;
+/// The server could not be reached, or could not be asked.
+const FETCH_UNREACHABLE: u8 = 2;
+/// The server was reached and has nothing filed under that figure.
+const FETCH_NO_CONTENT: u8 = 3;
+
+/// Records how a download ended, once.
+///
+/// A download ends in one of several places — before the request, in the
+/// fetch, or at the card — and every one of them has to leave the same answer.
+fn fetch_ended(outcome: u8) {
+    FETCH_OUTCOME.store(outcome, Ordering::Relaxed);
+}
+
+/// Which of the reducer's two words a failed fetch deserves.
+///
+/// A `404` or a `403` means the server answered and has no story for this
+/// figure; teddyCloud's `403` is what a request without a usable token gets,
+/// which is the same thing from the box's point of view. Everything else —
+/// the name, the socket, the handshake, a fault of the server's own — means
+/// the server was not reached, whatever the reason. The console keeps the
+/// reason; this is only what the box can say out loud.
+fn why_unavailable(error: &tls::Error) -> Unavailable {
+    match error {
+        tls::Error::NoContent
+        | tls::Error::Cloud(teddiebox_cloud::CloudError::UnexpectedStatus(403 | 404)) => {
+            Unavailable::NoContent
+        }
+        _ => Unavailable::Unreachable,
+    }
+}
+
 /// Set while audio is being fed, so the download can leave the radio alone.
 static PLAYING: AtomicBool = AtomicBool::new(false);
 
@@ -867,6 +914,12 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
                 // sink nobody drains never returns, and the box would look
                 // hung rather than broken.
                 esp_println::println!("teddiebox: get cannot write — {reason}");
+                // The story cannot be obtained, which is all the reducer has a
+                // word for. Which of the two it is told is a judgement: a card
+                // that will not take the bytes is not the server's fault, but
+                // "reached and has nothing" would be a lie, and `Unreachable`
+                // at least sends the box back to the network next time.
+                fetch_ended(FETCH_UNREACHABLE);
                 DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
                 DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
                 return false;
@@ -890,6 +943,7 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         }
         if let Err(reason) = active.writer.write(&mut sink, &buf[..taken]) {
             esp_println::println!("teddiebox: get write failed — {reason}");
+            fetch_ended(FETCH_UNREACHABLE);
             DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
             break;
         }
@@ -911,6 +965,10 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         );
         card.close_file(active.file);
         *write = None;
+        // Here rather than where the fetch returned: a story is ready when it
+        // is on the card, not when the last byte left the socket. Playing on
+        // the earlier answer would open a file the writer has not finished.
+        fetch_ended(FETCH_COMPLETED);
         DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
         DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
         return false;
@@ -1061,8 +1119,6 @@ static PLATE_TAG: Signal<CriticalSectionRawMutex, PlateState> = Signal::new();
 
 /// The token travels with the UID it was read from. As two separate statics
 /// it would be possible to send one figure's token for another's story.
-// TODO(task 8): read by the task that turns a plate event into a story.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 enum PlateState {
     Present {
@@ -1355,6 +1411,93 @@ fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
     }
 }
 
+/// Carries out one of the reducer's decisions.
+///
+/// Every arm reaches a path a console command already takes, by setting the
+/// same statics that command sets. Nothing new is built here: what this adds
+/// is that the box can now reach those paths without anybody typing.
+fn perform(action: Action, index: &CardIndex<'_>) {
+    match action {
+        Action::Play { tag, from } => {
+            let path = teddiebox_download::content_path(tag.0);
+            // A shipped story lives under `CONTENT/` and a downloaded one under
+            // `CACHE/`, and neither request looks in the other's directory. The
+            // index has just answered this very question to decide the story
+            // was there at all; asking it again is what turns that into a path.
+            let request = if index.on_stock_card(path.directory, path.file) {
+                REQUEST_CONTENT
+            } else {
+                REQUEST_CACHE
+            };
+            if from.page != 0 {
+                // Nothing resumes yet — `saved_position` answers zero for every
+                // figure — so a page here would mean the index grew a memory
+                // this never learned to honour.
+                esp_println::println!("teddiebox: plate ignoring saved page {}", from.page);
+            }
+            esp_println::println!(
+                "teddiebox: plate playing {}/{:08X}/{:08X}",
+                if request == REQUEST_CONTENT {
+                    "CONTENT"
+                } else {
+                    "CACHE"
+                },
+                path.directory,
+                path.file
+            );
+            CONTENT_DIRECTORY.store(path.directory, Ordering::Relaxed);
+            CONTENT_FILE.store(path.file, Ordering::Relaxed);
+            // The storage rail is already up, or the card would not be mounted.
+            // The codec's output stage is a different matter: `play <16 hex>`
+            // leaves raising it to whoever typed it, and nobody typed this.
+            OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+            REQUEST.store(request, Ordering::Relaxed);
+        }
+
+        // Pausing and stopping are the same act here. Nothing remembers where a
+        // story got to, so a pause that could be resumed does not yet exist.
+        Action::Pause | Action::Stop => {
+            esp_println::println!("teddiebox: plate stopping");
+            audio::STOP.store(true, Ordering::Relaxed);
+        }
+
+        Action::AbortFetch => {
+            esp_println::println!("teddiebox: plate abandoning the download");
+            DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
+        }
+
+        Action::RequestContent(tag) => {
+            // `get` takes the identifier in the order the path uses, which is
+            // the reverse of the order the reader hands the UID over in.
+            let mut ruid = tag.0;
+            ruid.reverse();
+            let ruid = u64::from_be_bytes(ruid);
+            esp_println::println!("teddiebox: plate fetching {ruid:016X}");
+            GET_RUID.store(ruid, Ordering::Relaxed);
+            NET_REQUEST.store(NET_GET, Ordering::Relaxed);
+        }
+
+        Action::PlayPrompt(prompt) => match Sound::for_prompt(prompt) {
+            Some(sound) => SOUND_REQUEST.store(sound.file(), Ordering::Relaxed),
+            // No file on this card has been identified for this sentence, and
+            // substituting another would have the box say something true about
+            // the wrong thing. The console hears it; the child hears nothing.
+            None => esp_println::println!(
+                "teddiebox: plate no sound identified for {prompt:?} — saying nothing"
+            ),
+        },
+
+        // Position memory has no store yet: `saved_position` answers zero for
+        // every figure, so there is nothing here for this to be written to.
+        Action::SavePosition { .. } => {}
+
+        // `SetLed` is reachable and the rest are not, and neither is acted on.
+        // The LED belongs to the console loop and has no seam another task can
+        // reach through; saying what was wanted is the honest half of that.
+        other => esp_println::println!("teddiebox: plate not wired — {other:?}"),
+    }
+}
+
 #[embassy_executor::task]
 async fn media(
     spi: Spi<'static, esp_hal::Blocking>,
@@ -1398,7 +1541,81 @@ async fn media(
 
     let mut download: Option<CacheWrite> = None;
 
+    // The thing that decides what a figure on the plate means. It lives here
+    // because the only question it asks — what is on the card — can only be
+    // answered by the task that owns the card.
+    let mut reducer = Core::new(CoreConfig::default());
+    // Which figure the box is currently answering for, or none. A download
+    // ends elsewhere and says only that it ended; this is what turns that into
+    // an event about a particular story. `None` is also the test for "nobody
+    // is waiting any more", which is what makes a fetch that finishes after
+    // the figure was lifted harmless.
+    let mut on_plate: Option<TagUid> = None;
+
     loop {
+        // Only four of the ten events are fed in this increment. Ears, motion
+        // and above all `Tick` are deliberately withheld: `Core` emits
+        // `PowerOff` on a tick once the idle timeout passes, which on a bench
+        // box sitting at a console would switch it off mid-session. Wiring the
+        // rest is its own piece of work with its own uncalibrated constants.
+        //
+        // Fed before the request is read, so a `Play` decided here is picked
+        // up on the same pass rather than the next one.
+        let mut events: [Option<Event>; 2] = [None, None];
+
+        if let Some(state) = PLATE_TAG.try_take() {
+            events[0] = Some(match state {
+                PlateState::Present { uid, token } => {
+                    let tag = TagUid(uid);
+                    on_plate = Some(tag);
+                    // Stored before anything can ask for a download: the token
+                    // is what authorises the fetch, and it belongs to this
+                    // figure rather than to whichever was read last.
+                    critical_section::with(|cs| *TAG_TOKEN.borrow_ref_mut(cs) = token);
+                    Event::TagPresent(tag)
+                }
+                PlateState::Absent => {
+                    on_plate = None;
+                    Event::TagAbsent
+                }
+            });
+        }
+
+        // A download has ended somewhere this task cannot see. Read every pass
+        // so a stale answer cannot arrive later attached to a different figure.
+        let outcome = FETCH_OUTCOME.swap(FETCH_NOTHING, Ordering::Relaxed);
+        if let Some(tag) = on_plate {
+            events[1] = match outcome {
+                FETCH_COMPLETED => Some(Event::ContentReady(tag)),
+                FETCH_UNREACHABLE => Some(Event::ContentMissing(tag, Unavailable::Unreachable)),
+                FETCH_NO_CONTENT => Some(Event::ContentMissing(tag, Unavailable::NoContent)),
+                _ => None,
+            };
+        }
+
+        if events.iter().any(Option::is_some) {
+            match card.as_ref() {
+                Some(mounted) => {
+                    // Built for this block and dropped at the end of it. It
+                    // borrows the card, and the rest of the loop needs the card
+                    // unborrowed — which is the whole reason it is this cheap
+                    // to construct.
+                    let index = CardIndex::new(mounted);
+                    for event in events.into_iter().flatten() {
+                        for action in reducer.handle(event, &index) {
+                            perform(action, &index);
+                        }
+                    }
+                }
+                // A figure answered with nothing at all is the failure this
+                // whole feature exists to remove, so it is at least said out
+                // loud on the one channel that is left.
+                None => esp_println::println!(
+                    "teddiebox: plate no card mounted — the figure cannot be answered"
+                ),
+            }
+        }
+
         let request = REQUEST.swap(REQUEST_NONE, Ordering::Relaxed);
         if request == REQUEST_NONE {
             // Serviced here rather than in a branch of its own, so a download
@@ -1664,6 +1881,9 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                             esp_println::println!(
                                 "teddiebox: get the card already holds all of it"
                             );
+                            // Nothing to fetch is still an answer, and it is
+                            // the good one: whoever asked can play now.
+                            fetch_ended(FETCH_COMPLETED);
                             DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
                         } else {
                             if from > 0 {
@@ -1740,13 +1960,24 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                             DOWNLOAD_STATE.store(DOWNLOAD_ENDED, Ordering::Relaxed);
 
                             match outcome {
+                                // Not reported ready here. The bytes are still
+                                // travelling through the pipe to the card, and
+                                // the media task says so when they land.
                                 Ok(got) => esp_println::println!(
                                     "teddiebox: get received {} bytes, crc32 {:08X}, {} s",
                                     got.bytes,
                                     got.crc32,
                                     got.seconds
                                 ),
-                                Err(e) => esp_println::println!("teddiebox: get failed — {e:?}"),
+                                Err(e) => {
+                                    // The console keeps the real code; the
+                                    // reducer gets the one word it can act on.
+                                    esp_println::println!("teddiebox: get failed — {e:?}");
+                                    fetch_ended(match why_unavailable(&e) {
+                                        Unavailable::NoContent => FETCH_NO_CONTENT,
+                                        Unavailable::Unreachable => FETCH_UNREACHABLE,
+                                    });
+                                }
                             }
                         }
                     }
@@ -1864,8 +2095,15 @@ async fn net(
             NET_UP => bring_up(&mut radio, tls).await,
             // `net status` and `net down` are answered inside `bring_up` while
             // it is running. Reaching them here means it is not.
-            NET_STATUS | NET_DOWN | NET_TLS | NET_GET => {
+            NET_STATUS | NET_DOWN | NET_TLS => {
                 esp_println::println!("teddiebox: net is down")
+            }
+            // Same message, but somebody is waiting on this one: a figure whose
+            // story has to be fetched with the radio down is unreachable, and
+            // saying nothing would leave the box silent with no explanation.
+            NET_GET => {
+                esp_println::println!("teddiebox: net is down");
+                fetch_ended(FETCH_UNREACHABLE);
             }
             _ => {}
         }

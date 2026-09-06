@@ -9,25 +9,25 @@ use teddiebox_download::{content_path, playable_now, Cached, Sidecar, MAX_SIDECA
 
 use crate::storage;
 
-// Task 8 wires this into the media task's reducer loop; until then nothing
-// constructs it and `-D warnings` would otherwise fail the lint gate.
-#[allow(dead_code)]
 pub struct CardIndex<'a> {
     card: &'a storage::Mounted,
 }
 
-// Same reason as above: nothing calls these until Task 8 wires the media
-// task's reducer loop up to a real card.
-#[allow(dead_code)]
 impl<'a> CardIndex<'a> {
     pub fn new(card: &'a storage::Mounted) -> Self {
         Self { card }
     }
 
+    /// Whether the card ships this story under `CONTENT/`.
+    ///
     /// Shipped content is complete by definition and carries no sidecar, so
     /// opening it is the whole test. The handle is closed immediately: this
     /// asks a question, it does not begin playback.
-    fn on_stock_card(&self, directory: u32, file: u32) -> bool {
+    ///
+    /// Public because the same answer decides more than availability: a story
+    /// under `CONTENT/` and a downloaded one under `CACHE/` are played by two
+    /// different requests, and whoever acts on `Action::Play` has to pick one.
+    pub fn on_stock_card(&self, directory: u32, file: u32) -> bool {
         match self.card.open_content(directory, file) {
             Ok((handle, _size)) => {
                 self.card.close_file(handle);
