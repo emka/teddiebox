@@ -606,9 +606,11 @@ pub async fn fetch(
 
     let started = Instant::now();
     let mut buf = [0u8; 1024];
-    let begun = stream::begin(&mut session, &request, &mut buf)
-        .await
-        .map_err(Error::Cloud)?;
+    // Everything downstream speaks to the session through this, so a failure
+    // can be reported with the number mbedtls actually gave.
+    let mut wire = Reporting::new(&mut session);
+    let opened = stream::begin(&mut wire, &request, &mut buf).await;
+    let begun = opened.map_err(|e| wire.explain(e))?;
 
     let (body_length, prefix) = match begun {
         Begun::NotFound | Begun::Unchanged => return Err(Error::NoContent),
@@ -636,10 +638,8 @@ pub async fn fetch(
         while !may_fetch() {
             Timer::after(THROTTLE_WAIT).await;
         }
-        let n = body
-            .read(&mut session, &mut buf)
-            .await
-            .map_err(Error::Cloud)?;
+        let got = body.read(&mut wire, &mut buf).await;
+        let n = got.map_err(|e| wire.explain(e))?;
         crc.update(&buf[..n]);
         received += n as u32;
         hand_over(&buf[..n], sink).await;
@@ -655,6 +655,80 @@ pub async fn fetch(
         crc32: crc.finish(),
         seconds: started.elapsed().as_secs() as u32,
     })
+}
+
+/// Keeps the transport error that `CloudError` throws away.
+///
+/// `teddiebox-cloud` is deliberately transport-agnostic, so everything that
+/// fails inside it surfaces as a bare `CloudError::Transport`: a read did not
+/// work, and nothing whatever about why. mbedtls answers in numbers, and this
+/// bench has already spent an afternoon on a variant that carried none. This
+/// sits in the one place that knows the transport is a TLS session and
+/// remembers the last error it handed on.
+struct Reporting<'a, T> {
+    inner: &'a mut T,
+    last: Option<SessionError>,
+}
+
+impl<'a, T> Reporting<'a, T> {
+    fn new(inner: &'a mut T) -> Self {
+        Self { inner, last: None }
+    }
+
+    /// Says what the transport said, when the transport is what failed.
+    ///
+    /// Silent for every other `CloudError`, because those already name
+    /// themselves and a second line would only dilute them.
+    fn explain(&self, error: CloudError) -> Error {
+        if let (CloudError::Transport, Some(inner)) = (&error, self.last) {
+            esp_println::println!("teddiebox: get transport failed — {inner:?}");
+        }
+        Error::Cloud(error)
+    }
+}
+
+impl<T: embedded_io_async::ErrorType<Error = SessionError>> embedded_io_async::ErrorType
+    for Reporting<'_, T>
+{
+    type Error = SessionError;
+}
+
+impl<T: embedded_io_async::Read<Error = SessionError>> embedded_io_async::Read
+    for Reporting<'_, T>
+{
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        match self.inner.read(buf).await {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                self.last = Some(e);
+                Err(e)
+            }
+        }
+    }
+}
+
+impl<T: embedded_io_async::Write<Error = SessionError>> embedded_io_async::Write
+    for Reporting<'_, T>
+{
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        match self.inner.write(buf).await {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                self.last = Some(e);
+                Err(e)
+            }
+        }
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        match self.inner.flush().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.last = Some(e);
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Pushes every byte into the sink, waiting when it will not take them.
