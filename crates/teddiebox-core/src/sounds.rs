@@ -181,8 +181,12 @@ impl Sound {
 /// The pack reading has been implausible before — the very first sample this
 /// project took was 9453 mV from three NiMH cells — and a single bad one must
 /// not make the box announce that it is turning off. Four readings at the
-/// battery task's interval is a few seconds, which is nothing against a
-/// discharge curve.
+/// battery task's two-second interval is eight seconds, which is nothing
+/// against a discharge curve.
+///
+/// This is a filter for noise, not for load: a pack that sags under playback
+/// stays sagged for the length of a story, so no number here would tell that
+/// apart from a pack that is genuinely empty.
 pub const READINGS_TO_AGREE: u8 = 4;
 
 /// Turns a stream of pack readings into the few moments worth speaking about.

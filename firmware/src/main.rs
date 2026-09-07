@@ -264,6 +264,18 @@ async fn sense(
     >,
 ) {
     let mut announcer = Announcer::new();
+    // The LED reads the pack, so unplugging a charger should change the colour
+    // while the hand is still on the cable. The announcer sees every sample
+    // too: `READINGS_TO_AGREE` guards against one implausible reading — this
+    // channel has produced 9453 mV from three NiMH cells — and four in a row
+    // reject that just as well in eight seconds as in forty. What it never
+    // guarded against is a pack sagging under load, because the load here is a
+    // story that runs for half an hour.
+    const SAMPLE_EVERY: Duration = Duration::from_secs(2);
+    // Printing stays where it was, purely so a bench capture is readable.
+    const PRINT_EVERY: u8 = 5;
+    let mut since_printed = 0u8;
+
     loop {
         // Raw counts as well as millivolts. The conversion rests on an
         // assumed attenuation and on GPIO9 measuring the pack rather than
@@ -275,14 +287,39 @@ async fn sense(
         let charger_mv = power::charger_mv(charger_raw);
 
         let pack_state = power::pack_state(pack_mv);
-        let state = match pack_state {
-            PackState::Healthy => "healthy",
-            PackState::Low => "LOW",
-            PackState::Critical => "CRITICAL",
-        };
-        esp_println::println!(
-            "teddiebox: pack {pack_mv} mV ({state}, raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
-        );
+
+        // The reducer decides the LED, and until now it was never told the one
+        // thing the LED most needs to say. Both go through the same channel
+        // the ears use: the media task drains it once per loop pass and once
+        // per decoded frame, so a warning is not held behind a story that has
+        // half an hour left to run.
+        let charging = power::charger_present(charger_raw);
+        for event in [
+            Event::Battery {
+                pack_mv: pack_mv as u16,
+                under_load: PLAYING.load(Ordering::Relaxed),
+            },
+            Event::Charger(charging),
+        ] {
+            // A full queue is somebody else's bug — this is the slowest
+            // producer on it, at one pair every two seconds.
+            if EAR_EVENTS.try_send(event).is_err() {
+                esp_println::println!("teddiebox: pack event dropped — the queue is full");
+            }
+        }
+
+        since_printed += 1;
+        if since_printed >= PRINT_EVERY {
+            since_printed = 0;
+            let state = match pack_state {
+                PackState::Healthy => "healthy",
+                PackState::Low => "LOW",
+                PackState::Critical => "CRITICAL",
+            };
+            esp_println::println!(
+                "teddiebox: pack {pack_mv} mV ({state}, raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
+            );
+        }
 
         // The box says this itself rather than only printing it: a child does
         // not read the console. `Announcer` decides when there is anything
@@ -296,7 +333,7 @@ async fn sense(
             SOUND_REQUEST.store(sound.file(), Ordering::Relaxed);
         }
 
-        Timer::after(Duration::from_secs(10)).await;
+        Timer::after(SAMPLE_EVERY).await;
     }
 }
 
