@@ -195,29 +195,13 @@ pub enum Colour {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotPowered;
 
-/// Peak duty of the idle breath, out of 255.
+/// How bright the indicator is lit, out of 255.
 ///
 /// Deliberately dim: this is a sign of life on a device that sits in a child's
-/// room, not an indicator anyone needs to read across the room.
-pub const BREATHE_PEAK: u8 = 40;
-
-/// One full breath, in and out.
-pub const BREATHE_PERIOD_MS: u32 = 4_000;
-
-/// Duty at a point in the breath, rising then falling.
-///
-/// A triangle rather than a sine: the difference is invisible at this
-/// brightness and it costs no floating point on a chip that would rather not.
-pub const fn breathing_duty(now_ms: u32) -> u8 {
-    let half = BREATHE_PERIOD_MS / 2;
-    let phase = now_ms % BREATHE_PERIOD_MS;
-    let rising = if phase < half {
-        phase
-    } else {
-        BREATHE_PERIOD_MS - phase
-    };
-    ((rising * BREATHE_PEAK as u32) / half) as u8
-}
+/// room, not an indicator anyone needs to read across the room. It is steady —
+/// the colour carries the meaning, and a box that pulses in the dark is a box
+/// that gets turned to face the wall.
+pub const LED_DUTY: u8 = 40;
 
 /// The codec's hardware reset line.
 pub const DAC_RESET: u8 = 26;
@@ -475,33 +459,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn the_breath_is_symmetric_about_its_peak() {
-        let quarter = BREATHE_PERIOD_MS / 4;
-        assert_eq!(breathing_duty(quarter), 20);
-        assert_eq!(breathing_duty(BREATHE_PERIOD_MS - quarter), 20);
-    }
-
-    /// It runs off a free-running clock, so it must keep breathing rather than
-    /// latch at one brightness once that clock has been up a while.
-    #[test]
-    fn the_breath_repeats_across_periods() {
-        assert_eq!(
-            breathing_duty(BREATHE_PERIOD_MS * 7 + 1_000),
-            breathing_duty(1_000)
-        );
-    }
-
-    /// Never brighter than the cap, whatever the clock says.
-    #[test]
-    fn the_breath_never_exceeds_its_peak() {
-        let mut t = 0;
-        while t < BREATHE_PERIOD_MS * 2 {
-            assert!(breathing_duty(t) <= BREATHE_PEAK, "at {t}");
-            t += 37;
-        }
     }
 
     #[test]

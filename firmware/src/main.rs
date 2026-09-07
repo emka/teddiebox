@@ -36,7 +36,7 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
 use lis3dh::{regs as lis, Lis3dh};
-use teddiebox_core::board::{self, Colour, Gates, Rail};
+use teddiebox_core::board::{self, Gates, Rail};
 use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
@@ -45,8 +45,10 @@ use teddiebox_core::plate::{Presence, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEA
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
+
 use teddiebox_core::{
-    db_for, Action, Core, CoreConfig, Ear, Event, TagUid, Unavailable, Volume, MAX_VOLUME,
+    colour_for, db_for, Action, Core, CoreConfig, Ear, Event, LedState, TagUid, Unavailable,
+    Volume, MAX_VOLUME,
 };
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
@@ -152,6 +154,15 @@ fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
 /// full queue means something else is wrong, and it says so rather than
 /// silently dropping the half of a pair that would mislead the reducer.
 static EAR_EVENTS: Channel<CriticalSectionRawMutex, Event, 8> = Channel::new();
+
+/// What the reducer last decided the LED should say.
+///
+/// The reducer runs in the media task; the LED belongs to the console loop,
+/// which owns the LEDC channels. One byte between them, the same seam shape as
+/// `OUTPUT_REQUEST` and `VOLUME_REQUEST` — and a state rather than a colour,
+/// because which colour stands for which state is
+/// `teddiebox_core::led::colour_for`'s business and is tested there.
+static LED_REQUEST: AtomicU8 = AtomicU8::new(LedState::Booting.code());
 
 /// Reports settled presses on the ears and the wake line.
 ///
@@ -1655,9 +1666,10 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         // every figure, so there is nothing here for this to be written to.
         Action::SavePosition { .. } => {}
 
-        // `SetLed` is reachable and the rest are not, and neither is acted on.
-        // The LED belongs to the console loop and has no seam another task can
-        // reach through; saying what was wanted is the honest half of that.
+        Action::SetLed(state) => LED_REQUEST.store(state.code(), Ordering::Relaxed),
+
+        // The rest are not reachable, and saying what was wanted is the
+        // honest half of that.
         other => esp_println::println!("teddiebox: plate not wired — {other:?}"),
     }
 }
@@ -2715,12 +2727,16 @@ async fn main(spawner: Spawner) {
         Err(_) => esp_println::println!("teddiebox: I2C would not configure"),
     }
 
-    // A dim green breath. The waveform is held by the LEDC peripheral, so
-    // this loop only decides how bright and then goes back to sleep — it does
-    // not have to be on time. The software PWM this replaces woke four hundred
-    // times a second and could not keep its own period once anything else
-    // wanted the executor.
-    const BREATH_STEP: Duration = Duration::from_millis(20);
+    // The LED holds one colour until the reducer decides on another, so this
+    // loop only has to repaint often enough that a decision is seen promptly.
+    // The waveform is held by the LEDC peripheral either way; the software PWM
+    // this replaced woke four hundred times a second and could not keep its
+    // own period once anything else wanted the executor.
+    const LED_STEP: Duration = Duration::from_millis(20);
+
+    // What the LED is showing now, so a loop pass with no new decision repaints
+    // the same colour rather than going dark.
+    let mut shown = LedState::Booting;
 
     // The controller and its timer are bound here rather than inside the
     // helper because the channels borrow the timer, so it has to outlive them.
@@ -2741,14 +2757,21 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    let lit = gates.led(Colour::Green).expect("the rail is up");
-
     loop {
         if let Some(rgb) = rgb.as_ref() {
-            rgb.apply(
-                &lit,
-                board::breathing_duty(Instant::now().as_millis() as u32),
-            );
+            // A byte that names no state can only come from a bug, and the
+            // last colour is a better answer than a dark LED: the box is still
+            // running, whatever the byte says.
+            if let Some(state) = LedState::from_code(LED_REQUEST.load(Ordering::Relaxed)) {
+                shown = state;
+            }
+            // A dark LED rather than a panic if the rail is ever down here.
+            // It is up for every path that reaches this today — the shutdown
+            // that lowers it parks without coming back — but this is a loop
+            // that runs for the life of the box on a device a child holds.
+            if let Ok(lit) = gates.led(colour_for(shown)) {
+                rgb.apply(&lit, board::LED_DUTY);
+            }
         }
 
         // The jingle stock plays at power-on, once the codec could carry it.
@@ -3013,6 +3036,6 @@ async fn main(spawner: Spawner) {
             }
         }
 
-        Timer::after(BREATH_STEP).await;
+        Timer::after(LED_STEP).await;
     }
 }
