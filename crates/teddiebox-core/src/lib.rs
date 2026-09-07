@@ -25,7 +25,7 @@ pub use gesture::{Gesture, GestureConfig, GestureDetector};
 pub use led::{led_for, PlaybackKind};
 pub use playback::{ContentIndex, Playback, Unavailable};
 pub use types::*;
-pub use volume::VolumeModel;
+pub use volume::{db_for, VolumeModel};
 
 use heapless::Vec;
 
