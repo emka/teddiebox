@@ -802,6 +802,72 @@ impl Mounted {
         filled
     }
 
+    /// Writes `/CONTENT|CACHE/<directory>/<file>.POS`.
+    ///
+    /// Truncating rather than appending: this file holds one number, and the
+    /// tail of a longer previous number left behind would parse as something
+    /// else entirely.
+    ///
+    /// Under `CACHE` the directory is ours and may legitimately be created
+    /// here. Under `CONTENT` it is not: a stock directory that is not there is
+    /// a story that is not there, and creating one would litter the card on
+    /// behalf of a question.
+    pub fn write_position(
+        &self,
+        stock: bool,
+        directory: u32,
+        file: u32,
+        bytes: &[u8],
+    ) -> Result<(), &'static str> {
+        let mut folder_name = [0u8; 8];
+        let mut stem = [0u8; 8];
+        write_hex8(&mut folder_name, directory);
+        write_hex8(&mut stem, file);
+        let folder_name =
+            core::str::from_utf8(&folder_name).map_err(|_| "the directory name is not text")?;
+
+        let mut file_name = [0u8; 12];
+        file_name[..8].copy_from_slice(&stem);
+        file_name[8..].copy_from_slice(b".POS");
+        let file_name =
+            core::str::from_utf8(&file_name).map_err(|_| "the position name is not text")?;
+
+        let top = if stock {
+            self.volumes
+                .open_dir(self.root, TONIE_CONTENT_DIR)
+                .map_err(|_| "no CONTENT directory")?
+        } else {
+            self.open_or_make_dir(self.root, CACHE_DIR)?
+        };
+        let folder = if stock {
+            self.volumes
+                .open_dir(top, folder_name)
+                .map_err(|_| "no story directory")
+        } else {
+            self.open_or_make_dir(top, folder_name)
+        };
+        let _ = self.volumes.close_dir(top);
+        let folder = folder?;
+
+        let handle =
+            self.volumes
+                .open_file_in_dir(folder, file_name, Mode::ReadWriteCreateOrTruncate);
+        let _ = self.volumes.close_dir(folder);
+        let handle = handle.map_err(|_| "the position file would not open")?;
+
+        let wrote = self
+            .volumes
+            .write(handle, bytes)
+            .map_err(|_| "the position write failed")
+            .and_then(|()| {
+                self.volumes
+                    .flush_file(handle)
+                    .map_err(|_| "the position flush failed")
+            });
+        self.close_file(handle);
+        wrote
+    }
+
     /// Opens a subdirectory, creating it if this is the first download.
     ///
     /// Creating first and opening second would fail on every run after the

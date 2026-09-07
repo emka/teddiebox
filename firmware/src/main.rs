@@ -42,6 +42,7 @@ use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::pipe::Pipe;
 use teddiebox_core::plate::{Presence, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEAVE};
+use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
@@ -1330,6 +1331,13 @@ static PLATE_TAG: Signal<CriticalSectionRawMutex, PlateState> = Signal::new();
 /// in a child's hand, and a second figure evicting the first is correct rather
 /// than a limitation: the evicted one still has its chapter on the card. Lost
 /// on a reboot by design — that is precisely what the card's tier is for.
+/// Where the next story should start.
+///
+/// Written by `perform` when the reducer decides to play, taken by the media
+/// task when it opens the file. Taken rather than read: a story the console
+/// starts after one a figure started must not inherit the figure's place.
+static PLAY_FROM: CsMutex<RefCell<Position>> = CsMutex::new(RefCell::new(Position::Start));
+
 pub(crate) static LAST_LIFTED: CsMutex<RefCell<Option<(u64, u32)>>> =
     CsMutex::new(RefCell::new(None));
 
@@ -1676,11 +1684,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             } else {
                 REQUEST_CACHE
             };
-            if from != Position::Start {
-                // Still ignored: the index cannot yet answer with anything
-                // else, and honouring it is the rest of position memory.
-                esp_println::println!("teddiebox: plate ignoring saved position {from:?}");
-            }
+            critical_section::with(|cs| *PLAY_FROM.borrow_ref_mut(cs) = from);
             esp_println::println!(
                 "teddiebox: plate playing {}/{:08X}/{:08X}",
                 if request == REQUEST_CONTENT {
@@ -2094,19 +2098,73 @@ async fn media(
                     // The ears are here for the same reason and it is the
                     // whole point of them: turning a story down while it plays
                     // is when anybody reaches for an ear at all.
+                    let stock = request == REQUEST_CONTENT;
+                    let dir = CONTENT_DIRECTORY.load(Ordering::Relaxed);
+                    let file = CONTENT_FILE.load(Ordering::Relaxed);
+                    let from = critical_section::with(|cs| {
+                        core::mem::replace(&mut *PLAY_FROM.borrow_ref_mut(cs), Position::Start)
+                    });
+                    // What the card already says, so resuming into a chapter
+                    // does not immediately rewrite the file it was read from.
+                    let mut wrote_chapter = match from {
+                        Position::Chapter(n) => n,
+                        _ => 0,
+                    };
                     let mut attend = || {
                         if let Some(event) = take_plate_event(&mut on_plate, &mut on_plate_token) {
                             apply(&mut reducer, card, event, on_plate_token);
                         }
                         apply_ear_events(&mut reducer, card, on_plate_token);
+
+                        // The exact tier, kept in RAM and free. The reducer
+                        // saves it if the figure is lifted; nothing else reads
+                        // it.
+                        reducer.note_position(Position::Exact {
+                            page: audio::PAGE.load(Ordering::Relaxed),
+                        });
+
+                        // The card's tier, written when a chapter begins
+                        // rather than when the figure is lifted. By then the
+                        // answer for the whole chapter is already known, so
+                        // writing it now covers every ending — including the
+                        // flat battery that never reaches a lift.
+                        let chapter = audio::CHAPTER.load(Ordering::Relaxed);
+                        if chapter != wrote_chapter {
+                            wrote_chapter = chapter;
+                            let mut out = [0u8; MAX_POSITION];
+                            let len = position::render(chapter, &mut out);
+                            if let Err(reason) = card.write_position(stock, dir, file, &out[..len])
+                            {
+                                esp_println::println!(
+                                    "teddiebox: taf chapter not saved — {reason}"
+                                );
+                            }
+                        }
                     };
                     // The hardware comes back, so playing again needs no
                     // reboot — which is what makes stopping worth anything.
                     let (outcome, tx, buffer) =
-                        audio::play_taf(card, tx, buffer, source, Position::Start, &mut attend)
-                            .await;
+                        audio::play_taf(card, tx, buffer, source, from, &mut attend).await;
                     if let Err(reason) = outcome {
                         esp_println::println!("teddiebox: playback failed — {reason}");
+                    }
+                    if matches!(outcome, Ok(audio::Finish::Ended)) {
+                        // A finished story is not a paused one. Zero rather
+                        // than a deletion: `storage` has no delete, and "no
+                        // file" and "chapter zero" mean the same thing.
+                        let mut out = [0u8; MAX_POSITION];
+                        let len = position::render(0, &mut out);
+                        let _ = card.write_position(stock, dir, file, &out[..len]);
+                        // And the RAM slot, but only if it holds this story: a
+                        // console `play` running to its end must not forget
+                        // where a figure on the plate had got to.
+                        let ruid = ((dir as u64) << 32) | file as u64;
+                        critical_section::with(|cs| {
+                            let mut slot = LAST_LIFTED.borrow_ref_mut(cs);
+                            if matches!(*slot, Some((held, _)) if held == ruid) {
+                                *slot = None;
+                            }
+                        });
                     }
                     ANNOUNCING.store(false, Ordering::Relaxed);
                     i2s_tx = Some(tx);
