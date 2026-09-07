@@ -54,8 +54,63 @@ pub enum LedState {
     Playing,
     Fetching,
     Charging,
-    LowBattery,
+    /// The pack is running out but the box still works — a warning, in orange.
+    BatteryLow,
+    /// The pack is nearly gone and the box is about to stop, in red.
+    BatteryCritical,
     Error,
+}
+
+impl LedState {
+    /// Every state, so a test can prove the round trip below covers them all
+    /// rather than the handful somebody remembered.
+    pub const ALL: [LedState; 9] = [
+        LedState::Off,
+        LedState::Booting,
+        LedState::Ready,
+        LedState::Playing,
+        LedState::Fetching,
+        LedState::Charging,
+        LedState::BatteryLow,
+        LedState::BatteryCritical,
+        LedState::Error,
+    ];
+
+    /// The byte that carries this state between tasks.
+    ///
+    /// The reducer runs in the media task and the LED is owned by the console
+    /// loop, so what passes between them is one atomic. Written as an explicit
+    /// number per state rather than a cast, because a reordering of the enum
+    /// would otherwise silently change what a stored byte means.
+    pub const fn code(self) -> u8 {
+        match self {
+            LedState::Off => 0,
+            LedState::Booting => 1,
+            LedState::Ready => 2,
+            LedState::Playing => 3,
+            LedState::Fetching => 4,
+            LedState::Charging => 5,
+            LedState::BatteryLow => 6,
+            LedState::BatteryCritical => 7,
+            LedState::Error => 8,
+        }
+    }
+
+    /// The state a byte names, or `None` if it names none.
+    pub const fn from_code(code: u8) -> Option<LedState> {
+        match code {
+            0 => Some(LedState::Off),
+            1 => Some(LedState::Booting),
+            2 => Some(LedState::Ready),
+            3 => Some(LedState::Playing),
+            4 => Some(LedState::Fetching),
+            5 => Some(LedState::Charging),
+            6 => Some(LedState::BatteryLow),
+            7 => Some(LedState::BatteryCritical),
+            8 => Some(LedState::Error),
+            _ => None,
+        }
+    }
 }
 
 /// Spoken or tonal feedback the firmware renders from a bundled asset.

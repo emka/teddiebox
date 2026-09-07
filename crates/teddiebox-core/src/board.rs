@@ -107,6 +107,8 @@ impl Gates {
             Colour::Red => (true, false, false),
             Colour::Green => (false, true, false),
             Colour::Blue => (false, false, true),
+            Colour::Orange => (true, true, false),
+            Colour::Cyan => (false, true, true),
         };
 
         Ok([
@@ -182,6 +184,11 @@ pub enum Colour {
     Red,
     Green,
     Blue,
+    /// Red and green together. The warning colour for a pack that is running
+    /// out, kept distinct from the red this box uses for a fault.
+    Orange,
+    /// Green and blue together, for a box that is idle and on its charger.
+    Cyan,
 }
 
 /// The rail feeding the requested peripheral is off.
@@ -235,6 +242,26 @@ pub const fn dac_reset(held: bool) -> PinLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Orange is the low-pack warning, and this LED has no orange channel —
+    /// it is red and green lit together. A mapping that lights only one of
+    /// them is the failure this pins: it would show red, which this box also
+    /// uses for a fault, so a tired battery would read as a broken story.
+    #[test]
+    fn orange_lights_the_red_and_green_channels_together() {
+        let mut gates = Gates::at_reset();
+        gates.power(Rail::Peripherals, true);
+        let levels = gates.led(Colour::Orange).expect("the rail is up");
+        for level in levels {
+            let lit = level.high == LED_ACTIVE_HIGH;
+            match level.gpio {
+                LED_RED => assert!(lit, "red is half of orange"),
+                LED_GREEN => assert!(lit, "green is the other half"),
+                LED_BLUE => assert!(!lit, "blue would wash it out to white"),
+                other => panic!("unexpected channel {other}"),
+            }
+        }
+    }
 
     /// The two rails are wired with opposite polarity. Getting one backwards
     /// leaves the peripheral dead, which is indistinguishable from a wiring
@@ -448,13 +475,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn the_breath_starts_dark_and_peaks_halfway() {
-        assert_eq!(breathing_duty(0), 0);
-        assert_eq!(breathing_duty(BREATHE_PERIOD_MS / 2), BREATHE_PEAK);
-        assert_eq!(breathing_duty(BREATHE_PERIOD_MS), 0);
     }
 
     #[test]

@@ -22,7 +22,7 @@ pub mod wav;
 
 pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
 pub use gesture::{Gesture, GestureConfig, GestureDetector};
-pub use led::{led_for, PlaybackKind};
+pub use led::{colour_for, led_for, PlaybackKind};
 pub use playback::{ContentIndex, Playback, Unavailable};
 pub use types::*;
 pub use volume::{db_for, VolumeModel};
