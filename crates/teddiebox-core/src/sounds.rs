@@ -116,6 +116,14 @@ pub enum Sound {
     /// is simply out of range — so the box can say which of the two it is
     /// rather than blaming the network for a typo.
     WrongPassword,
+    /// The box reached the server and there is no story for this figure.
+    ///
+    /// Identified by ear on the bench, like the two battery sounds and for the
+    /// same reason: the published mapping has been wrong before. It sits
+    /// between `NoInternet` and `WrongPassword` on the card, which is the sort
+    /// of coincidence that makes a wrong guess plausible — so this one is
+    /// pinned by its own test.
+    NoStory,
 }
 
 impl Sound {
@@ -136,18 +144,19 @@ impl Sound {
 
     /// What the box should say for a prompt, if it has words for it.
     ///
-    /// `None` is a real answer and not an oversight. Three failure sounds were
-    /// identified by ear on this card — the config, the network and the
-    /// passphrase — and "I have no story for this figure" was not among them.
-    /// Pointing it at a sound that says something else would have the box say
-    /// something true about the wrong thing, which is the failure this module
-    /// already guards against elsewhere. Finding that file is bench work.
+    /// `None` is a real answer and not an oversight. Every sound here was
+    /// identified by ear on this card, because the published mapping has been
+    /// wrong before, and the two prompts that still return `None` are the two
+    /// nobody has listened for. Pointing one of them at a sound that says
+    /// something else would have the box say something true about the wrong
+    /// thing, which is the failure this module guards against elsewhere.
     pub const fn for_prompt(prompt: crate::Prompt) -> Option<Self> {
         match prompt {
             crate::Prompt::Startup => Some(Self::Startup),
             crate::Prompt::NoNetwork => Some(Self::NoInternet),
             crate::Prompt::BatteryLow => Some(Self::BatteryLow),
-            crate::Prompt::NoContent | crate::Prompt::Shutdown | crate::Prompt::VolumeLimit => None,
+            crate::Prompt::NoContent => Some(Self::NoStory),
+            crate::Prompt::Shutdown | crate::Prompt::VolumeLimit => None,
         }
     }
 
@@ -162,6 +171,7 @@ impl Sound {
             Self::ConfigError => 0x0000_000B,
             Self::NoInternet => 0x0000_0011,
             Self::WrongPassword => 0x0000_0013,
+            Self::NoStory => 0x0000_0012,
         }
     }
 }
@@ -406,15 +416,22 @@ mod tests {
             Sound::for_prompt(Prompt::BatteryLow),
             Some(Sound::BatteryLow)
         );
+        assert_eq!(Sound::for_prompt(Prompt::NoContent), Some(Sound::NoStory));
     }
 
-    /// Nobody has found the file that says "I have no story for this figure",
-    /// and guessing would have the box say something true about the wrong
-    /// thing. Silence with a log line is the honest answer until the bench
-    /// identifies it by ear, the way the two battery sounds were identified.
+    /// The file a figure with no story gets. Written out rather than compared
+    /// against the mapping, because the whole value of this identification is
+    /// that it came from someone listening to the card.
+    #[test]
+    fn the_figure_with_no_story_has_its_own_file() {
+        assert_eq!(Sound::NoStory.file(), 0x0000_0012);
+    }
+
+    /// Two prompts still have no file. Shutdown and the volume ceiling were
+    /// never identified by ear, and guessing would have the box say something
+    /// true about the wrong thing.
     #[test]
     fn the_prompts_with_no_identified_file_map_to_nothing() {
-        assert_eq!(Sound::for_prompt(Prompt::NoContent), None);
         assert_eq!(Sound::for_prompt(Prompt::Shutdown), None);
         assert_eq!(Sound::for_prompt(Prompt::VolumeLimit), None);
     }
