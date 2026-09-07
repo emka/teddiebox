@@ -48,6 +48,15 @@ fn is_opus_header(packet: &[u8]) -> bool {
     packet.starts_with(b"OpusHead") || packet.starts_with(b"OpusTags")
 }
 
+/// Where a skip forward left the story.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skip {
+    /// Now playing this chapter, zero-based.
+    To(usize),
+    /// There was no next chapter, so the story is over.
+    PastTheEnd,
+}
+
 pub struct TafDecoder<S: PageSource, D: OpusDecode> {
     reader: TafReader<S>,
     decoder: D,
@@ -103,6 +112,33 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
     pub fn seek_to_chapter(&mut self, n: usize) -> Result<(), AudioError> {
         self.reader.seek_to_chapter(n)?;
         Ok(())
+    }
+
+    /// Skips forward to the start of the following chapter.
+    ///
+    /// [`Skip::PastTheEnd`] from the last chapter, with the story left where
+    /// it was: skipping out of the end of the last chapter is the same thing
+    /// as the story finishing, and the caller ends it rather than playing
+    /// that chapter a second time.
+    pub fn next_chapter(&mut self) -> Result<Skip, AudioError> {
+        let next = self.chapter() + 1;
+        if next >= self.chapter_count() {
+            return Ok(Skip::PastTheEnd);
+        }
+        self.seek_to_chapter(next)?;
+        Ok(Skip::To(next))
+    }
+
+    /// Skips back to the start of the previous chapter, or restarts the
+    /// current one if there is none.
+    ///
+    /// Restarting rather than refusing, because a control that does nothing
+    /// is indistinguishable from a control that is broken, and starting the
+    /// story again is what going back from its beginning means.
+    pub fn previous_chapter(&mut self) -> Result<usize, AudioError> {
+        let previous = self.chapter().saturating_sub(1);
+        self.seek_to_chapter(previous)?;
+        Ok(previous)
     }
 
     /// Decodes the next audio packet. `Ok(None)` at end of stream.
@@ -239,6 +275,91 @@ mod tests {
         assert_eq!(dec.chapter(), 0);
         dec.seek_to_chapter(2).unwrap();
         assert_eq!(dec.chapter(), 2);
+    }
+
+    /// Records the last packet it was asked to decode, so a test can say
+    /// which part of the file the decoder actually went to.
+    struct LastPacket {
+        buf: [u8; MAX_PACKET],
+        len: usize,
+    }
+    impl OpusDecode for LastPacket {
+        fn decode(&mut self, packet: &[u8], pcm: &mut [i16]) -> Result<usize, AudioError> {
+            self.buf[..packet.len()].copy_from_slice(packet);
+            self.len = packet.len();
+            let n = 960 * CHANNELS;
+            pcm[..n].fill(0);
+            Ok(n)
+        }
+    }
+
+    fn chapters_decoder() -> TafDecoder<SlicePages<'static>, LastPacket> {
+        const CHAPTERS_FIXTURE: &[u8] =
+            include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
+        TafDecoder::open(
+            SlicePages::new(CHAPTERS_FIXTURE).unwrap(),
+            LastPacket {
+                buf: [0u8; MAX_PACKET],
+                len: 0,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_next_chapter_is_the_one_after_the_chapter_playing() {
+        let mut dec = chapters_decoder();
+        assert_eq!(dec.next_chapter(), Ok(Skip::To(1)));
+        assert_eq!(dec.chapter(), 1);
+        assert_eq!(dec.next_chapter(), Ok(Skip::To(2)));
+        assert_eq!(dec.chapter(), 2);
+    }
+
+    /// A child skipping forward out of the last chapter has reached the end
+    /// of the story, which is the same thing as the story finishing. Saying
+    /// so is what lets the decode loop end instead of playing the last
+    /// chapter twice.
+    #[test]
+    fn there_is_no_chapter_after_the_last_one() {
+        let mut dec = chapters_decoder();
+        dec.seek_to_chapter(2).unwrap();
+        assert_eq!(dec.next_chapter(), Ok(Skip::PastTheEnd));
+        assert_eq!(dec.chapter(), 2, "a refused skip must not move the story");
+    }
+
+    #[test]
+    fn the_previous_chapter_is_the_one_before_the_chapter_playing() {
+        let mut dec = chapters_decoder();
+        dec.seek_to_chapter(2).unwrap();
+        assert_eq!(dec.previous_chapter(), Ok(1));
+        assert_eq!(dec.chapter(), 1);
+    }
+
+    /// Going back from the first chapter restarts it rather than doing
+    /// nothing. Nothing at all is indistinguishable from a control that did
+    /// not work, and starting the story over is what the gesture means
+    /// everywhere else it exists.
+    #[test]
+    fn going_back_from_the_first_chapter_starts_it_again() {
+        let mut dec = chapters_decoder();
+        let mut pcm = [0i16; MAX_FRAME_SAMPLES];
+
+        dec.next_frame(&mut pcm).unwrap();
+        let mut first = [0u8; MAX_PACKET];
+        let first_len = dec.decoder.len;
+        first[..first_len].copy_from_slice(&dec.decoder.buf[..first_len]);
+
+        dec.next_frame(&mut pcm).unwrap();
+        dec.next_frame(&mut pcm).unwrap();
+        assert_ne!(
+            &dec.decoder.buf[..dec.decoder.len],
+            &first[..first_len],
+            "the fixture must have moved on, or this proves nothing"
+        );
+
+        assert_eq!(dec.previous_chapter(), Ok(0));
+        dec.next_frame(&mut pcm).unwrap();
+        assert_eq!(&dec.decoder.buf[..dec.decoder.len], &first[..first_len]);
     }
 
     #[test]
