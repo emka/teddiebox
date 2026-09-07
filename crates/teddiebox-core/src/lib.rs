@@ -12,6 +12,7 @@ mod led;
 pub mod pipe;
 pub mod plate;
 mod playback;
+pub mod position;
 pub mod power;
 pub mod sounds;
 pub mod tone;
