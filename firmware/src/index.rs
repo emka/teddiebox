@@ -88,6 +88,17 @@ impl ContentIndex for CardIndex<'_> {
     /// not a trusted input, and no byte on it should be able to strand a
     /// figure at a chapter its story does not have.
     fn saved_position(&self, tag: TagUid) -> Position {
+        // The slot answers only for the figure it holds, and only until the
+        // box is switched off — but when it answers, it is exact. This is the
+        // case a child creates constantly: pick the figure up, put it back.
+        let ruid = crate::ruid_of(tag);
+        if let Some((held, page)) = critical_section::with(|cs| *crate::LAST_LIFTED.borrow_ref(cs))
+        {
+            if held == ruid {
+                return Position::Exact { page };
+            }
+        }
+
         let path = content_path(tag.0);
         let stock = self.on_stock_card(path.directory, path.file);
         let mut buffer = [0u8; MAX_POSITION];

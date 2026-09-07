@@ -1324,6 +1324,15 @@ static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
 /// which is the right answer anyway.
 static PLATE_TAG: Signal<CriticalSectionRawMutex, PlateState> = Signal::new();
 
+/// The exact page of the most recently lifted figure.
+///
+/// One slot, not a table. Matching the stock box means remembering the figure
+/// in a child's hand, and a second figure evicting the first is correct rather
+/// than a limitation: the evicted one still has its chapter on the card. Lost
+/// on a reboot by design — that is precisely what the card's tier is for.
+pub(crate) static LAST_LIFTED: CsMutex<RefCell<Option<(u64, u32)>>> =
+    CsMutex::new(RefCell::new(None));
+
 /// The token travels with the UID it was read from. As two separate statics
 /// it would be possible to send one figure's token for another's story.
 #[derive(Debug, Clone, Copy)]
@@ -1638,7 +1647,7 @@ fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
 /// The reader hands the UID over in the opposite order. Both writers of a
 /// [`FetchRequest`] and the outcome comparison in the media loop go through
 /// this one conversion rather than repeating the reversal at each call site.
-fn ruid_of(tag: TagUid) -> u64 {
+pub(crate) fn ruid_of(tag: TagUid) -> u64 {
     let mut bytes = tag.0;
     bytes.reverse();
     u64::from_be_bytes(bytes)
@@ -1745,9 +1754,17 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             ),
         },
 
-        // Position memory has no store yet: `saved_position` answers zero for
-        // every figure, so there is nothing here for this to be written to.
-        Action::SavePosition { .. } => {}
+        Action::SavePosition { tag, pos } => {
+            // Only the exact tier is kept here. The chapter is already on the
+            // card, written when that chapter began, which is what makes a
+            // flat battery survivable — by the time a figure is lifted the
+            // durable answer has been safe for minutes.
+            if let Position::Exact { page } = pos {
+                let ruid = ruid_of(tag);
+                critical_section::with(|cs| *LAST_LIFTED.borrow_ref_mut(cs) = Some((ruid, page)));
+                esp_println::println!("teddiebox: plate remembering {ruid:016X} at page {page}");
+            }
+        }
 
         Action::SetLed(state) => LED_REQUEST.store(state.code(), Ordering::Relaxed),
 
