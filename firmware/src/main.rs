@@ -1853,8 +1853,14 @@ async fn media(
                     i2s_tx = Some(tx);
                     wav_buffer = Some(buffer);
                     // Nothing is playing now, so the speaker has no business
-                    // being driven.
-                    OUTPUT_REQUEST.store(OUTPUT_DOWN, Ordering::Relaxed);
+                    // being driven — unless something has already asked for
+                    // the next thing to play, in which case it raised the
+                    // output when it asked and lowering it here would silence
+                    // it. It also spares the stage a power cycle it would
+                    // otherwise click through.
+                    if REQUEST.load(Ordering::Relaxed) == REQUEST_NONE {
+                        OUTPUT_REQUEST.store(OUTPUT_DOWN, Ordering::Relaxed);
+                    }
                 }
                 PLAYING.store(false, Ordering::Relaxed);
             }
