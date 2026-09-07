@@ -2463,6 +2463,8 @@ async fn nfc_reader(
 
     let mut presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
     let mut ticks_since_poll: u8 = 0;
+    // Consecutive unanswered polls against a figure believed present.
+    let mut misses: u16 = 0;
     // Whether the last poll found a figure. Chooses which question the next
     // poll asks first; a wrong guess costs one extra unanswered exchange and
     // corrects itself on the following poll, which `MISSES_TO_LEAVE` absorbs.
@@ -2582,9 +2584,45 @@ async fn nfc_reader(
                     // unanswered exchange and nothing else.
                     None
                 };
+                // How many polls in a row have found nothing. `MISSES_TO_LEAVE`
+                // turns four of these into a departure, and on 2026-09-07 the
+                // radio produced 23 false departures in ten minutes — so
+                // whether the misses come in ones and twos or in long runs
+                // decides whether tolerating more of them is a fix or a
+                // plaster.
+                //
+                // Counted on `seen` alone, deliberately. An earlier version of
+                // this gated the count on `believed_present`, which is the
+                // *previous* poll's answer and is already false by the second
+                // miss — so it could never count past one, which was the whole
+                // question. A miss is a poll that saw nothing, whatever the
+                // poller expected to see.
+                if seen.is_none() {
+                    misses = misses.saturating_add(1);
+                } else {
+                    if misses > 0 {
+                        esp_println::println!(
+                            "teddiebox: plate answered again after {misses} missed polls"
+                        );
+                    }
+                    misses = 0;
+                }
                 believed_present = seen.is_some();
 
                 if let Some(event) = presence.feed(seen.map(TagUid)) {
+                    // The poller's own view of the plate, which until now was
+                    // visible only through whatever the reducer decided to do
+                    // about it: a tag lost while nothing was playing left no
+                    // trace at all.
+                    match event {
+                        TagEvent::Arrived(TagUid(uid)) => esp_println::println!(
+                            "teddiebox: plate tag arrived {:016X}",
+                            ruid_of(TagUid(uid))
+                        ),
+                        TagEvent::Left => esp_println::println!(
+                            "teddiebox: plate tag left after {misses} missed polls"
+                        ),
+                    }
                     match event {
                         TagEvent::Arrived(TagUid(uid)) => {
                             // Read the token in the same session that found
