@@ -160,7 +160,7 @@ mod tests {
     fn known(page: u32) -> Index {
         Index {
             available: true,
-            resume: Position { page },
+            resume: Position::Exact { page },
         }
     }
 
@@ -179,7 +179,7 @@ mod tests {
             actions.as_slice(),
             &[Action::Play {
                 tag: TAG,
-                from: Position { page: 1 }
+                from: Position::Exact { page: 1 }
             }]
         );
         assert_eq!(p.kind(), PlaybackKind::Playing);
@@ -193,7 +193,7 @@ mod tests {
             actions.as_slice(),
             &[Action::Play {
                 tag: TAG,
-                from: Position { page: 412 }
+                from: Position::Exact { page: 412 }
             }]
         );
     }
@@ -210,7 +210,7 @@ mod tests {
     fn lifting_the_figure_saves_the_position_and_pauses() {
         let mut p = Playback::new();
         p.on_tag_present(TAG, &known(1));
-        p.note_position(Position { page: 77 });
+        p.note_position(Position::Exact { page: 77 });
 
         let actions: Vec<Action, 8> = p.on_tag_absent();
         assert_eq!(
@@ -218,7 +218,7 @@ mod tests {
             &[
                 Action::SavePosition {
                     tag: TAG,
-                    pos: Position { page: 77 }
+                    pos: Position::Exact { page: 77 }
                 },
                 Action::Pause,
             ]
@@ -236,7 +236,7 @@ mod tests {
     fn replacing_the_same_figure_resumes_from_the_saved_position() {
         let mut p = Playback::new();
         p.on_tag_present(TAG, &known(1));
-        p.note_position(Position { page: 77 });
+        p.note_position(Position::Exact { page: 77 });
         p.on_tag_absent();
 
         let actions = p.on_tag_present(TAG, &known(77));
@@ -244,7 +244,7 @@ mod tests {
             actions.as_slice(),
             &[Action::Play {
                 tag: TAG,
-                from: Position { page: 77 }
+                from: Position::Exact { page: 77 }
             }]
         );
     }
@@ -258,7 +258,7 @@ mod tests {
             actions.as_slice(),
             &[Action::Play {
                 tag: TAG,
-                from: Position { page: 1 }
+                from: Position::Exact { page: 1 }
             }]
         );
         assert_eq!(p.kind(), PlaybackKind::Playing);
@@ -323,7 +323,7 @@ mod tests {
             &[
                 Action::SavePosition {
                     tag: TAG,
-                    pos: Position { page: 7 }
+                    pos: Position::Exact { page: 7 }
                 },
                 Action::Pause
             ]

@@ -47,8 +47,8 @@ use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
 
 use teddiebox_core::{
-    colour_for, db_for, Action, Core, CoreConfig, Ear, Event, LedState, TagUid, Unavailable,
-    Volume, MAX_VOLUME,
+    colour_for, db_for, Action, Core, CoreConfig, Ear, Event, LedState, Position, TagUid,
+    Unavailable, Volume, MAX_VOLUME,
 };
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
@@ -1667,11 +1667,10 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             } else {
                 REQUEST_CACHE
             };
-            if from.page != 0 {
-                // Nothing resumes yet — `saved_position` answers zero for every
-                // figure — so a page here would mean the index grew a memory
-                // this never learned to honour.
-                esp_println::println!("teddiebox: plate ignoring saved page {}", from.page);
+            if from != Position::Start {
+                // Still ignored: the index cannot yet answer with anything
+                // else, and honouring it is the rest of position memory.
+                esp_println::println!("teddiebox: plate ignoring saved position {from:?}");
             }
             esp_println::println!(
                 "teddiebox: plate playing {}/{:08X}/{:08X}",

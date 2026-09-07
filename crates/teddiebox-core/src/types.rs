@@ -9,13 +9,23 @@ pub struct TagUid(pub [u8; 8]);
 
 /// A resume point, expressed as an Ogg page index within the TAF file.
 ///
-/// Page granularity is deliberate: TAF pages are 4096 bytes, so at typical
-/// Tonie bitrates one page is roughly a third of a second. That is precise
-/// enough to resume a story, costs four bytes to persist, and is directly
-/// seekable without decoding anything.
+/// Where a story should resume.
+///
+/// Two tiers answer this and they carry different things. The in-RAM slot
+/// knows the exact page the decoder had reached and is lost when the box is
+/// switched off; the card knows only which chapter was playing and survives
+/// everything. Making that an enum rather than a bare `u32` means neither can
+/// be mistaken for the other — a page number read as a chapter would seek to
+/// the wrong place in silence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Position {
-    pub page: u32,
+pub enum Position {
+    /// Nothing is remembered: play from the beginning.
+    #[default]
+    Start,
+    /// The start of this chapter, zero-based. What survives a power cycle.
+    Chapter(u16),
+    /// The exact container page the decoder had reached.
+    Exact { page: u32 },
 }
 
 /// The discriminants are explicit because the reducer indexes its
@@ -122,4 +132,17 @@ pub enum Prompt {
     NoNetwork,
     BatteryLow,
     VolumeLimit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two tiers carry different things — an exact page in RAM, a chapter
+    /// on the card — and a `page` that sometimes means a chapter is the kind
+    /// of lie that costs an evening.
+    #[test]
+    fn a_position_with_nothing_saved_is_the_start() {
+        assert_eq!(Position::default(), Position::Start);
+    }
 }

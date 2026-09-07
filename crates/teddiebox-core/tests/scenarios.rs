@@ -27,7 +27,7 @@ fn a_child_plays_a_story_adjusts_the_volume_and_lifts_the_figure() {
     let mut core = Core::new(CoreConfig::default());
     let library = Library {
         available: true,
-        resume: Position { page: 1 },
+        resume: Position::Exact { page: 1 },
     };
 
     let start = core.handle(Event::TagPresent(TAG), &library);
@@ -35,7 +35,7 @@ fn a_child_plays_a_story_adjusts_the_volume_and_lifts_the_figure() {
         &start,
         Action::Play {
             tag: TAG,
-            from: Position { page: 1 }
+            from: Position::Exact { page: 1 }
         }
     ));
 
@@ -75,14 +75,14 @@ fn an_unknown_figure_is_fetched_then_played() {
 
     let downloaded = Library {
         available: true,
-        resume: Position { page: 1 },
+        resume: Position::Exact { page: 1 },
     };
     let ready = core.handle(Event::ContentReady(TAG), &downloaded);
     assert!(has(
         &ready,
         Action::Play {
             tag: TAG,
-            from: Position { page: 1 }
+            from: Position::Exact { page: 1 }
         }
     ));
 }
@@ -92,7 +92,7 @@ fn an_exhausted_pack_powers_the_box_off_mid_story() {
     let mut core = Core::new(CoreConfig::default());
     let library = Library {
         available: true,
-        resume: Position { page: 1 },
+        resume: Position::Exact { page: 1 },
     };
     core.handle(Event::TagPresent(TAG), &library);
 

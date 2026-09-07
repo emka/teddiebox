@@ -302,7 +302,7 @@ mod tests {
             true
         }
         fn saved_position(&self, _tag: TagUid) -> Position {
-            Position { page: 1 }
+            Position::Exact { page: 1 }
         }
     }
 
@@ -400,7 +400,7 @@ mod tests {
             &actions,
             Action::Play {
                 tag: TAG,
-                from: Position { page: 1 }
+                from: Position::Exact { page: 1 }
             }
         ));
         assert!(contains(&actions, Action::SetLed(LedState::Playing)));
