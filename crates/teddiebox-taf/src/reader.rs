@@ -194,6 +194,32 @@ impl<S: PageSource> TafReader<S> {
         self.load_page(file_page)
     }
 
+    /// Which container block the reader is on.
+    ///
+    /// This is what position memory's exact tier saves. A block index rather
+    /// than an Ogg page index, because that is the unit the reader loads and
+    /// therefore the only one it can be handed back.
+    pub fn current_page(&self) -> u32 {
+        self.page_index
+    }
+
+    /// Positions the reader at a block it reported earlier.
+    ///
+    /// Bounded exactly as [`seek_to_chapter`](Self::seek_to_chapter) is: a
+    /// block past `last_usable_page` physically exists but is not declared as
+    /// part of this stream, and file page 0 is the header rather than audio.
+    ///
+    /// A block that begins with the continuation of a packet started on the
+    /// previous one costs the first few tens of milliseconds after the seek.
+    /// That is the accepted price of resuming exactly rather than at a chapter
+    /// boundary, and it is inaudible against a story.
+    pub fn seek_to_page(&mut self, page: u32) -> Result<(), TafError> {
+        if page == 0 || page > self.last_usable_page {
+            return Err(TafError::PageOutOfRange);
+        }
+        self.load_page(page)
+    }
+
     /// Copies the next Opus packet into `out`, returning its length.
     /// `Ok(None)` means end of stream.
     pub fn next_packet(&mut self, out: &mut [u8]) -> Result<Option<usize>, TafError> {
@@ -565,6 +591,38 @@ mod tests {
     /// literally so these tests can disagree with the parser rather than
     /// asking it what to expect.
     const CHAPTERS_FIXTURE_PAGES: &[u32] = &[0, 5, 11];
+
+    /// Position memory's exact tier resumes at a page the reader itself
+    /// reported, so what it hands out must be what it takes back.
+    #[test]
+    fn a_reader_returns_to_the_page_it_reported() {
+        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        r.seek_to_chapter(1).unwrap();
+        let page = r.current_page();
+
+        r.seek_to_chapter(0).unwrap();
+        assert_ne!(r.current_page(), page, "the seek away has to move it");
+
+        r.seek_to_page(page).unwrap();
+        assert_eq!(r.current_page(), page);
+    }
+
+    /// The same bound `seek_to_chapter` applies: a page that physically exists
+    /// but sits beyond what the header declares is padding, not audio, and
+    /// decoding it would produce noise from a previous, longer recording.
+    #[test]
+    fn a_page_beyond_the_declared_stream_is_refused() {
+        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        assert_eq!(r.seek_to_page(u32::MAX), Err(TafError::PageOutOfRange));
+    }
+
+    /// File page 0 is the header, never audio — the `+1` in `seek_to_chapter`
+    /// exists for exactly this reason.
+    #[test]
+    fn the_header_page_is_not_a_place_to_resume() {
+        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        assert_eq!(r.seek_to_page(0), Err(TafError::PageOutOfRange));
+    }
 
     #[test]
     fn the_fixtures_chapters_start_where_the_chapter_tests_assume() {
