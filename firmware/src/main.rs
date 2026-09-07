@@ -2103,7 +2103,8 @@ async fn media(
                     // The hardware comes back, so playing again needs no
                     // reboot — which is what makes stopping worth anything.
                     let (outcome, tx, buffer) =
-                        audio::play_taf(card, tx, buffer, source, &mut attend).await;
+                        audio::play_taf(card, tx, buffer, source, Position::Start, &mut attend)
+                            .await;
                     if let Err(reason) = outcome {
                         esp_println::println!("teddiebox: playback failed — {reason}");
                     }

@@ -12,7 +12,7 @@
 //! [`teddiebox_core::wav`]; both are tested on the host. What is left here is
 //! the part that owns a DMA engine.
 
-use core::sync::atomic::{AtomicBool, AtomicI8};
+use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU32};
 use portable_atomic::Ordering;
 
 use embassy_futures::yield_now;
@@ -23,6 +23,7 @@ use esp_hal::i2s::master::I2sTx;
 use teddiebox_core::checksum::Crc32;
 use teddiebox_core::cushion::Cushion;
 use teddiebox_core::wav::{WavError, WavFormat};
+use teddiebox_core::Position;
 
 use teddiebox_audio::{LibOpus, OpusState, Skip, TafDecoder, MAX_FRAME_SAMPLES};
 
@@ -265,6 +266,26 @@ static SCRATCH_TAKEN: AtomicBool = AtomicBool::new(false);
 /// created it can hand them back.
 pub static STOP: AtomicBool = AtomicBool::new(false);
 
+/// The container page the decoder is on, and the chapter it is in.
+///
+/// Position memory reads both from outside this module: the page for the exact
+/// tier it keeps in RAM, the chapter for the one it writes to the card. The
+/// decoder itself is created inside the playback loop and is reachable from
+/// nowhere else, which is the same reason `STOP` and `SKIP` are statics.
+pub static PAGE: AtomicU32 = AtomicU32::new(0);
+pub static CHAPTER: AtomicU16 = AtomicU16::new(0);
+
+/// How playback ended, which decides whether a saved position is worth
+/// keeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finish {
+    /// The stream ran out. A finished story is not a paused one, so whoever
+    /// owns the position clears it.
+    Ended,
+    /// `STOP` was set — a figure lifted, a console `stop`, a new request.
+    Stopped,
+}
+
 /// Set to ask whatever is playing to skip a chapter at the next frame:
 /// [`SKIP_FORWARD`] or [`SKIP_BACK`].
 ///
@@ -401,19 +422,20 @@ pub async fn play_taf(
     i2s_tx: I2sTx<'static, Blocking>,
     buffer: DmaTxStreamBuf,
     source: Source,
+    from: Position,
     on_frame: &mut dyn FnMut(),
 ) -> (
-    Result<(), &'static str>,
+    Result<Finish, &'static str>,
     I2sTx<'static, Blocking>,
     DmaTxStreamBuf,
 ) {
-    match play_taf_inner(card, i2s_tx, buffer, source, on_frame).await {
-        Ok((tx, buffer)) => (Ok(()), tx, buffer),
+    match play_taf_inner(card, i2s_tx, buffer, source, from, on_frame).await {
+        Ok((finish, tx, buffer)) => (Ok(finish), tx, buffer),
         Err((reason, tx, buffer)) => (Err(reason), tx, buffer),
     }
 }
 
-type Reclaimed = (I2sTx<'static, Blocking>, DmaTxStreamBuf);
+type Reclaimed = (Finish, I2sTx<'static, Blocking>, DmaTxStreamBuf);
 type PlaybackError = (&'static str, I2sTx<'static, Blocking>, DmaTxStreamBuf);
 
 async fn play_taf_inner(
@@ -421,6 +443,7 @@ async fn play_taf_inner(
     i2s_tx: I2sTx<'static, Blocking>,
     mut buffer: DmaTxStreamBuf,
     source: Source,
+    from: Position,
     on_frame: &mut dyn FnMut(),
 ) -> Result<Reclaimed, PlaybackError> {
     let Some(scratch) = take_scratch() else {
@@ -475,6 +498,32 @@ async fn play_taf_inner(
         decoder.header().audio_id,
         decoder.chapter_count()
     );
+
+    // Where to start, and what to do when it cannot be honoured. A story that
+    // has been replaced or re-downloaded can name a page or a chapter it no
+    // longer has, and that is a reason to play it from the beginning — never a
+    // reason to refuse to play it.
+    match from {
+        Position::Start => {}
+        Position::Chapter(n) => {
+            if decoder.seek_to_chapter(n as usize).is_err() {
+                esp_println::println!(
+                    "teddiebox: taf chapter {n} is not in this story — starting at the top"
+                );
+            } else {
+                esp_println::println!("teddiebox: taf resuming at chapter {n}");
+            }
+        }
+        Position::Exact { page } => {
+            if decoder.seek_to_page(page).is_err() {
+                esp_println::println!(
+                    "teddiebox: taf page {page} is not in this story — starting at the top"
+                );
+            } else {
+                esp_println::println!("teddiebox: taf resuming at page {page}");
+            }
+        }
+    }
 
     // Pre-fill before the transfer starts, exactly as the WAV path does: a
     // buffer still empty when `write()` runs is played as silence and the
@@ -650,6 +699,10 @@ async fn play_taf_inner(
                     pcm_crc.update(as_bytes(&scratch.pcm[..samples]));
                     pending = 0..samples * 2;
                     frames += 1;
+                    // Published for position memory, which cannot reach the
+                    // decoder: it lives inside this loop and nowhere else.
+                    PAGE.store(decoder.page(), Ordering::Relaxed);
+                    CHAPTER.store(decoder.chapter() as u16, Ordering::Relaxed);
                 }
                 Ok(None) => break,
                 Err(_) => {
@@ -773,5 +826,13 @@ async fn play_taf_inner(
         card_us * 100 / played_us,
         decode_us.saturating_sub(card_us) * 100 / played_us
     );
-    Ok((i2s_tx, buffer))
+    Ok((
+        if stopped {
+            Finish::Stopped
+        } else {
+            Finish::Ended
+        },
+        i2s_tx,
+        buffer,
+    ))
 }
