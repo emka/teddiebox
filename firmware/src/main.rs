@@ -19,6 +19,7 @@ use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use heapless::String;
@@ -44,7 +45,7 @@ use teddiebox_core::plate::{Presence, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEA
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
-use teddiebox_core::{Action, Core, CoreConfig, Event, TagUid, Unavailable};
+use teddiebox_core::{Action, Core, CoreConfig, Ear, Event, TagUid, Unavailable};
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
 
@@ -136,6 +137,20 @@ fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_hal::system::software_reset()
 }
 
+/// Settled ear edges, waiting for the reducer to be told about them.
+///
+/// A channel rather than a `Signal` like [`PLATE_TAG`], because these are
+/// edges and not a state. `Core` pairs each `EarDown` with its `EarUp` to tell
+/// a tap from a hold, so a lost press turns the next release into a long one
+/// and a lost release leaves an ear held for ever. A signal keeps only the
+/// last write, and both ears can settle inside one pass of the media loop.
+///
+/// Eight is far more than the two ears can produce between two drains — the
+/// media task drains this once per pass *and* once per decoded frame — so a
+/// full queue means something else is wrong, and it says so rather than
+/// silently dropping the half of a pair that would mislead the reducer.
+static EAR_EVENTS: Channel<CriticalSectionRawMutex, Event, 8> = Channel::new();
+
 /// Reports settled presses on the ears and the wake line.
 ///
 /// Also counts the raw flips seen while each change settled: bench step 2 wants
@@ -150,21 +165,41 @@ async fn inputs(left: Input<'static>, right: Input<'static>, wake: Input<'static
     // step 2 asks for, so it must count changes of the raw line — counting
     // polls that merely disagree with the settled state yields
     // DEBOUNCE_MS / POLL_MS every single time, which looks like data and is not.
+    // Wake carries no ear, because it is not one: it is the button and the
+    // charger, and `Core` has no event for it.
     let mut state = [
-        ("left ear", Debounced::released(), 0u32, false),
-        ("right ear", Debounced::released(), 0u32, false),
-        ("wake", Debounced::released(), 0u32, false),
+        (
+            "left ear",
+            Some(Ear::Left),
+            Debounced::released(),
+            0u32,
+            false,
+        ),
+        (
+            "right ear",
+            Some(Ear::Right),
+            Debounced::released(),
+            0u32,
+            false,
+        ),
+        ("wake", None, Debounced::released(), 0u32, false),
     ];
 
     loop {
-        let now = Instant::now().as_millis() as u32;
+        let uptime = Instant::now().as_millis();
+        // `Debounced` takes a `u32` and handles its wrap; `Core` measures how
+        // long an ear was held and wants the un-truncated clock, or a press
+        // spanning the wrap would read as 49 days and count as a hold.
+        let now = uptime as u32;
         let raw = [
             input::ear_pressed(left.is_high()),
             input::ear_pressed(right.is_high()),
             input::wake_asserted(wake.is_high()),
         ];
 
-        for ((name, button, transitions, last_raw), &pressed) in state.iter_mut().zip(raw.iter()) {
+        for ((name, ear, button, transitions, last_raw), &pressed) in
+            state.iter_mut().zip(raw.iter())
+        {
             if pressed != *last_raw {
                 *transitions += 1;
                 *last_raw = pressed;
@@ -180,6 +215,16 @@ async fn inputs(left: Input<'static>, right: Input<'static>, wake: Input<'static
                 // invisible here and reads as a clean edge.
                 esp_println::println!("teddiebox: {name} {label}, {transitions} raw transitions");
                 *transitions = 0;
+
+                if let Some(ear) = *ear {
+                    let event = match edge {
+                        Edge::Pressed => Event::EarDown(ear, uptime),
+                        Edge::Released => Event::EarUp(ear, uptime),
+                    };
+                    if EAR_EVENTS.try_send(event).is_err() {
+                        esp_println::println!("teddiebox: ear queue full — {event:?} dropped");
+                    }
+                }
             }
         }
 
@@ -1587,6 +1632,22 @@ fn take_plate_event(on_plate: &mut Option<TagUid>, token: &mut Option<[u8; 32]>)
     })
 }
 
+/// Hands the reducer every ear edge that has settled since it was last asked.
+///
+/// Drained rather than read one at a time, because `Core` pairs a press with
+/// its release and leaving half a pair in the queue is what turns the next tap
+/// into a hold.
+///
+/// Needs the card only because `Core::handle` takes an index for every event,
+/// not because an ear does. A box whose card would not mount has nothing to
+/// play and so nothing to turn down, which is what makes that acceptable
+/// rather than merely convenient.
+fn apply_ear_events(reducer: &mut Core, card: &storage::Mounted, token: Option<[u8; 32]>) {
+    while let Ok(event) = EAR_EVENTS.try_receive() {
+        apply(reducer, card, event, token);
+    }
+}
+
 /// Tells the reducer what happened and carries out what it decides.
 ///
 /// The index is built here and dropped at the end: it borrows the card, and
@@ -1707,6 +1768,12 @@ async fn media(
                 // exists to guarantee.
                 None => {}
             }
+        }
+
+        // Every pass, not only when a figure moved: a tap has nothing to do
+        // with the plate and must not wait for one.
+        if let Some(mounted) = card.as_ref() {
+            apply_ear_events(&mut reducer, mounted, on_plate_token);
         }
 
         if events.iter().any(Option::is_some) {
@@ -1852,15 +1919,20 @@ async fn media(
                     // plate is not read again until the story ends by itself,
                     // and lifting the figure does nothing — the reducer never
                     // sees the departure, so it never asks for the stop.
-                    let mut watch_plate = || {
+                    //
+                    // The ears are here for the same reason and it is the
+                    // whole point of them: turning a story down while it plays
+                    // is when anybody reaches for an ear at all.
+                    let mut attend = || {
                         if let Some(event) = take_plate_event(&mut on_plate, &mut on_plate_token) {
                             apply(&mut reducer, card, event, on_plate_token);
                         }
+                        apply_ear_events(&mut reducer, card, on_plate_token);
                     };
                     // The hardware comes back, so playing again needs no
                     // reboot — which is what makes stopping worth anything.
                     let (outcome, tx, buffer) =
-                        audio::play_taf(card, tx, buffer, source, &mut watch_plate).await;
+                        audio::play_taf(card, tx, buffer, source, &mut attend).await;
                     if let Err(reason) = outcome {
                         esp_println::println!("teddiebox: playback failed — {reason}");
                     }
