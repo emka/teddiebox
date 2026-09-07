@@ -13,7 +13,7 @@ mod storage;
 mod tls;
 
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU32, AtomicU8, Ordering};
 
 use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
@@ -45,7 +45,9 @@ use teddiebox_core::plate::{Presence, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEA
 use teddiebox_core::power::{self, PackState};
 use teddiebox_core::sounds::{Announcer, Language, Sound};
 use teddiebox_core::tone;
-use teddiebox_core::{Action, Core, CoreConfig, Ear, Event, TagUid, Unavailable};
+use teddiebox_core::{
+    db_for, Action, Core, CoreConfig, Ear, Event, TagUid, Unavailable, Volume, MAX_VOLUME,
+};
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
 
@@ -356,7 +358,7 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             // this was, in the listener's words, "120% of the max volume".
             // The codec goes to -63.5 dB, so erring quiet costs nothing and
             // is the right way to err beside someone's head.
-            if dac.set_volume_db(BENCH_VOLUME_DB).is_err() {
+            if dac.set_volume_db(BOOT_VOLUME_DB).is_err() {
                 esp_println::println!("teddiebox: codec volume not set");
             }
 
@@ -435,6 +437,18 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 continue;
             }
         }
+        let volume = VOLUME_REQUEST.swap(NO_VOLUME, Ordering::Relaxed);
+        if volume != NO_VOLUME {
+            let bus = accel.release();
+            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+            match dac.set_volume_db(volume) {
+                Ok(()) => esp_println::println!("teddiebox: codec volume {volume} dB"),
+                Err(_) => esp_println::println!("teddiebox: codec volume would not change"),
+            }
+            let bus = dac.release();
+            accel = Lis3dh::new(bus, address);
+            continue;
+        }
         let output = OUTPUT_REQUEST.swap(0, Ordering::Relaxed);
         if let request @ (OUTPUT_DOWN | OUTPUT_UP) = output {
             let bus = accel.release();
@@ -478,7 +492,7 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 .and_then(|()| codec_bring_up(&mut dac, &mut dac_delay))
             {
                 Ok(()) => {
-                    let _ = dac.set_volume_db(BENCH_VOLUME_DB);
+                    let _ = dac.set_volume_db(BOOT_VOLUME_DB);
                     match dac.power_flags() {
                         Ok(f) => esp_println::println!(
                             "teddiebox: codec re-inited dac_l={} class_d_l={} hpl={}",
@@ -556,11 +570,18 @@ const ACCEL_POLL_MS: u64 = 200;
 /// One reading printed per ten polls, so the console stays legible.
 const ACCEL_REPORT_EVERY: u32 = 10;
 
-/// How loud the box plays during bring-up.
+/// How loud the box plays until an ear says otherwise.
 ///
-/// Deliberately low. Turning it up is a one-line change and a reflash; the
-/// alternative is discovering it is too loud with the box against your ear.
-const BENCH_VOLUME_DB: i8 = -35;
+/// No longer a number chosen at the bench: it is the level of the step
+/// `VolumeModel` starts a box on, so the codec's initial state and the
+/// reducer's belief about it are one number rather than two that happen to
+/// agree. Without that, the first tap would step from a level the ladder does
+/// not contain.
+///
+/// It is still deliberately quiet — see `teddiebox_core::db_for` for what the
+/// ladder is anchored on, which is the same listening that set the -35 dB this
+/// replaces.
+const BOOT_VOLUME_DB: i8 = db_for(Volume(MAX_VOLUME / 2));
 
 /// What the console has asked the media task to do.
 ///
@@ -1254,6 +1275,20 @@ const NO_SOUND: u32 = u32::MAX;
 /// Set while a sound the box asked for is still being played.
 static ANNOUNCING: AtomicBool = AtomicBool::new(false);
 
+/// The level the codec should be playing at, in whole dB, or [`NO_VOLUME`].
+///
+/// The codec lives in the task that shares its I2C bus with the accelerometer,
+/// and the reducer lives in the media task, so this is the same kind of seam
+/// `OUTPUT_REQUEST` and `SPEAKER_REQUEST` already are. It carries dB rather
+/// than a step because dB is the codec's own language: which step that came
+/// from is the reducer's business and nothing the codec task should have an
+/// opinion about.
+static VOLUME_REQUEST: AtomicI8 = AtomicI8::new(NO_VOLUME);
+
+/// No level is waiting. Outside the codec's -63.5..=+24 dB range, so it can
+/// never collide with a real request.
+const NO_VOLUME: i8 = i8::MIN;
+
 /// Set once the codec is configured and would be heard if it were driven.
 ///
 /// The start-up jingle waits on this. `init` spends 400 ms letting the output
@@ -1567,6 +1602,14 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         Action::Pause | Action::Stop => {
             esp_println::println!("teddiebox: plate stopping");
             audio::STOP.store(true, Ordering::Relaxed);
+        }
+
+        // The parental ceiling and the stepping are already the reducer's;
+        // all that is left here is saying it in the codec's units.
+        Action::SetVolume(volume) => {
+            let db = db_for(volume);
+            esp_println::println!("teddiebox: volume step {} — {db} dB", volume.0);
+            VOLUME_REQUEST.store(db, Ordering::Relaxed);
         }
 
         Action::AbortFetch => {

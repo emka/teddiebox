@@ -17,9 +17,17 @@ use crate::{Volume, MAX_VOLUME};
 /// A step above [`MAX_VOLUME`] is answered with the ceiling. [`Volume`] is a
 /// tuple struct with a public field and nothing in the type prevents one, and
 /// the ceiling is the only safe answer beside a child's head.
-pub fn db_for(volume: Volume) -> i8 {
+pub const fn db_for(volume: Volume) -> i8 {
     const LEVELS: [i8; MAX_VOLUME as usize + 1] = [-63, -43, -36, -29, -22, -15];
-    LEVELS[(volume.0.min(MAX_VOLUME)) as usize]
+    // `Ord::min` is not const, and the firmware needs this in a `const` so the
+    // level it powers the codec up at is this ladder's rather than a second
+    // number that happens to agree with it.
+    let step = if volume.0 > MAX_VOLUME {
+        MAX_VOLUME
+    } else {
+        volume.0
+    };
+    LEVELS[step as usize]
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +125,14 @@ mod tests {
     #[test]
     fn starts_at_half_the_limit() {
         assert_eq!(VolumeModel::new(4).current(), Volume(2));
+    }
+
+    /// Pinned because the firmware powers the codec up at this step's level,
+    /// computed at compile time, and would otherwise be free to disagree with
+    /// the reducer about how loud a freshly booted box is.
+    #[test]
+    fn a_box_with_no_parental_limit_starts_on_the_middle_step() {
+        assert_eq!(VolumeModel::new(MAX_VOLUME).current(), Volume(2));
     }
 
     #[test]
