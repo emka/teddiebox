@@ -1567,6 +1567,10 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
 /// The figure and the token it arrived with are updated together, here and
 /// nowhere else. They are two halves of one identity, and letting them drift
 /// apart is the bug [`FetchRequest`] exists to make unrepresentable.
+///
+/// Called from two places — once per pass of the media loop, and once per
+/// frame while a story plays — because a loop pass is a whole story long and a
+/// figure lifted during one must not wait for it to end.
 fn take_plate_event(on_plate: &mut Option<TagUid>, token: &mut Option<[u8; 32]>) -> Option<Event> {
     Some(match PLATE_TAG.try_take()? {
         PlateState::Present { uid, token: read } => {
@@ -1843,9 +1847,20 @@ async fn media(
                         },
                         _ => audio::Source::First,
                     };
+                    // Answered on every frame, because a story is one pass of
+                    // this loop and can be half an hour long. Without it the
+                    // plate is not read again until the story ends by itself,
+                    // and lifting the figure does nothing — the reducer never
+                    // sees the departure, so it never asks for the stop.
+                    let mut watch_plate = || {
+                        if let Some(event) = take_plate_event(&mut on_plate, &mut on_plate_token) {
+                            apply(&mut reducer, card, event, on_plate_token);
+                        }
+                    };
                     // The hardware comes back, so playing again needs no
                     // reboot — which is what makes stopping worth anything.
-                    let (outcome, tx, buffer) = audio::play_taf(card, tx, buffer, source).await;
+                    let (outcome, tx, buffer) =
+                        audio::play_taf(card, tx, buffer, source, &mut watch_plate).await;
                     if let Err(reason) = outcome {
                         esp_println::println!("teddiebox: playback failed — {reason}");
                     }

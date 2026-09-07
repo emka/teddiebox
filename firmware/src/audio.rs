@@ -371,17 +371,25 @@ pub enum Source {
 /// Returning the I2S transmitter and the DMA buffer is what makes playback
 /// something the box can do twice. It used to be terminal — `rb` between every
 /// attempt — which also made stopping meaningless, since nothing could follow.
+///
+/// `on_frame` is called once per pass of the decode loop. Playback owns the
+/// task for the length of a story, so this is the caller's only opportunity to
+/// do anything at all while one plays; it exists so that whoever started the
+/// story can keep watching for a reason to end it. This module deliberately
+/// knows nothing about what that reason might be — it hands over a turn and
+/// then reads [`STOP`], exactly as it already did for the console.
 pub async fn play_taf(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
     buffer: DmaTxStreamBuf,
     source: Source,
+    on_frame: &mut dyn FnMut(),
 ) -> (
     Result<(), &'static str>,
     I2sTx<'static, Blocking>,
     DmaTxStreamBuf,
 ) {
-    match play_taf_inner(card, i2s_tx, buffer, source).await {
+    match play_taf_inner(card, i2s_tx, buffer, source, on_frame).await {
         Ok((tx, buffer)) => (Ok(()), tx, buffer),
         Err((reason, tx, buffer)) => (Err(reason), tx, buffer),
     }
@@ -395,6 +403,7 @@ async fn play_taf_inner(
     i2s_tx: I2sTx<'static, Blocking>,
     mut buffer: DmaTxStreamBuf,
     source: Source,
+    on_frame: &mut dyn FnMut(),
 ) -> Result<Reclaimed, PlaybackError> {
     let Some(scratch) = take_scratch() else {
         return Err(("the decoder is already in use", i2s_tx, buffer));
@@ -522,6 +531,13 @@ async fn play_taf_inner(
     // Consecutive milliseconds the buffer has refused a byte.
     let mut stalled: u32 = 0;
     loop {
+        // The caller's turn. This loop is the whole media task for as long as
+        // a story lasts, so anything that decides playback should end — a
+        // figure lifted off the plate above all — can only be noticed from in
+        // here. It is given the turn *before* the stop check, so a decision
+        // made now is acted on now rather than one frame later.
+        on_frame();
+
         if STOP.swap(false, Ordering::Relaxed) {
             stopped = true;
             break;
