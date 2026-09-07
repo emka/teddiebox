@@ -4,6 +4,7 @@
 //! that can answer it without a cross-task round trip is the one that owns the
 //! card. So this lives in the media task and does nothing but look.
 
+use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::{ContentIndex, Position, TagUid};
 use teddiebox_download::{content_path, playable_now, Cached, Sidecar, MAX_SIDECAR};
 
@@ -80,9 +81,20 @@ impl ContentIndex for CardIndex<'_> {
         available
     }
 
-    /// Position memory is not built. The trait method is the seam it will
-    /// fill; until then every placement starts the story from the beginning.
-    fn saved_position(&self, _tag: TagUid) -> Position {
-        Position::default()
+    /// The card's tier: which chapter this story was in when the box last
+    /// stopped. It survives a power cycle, and it is all that survives one.
+    ///
+    /// An unreadable, absent or malformed file reads as `Start`. The card is
+    /// not a trusted input, and no byte on it should be able to strand a
+    /// figure at a chapter its story does not have.
+    fn saved_position(&self, tag: TagUid) -> Position {
+        let path = content_path(tag.0);
+        let stock = self.on_stock_card(path.directory, path.file);
+        let mut buffer = [0u8; MAX_POSITION];
+        self.card
+            .read_position(stock, path.directory, path.file, &mut buffer)
+            .and_then(|len| core::str::from_utf8(&buffer[..len]).ok())
+            .map(position::parse)
+            .unwrap_or(Position::Start)
     }
 }

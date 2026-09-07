@@ -750,6 +750,58 @@ impl Mounted {
         wrote
     }
 
+    /// Reads `/CONTENT|CACHE/<directory>/<file>.POS`, the chapter a story
+    /// should resume at.
+    ///
+    /// Deliberately not the `.MET` sidecar. That records what the server said
+    /// a download's length is, and `decide()` reads it to tell a complete file
+    /// from a partial one — a torn write while saving a chapter would corrupt
+    /// the record download resume depends on. Frequently-written convenience
+    /// data and rarely-written correctness data belong in different files.
+    ///
+    /// Nothing is created on this path, exactly as `read_sidecar` creates
+    /// nothing: a read that made a directory would litter the card by the act
+    /// of asking whether anything is there.
+    pub fn read_position(
+        &self,
+        stock: bool,
+        directory: u32,
+        file: u32,
+        buffer: &mut [u8],
+    ) -> Option<usize> {
+        let mut folder_name = [0u8; 8];
+        let mut stem = [0u8; 8];
+        write_hex8(&mut folder_name, directory);
+        write_hex8(&mut stem, file);
+        let folder_name = core::str::from_utf8(&folder_name).ok()?;
+
+        let mut file_name = [0u8; 12];
+        file_name[..8].copy_from_slice(&stem);
+        file_name[8..].copy_from_slice(b".POS");
+        let file_name = core::str::from_utf8(&file_name).ok()?;
+
+        let root = if stock { TONIE_CONTENT_DIR } else { CACHE_DIR };
+        let top = self.volumes.open_dir(self.root, root).ok()?;
+        let folder = match self.volumes.open_dir(top, folder_name) {
+            Ok(folder) => folder,
+            Err(_) => {
+                let _ = self.volumes.close_dir(top);
+                return None;
+            }
+        };
+        let _ = self.volumes.close_dir(top);
+
+        let handle = self
+            .volumes
+            .open_file_in_dir(folder, file_name, Mode::ReadOnly);
+        let _ = self.volumes.close_dir(folder);
+        let handle = handle.ok()?;
+
+        let filled = self.volumes.read(handle, buffer).ok();
+        self.close_file(handle);
+        filled
+    }
+
     /// Opens a subdirectory, creating it if this is the first download.
     ///
     /// Creating first and opening second would fail on every run after the
