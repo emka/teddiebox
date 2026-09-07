@@ -251,6 +251,18 @@ impl Reader {
     /// reading it. Delegates to the same `inventory_unlocked` and the same
     /// password list `unlock` builds, so the two paths cannot silently
     /// disagree about which passwords a poll is willing to try.
+    /// The most interrupt polls any answered exchange has needed, and what
+    /// that is in microseconds at the driver's poll interval.
+    ///
+    /// The number the reply window should be sized against. It is read out
+    /// when polling stops rather than printed as it changes, because a figure
+    /// on the plate is polled several times a second and the interesting value
+    /// is the worst one across a whole run.
+    pub fn slowest_reply(&self) -> (u32, u32) {
+        let polls = self.trf.slowest_reply_polls();
+        (polls, polls * trf7962a::IRQ_POLL_INTERVAL_US)
+    }
+
     /// Whether anything is on the plate, without unlocking it.
     ///
     /// The one question a Tonie in privacy mode answers (SL2S5002 §1.3), and

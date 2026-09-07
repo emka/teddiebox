@@ -187,6 +187,10 @@ pub struct Trf7962a<SPI, D, IRQ> {
     spi: SPI,
     delay: D,
     irq: IRQ,
+    /// The most interrupt polls any answered exchange has needed, so the reply
+    /// window can be sized against what this board actually does rather than
+    /// against arithmetic. See `slowest_reply_polls`.
+    slowest_reply_polls: u32,
 }
 
 impl<SPI, D, IRQ, E> Trf7962a<SPI, D, IRQ>
@@ -202,7 +206,12 @@ where
     /// "not finished yet" — it always reads too early and reports an empty
     /// plate.
     pub fn new(spi: SPI, delay: D, irq: IRQ) -> Self {
-        Self { spi, delay, irq }
+        Self {
+            spi,
+            delay,
+            irq,
+            slowest_reply_polls: 0,
+        }
     }
 
     pub fn release(self) -> (SPI, D, IRQ) {
@@ -308,13 +317,30 @@ where
     /// ordinary "nothing on the plate" case rather than a fault — the firmware
     /// polls an empty plate continuously, so that must not be an error.
     fn wait_for_response(&mut self) -> Result<bool, Error<E>> {
-        for _ in 0..IRQ_POLL_ATTEMPTS {
+        for polled in 0..IRQ_POLL_ATTEMPTS {
             if self.irq.is_high().map_err(|_| Error::Pin)? {
+                if polled > self.slowest_reply_polls {
+                    self.slowest_reply_polls = polled;
+                }
                 return Ok(true);
             }
             self.delay.delay_us(IRQ_POLL_INTERVAL_US);
         }
         Ok(false)
+    }
+
+    /// The most interrupt polls any answered exchange has needed so far.
+    ///
+    /// Multiplied by `IRQ_POLL_INTERVAL_US` this is how long the slowest reply
+    /// actually took on this board, which is the only honest input to sizing
+    /// `IRQ_POLL_ATTEMPTS`. Unanswered exchanges are excluded on purpose: they
+    /// tell you what the window is, not what a reply needs.
+    ///
+    /// A window cut below this figure makes a tag on the plate read as no tag,
+    /// which cannot be told apart from a disconnected antenna — so leave real
+    /// headroom above whatever the bench reports.
+    pub fn slowest_reply_polls(&self) -> u32 {
+        self.slowest_reply_polls
     }
 
     /// Puts `request` on the air, as one slave-select window.

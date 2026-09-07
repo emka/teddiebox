@@ -1080,3 +1080,35 @@ fn an_empty_plate_costs_one_unanswered_exchange() {
     delay.done();
     irq.done();
 }
+
+/// What the reply window should actually be sized against.
+///
+/// `IRQ_POLL_ATTEMPTS` was set generously on purpose and its own comment asks
+/// for a retune against a real exchange. That retune needs a number from the
+/// bench rather than from arithmetic, so the driver keeps the worst reply it
+/// has seen; too short a window makes a tag on the plate read as no tag, which
+/// is the one failure indistinguishable from a broken antenna.
+#[test]
+fn the_slowest_reply_is_remembered_for_the_bench_to_read() {
+    let random_response = [0x00u8, 0xCD, 0xAB];
+    let spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &random_response);
+
+    // The transmit interrupt answers at once; the tag's reply takes two polls.
+    let mut irq = irq_after(0);
+    irq.extend(irq_after(2));
+
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&answered(2)),
+        PinMock::new(&irq),
+    );
+
+    assert_eq!(r.slowest_reply_polls(), 0, "nothing has been answered yet");
+    assert_eq!(r.get_random_number(), Ok(0xABCD));
+    assert_eq!(r.slowest_reply_polls(), 2);
+
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}

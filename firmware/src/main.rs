@@ -1150,6 +1150,9 @@ static NFC_MEM_RANGE: AtomicU32 = AtomicU32::new(0);
 /// measurement that involves a figure, so this stays off until `plate on`
 /// asks for it in a session that is watching.
 static PLATE_POLLING: AtomicBool = AtomicBool::new(false);
+/// Asks the reader task to print the slowest reply it has seen. Set when
+/// polling is switched off, because that is when a run is over.
+static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
 
 /// What is on the plate right now — the current state, not a queue of edges.
 ///
@@ -2326,6 +2329,17 @@ async fn nfc_reader(
             _ => {}
         }
 
+        // Read out when polling stops, so a whole run is summarised by its
+        // worst reply rather than by whichever poll happened to print last.
+        if PLATE_REPORT.swap(false, Ordering::Relaxed) {
+            let (polls, micros) = reader.slowest_reply();
+            esp_println::println!(
+                "teddiebox: plate slowest reply {polls} polls (~{micros} us) \
+                 of {} attempts allowed",
+                trf7962a::IRQ_POLL_ATTEMPTS
+            );
+        }
+
         if PLATE_POLLING.load(Ordering::Relaxed) {
             ticks_since_poll = ticks_since_poll.saturating_add(1);
             if ticks_since_poll >= PLATE_POLL_TICKS {
@@ -2777,6 +2791,9 @@ async fn main(spawner: Spawner) {
                     NFC_REQUEST.store(NFC_LOCK, Ordering::Relaxed);
                 }
                 Some(Command::Plate(on)) => {
+                    if !on {
+                        PLATE_REPORT.store(true, Ordering::Relaxed);
+                    }
                     if on {
                         board.apply(gates.power(Rail::Storage, true));
                     }
