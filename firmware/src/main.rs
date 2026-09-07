@@ -2122,7 +2122,11 @@ async fn media(
 /// has to be polled for the entire time the session is wanted. So "up" is not
 /// a state this returns to the caller — it is a stretch of time spent inside
 /// here, ending only when the console asks for it to end.
-async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReference<'_>>) {
+async fn bring_up(
+    radio: &mut net::Radio<'_>,
+    tls: Option<mbedtls_rs::TlsReference<'_>>,
+    stay_up: bool,
+) {
     let Some(config) = credentials() else {
         esp_println::println!(
             "teddiebox: net no credentials — type `net ssid <name>` then `net pw <passphrase>`"
@@ -2192,172 +2196,189 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                 // `acquire` and `release`. It is awaited inline, so the runner
                 // beside it keeps polling for its whole length — a handshake
                 // is several round trips and would stall without it.
-                NET_GET => match tls {
-                    None => esp_println::println!("teddiebox: tls context unavailable"),
-                    Some(tls) => match critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs)) {
-                        None => esp_println::println!(
-                            "teddiebox: get has no request queued — nothing to fetch"
-                        ),
-                        Some(FetchRequest {
-                            ruid: requested,
-                            token,
-                        }) => {
-                            // Attributed up front, from the pair this fetch was
-                            // raised with — see `FetchRequest` — rather than read
-                            // from a shared static later, when a `token` typed at
-                            // the console in the meantime could have moved on.
-                            FETCH_ACTIVE_RUID.store(requested, Ordering::Relaxed);
-                            let ruid = requested.to_be_bytes();
-                            // `content_path` takes the UID and reverses it itself,
-                            // and what the console typed is already reversed.
-                            let mut uid = ruid;
-                            uid.reverse();
-                            let path = teddiebox_download::content_path(uid);
+                NET_GET => {
+                    match tls {
+                        None => esp_println::println!("teddiebox: tls context unavailable"),
+                        Some(tls) => match critical_section::with(|cs| {
+                            *FETCH_REQUEST.borrow_ref(cs)
+                        }) {
+                            None => esp_println::println!(
+                                "teddiebox: get has no request queued — nothing to fetch"
+                            ),
+                            Some(FetchRequest {
+                                ruid: requested,
+                                token,
+                            }) => {
+                                // Attributed up front, from the pair this fetch was
+                                // raised with — see `FetchRequest` — rather than read
+                                // from a shared static later, when a `token` typed at
+                                // the console in the meantime could have moved on.
+                                FETCH_ACTIVE_RUID.store(requested, Ordering::Relaxed);
+                                let ruid = requested.to_be_bytes();
+                                // `content_path` takes the UID and reverses it itself,
+                                // and what the console typed is already reversed.
+                                let mut uid = ruid;
+                                uid.reverse();
+                                let path = teddiebox_download::content_path(uid);
 
-                            DOWNLOAD_DIR.store(path.directory, Ordering::Relaxed);
-                            DOWNLOAD_FILE.store(path.file, Ordering::Relaxed);
-                            DOWNLOAD_SENT.store(0, Ordering::Relaxed);
-                            critical_section::with(|cs| {
-                                *DOWNLOAD_PIPE.borrow_ref_mut(cs) = Pipe::new()
-                            });
-                            // The card is the only thing that knows what is
-                            // already downloaded, and only its owner may ask it. So
-                            // the request waits here until it has been told what to
-                            // ask for — a resume asks for the rest, and asking for
-                            // the whole file again is a quarter of an hour thrown
-                            // away with the story still not playing.
-                            DOWNLOAD_FROM.store(0, Ordering::Relaxed);
-                            DOWNLOAD_AT.store(0, Ordering::Relaxed);
-                            DOWNLOAD_STATE.store(DOWNLOAD_PREPARING, Ordering::Relaxed);
-                            // Bounded, because a media task that never answers must
-                            // not wedge the console. Timing out leaves DOWNLOAD_FROM
-                            // at zero, which fetches the whole file — slow, and
-                            // correct, which is the right way round for a fallback.
-                            let mut waited = 0;
-                            while DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_PREPARING
-                                && waited < 500
-                            {
-                                Timer::after(Duration::from_millis(10)).await;
-                                waited += 1;
-                            }
-
-                            let from = DOWNLOAD_FROM.load(Ordering::Relaxed);
-                            if from == NOTHING_TO_FETCH {
-                                esp_println::println!(
-                                    "teddiebox: get the card already holds all of it"
-                                );
-                                // Nothing to fetch is still an answer, and it is
-                                // the good one: whoever asked can play now.
-                                fetch_ended(FETCH_COMPLETED);
-                                DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
-                            } else {
-                                if from > 0 {
-                                    esp_println::println!("teddiebox: get resuming from {from}");
-                                }
-                                DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
-                                if token.is_some() {
-                                    esp_println::println!("teddiebox: get sending the tag's token");
-                                }
-                                let mut throttle = Throttle::new();
-                                let mut may_fetch = || {
-                                    teddiebox_download::next_step(
-                                        DOWNLOAD_ABORT.load(Ordering::Relaxed),
-                                        throttle.update(
-                                            PLAYING.load(Ordering::Relaxed),
-                                            NOTHING_WAITING,
-                                            RESUME_BELOW,
-                                            PAUSE_ABOVE,
-                                        ),
-                                    )
-                                };
-                                let mut into_pipe = |bytes: &[u8]| -> usize {
-                                    // Nobody is draining. Swallow the rest so the
-                                    // download ends and reports, rather than blocking
-                                    // forever on a pipe that will never empty.
-                                    if DOWNLOAD_ABORT.load(Ordering::Relaxed) {
-                                        return bytes.len();
-                                    }
-                                    let taken = critical_section::with(|cs| {
-                                        DOWNLOAD_PIPE.borrow_ref_mut(cs).write(bytes)
-                                    });
-                                    DOWNLOAD_SENT.fetch_add(taken as u32, Ordering::Relaxed);
-                                    taken
-                                };
-                                let resume_etag = critical_section::with(|cs| {
-                                    DOWNLOAD_RESUME_ETAG.borrow_ref(cs).clone()
+                                DOWNLOAD_DIR.store(path.directory, Ordering::Relaxed);
+                                DOWNLOAD_FILE.store(path.file, Ordering::Relaxed);
+                                DOWNLOAD_SENT.store(0, Ordering::Relaxed);
+                                critical_section::with(|cs| {
+                                    *DOWNLOAD_PIPE.borrow_ref_mut(cs) = Pipe::new()
                                 });
-                                let wanted = tls::Wanted {
-                                    server: &config.server,
-                                    insecure: config.insecure,
-                                    ruid,
-                                    token: token.as_ref(),
-                                    from: (from > 0).then_some(from),
-                                    etag: resume_etag.as_ref(),
-                                };
-                                // Raised here rather than before the request. Until the
-                                // head arrives there is nothing to write and nothing to
-                                // write it with — and opening the file any earlier
-                                // truncates a partial download on behalf of a request
-                                // that may yet fail before asking for a byte.
-                                let mut on_head = |head: tls::Head<'_>| {
-                                    DOWNLOAD_TOTAL
-                                        .store(head.total.unwrap_or(0), Ordering::Relaxed);
-                                    // Where the body actually belongs, which is not
-                                    // always where it was asked to start: a server
-                                    // that declined the range says so with zero.
-                                    DOWNLOAD_AT.store(head.offset, Ordering::Relaxed);
-                                    critical_section::with(|cs| {
-                                        *DOWNLOAD_ETAG.borrow_ref_mut(cs) = head.etag.cloned();
-                                    });
-                                    DOWNLOAD_STATE.store(DOWNLOAD_RUNNING, Ordering::Relaxed);
-                                };
-                                let outcome = tls::fetch(
-                                    tls,
-                                    &stack,
-                                    &wanted,
-                                    &mut on_head,
-                                    &mut into_pipe,
-                                    &mut may_fetch,
-                                )
-                                .await;
-                                // Ended either way: the consumer must stop waiting for
-                                // bytes that are never coming.
-                                DOWNLOAD_STATE.store(DOWNLOAD_ENDED, Ordering::Relaxed);
+                                // The card is the only thing that knows what is
+                                // already downloaded, and only its owner may ask it. So
+                                // the request waits here until it has been told what to
+                                // ask for — a resume asks for the rest, and asking for
+                                // the whole file again is a quarter of an hour thrown
+                                // away with the story still not playing.
+                                DOWNLOAD_FROM.store(0, Ordering::Relaxed);
+                                DOWNLOAD_AT.store(0, Ordering::Relaxed);
+                                DOWNLOAD_STATE.store(DOWNLOAD_PREPARING, Ordering::Relaxed);
+                                // Bounded, because a media task that never answers must
+                                // not wedge the console. Timing out leaves DOWNLOAD_FROM
+                                // at zero, which fetches the whole file — slow, and
+                                // correct, which is the right way round for a fallback.
+                                let mut waited = 0;
+                                while DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_PREPARING
+                                    && waited < 500
+                                {
+                                    Timer::after(Duration::from_millis(10)).await;
+                                    waited += 1;
+                                }
 
-                                match outcome {
-                                    // Not reported ready here. The bytes are still
-                                    // travelling through the pipe to the card, and
-                                    // the media task says so when they land.
-                                    Ok(got) => esp_println::println!(
-                                        "teddiebox: get received {} bytes, crc32 {:08X}, {} s",
-                                        got.bytes,
-                                        got.crc32,
-                                        got.seconds
-                                    ),
-                                    // Not a failure, and not the reducer's
-                                    // business: it learned the figure was gone
-                                    // before this loop did, and that is what
-                                    // told this loop to stop. Saying
-                                    // "unreachable" now would have the box
-                                    // announce a network fault for a story
-                                    // nobody is waiting for.
-                                    Err(tls::Error::Abandoned) => esp_println::println!(
-                                        "teddiebox: get abandoned — nobody is waiting for it"
-                                    ),
-                                    Err(e) => {
-                                        // The console keeps the real code; the
-                                        // reducer gets the one word it can act on.
-                                        esp_println::println!("teddiebox: get failed — {e:?}");
-                                        fetch_ended(match why_unavailable(&e) {
-                                            Unavailable::NoContent => FETCH_NO_CONTENT,
-                                            Unavailable::Unreachable => FETCH_UNREACHABLE,
+                                let from = DOWNLOAD_FROM.load(Ordering::Relaxed);
+                                if from == NOTHING_TO_FETCH {
+                                    esp_println::println!(
+                                        "teddiebox: get the card already holds all of it"
+                                    );
+                                    // Nothing to fetch is still an answer, and it is
+                                    // the good one: whoever asked can play now.
+                                    fetch_ended(FETCH_COMPLETED);
+                                    DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
+                                } else {
+                                    if from > 0 {
+                                        esp_println::println!(
+                                            "teddiebox: get resuming from {from}"
+                                        );
+                                    }
+                                    DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
+                                    if token.is_some() {
+                                        esp_println::println!(
+                                            "teddiebox: get sending the tag's token"
+                                        );
+                                    }
+                                    let mut throttle = Throttle::new();
+                                    let mut may_fetch = || {
+                                        teddiebox_download::next_step(
+                                            DOWNLOAD_ABORT.load(Ordering::Relaxed),
+                                            throttle.update(
+                                                PLAYING.load(Ordering::Relaxed),
+                                                NOTHING_WAITING,
+                                                RESUME_BELOW,
+                                                PAUSE_ABOVE,
+                                            ),
+                                        )
+                                    };
+                                    let mut into_pipe = |bytes: &[u8]| -> usize {
+                                        // Nobody is draining. Swallow the rest so the
+                                        // download ends and reports, rather than blocking
+                                        // forever on a pipe that will never empty.
+                                        if DOWNLOAD_ABORT.load(Ordering::Relaxed) {
+                                            return bytes.len();
+                                        }
+                                        let taken = critical_section::with(|cs| {
+                                            DOWNLOAD_PIPE.borrow_ref_mut(cs).write(bytes)
                                         });
+                                        DOWNLOAD_SENT.fetch_add(taken as u32, Ordering::Relaxed);
+                                        taken
+                                    };
+                                    let resume_etag = critical_section::with(|cs| {
+                                        DOWNLOAD_RESUME_ETAG.borrow_ref(cs).clone()
+                                    });
+                                    let wanted = tls::Wanted {
+                                        server: &config.server,
+                                        insecure: config.insecure,
+                                        ruid,
+                                        token: token.as_ref(),
+                                        from: (from > 0).then_some(from),
+                                        etag: resume_etag.as_ref(),
+                                    };
+                                    // Raised here rather than before the request. Until the
+                                    // head arrives there is nothing to write and nothing to
+                                    // write it with — and opening the file any earlier
+                                    // truncates a partial download on behalf of a request
+                                    // that may yet fail before asking for a byte.
+                                    let mut on_head = |head: tls::Head<'_>| {
+                                        DOWNLOAD_TOTAL
+                                            .store(head.total.unwrap_or(0), Ordering::Relaxed);
+                                        // Where the body actually belongs, which is not
+                                        // always where it was asked to start: a server
+                                        // that declined the range says so with zero.
+                                        DOWNLOAD_AT.store(head.offset, Ordering::Relaxed);
+                                        critical_section::with(|cs| {
+                                            *DOWNLOAD_ETAG.borrow_ref_mut(cs) = head.etag.cloned();
+                                        });
+                                        DOWNLOAD_STATE.store(DOWNLOAD_RUNNING, Ordering::Relaxed);
+                                    };
+                                    let outcome = tls::fetch(
+                                        tls,
+                                        &stack,
+                                        &wanted,
+                                        &mut on_head,
+                                        &mut into_pipe,
+                                        &mut may_fetch,
+                                    )
+                                    .await;
+                                    // Ended either way: the consumer must stop waiting for
+                                    // bytes that are never coming.
+                                    DOWNLOAD_STATE.store(DOWNLOAD_ENDED, Ordering::Relaxed);
+
+                                    match outcome {
+                                        // Not reported ready here. The bytes are still
+                                        // travelling through the pipe to the card, and
+                                        // the media task says so when they land.
+                                        Ok(got) => esp_println::println!(
+                                            "teddiebox: get received {} bytes, crc32 {:08X}, {} s",
+                                            got.bytes,
+                                            got.crc32,
+                                            got.seconds
+                                        ),
+                                        // Not a failure, and not the reducer's
+                                        // business: it learned the figure was gone
+                                        // before this loop did, and that is what
+                                        // told this loop to stop. Saying
+                                        // "unreachable" now would have the box
+                                        // announce a network fault for a story
+                                        // nobody is waiting for.
+                                        Err(tls::Error::Abandoned) => esp_println::println!(
+                                            "teddiebox: get abandoned — nobody is waiting for it"
+                                        ),
+                                        Err(e) => {
+                                            // The console keeps the real code; the
+                                            // reducer gets the one word it can act on.
+                                            esp_println::println!("teddiebox: get failed — {e:?}");
+                                            fetch_ended(match why_unavailable(&e) {
+                                                Unavailable::NoContent => FETCH_NO_CONTENT,
+                                                Unavailable::Unreachable => FETCH_UNREACHABLE,
+                                            });
+                                        }
                                     }
                                 }
                             }
-                        }
-                    },
-                },
+                        },
+                    }
+                    // An association raised for one story goes down with
+                    // it. Asking here rather than at the top of the loop
+                    // keeps the radio up for the whole of the fetch,
+                    // including the part that happens after the last byte
+                    // leaves the socket.
+                    if !stay_up {
+                        break;
+                    }
+                }
+
                 NET_TLS => match tls {
                     None => esp_println::println!(
                         "teddiebox: tls context unavailable — mbedtls would not start"
@@ -2468,26 +2489,41 @@ async fn net(
                     ),
                 }
             }
-            NET_UP => bring_up(&mut radio, tls).await,
+            NET_UP => bring_up(&mut radio, tls, true).await,
             // `net status` and `net down` are answered inside `bring_up` while
             // it is running. Reaching them here means it is not.
             NET_STATUS | NET_DOWN | NET_TLS => {
                 esp_println::println!("teddiebox: net is down")
             }
-            // Same message, but somebody is waiting on this one: a figure whose
-            // story has to be fetched with the radio down is unreachable, and
-            // saying nothing would leave the box silent with no explanation.
+            // A story to fetch with the radio down. The radio comes up for
+            // it and goes down again with it: this box cannot hold a figure
+            // reliably while the radio works, and it has no other reason to be
+            // associated — so an association is something a download borrows
+            // rather than a state the box sits in.
             NET_GET => match critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs)) {
                 None => {
                     esp_println::println!("teddiebox: get has no request queued — nothing to fetch")
                 }
                 Some(FetchRequest { ruid, .. }) => {
-                    // Attributed before the outcome is recorded, the same as
-                    // every other path that ends a fetch — this one is no
-                    // exception just because the radio never came up.
+                    // Attributed before anything can end the fetch, the same as
+                    // every other path that ends one.
                     FETCH_ACTIVE_RUID.store(ruid, Ordering::Relaxed);
-                    esp_println::println!("teddiebox: net is down");
-                    fetch_ended(FETCH_UNREACHABLE);
+                    esp_println::println!("teddiebox: net coming up for a story");
+                    // Put back for the association's own loop to serve: it was
+                    // taken out of the request by the read at the top of this
+                    // one, and it is the whole reason for associating.
+                    NET_REQUEST.store(NET_GET, Ordering::Relaxed);
+                    bring_up(&mut radio, tls, false).await;
+                    // `bring_up` answers a fetch it could not start — no
+                    // credentials, no association, no lease — by returning
+                    // without serving the request. Nobody else will, so
+                    // whoever asked is told here rather than left waiting.
+                    if FETCH_OUTCOME.load(Ordering::Relaxed) == FETCH_NOTHING
+                        && DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_IDLE
+                    {
+                        esp_println::println!("teddiebox: net would not come up for it");
+                        fetch_ended(FETCH_UNREACHABLE);
+                    }
                 }
             },
             _ => {}
