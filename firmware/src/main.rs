@@ -839,6 +839,11 @@ fn fetch_ended(outcome: u8) {
 /// the name, the socket, the handshake, a fault of the server's own — means
 /// the server was not reached, whatever the reason. The console keeps the
 /// reason; this is only what the box can say out loud.
+///
+/// [`tls::Error::Abandoned`] never reaches here — it is answered before this is
+/// called, because a transfer that was told to stop is not a story that could
+/// not be obtained. If that arm is ever removed, the catch-all below will turn
+/// every lifted figure into an announced network fault.
 fn why_unavailable(error: &tls::Error) -> Unavailable {
     match error {
         tls::Error::NoContent
@@ -1159,7 +1164,12 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
             // server that has no story and one that could not be reached —
             // which is the difference between the two things the box can say
             // out loud.
-            if FETCH_OUTCOME.load(Ordering::Relaxed) == FETCH_NOTHING {
+            // Nor if the download was abandoned: a figure that has been
+            // lifted is not owed an explanation, and the reducer has already
+            // moved on to having no figure at all.
+            if FETCH_OUTCOME.load(Ordering::Relaxed) == FETCH_NOTHING
+                && !DOWNLOAD_ABORT.load(Ordering::Relaxed)
+            {
                 fetch_ended(FETCH_UNREACHABLE);
             }
         }
@@ -2250,11 +2260,14 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                                 }
                                 let mut throttle = Throttle::new();
                                 let mut may_fetch = || {
-                                    throttle.update(
-                                        PLAYING.load(Ordering::Relaxed),
-                                        NOTHING_WAITING,
-                                        RESUME_BELOW,
-                                        PAUSE_ABOVE,
+                                    teddiebox_download::next_step(
+                                        DOWNLOAD_ABORT.load(Ordering::Relaxed),
+                                        throttle.update(
+                                            PLAYING.load(Ordering::Relaxed),
+                                            NOTHING_WAITING,
+                                            RESUME_BELOW,
+                                            PAUSE_ABOVE,
+                                        ),
                                     )
                                 };
                                 let mut into_pipe = |bytes: &[u8]| -> usize {
@@ -2320,6 +2333,16 @@ async fn bring_up(radio: &mut net::Radio<'_>, tls: Option<mbedtls_rs::TlsReferen
                                         got.bytes,
                                         got.crc32,
                                         got.seconds
+                                    ),
+                                    // Not a failure, and not the reducer's
+                                    // business: it learned the figure was gone
+                                    // before this loop did, and that is what
+                                    // told this loop to stop. Saying
+                                    // "unreachable" now would have the box
+                                    // announce a network fault for a story
+                                    // nobody is waiting for.
+                                    Err(tls::Error::Abandoned) => esp_println::println!(
+                                        "teddiebox: get abandoned — nobody is waiting for it"
                                     ),
                                     Err(e) => {
                                         // The console keeps the real code; the

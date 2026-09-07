@@ -23,6 +23,37 @@ use crate::units::Pages;
 /// Holds one bit of state because the answer depends on what it said last:
 /// between the two thresholds the previous decision stands, and that is what
 /// stops it flapping.
+/// What a transfer in progress should do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Continue {
+    /// Read the next chunk.
+    Now,
+    /// Hold, and ask again shortly. The decoder is far enough ahead that the
+    /// radio can be left alone for a moment.
+    Wait,
+    /// Stop. Nobody wants these bytes any more.
+    Abandon,
+}
+
+/// Folds the two reasons a transfer might not read right now into one answer.
+///
+/// The order is the whole content of this function. Abandonment is checked
+/// before the throttle, because a transfer that has been abandoned *while*
+/// the throttle is holding it closed would otherwise sit waiting for a lead it
+/// will never be allowed to build — a download that cannot end. The bug this
+/// replaces was the same shape from the other side: nothing checked
+/// abandonment at all, so lifting a figure left the radio pulling a whole
+/// story it had already been told nobody wanted.
+pub fn next_step(abandoned: bool, may_read: bool) -> Continue {
+    if abandoned {
+        Continue::Abandon
+    } else if may_read {
+        Continue::Now
+    } else {
+        Continue::Wait
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Throttle {
     fetching: bool,
@@ -75,6 +106,31 @@ impl Throttle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The precedence that matters, and the one a bug hides in: a transfer
+    /// that has been abandoned must stop even while the throttle is holding it
+    /// closed. Checking the throttle first would leave an abandoned download
+    /// waiting for a lead it will never be allowed to build, which is a
+    /// download that never ends.
+    #[test]
+    fn an_abandoned_transfer_stops_even_while_the_throttle_holds_it() {
+        assert_eq!(next_step(true, false), Continue::Abandon);
+    }
+
+    #[test]
+    fn an_abandoned_transfer_stops_rather_than_reading_on() {
+        assert_eq!(next_step(true, true), Continue::Abandon);
+    }
+
+    #[test]
+    fn a_throttled_transfer_waits() {
+        assert_eq!(next_step(false, false), Continue::Wait);
+    }
+
+    #[test]
+    fn an_open_throttle_reads_now() {
+        assert_eq!(next_step(false, true), Continue::Now);
+    }
 
     const RESUME: Pages = Pages(8);
     const PAUSE: Pages = Pages(32);

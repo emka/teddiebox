@@ -32,6 +32,7 @@ use static_cell::StaticCell;
 use teddiebox_cloud::stream::{self, Begun, Body};
 use teddiebox_cloud::{CloudError, ContentRequest, ETag, Route};
 use teddiebox_core::checksum::Crc32;
+use teddiebox_download::Continue;
 
 /// How long to wait for the TCP connect and the handshake.
 ///
@@ -75,6 +76,9 @@ const MAX_NAME: usize = 80;
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum Error {
+    /// Nobody wants these bytes any more — the figure that asked for them was
+    /// lifted. Not a failure: the transfer was told to stop and did.
+    Abandoned,
     /// `server` in the config was not `host:port`.
     MalformedServer,
     /// The host name did not resolve.
@@ -577,7 +581,7 @@ pub async fn fetch(
     wanted: &Wanted<'_>,
     on_head: &mut dyn FnMut(Head<'_>),
     sink: &mut dyn FnMut(&[u8]) -> usize,
-    may_fetch: &mut dyn FnMut() -> bool,
+    may_fetch: &mut dyn FnMut() -> Continue,
 ) -> Result<Fetched, Error> {
     let Wanted {
         server,
@@ -682,8 +686,19 @@ pub async fn fetch(
         // Asked before reading rather than after: the point is to leave the
         // radio quiet while audio has a deadline, and a read already taken is
         // a packet already received.
-        while !may_fetch() {
-            Timer::after(THROTTLE_WAIT).await;
+        //
+        // This loop used to ask only whether it might read, so a transfer
+        // nobody wanted any more ran to the last byte regardless: lifting a
+        // figure pulled the rest of a whole story over the radio and threw it
+        // away. Abandonment is the third answer, and is checked ahead of the
+        // throttle so that a transfer paused behind a playing story can still
+        // be ended.
+        loop {
+            match may_fetch() {
+                Continue::Now => break,
+                Continue::Abandon => return Err(Error::Abandoned),
+                Continue::Wait => Timer::after(THROTTLE_WAIT).await,
+            }
         }
         let got = body.read(&mut wire, &mut buf).await;
         let n = got.map_err(|e| wire.explain(e))?;

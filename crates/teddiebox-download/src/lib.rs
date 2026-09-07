@@ -25,7 +25,7 @@ pub use cache::{
 pub use content_path::{content_path, ContentPath};
 pub use reconcile::{reconcile, Action, Mismatch};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
-pub use throttle::Throttle;
+pub use throttle::{next_step, Continue, Throttle};
 pub use units::{Bytes, Pages};
 pub use window::{may_decode, Window, WindowError};
 pub use writer::{ContentSink, Writer};
