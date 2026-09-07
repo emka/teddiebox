@@ -52,6 +52,17 @@ pub const fn charger_mv(raw: u16) -> u32 {
 
 /// Warn here. Three NiMH cells nominal 3.6 V; below this the box should say so
 /// while it still has the power to say it.
+/// Whether the charger is plugged in.
+///
+/// The channel is uncalibrated, so this is a threshold between two observed
+/// states rather than a voltage with a meaning: nothing connected reads about
+/// 1,950 counts, and a connected charger rails the channel at full scale.
+/// Half way between them is far from either, which is the most this reading
+/// can honestly support.
+pub const fn charger_present(raw: u16) -> bool {
+    raw > 3_000
+}
+
 pub const LOW_BATTERY_MV: u32 = 3_300;
 /// Shut down here, before the flash writes start failing.
 pub const CRITICAL_BATTERY_MV: u32 = 3_000;
@@ -77,6 +88,20 @@ pub const fn pack_state(mv: u32) -> PackState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both readings are from this bench, not from the divider arithmetic:
+    /// the channel is uncalibrated, so what it is worth is exactly the two
+    /// states it has been observed in. Deriving these from `charger_mv` would
+    /// make the test agree with the code by construction.
+    #[test]
+    fn the_charger_is_seen_when_the_reading_rails_and_not_when_it_floats() {
+        assert!(
+            charger_present(4095),
+            "on the charger, railed at full scale"
+        );
+        assert!(!charger_present(1957), "nothing connected, 2026-09-03");
+        assert!(!charger_present(1933), "nothing connected, 2026-09-07");
+    }
 
     #[test]
     fn a_full_scale_reading_is_the_rail_times_its_divider() {
