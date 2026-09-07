@@ -1612,6 +1612,19 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             VOLUME_REQUEST.store(db, Ordering::Relaxed);
         }
 
+        // Which chapter is playing, and what the ends of the story mean, are
+        // the decoder's — it is the only thing that knows either. This says
+        // only which way.
+        Action::NextTrack => {
+            esp_println::println!("teddiebox: skip forward");
+            audio::SKIP.store(audio::SKIP_FORWARD, Ordering::Relaxed);
+        }
+
+        Action::PrevTrack => {
+            esp_println::println!("teddiebox: skip back");
+            audio::SKIP.store(audio::SKIP_BACK, Ordering::Relaxed);
+        }
+
         Action::AbortFetch => {
             esp_println::println!("teddiebox: plate abandoning the download");
             DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
@@ -1932,8 +1945,11 @@ async fn media(
                 };
 
                 // A stop typed before the first frame must not be waiting for
-                // the next playback to start.
+                // the next playback to start. Nor must a skip: an ear held
+                // down with nothing playing would otherwise lose the first
+                // chapter of whatever is played next.
                 audio::STOP.store(false, Ordering::Relaxed);
+                audio::SKIP.store(audio::SKIP_NONE, Ordering::Relaxed);
 
                 // Raised around every path that feeds the DMA, so the
                 // download knows to leave the radio alone. Cleared on the way

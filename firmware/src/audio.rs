@@ -12,7 +12,7 @@
 //! [`teddiebox_core::wav`]; both are tested on the host. What is left here is
 //! the part that owns a DMA engine.
 
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicI8};
 use portable_atomic::Ordering;
 
 use embassy_futures::yield_now;
@@ -24,7 +24,7 @@ use teddiebox_core::checksum::Crc32;
 use teddiebox_core::cushion::Cushion;
 use teddiebox_core::wav::{WavError, WavFormat};
 
-use teddiebox_audio::{LibOpus, OpusState, TafDecoder, MAX_FRAME_SAMPLES};
+use teddiebox_audio::{LibOpus, OpusState, Skip, TafDecoder, MAX_FRAME_SAMPLES};
 
 use crate::storage::{CardPages, Mounted, PAGE_READ_MAX_US, PAGE_READ_US};
 
@@ -264,6 +264,24 @@ static SCRATCH_TAKEN: AtomicBool = AtomicBool::new(false);
 /// transfer owns the I2S transmitter and the buffer, and only the loop that
 /// created it can hand them back.
 pub static STOP: AtomicBool = AtomicBool::new(false);
+
+/// Set to ask whatever is playing to skip a chapter at the next frame:
+/// [`SKIP_FORWARD`] or [`SKIP_BACK`].
+///
+/// Read by the playback loop for the same reason [`STOP`] is — the decoder is
+/// created inside it and reachable from nowhere else — and set from outside by
+/// whoever decided a chapter should change. Which is the same bargain
+/// `on_frame` strikes: this module is told what to do and never learns that an
+/// ear exists.
+///
+/// The last request wins rather than accumulating. Recognising a held ear
+/// takes longer than half a second and a frame is 60 ms, so the loop has
+/// always read one before the next can arrive.
+pub static SKIP: AtomicI8 = AtomicI8::new(SKIP_NONE);
+
+pub const SKIP_NONE: i8 = 0;
+pub const SKIP_FORWARD: i8 = 1;
+pub const SKIP_BACK: i8 = -1;
 
 /// Hands the scratch back, so another playback can have it.
 ///
@@ -541,6 +559,43 @@ async fn play_taf_inner(
         if STOP.swap(false, Ordering::Relaxed) {
             stopped = true;
             break;
+        }
+
+        // Read after the stop, so an ear still held as a figure is lifted does
+        // not skip within a story the box is about to stop playing anyway.
+        //
+        // A skip drops the frame half-pushed into the buffer, or the tail of
+        // the chapter just left would be played over the start of the new one.
+        // What the DMA already holds — up to `BUFFER_BYTES` — is not
+        // recoverable, so a little of the old chapter is still heard. That is
+        // a chosen cost: draining it would mean stopping and restarting the
+        // transfer, which is the thing this box clicks through.
+        //
+        // A run that skipped has a `pcm_crc` that no host decode of the whole
+        // file can match. That is correct — it is not the same audio — and
+        // step 9's comparison simply must not skip.
+        match SKIP.swap(SKIP_NONE, Ordering::Relaxed) {
+            SKIP_NONE => {}
+            n if n > 0 => match decoder.next_chapter() {
+                Ok(Skip::To(chapter)) => {
+                    esp_println::println!("teddiebox: taf skipped to chapter {chapter}");
+                    pending = 0..0;
+                }
+                // Skipping out of the last chapter is the end of the story,
+                // which is the same thing the stream running out means.
+                Ok(Skip::PastTheEnd) => {
+                    esp_println::println!("teddiebox: taf skipped past the last chapter");
+                    break;
+                }
+                Err(_) => esp_println::println!("teddiebox: taf could not skip forward"),
+            },
+            _ => match decoder.previous_chapter() {
+                Ok(chapter) => {
+                    esp_println::println!("teddiebox: taf skipped back to chapter {chapter}");
+                    pending = 0..0;
+                }
+                Err(_) => esp_println::println!("teddiebox: taf could not skip back"),
+            },
         }
         // Checked before the buffer level, because the level cannot tell this
         // apart. `available_bytes` counts descriptors the CPU owns, so zero
