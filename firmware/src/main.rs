@@ -1115,17 +1115,54 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         // Whatever this reports the sink has already said; there is nothing
         // here that could act on it.
         let _ = active.writer.finish(&mut sink);
+        let written = active.writer.watermark().0;
         esp_println::println!(
             "teddiebox: get wrote {} bytes, crc32 {:08X}",
-            active.writer.watermark().0,
+            written,
             active.crc.finish()
         );
         card.close_file(active.file);
         *write = None;
-        // Here rather than where the fetch returned: a story is ready when it
-        // is on the card, not when the last byte left the socket. Playing on
-        // the earlier answer would open a file the writer has not finished.
-        fetch_ended(FETCH_COMPLETED);
+
+        // A transfer that stopped and a story that is ready are not the same
+        // statement, and this used to make the second whenever the first was
+        // true: an aborted or failed download was announced as complete, and
+        // the reducer opened a fragment. On 2026-09-07 that was 1,089,536
+        // bytes of a 38,349,983-byte story, saved from playing only because
+        // the decoder refused it.
+        //
+        // The arithmetic decides instead — where this body went, plus what
+        // landed, against what the server said the file is.
+        let whole = teddiebox_download::is_whole(
+            DOWNLOAD_AT.load(Ordering::Relaxed),
+            written,
+            match DOWNLOAD_TOTAL.load(Ordering::Relaxed) {
+                0 => None,
+                total => Some(total),
+            },
+        );
+        if whole {
+            // Here rather than where the fetch returned: a story is ready when
+            // it is on the card, not when the last byte left the socket.
+            // Playing on the earlier answer would open a file the writer has
+            // not finished.
+            fetch_ended(FETCH_COMPLETED);
+        } else {
+            esp_println::println!(
+                "teddiebox: get stopped short — {} of {} bytes, not vouching for it",
+                DOWNLOAD_AT.load(Ordering::Relaxed).saturating_add(written),
+                DOWNLOAD_TOTAL.load(Ordering::Relaxed)
+            );
+            // Only if nothing has been said yet. A fetch that failed already
+            // reported *why* through `why_unavailable`, and overwriting that
+            // with a coarser word would throw away the distinction between a
+            // server that has no story and one that could not be reached —
+            // which is the difference between the two things the box can say
+            // out loud.
+            if FETCH_OUTCOME.load(Ordering::Relaxed) == FETCH_NOTHING {
+                fetch_ended(FETCH_UNREACHABLE);
+            }
+        }
         DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
         DOWNLOAD_ABORT.store(false, Ordering::Relaxed);
         return false;

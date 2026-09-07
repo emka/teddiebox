@@ -47,6 +47,28 @@ pub fn decide(cached: &Cached) -> Decision {
     }
 }
 
+/// Whether what reached the card adds up to the whole file.
+///
+/// `from` is where this body was written, `written` how much of it landed, and
+/// `total` what the server said the whole file is.
+///
+/// This exists because "the transfer stopped" and "the story is ready" are not
+/// the same statement, and the firmware used to make the second one whenever
+/// the first was true — announcing a fragment as a finished story. A download
+/// can stop early for reasons that leave a perfectly valid partial file
+/// behind: a figure lifted, a socket dropped, a server that closed the
+/// connection. Only the arithmetic says which happened.
+///
+/// A file whose length the server never gave can never be called whole. That
+/// is the same bargain the sidecar makes: nothing is claimed that was not
+/// said.
+pub fn is_whole(from: u32, written: u32, total: Option<u32>) -> bool {
+    match total {
+        Some(total) => total != 0 && from.saturating_add(written) == total,
+        None => false,
+    }
+}
+
 /// Where a response body belongs on the card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
@@ -157,6 +179,42 @@ pub fn revalidate(sidecar: &Sidecar, server_length: Option<u32>) -> Freshness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A download that stops early still leaves a file on the card, and on
+    /// 2026-09-07 the box announced one such file — 1,089,536 bytes of a
+    /// 38,349,983-byte story — as a finished story and tried to play it. The
+    /// decoder rejected it, which was luck: a fragment that happened to parse
+    /// would have played as a story that stops in the middle.
+    #[test]
+    fn a_body_that_reaches_the_servers_length_is_whole() {
+        assert!(is_whole(0, 38_349_983, Some(38_349_983)));
+    }
+
+    #[test]
+    fn a_body_that_stops_early_is_not_whole() {
+        assert!(!is_whole(0, 1_089_536, Some(38_349_983)));
+    }
+
+    /// The common case after an interruption: the file is finished by a body
+    /// that never contained its beginning.
+    #[test]
+    fn a_resumed_body_that_finishes_the_file_is_whole() {
+        assert!(is_whole(3_145_728, 35_204_255, Some(38_349_983)));
+    }
+
+    /// Nothing said how long the file was, so nothing can claim it is all
+    /// there — the same bargain `write_sidecar` makes when it declines to
+    /// vouch for a length the server never gave.
+    #[test]
+    fn without_a_length_from_the_server_nothing_is_whole() {
+        assert!(!is_whole(0, 38_349_983, None));
+    }
+
+    /// More bytes than the file has cannot be a correct download of it.
+    #[test]
+    fn a_body_that_overshoots_is_not_whole() {
+        assert!(!is_whole(0, 38_349_984, Some(38_349_983)));
+    }
     use teddiebox_cloud::ETag;
 
     /// A resume that everything agrees about: half a 8192-byte file is there,
