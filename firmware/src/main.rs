@@ -1561,6 +1561,40 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
     }
 }
 
+/// Reads what is on the plate right now, if it has changed since the last
+/// read, and says what happened in the reducer's words.
+///
+/// The figure and the token it arrived with are updated together, here and
+/// nowhere else. They are two halves of one identity, and letting them drift
+/// apart is the bug [`FetchRequest`] exists to make unrepresentable.
+fn take_plate_event(on_plate: &mut Option<TagUid>, token: &mut Option<[u8; 32]>) -> Option<Event> {
+    Some(match PLATE_TAG.try_take()? {
+        PlateState::Present { uid, token: read } => {
+            let tag = TagUid(uid);
+            *on_plate = Some(tag);
+            *token = read;
+            Event::TagPresent(tag)
+        }
+        PlateState::Absent => {
+            *on_plate = None;
+            *token = None;
+            Event::TagAbsent
+        }
+    })
+}
+
+/// Tells the reducer what happened and carries out what it decides.
+///
+/// The index is built here and dropped at the end: it borrows the card, and
+/// the rest of the media loop needs the card unborrowed — which is the whole
+/// reason it is this cheap to construct.
+fn apply(reducer: &mut Core, card: &storage::Mounted, event: Event, token: Option<[u8; 32]>) {
+    let index = CardIndex::new(card);
+    for action in reducer.handle(event, &index) {
+        perform(action, &index, token);
+    }
+}
+
 #[embassy_executor::task]
 async fn media(
     spi: Spi<'static, esp_hal::Blocking>,
@@ -1632,21 +1666,7 @@ async fn media(
         // up on the same pass rather than the next one.
         let mut events: [Option<Event>; 2] = [None, None];
 
-        if let Some(state) = PLATE_TAG.try_take() {
-            events[0] = Some(match state {
-                PlateState::Present { uid, token } => {
-                    let tag = TagUid(uid);
-                    on_plate = Some(tag);
-                    on_plate_token = token;
-                    Event::TagPresent(tag)
-                }
-                PlateState::Absent => {
-                    on_plate = None;
-                    on_plate_token = None;
-                    Event::TagAbsent
-                }
-            });
-        }
+        events[0] = take_plate_event(&mut on_plate, &mut on_plate_token);
 
         // A download has ended somewhere this task cannot see. Read every pass
         // so a stale answer cannot arrive later attached to a different figure.
@@ -1688,15 +1708,8 @@ async fn media(
         if events.iter().any(Option::is_some) {
             match card.as_ref() {
                 Some(mounted) => {
-                    // Built for this block and dropped at the end of it. It
-                    // borrows the card, and the rest of the loop needs the card
-                    // unborrowed — which is the whole reason it is this cheap
-                    // to construct.
-                    let index = CardIndex::new(mounted);
                     for event in events.into_iter().flatten() {
-                        for action in reducer.handle(event, &index) {
-                            perform(action, &index, on_plate_token);
-                        }
+                        apply(&mut reducer, mounted, event, on_plate_token);
                     }
                 }
                 // A figure answered with nothing at all is the failure this
