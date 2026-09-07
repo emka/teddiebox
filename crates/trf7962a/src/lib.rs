@@ -138,12 +138,24 @@ const IRQ_ERRORS: u8 = 0x1E;
 ///
 /// An ISO 15693 exchange at high bit rate runs roughly 5–6 ms end to end:
 /// transmit, then t1 of about 320 µs, then the tag's reply at 26.48 kbit/s.
-/// The budget is deliberately generous, because being too short makes a tag
-/// on the plate read as no tag — the one failure that cannot be told apart
-/// from a wiring fault. **Retune against a real exchange at bench step 10.**
+/// Being too short makes a tag on the plate read as no tag — the one failure
+/// that cannot be told apart from a wiring fault — so the window keeps real
+/// headroom over what a reply needs.
 pub const IRQ_POLL_INTERVAL_US: u32 = 200;
-/// Poll count, giving a 20 ms window at the interval above.
-pub const IRQ_POLL_ATTEMPTS: u32 = 100;
+/// Poll count, giving a 10 ms window at the interval above.
+///
+/// **Measured, 2026-09-07:** the slowest reply a real Tonie produced across a
+/// run of the plate poller was **20 polls, about 4 ms** — see
+/// `slowest_reply_polls`, which exists to keep this number honest. 50 leaves
+/// two and a half times that, and is still well above the 5–6 ms an exchange
+/// is supposed to take.
+///
+/// It was 100 until that measurement. Halving it matters because an empty
+/// plate pays the whole window on every poll and the reader task blocks while
+/// it does: at 100 the poller cost 49 audible DMA restarts in 70 s of
+/// playback. Re-measure before cutting further; one figure on one board over
+/// one run is thin evidence for a tighter bound.
+pub const IRQ_POLL_ATTEMPTS: u32 = 50;
 
 /// Quiet time the air is left after a tag has answered, before the next
 /// request may go out — ISO 15693-3 §9.1's t2, 4192 carrier periods at
