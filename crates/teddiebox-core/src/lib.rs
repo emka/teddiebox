@@ -153,6 +153,17 @@ impl Core {
         self.volume.current()
     }
 
+    /// Records how far the story has got, so lifting the figure can save it.
+    ///
+    /// Not an `Event`, because it carries no decision and would be the most
+    /// frequent one by far: the media task calls this once per decoded frame,
+    /// beside the plate and the ears it already services there. It touches RAM
+    /// only — the card's copy is written at chapter boundaries by whoever owns
+    /// the card, which is not this.
+    pub fn note_position(&mut self, pos: Position) {
+        self.playback.note_position(pos);
+    }
+
     pub fn handle<I: ContentIndex>(&mut self, event: Event, index: &I) -> Actions {
         let mut actions = Actions::new();
 
@@ -313,6 +324,26 @@ mod tests {
 
     fn contains(actions: &Actions, wanted: Action) -> bool {
         actions.contains(&wanted)
+    }
+
+    /// `Playback::note_position` has existed since M2 and is reachable only
+    /// from its own tests, so lifting a figure has always saved the position
+    /// the story *started* at. The firmware holds a `Core`, not a `Playback`.
+    #[test]
+    fn a_lifted_figure_saves_where_the_story_had_reached() {
+        let mut c = core();
+        c.handle(Event::TagPresent(TAG), &Index);
+
+        c.note_position(Position::Exact { page: 412 });
+        let actions = c.handle(Event::TagAbsent, &Index);
+
+        assert!(contains(
+            &actions,
+            Action::SavePosition {
+                tag: TAG,
+                pos: Position::Exact { page: 412 }
+            }
+        ));
     }
 
     #[test]
