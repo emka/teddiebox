@@ -1035,3 +1035,48 @@ fn a_reply_longer_than_the_fifo_warning_is_collected_in_full() {
     delay.done();
     irq.done();
 }
+
+/// The plate poller's presence check. SL2S5002 §1.3: in privacy mode the label
+/// "will not respond to any command except the command GET RANDOM NUMBER,
+/// until it next receives the correct Privacy password" — so this one command
+/// answers whether a Tonie is on the plate, and it answers without unlocking
+/// anything. The bus traffic below is the whole exchange: no SET PASSWORD
+/// follows it, which `spi.done()` is what proves.
+#[test]
+fn a_tag_is_noticed_without_being_unlocked() {
+    let random_response = [0x00u8, 0xCD, 0xAB]; // flags, then RN low, high
+    let spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &random_response);
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&answered(0)),
+        PinMock::new(&irq_exchange()),
+    );
+
+    assert_eq!(r.tag_present(), Ok(true));
+
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
+/// An empty plate costs exactly one unanswered exchange. This is the state the
+/// box sits in almost all the time, and the reason the check exists: asking
+/// anything else first spends a second timeout learning what this one already
+/// said.
+#[test]
+fn an_empty_plate_costs_one_unanswered_exchange() {
+    let spi = transmit_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30]);
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&polls(IRQ_POLL_ATTEMPTS as usize)),
+        PinMock::new(&irq_never()),
+    );
+
+    assert_eq!(r.tag_present(), Ok(false));
+
+    let (mut spi, mut delay, mut irq) = r.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}

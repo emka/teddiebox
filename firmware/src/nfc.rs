@@ -251,6 +251,31 @@ impl Reader {
     /// reading it. Delegates to the same `inventory_unlocked` and the same
     /// password list `unlock` builds, so the two paths cannot silently
     /// disagree about which passwords a poll is willing to try.
+    /// Whether anything is on the plate, without unlocking it.
+    ///
+    /// The one question a Tonie in privacy mode answers (SL2S5002 §1.3), and
+    /// the reason the poller can afford to run at all: an empty plate costs one
+    /// unanswered exchange here instead of two, and a locked figure is noticed
+    /// without the password exchange that identifying it would need.
+    ///
+    /// A bus fault reads as "nothing there", which is the same answer the
+    /// poller would reach anyway and keeps this off the error path of a loop
+    /// that runs several times a second.
+    pub fn tag_present(&mut self) -> bool {
+        self.trf.tag_present().unwrap_or(false)
+    }
+
+    /// The UID of a tag that is already out of privacy mode, quietly.
+    ///
+    /// Once a figure has been unlocked it stays unlocked until its field is
+    /// cycled, so for the whole time it sits on the plate this answers on the
+    /// first try with no password exchange at all. Re-reading the UID rather
+    /// than remembering it is what lets one figure being swapped for another
+    /// be noticed.
+    pub fn identify(&mut self) -> Option<[u8; 8]> {
+        self.trf.inventory().ok()?
+    }
+
     pub fn inventory_unlocked(&mut self, password: u32) -> Option<[u8; 8]> {
         self.trf.inventory_unlocked(&passwords(password)).ok()?
     }

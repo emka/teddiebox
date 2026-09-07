@@ -2246,6 +2246,10 @@ async fn nfc_reader(
 
     let mut presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
     let mut ticks_since_poll: u8 = 0;
+    // Whether the last poll found a figure. Chooses which question the next
+    // poll asks first; a wrong guess costs one extra unanswered exchange and
+    // corrects itself on the following poll, which `MISSES_TO_LEAVE` absorbs.
+    let mut believed_present = false;
 
     loop {
         match NFC_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
@@ -2328,7 +2332,29 @@ async fn nfc_reader(
                 ticks_since_poll = 0;
 
                 let password = NFC_PASSWORD.load(Ordering::Relaxed);
-                let seen = reader.inventory_unlocked(password);
+
+                // Which question is cheap depends on what was there last time,
+                // and the difference is not small: measured on 2026-09-07, a
+                // poller that always asked the full question cost 49 DMA
+                // restarts in 70 s of playback against 0 with polling off,
+                // because every unanswered exchange blocks this task for the
+                // whole `IRQ_POLL_ATTEMPTS` window.
+                let seen = if believed_present {
+                    // A figure identified once stays out of privacy mode until
+                    // its field is cycled, so a plain inventory answers on the
+                    // first try. It also re-reads the UID, which is what
+                    // notices one figure being swapped for another.
+                    reader.identify()
+                } else if reader.tag_present() {
+                    // Something is there but has not been identified yet. This
+                    // is the only poll that pays for the password exchange.
+                    reader.inventory_unlocked(password)
+                } else {
+                    // The state the box sits in almost all the time: one
+                    // unanswered exchange and nothing else.
+                    None
+                };
+                believed_present = seen.is_some();
 
                 if let Some(event) = presence.feed(seen.map(TagUid)) {
                     match event {

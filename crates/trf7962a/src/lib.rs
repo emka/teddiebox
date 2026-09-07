@@ -534,6 +534,30 @@ where
     /// `passwords` are tried in order, so the caller states its preference:
     /// a Toniebox figure and a tag still holding NXP's factory default are
     /// both readable, and which one is expected comes first.
+    /// Whether anything is on the plate, without unlocking it.
+    ///
+    /// SL2S5002 §1.3: a label in privacy mode "will not respond to any command
+    /// except the command GET RANDOM NUMBER, until it next receives the correct
+    /// Privacy password". That makes this the only question a locked Tonie will
+    /// answer, and the cheapest one there is — a tag replies in about 6 ms
+    /// where silence costs the full `IRQ_POLL_ATTEMPTS` window.
+    ///
+    /// It says *something is there*, never *what*: the reply is a fresh random
+    /// number, so two different figures are indistinguishable by it. Identity
+    /// still needs `inventory_unlocked`, which is worth paying once when a
+    /// figure arrives rather than on every poll of an empty plate.
+    ///
+    /// A tag that is **not** in privacy mode answers this too — it is the first
+    /// half of the password exchange, not a privacy-only command — so a caller
+    /// does not have to know which state the tag is in before asking.
+    pub fn tag_present(&mut self) -> Result<bool, Error<E>> {
+        match self.get_random_number() {
+            Ok(_) => Ok(true),
+            Err(Error::Timeout) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn inventory_unlocked(&mut self, passwords: &[u32]) -> Result<Option<[u8; 8]>, Error<E>> {
         // A tag already out of privacy mode answers inventory directly, so try
         // that first and only pay for the unlock exchange when it is needed.
