@@ -103,6 +103,27 @@ impl<S: PageSource> TafReader<S> {
         self.header.chapter_pages.len()
     }
 
+    /// Which chapter the reader is in, zero-based.
+    ///
+    /// Asked of the reader rather than remembered by whoever last sought,
+    /// because a story played straight through crosses chapters with nobody
+    /// seeking — and a caller counting from its own last seek would name the
+    /// wrong chapter for the whole rest of the file.
+    ///
+    /// The answer is the last chapter start at or before the current page,
+    /// using the same stream-relative-to-file conversion `seek_to_chapter`
+    /// applies, so the two cannot disagree about where a chapter begins. A
+    /// file whose chapter starts do not increase is not rejected here — the
+    /// format does not promise they do — but the answer is only meaningful
+    /// for one that does.
+    pub fn current_chapter(&self) -> usize {
+        self.header
+            .chapter_pages
+            .iter()
+            .rposition(|&ogg_page| ogg_page.saturating_add(1) <= self.page_index)
+            .unwrap_or(0)
+    }
+
     fn load_page(&mut self, index: u32) -> Result<(), TafError> {
         if index >= self.source.page_count() {
             return Err(TafError::PageOutOfRange);
@@ -539,6 +560,63 @@ mod tests {
     }
 
     const CHAPTERS_FIXTURE: &[u8] = include_bytes!("../tests/data/chapters.taf");
+
+    /// The fixture's chapter starts, as Ogg-stream page indices. Stated
+    /// literally so these tests can disagree with the parser rather than
+    /// asking it what to expect.
+    const CHAPTERS_FIXTURE_PAGES: &[u32] = &[0, 5, 11];
+
+    #[test]
+    fn the_fixtures_chapters_start_where_the_chapter_tests_assume() {
+        let r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        assert_eq!(r.header().chapter_pages.as_slice(), CHAPTERS_FIXTURE_PAGES);
+    }
+
+    #[test]
+    fn a_freshly_opened_reader_is_in_the_first_chapter() {
+        let r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        assert_eq!(r.current_chapter(), 0);
+    }
+
+    #[test]
+    fn seeking_reports_the_chapter_that_was_sought() {
+        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        r.seek_to_chapter(2).unwrap();
+        assert_eq!(r.current_chapter(), 2);
+        r.seek_to_chapter(1).unwrap();
+        assert_eq!(r.current_chapter(), 1);
+    }
+
+    /// The reason this is asked of the reader rather than tracked by whoever
+    /// last seeked: a story played straight through crosses chapters without
+    /// anybody seeking, and "skip to the next one" is wrong by a whole
+    /// chapter if it counts from the last seek instead of from where the
+    /// stream actually is.
+    #[test]
+    fn reading_straight_through_reports_each_chapter_in_turn() {
+        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        let mut buf = [0u8; MAX_PACKET];
+        let mut seen: heapless::Vec<usize, 8> = heapless::Vec::new();
+        seen.push(r.current_chapter()).unwrap();
+        while r.next_packet(&mut buf).unwrap().is_some() {
+            let now = r.current_chapter();
+            if seen.last() != Some(&now) {
+                seen.push(now).unwrap();
+            }
+        }
+        assert_eq!(seen.as_slice(), &[0, 1, 2]);
+    }
+
+    /// `seek_to_chapter` promises a failed seek leaves the reader exactly
+    /// where it was. The chapter it reports has to keep that promise too, or
+    /// a skip past the end would silently renumber the story.
+    #[test]
+    fn a_failed_seek_leaves_the_chapter_where_it_was() {
+        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
+        r.seek_to_chapter(1).unwrap();
+        assert_eq!(r.seek_to_chapter(3), Err(TafError::PageOutOfRange));
+        assert_eq!(r.current_chapter(), 1);
+    }
 
     #[test]
     fn the_multi_chapter_fixture_has_three_chapters() {

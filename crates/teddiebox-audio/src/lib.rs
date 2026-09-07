@@ -86,6 +86,16 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
         self.reader.chapter_count()
     }
 
+    /// Which chapter is playing, zero-based.
+    ///
+    /// Delegated to the reader rather than latched on seek: the reader is the
+    /// only thing that knows the stream advanced past a chapter start on its
+    /// own, and a copy kept here would be wrong for the whole rest of any
+    /// story played straight through.
+    pub fn chapter(&self) -> usize {
+        self.reader.current_chapter()
+    }
+
     /// Seeks to a chapter and resumes decoding from there.
     ///
     /// A failed seek leaves the reader positioned exactly where it was,
@@ -210,6 +220,25 @@ mod tests {
         .unwrap();
         let mut pcm = [0i16; 8];
         assert_eq!(dec.next_frame(&mut pcm), Err(AudioError::BufferTooSmall));
+    }
+
+    /// The decode loop is the only thing that knows a story is playing, so a
+    /// skip decided elsewhere has to be able to ask the decoder where it is.
+    #[test]
+    fn the_decoder_reports_the_chapter_it_is_playing() {
+        const CHAPTERS_FIXTURE: &[u8] =
+            include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
+        let mut dec = TafDecoder::open(
+            SlicePages::new(CHAPTERS_FIXTURE).unwrap(),
+            StubDecoder {
+                calls: 0,
+                saw_opus_header: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(dec.chapter(), 0);
+        dec.seek_to_chapter(2).unwrap();
+        assert_eq!(dec.chapter(), 2);
     }
 
     #[test]
