@@ -114,6 +114,22 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
         Ok(())
     }
 
+    /// Which container page the reader is on — what position memory saves
+    /// when a figure is lifted.
+    pub fn page(&self) -> u32 {
+        self.reader.current_page()
+    }
+
+    /// Resumes at a page reported earlier by [`page`](Self::page).
+    ///
+    /// A failed seek leaves the reader exactly where it was, the same contract
+    /// [`seek_to_chapter`](Self::seek_to_chapter) keeps — so a saved page that
+    /// belongs to some other story costs nothing but the seek.
+    pub fn seek_to_page(&mut self, page: u32) -> Result<(), AudioError> {
+        self.reader.seek_to_page(page)?;
+        Ok(())
+    }
+
     /// Skips forward to the start of the following chapter.
     ///
     /// [`Skip::PastTheEnd`] from the last chapter, with the story left where
@@ -275,6 +291,31 @@ mod tests {
         assert_eq!(dec.chapter(), 0);
         dec.seek_to_chapter(2).unwrap();
         assert_eq!(dec.chapter(), 2);
+    }
+
+    /// The firmware holds a decoder and never a reader, so position memory's
+    /// exact tier is only reachable if both halves pass through.
+    #[test]
+    fn the_decoder_returns_to_the_page_it_reported() {
+        const CHAPTERS_FIXTURE: &[u8] =
+            include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
+        let mut dec = TafDecoder::open(
+            SlicePages::new(CHAPTERS_FIXTURE).unwrap(),
+            StubDecoder {
+                calls: 0,
+                saw_opus_header: false,
+            },
+        )
+        .unwrap();
+        dec.seek_to_chapter(2).unwrap();
+        let page = dec.page();
+
+        dec.seek_to_chapter(0).unwrap();
+        assert_ne!(dec.page(), page, "the seek away has to move it");
+
+        dec.seek_to_page(page).unwrap();
+        assert_eq!(dec.page(), page);
+        assert_eq!(dec.chapter(), 2, "and it is back in that chapter");
     }
 
     /// Records the last packet it was asked to decode, so a test can say
