@@ -41,6 +41,7 @@ use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::pipe::Pipe;
+use teddiebox_core::place::PendingPlace;
 use teddiebox_core::plate::{Presence, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEAVE};
 use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::power::{self, PackState};
@@ -1340,12 +1341,12 @@ static FLUSH_PLACE: AtomicBool = AtomicBool::new(false);
 
 /// The place a figure was lifted from, before the card knows about it.
 ///
-/// A write-back cache of exactly one entry. Lifting a figure and putting it
-/// back is what children do constantly, and every one of those would otherwise
-/// be a card write for a value about to be read straight back out of RAM. The
-/// card is told when this is about to be lost and not before: another figure
-/// needing the slot, or the box shutting down.
-static PENDING_PLACE: CsMutex<RefCell<Option<(TagUid, u32)>>> = CsMutex::new(RefCell::new(None));
+/// The policy itself lives in [`PendingPlace`], where the host can drive it:
+/// which lift displaces which, and which ending clears the slot, are decided
+/// by rules that had two defects found by re-reading them. What is left here
+/// is the shared-access wrapper and the card, neither of which a test can have.
+static PENDING_PLACE: CsMutex<RefCell<PendingPlace>> =
+    CsMutex::new(RefCell::new(PendingPlace::new()));
 
 /// Where the next story should start.
 ///
@@ -1662,38 +1663,19 @@ fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
     }
 }
 
-/// A tag's UID in the byte order `get`'s ruid argument — and a fetch's
-/// request line — both use.
-///
-/// The reader hands the UID over in the opposite order. Both writers of a
-/// [`FetchRequest`] and the outcome comparison in the media loop go through
-/// this one conversion rather than repeating the reversal at each call site.
-pub(crate) fn ruid_of(tag: TagUid) -> u64 {
-    let mut bytes = tag.0;
-    bytes.reverse();
-    u64::from_be_bytes(bytes)
-}
-
 /// Holds a figure's place in RAM, writing the previous one out if it must.
 ///
 /// The card is written for the *outgoing* figure only: its place is about to
 /// become unreachable, and this is the last moment anything knows it.
 fn remember_in_ram(index: &CardIndex<'_>, tag: TagUid, page: u32) {
-    let evicted = critical_section::with(|cs| {
-        let mut slot = PENDING_PLACE.borrow_ref_mut(cs);
-        let evicted = match *slot {
-            Some((held, held_page)) if held != tag => Some((held, held_page)),
-            _ => None,
-        };
-        *slot = Some((tag, page));
-        evicted
-    });
-    if let Some((held, held_page)) = evicted {
+    let displaced =
+        critical_section::with(|cs| PENDING_PLACE.borrow_ref_mut(cs).remember(tag, page));
+    if let Some((held, held_page)) = displaced {
         write_place(index, held, held_page, "making room");
     }
     esp_println::println!(
         "teddiebox: plate holding {:016X} at page {page}",
-        ruid_of(tag)
+        tag.ruid()
     );
 }
 
@@ -1702,10 +1684,7 @@ fn remember_in_ram(index: &CardIndex<'_>, tag: TagUid, page: u32) {
 /// Asked before the card, because the slot is newer by construction: it is
 /// written the moment a figure comes off, and the card only learns later.
 pub(crate) fn held_place(tag: TagUid) -> Option<u32> {
-    critical_section::with(|cs| match *PENDING_PLACE.borrow_ref(cs) {
-        Some((held, page)) if held == tag => Some(page),
-        _ => None,
-    })
+    critical_section::with(|cs| PENDING_PLACE.borrow_ref(cs).held(tag))
 }
 
 /// Drops a story's held place, by the path it lives at.
@@ -1714,12 +1693,7 @@ pub(crate) fn held_place(tag: TagUid) -> Option<u32> {
 /// its end. Taking the ruid rather than the tag because the media task knows
 /// where it is playing from and not which figure asked.
 fn forget_place(ruid: u64) {
-    critical_section::with(|cs| {
-        let mut slot = PENDING_PLACE.borrow_ref_mut(cs);
-        if matches!(*slot, Some((held, _)) if ruid_of(held) == ruid) {
-            *slot = None;
-        }
-    });
+    critical_section::with(|cs| PENDING_PLACE.borrow_ref_mut(cs).forget(ruid));
 }
 
 /// Puts whatever RAM is holding onto the card.
@@ -1737,7 +1711,7 @@ fn write_place(index: &CardIndex<'_>, tag: TagUid, page: u32, why: &str) {
     match index.remember(tag, page) {
         Ok(()) => esp_println::println!(
             "teddiebox: plate wrote {:016X} at page {page} — {why}",
-            ruid_of(tag)
+            tag.ruid()
         ),
         Err(reason) => esp_println::println!("teddiebox: plate place not saved — {reason}"),
     }
@@ -1820,7 +1794,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         }
 
         Action::RequestContent(tag) => {
-            let ruid = ruid_of(tag);
+            let ruid = tag.ruid();
             esp_println::println!("teddiebox: plate fetching {ruid:016X}");
             // Written whole, in the one call: see `FetchRequest` for why the
             // ruid and the token it authorises never travel separately.
@@ -2003,7 +1977,7 @@ async fn media(
                 // reducer's guard checks the same identity again before
                 // acting, but the event it sees is at least about the right
                 // figure.
-                Some(tag) if ruid_of(tag) == outcome_ruid => {
+                Some(tag) if tag.ruid() == outcome_ruid => {
                     events[1] = match outcome {
                         FETCH_COMPLETED => Some(Event::ContentReady(tag)),
                         FETCH_UNREACHABLE => {
@@ -2859,7 +2833,7 @@ async fn nfc_reader(
                     match event {
                         TagEvent::Arrived(TagUid(uid)) => esp_println::println!(
                             "teddiebox: plate tag arrived {:016X}",
-                            ruid_of(TagUid(uid))
+                            TagUid(uid).ruid()
                         ),
                         TagEvent::Left => esp_println::println!(
                             "teddiebox: plate tag left after {misses} missed polls"

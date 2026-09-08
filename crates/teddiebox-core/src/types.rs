@@ -7,6 +7,22 @@ pub type Millis = u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TagUid(pub [u8; 8]);
 
+impl TagUid {
+    /// The same identifier in the byte order everything outside the reader
+    /// uses: the card's `<8 hex>/<8 hex>` path, teddyCloud's ruid, and the
+    /// `get` command's argument.
+    ///
+    /// The reader hands the UID over least-significant byte first and every
+    /// other party reads it the other way round, so one of the two has to
+    /// reverse it. Doing it here means callers name the conversion instead of
+    /// open-coding a `reverse()` each time they need a story's identity.
+    pub fn ruid(self) -> u64 {
+        let mut bytes = self.0;
+        bytes.reverse();
+        u64::from_be_bytes(bytes)
+    }
+}
+
 /// A resume point, expressed as an Ogg page index within the TAF file.
 ///
 /// Where a story should resume.
@@ -156,5 +172,14 @@ mod tests {
     #[test]
     fn a_position_with_nothing_saved_is_the_start() {
         assert_eq!(Position::default(), Position::Start);
+    }
+
+    /// A real Tonie off this project's own card: the reader hands its UID over
+    /// as `E0040350503F2E1D`, and the story sits at `CONTENT/1D2E3F50/500304E0`.
+    /// A synthetic vector would pass by construction; this one was observed.
+    #[test]
+    fn a_real_tonie_uid_reverses_to_the_identifier_its_story_is_filed_under() {
+        let tag = TagUid([0xE0, 0x04, 0x03, 0x50, 0x50, 0x3F, 0x2E, 0x1D]);
+        assert_eq!(tag.ruid(), 0x1D2E_3F50_5003_04E0);
     }
 }

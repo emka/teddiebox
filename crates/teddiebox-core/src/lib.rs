@@ -10,6 +10,7 @@ pub mod i2c;
 pub mod input;
 mod led;
 pub mod pipe;
+pub mod place;
 pub mod plate;
 mod playback;
 pub mod position;
