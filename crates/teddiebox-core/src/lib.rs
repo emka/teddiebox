@@ -191,13 +191,11 @@ impl Core {
             Event::TagPresent(_)
             | Event::TagAbsent
             | Event::ContentReady(_)
-            | Event::ContentMissing(..) => {
+            | Event::ContentMissing(..)
+            | Event::PlaybackEnded => {
                 self.last_activity = self.last_tick;
             }
-            Event::Battery { .. }
-            | Event::Charger(_)
-            | Event::TrackFinished
-            | Event::PlaybackEnded => {}
+            Event::Battery { .. } | Event::Charger(_) | Event::TrackFinished => {}
         }
 
         match event {
@@ -512,6 +510,33 @@ mod tests {
 
         let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
         assert!(contains(&actions, Action::PowerOff));
+    }
+
+    /// A story that ran for longer than the idle timeout must not switch the box
+    /// off the moment it ends: the countdown starts when the box becomes idle, not
+    /// when the figure was placed. Feeding the tick only at the top of the media
+    /// loop, which is inside the playback call for the whole story, is what made
+    /// this a real hazard rather than a theoretical one.
+    #[test]
+    fn the_idle_countdown_starts_when_the_story_ends_not_when_it_began() {
+        let mut c = core();
+        c.handle(Event::Tick(0), &Index);
+        c.handle(Event::TagPresent(TAG), &Index);
+        // A long story, with the clock kept fresh throughout.
+        c.handle(Event::Tick(30 * 60 * 1_000), &Index);
+        c.handle(Event::PlaybackEnded, &Index);
+
+        let actions = c.handle(Event::Tick(30 * 60 * 1_000 + 1_000), &Index);
+        assert!(
+            !contains(&actions, Action::PowerOff),
+            "one second after the end is not idle"
+        );
+
+        let actions = c.handle(Event::Tick(30 * 60 * 1_000 + 5 * 60 * 1_000 + 1), &Index);
+        assert!(
+            contains(&actions, Action::PowerOff),
+            "five minutes after the end is"
+        );
     }
 
     #[test]

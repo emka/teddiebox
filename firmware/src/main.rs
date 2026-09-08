@@ -1910,6 +1910,27 @@ fn apply(reducer: &mut Core, card: &storage::Mounted, event: Event, token: Optio
     }
 }
 
+/// The core's only clock, fed at most once a second.
+///
+/// Called from both the top of the media loop and the per-frame `attend`
+/// closure inside a playing story, so there has to be one rate limit rather
+/// than two: a tick per frame would be a tick every few milliseconds, and this
+/// project has measured audible DMA restarts from far less extra work than
+/// that in the media loop. A second is far finer than a five-minute timeout
+/// needs.
+fn feed_tick(
+    reducer: &mut Core,
+    card: &storage::Mounted,
+    token: Option<[u8; 32]>,
+    last_fed: &mut u64,
+) {
+    let now = Instant::now().as_millis();
+    if now.saturating_sub(*last_fed) >= 1_000 {
+        *last_fed = now;
+        apply(reducer, card, Event::Tick(now), token);
+    }
+}
+
 #[embassy_executor::task]
 async fn media(
     spi: Spi<'static, esp_hal::Blocking>,
@@ -1969,14 +1990,12 @@ async fn media(
     // `FetchRequest` write — so nothing typed at the console between now and
     // then can attach itself to this figure's fetch.
     let mut on_plate_token: Option<[u8; 32]> = None;
+    // The last millisecond a `Tick` was fed to the reducer, so `feed_tick` can
+    // rate-limit itself across both call sites — the top of this loop and the
+    // per-frame `attend` closure inside a playing story.
+    let mut last_tick_fed: u64 = 0;
 
     loop {
-        // Only four of the ten events are fed in this increment. Ears, motion
-        // and above all `Tick` are deliberately withheld: `Core` emits
-        // `PowerOff` on a tick once the idle timeout passes, which on a bench
-        // box sitting at a console would switch it off mid-session. Wiring the
-        // rest is its own piece of work with its own uncalibrated constants.
-        //
         // Fed before the request is read, so a `Play` decided here is picked
         // up on the same pass rather than the next one.
         let mut events: [Option<Event>; 2] = [None, None];
@@ -2033,6 +2052,19 @@ async fn media(
         // with the plate and must not wait for one.
         if let Some(mounted) = card.as_ref() {
             apply_ear_events(&mut reducer, mounted, on_plate_token);
+        }
+
+        // The core's only clock. Withheld until now because `Core` emits
+        // `PowerOff` on a tick once the idle timeout passes and nothing acted
+        // on it — so feeding it did nothing, and wiring it without the arm in
+        // `perform` would have been a shutdown nobody could see coming.
+        //
+        // This alone would not be enough: a story plays for the whole length
+        // of `play_taf`, below, so a tick fed only here would go stale for as
+        // long as half an hour. `feed_tick` is called again from inside that
+        // call's `attend` closure for exactly that reason.
+        if let Some(mounted) = card.as_ref() {
+            feed_tick(&mut reducer, mounted, on_plate_token, &mut last_tick_fed);
         }
 
         if events.iter().any(Option::is_some) {
@@ -2185,6 +2217,11 @@ async fn media(
                     // The ears are here for the same reason and it is the
                     // whole point of them: turning a story down while it plays
                     // is when anybody reaches for an ear at all.
+                    //
+                    // The tick is here too, rate-limited by `feed_tick` to
+                    // once a second: without it the idle clock goes stale for
+                    // the whole length of the story, since the top-of-loop
+                    // tick never runs while this call is still awaiting.
                     // Only a story the box can name has a place worth keeping.
                     // A root `.TAF` played from the console arrives here too,
                     // as `Source::First`, and `CONTENT_DIRECTORY` then holds
@@ -2209,6 +2246,7 @@ async fn media(
                             apply(&mut reducer, card, event, on_plate_token);
                         }
                         apply_ear_events(&mut reducer, card, on_plate_token);
+                        feed_tick(&mut reducer, card, on_plate_token, &mut last_tick_fed);
 
                         // Free, and the only thing keeping the reducer's idea
                         // of the position true: it is what gets written when
@@ -2224,17 +2262,27 @@ async fn media(
                     if let Err(reason) = outcome {
                         esp_println::println!("teddiebox: playback failed — {reason}");
                     }
-                    if identified && matches!(outcome, Ok(audio::Finish::Ended)) {
-                        // A finished story is not a paused one. Zero rather
-                        // than a deletion: `storage` has no delete, and page 0
-                        // is the header rather than audio, so "no file" and
-                        // "page zero" already mean the same thing.
-                        let mut out = [0u8; MAX_POSITION];
-                        let len = position::render(0, &mut out);
-                        let _ = card.write_position(stock, dir, file, &out[..len]);
-                        // And whatever RAM was holding for it, which would
-                        // otherwise outrank the card that was just cleared.
-                        forget_place(((dir as u64) << 32) | file as u64);
+                    if matches!(outcome, Ok(audio::Finish::Ended)) {
+                        if identified {
+                            // A finished story is not a paused one. Zero
+                            // rather than a deletion: `storage` has no
+                            // delete, and page 0 is the header rather than
+                            // audio, so "no file" and "page zero" already
+                            // mean the same thing.
+                            let mut out = [0u8; MAX_POSITION];
+                            let len = position::render(0, &mut out);
+                            let _ = card.write_position(stock, dir, file, &out[..len]);
+                            // And whatever RAM was holding for it, which
+                            // would otherwise outrank the card that was just
+                            // cleared.
+                            forget_place(((dir as u64) << 32) | file as u64);
+                        }
+                        // The reducer has no other way to learn this: the
+                        // only other exit from playing is the figure being
+                        // lifted. Fed for every ended story, identified or
+                        // not — a console `play` running out must leave the
+                        // reducer idle too, not just a story tied to a figure.
+                        apply(&mut reducer, card, Event::PlaybackEnded, on_plate_token);
                     }
                     ANNOUNCING.store(false, Ordering::Relaxed);
                     i2s_tx = Some(tx);
