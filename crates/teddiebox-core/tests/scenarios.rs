@@ -96,6 +96,18 @@ fn an_exhausted_pack_powers_the_box_off_mid_story() {
     };
     core.handle(Event::TagPresent(TAG), &library);
 
+    // The model no longer believes a single sample: readings must agree
+    // before the level, and the shutdown, commit (default readings_to_agree
+    // is 4).
+    for _ in 0..3 {
+        core.handle(
+            Event::Battery {
+                pack_mv: 2_900,
+                under_load: false,
+            },
+            &library,
+        );
+    }
     let flat = core.handle(
         Event::Battery {
             pack_mv: 2_900,
