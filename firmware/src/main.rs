@@ -1331,6 +1331,22 @@ static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
 /// which is the right answer anyway.
 static PLATE_TAG: Signal<CriticalSectionRawMutex, PlateState> = Signal::new();
 
+/// Set when the box is about to stop being able to write the card.
+///
+/// The console loop decides to shut down; the media task owns the card. This
+/// is the one bit between them, and the shutdown waits briefly for it to clear
+/// rather than taking the place down with it.
+static FLUSH_PLACE: AtomicBool = AtomicBool::new(false);
+
+/// The place a figure was lifted from, before the card knows about it.
+///
+/// A write-back cache of exactly one entry. Lifting a figure and putting it
+/// back is what children do constantly, and every one of those would otherwise
+/// be a card write for a value about to be read straight back out of RAM. The
+/// card is told when this is about to be lost and not before: another figure
+/// needing the slot, or the box shutting down.
+static PENDING_PLACE: CsMutex<RefCell<Option<(TagUid, u32)>>> = CsMutex::new(RefCell::new(None));
+
 /// Where the next story should start.
 ///
 /// Written by `perform` when the reducer decides to play, taken by the media
@@ -1658,6 +1674,75 @@ pub(crate) fn ruid_of(tag: TagUid) -> u64 {
     u64::from_be_bytes(bytes)
 }
 
+/// Holds a figure's place in RAM, writing the previous one out if it must.
+///
+/// The card is written for the *outgoing* figure only: its place is about to
+/// become unreachable, and this is the last moment anything knows it.
+fn remember_in_ram(index: &CardIndex<'_>, tag: TagUid, page: u32) {
+    let evicted = critical_section::with(|cs| {
+        let mut slot = PENDING_PLACE.borrow_ref_mut(cs);
+        let evicted = match *slot {
+            Some((held, held_page)) if held != tag => Some((held, held_page)),
+            _ => None,
+        };
+        *slot = Some((tag, page));
+        evicted
+    });
+    if let Some((held, held_page)) = evicted {
+        write_place(index, held, held_page, "making room");
+    }
+    esp_println::println!(
+        "teddiebox: plate holding {:016X} at page {page}",
+        ruid_of(tag)
+    );
+}
+
+/// What RAM is holding for this figure, if anything.
+///
+/// Asked before the card, because the slot is newer by construction: it is
+/// written the moment a figure comes off, and the card only learns later.
+pub(crate) fn held_place(tag: TagUid) -> Option<u32> {
+    critical_section::with(|cs| match *PENDING_PLACE.borrow_ref(cs) {
+        Some((held, page)) if held == tag => Some(page),
+        _ => None,
+    })
+}
+
+/// Drops a story's held place, by the path it lives at.
+///
+/// Called where the place has stopped meaning anything — a story that reached
+/// its end. Taking the ruid rather than the tag because the media task knows
+/// where it is playing from and not which figure asked.
+fn forget_place(ruid: u64) {
+    critical_section::with(|cs| {
+        let mut slot = PENDING_PLACE.borrow_ref_mut(cs);
+        if matches!(*slot, Some((held, _)) if ruid_of(held) == ruid) {
+            *slot = None;
+        }
+    });
+}
+
+/// Puts whatever RAM is holding onto the card.
+///
+/// Called where the slot is about to be lost for good. Idempotent by
+/// construction: the slot is emptied, so a second call writes nothing.
+fn flush_place(index: &CardIndex<'_>, why: &str) {
+    let held = critical_section::with(|cs| PENDING_PLACE.borrow_ref_mut(cs).take());
+    if let Some((tag, page)) = held {
+        write_place(index, tag, page, why);
+    }
+}
+
+fn write_place(index: &CardIndex<'_>, tag: TagUid, page: u32, why: &str) {
+    match index.remember(tag, page) {
+        Ok(()) => esp_println::println!(
+            "teddiebox: plate wrote {:016X} at page {page} — {why}",
+            ruid_of(tag)
+        ),
+        Err(reason) => esp_println::println!("teddiebox: plate place not saved — {reason}"),
+    }
+}
+
 /// Carries out one of the reducer's decisions.
 ///
 /// Every arm reaches a path a console command already takes, by setting the
@@ -1756,21 +1841,12 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         },
 
         Action::SavePosition { tag, pos } => {
-            // The one write position memory makes, and the moment worth making
-            // it: a figure coming off is the only ending the box can see
-            // coming. Writing at every chapter boundary instead would cost
-            // twenty writes to a child holding an ear down and still not cover
-            // a battery that goes flat between them.
+            // Into RAM, not onto the card. A child lifts a figure and puts it
+            // back over and over, and each of those is a place worth keeping
+            // but not a place worth a card write — the card only has to know
+            // once the box is about to forget.
             if let Position::Exact { page } = pos {
-                match index.remember(tag, page) {
-                    Ok(()) => esp_println::println!(
-                        "teddiebox: plate remembering {:016X} at page {page}",
-                        ruid_of(tag)
-                    ),
-                    Err(reason) => {
-                        esp_println::println!("teddiebox: plate place not saved — {reason}")
-                    }
-                }
+                remember_in_ram(index, tag, page);
             }
         }
 
@@ -1906,6 +1982,14 @@ async fn media(
         // Fed before the request is read, so a `Play` decided here is picked
         // up on the same pass rather than the next one.
         let mut events: [Option<Event>; 2] = [None, None];
+
+        // Asked before anything else, because the answer is only useful while
+        // the card is still writable.
+        if FLUSH_PLACE.swap(false, Ordering::Relaxed) {
+            if let Some(card) = card.as_ref() {
+                flush_place(&CardIndex::new(card), "the box is stopping");
+            }
+        }
 
         events[0] = take_plate_event(&mut on_plate, &mut on_plate_token);
 
@@ -2149,6 +2233,9 @@ async fn media(
                         let mut out = [0u8; MAX_POSITION];
                         let len = position::render(0, &mut out);
                         let _ = card.write_position(stock, dir, file, &out[..len]);
+                        // And whatever RAM was holding for it, which would
+                        // otherwise outrank the card that was just cleared.
+                        forget_place(((dir as u64) << 32) | file as u64);
                     }
                     ANNOUNCING.store(false, Ordering::Relaxed);
                     i2s_tx = Some(tx);
@@ -3036,6 +3123,18 @@ async fn main(spawner: Spawner) {
         // heard — cutting the announcement short to obey it would be its own
         // kind of broken.
         if SHUTTING_DOWN.load(Ordering::Relaxed) && !ANNOUNCING.load(Ordering::Relaxed) {
+            // The last chance anything has to write the card. Asked of the task
+            // that owns it, and waited for — but not for long: a pack this
+            // close to empty is not worth holding the rails up over, and a lost
+            // bookmark is a smaller failure than a box that will not switch
+            // off.
+            FLUSH_PLACE.store(true, Ordering::Relaxed);
+            for _ in 0..20 {
+                if !FLUSH_PLACE.load(Ordering::Relaxed) {
+                    break;
+                }
+                Timer::after(Duration::from_millis(25)).await;
+            }
             esp_println::println!("teddiebox: battery critical — going dark");
             quieten_codec().await;
             board.apply_all(&gates.release_for_reset());

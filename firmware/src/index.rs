@@ -102,6 +102,14 @@ impl ContentIndex for CardIndex<'_> {
     /// not a trusted input, and no byte on it should be able to strand a
     /// figure at a chapter its story does not have.
     fn saved_position(&self, tag: TagUid) -> Position {
+        // RAM first: it is newer than the card by construction, because the
+        // card is only written once this is about to be lost. A figure lifted
+        // and put straight back — which is most of what happens to a figure —
+        // never touches the card at all.
+        if let Some(page) = crate::held_place(tag) {
+            return Position::Exact { page };
+        }
+
         let path = content_path(tag.0);
         let stock = self.on_stock_card(path.directory, path.file);
         let mut buffer = [0u8; MAX_POSITION];
