@@ -17,19 +17,26 @@ the box a child already knows behaves.
 A stock box remembers where a story was only until it goes into standby. Put a
 figure back the next day and the story starts again from the beginning.
 
-This box keeps two kinds of memory:
+This box remembers the **exact spot**, and keeps remembering it after being
+switched off:
 
-- **Lift a figure and put it straight back** and the story carries on from the
-  exact spot, as stock does.
-- **Switch the box off — or let the battery go flat — and come back later**, and
-  the story resumes at the start of the chapter it was in. That is written to
-  the card when each chapter begins, so it survives an ending nobody planned.
+- **Lift a figure and put it straight back** and the story carries on where it
+  was, as stock does.
+- **Put it back tomorrow** and it still does. The place is written to the card
+  when the box needs the memory for another figure, or when it shuts itself
+  down.
 
 A story played all the way to its end starts from the beginning next time. A
 finished story is not a paused one.
 
-The chapter is kept in a small text file called `<STORY>.POS` beside the story
-on the card, which you can read — or delete — on a laptop.
+The place is kept in a small text file called `<STORY>.POS` beside the story on
+the card — one number, which you can read or delete on a laptop. Deleting it
+just means that story starts from the beginning.
+
+What is *not* remembered is an ending nobody chose: if the battery goes flat
+mid-story, or the box is reset, the place falls back to whatever was last
+written to the card. This is a deliberate trade — writing every few seconds to
+survive it would wear the card for a case that leaves the box unusable anyway.
 
 ### The indicator says more
 
