@@ -165,6 +165,11 @@ pub enum Prompt {
     /// the router.
     WrongPassword,
     BatteryLow,
+    /// The pack is nearly gone and the box is about to stop.
+    ///
+    /// Separate from [`Prompt::BatteryLow`], which is a warning the box carries
+    /// on after. This one is an announcement of something it is doing.
+    BatteryCritical,
     VolumeLimit,
 }
 

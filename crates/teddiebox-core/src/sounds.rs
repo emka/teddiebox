@@ -155,6 +155,7 @@ impl Sound {
             crate::Prompt::Startup => Some(Self::Startup),
             crate::Prompt::NoNetwork => Some(Self::NoInternet),
             crate::Prompt::BatteryLow => Some(Self::BatteryLow),
+            crate::Prompt::BatteryCritical => Some(Self::BatteryCritical),
             crate::Prompt::NoContent => Some(Self::NoStory),
             crate::Prompt::WrongPassword => Some(Self::WrongPassword),
             crate::Prompt::Shutdown | crate::Prompt::VolumeLimit => None,
@@ -421,6 +422,10 @@ mod tests {
             Sound::for_prompt(Prompt::BatteryLow),
             Some(Sound::BatteryLow)
         );
+        assert_eq!(
+            Sound::for_prompt(Prompt::BatteryCritical),
+            Some(Sound::BatteryCritical)
+        );
         assert_eq!(Sound::for_prompt(Prompt::NoContent), Some(Sound::NoStory));
         assert_eq!(
             Sound::for_prompt(Prompt::WrongPassword),
@@ -456,5 +461,13 @@ mod tests {
     fn the_prompts_with_no_identified_file_map_to_nothing() {
         assert_eq!(Sound::for_prompt(Prompt::Shutdown), None);
         assert_eq!(Sound::for_prompt(Prompt::VolumeLimit), None);
+    }
+
+    /// Identified by ear, and the published wiki mapping was wrong about this
+    /// one: 0x09 is "battery is critical, turning off now", not 0x03.
+    #[test]
+    fn the_critical_announcement_has_its_own_file() {
+        assert_eq!(Sound::BatteryCritical.file(), 0x0000_0009);
+        assert_ne!(Sound::BatteryCritical.file(), Sound::BatteryLow.file());
     }
 }
