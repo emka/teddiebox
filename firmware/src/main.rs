@@ -1870,6 +1870,17 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                     PowerOffReason::Idle => "nothing has used the box",
                 }
             );
+            // A pack below the cutoff must stop being driven, and a story left
+            // running drives it for another half hour — which is the discharge
+            // the cutoff exists to prevent, on cells with no protection
+            // circuit. Safe for the announcement queued alongside this: every
+            // playback clears `STOP` before its first frame.
+            //
+            // A stop is not an ending. `play_taf` answers `Finish::Stopped`,
+            // and the completion path — which clears the story's place and
+            // tells the reducer it ended — is reached only on `Finish::Ended`,
+            // so the child's place survives being switched off.
+            audio::STOP.store(true, Ordering::Relaxed);
             SHUTTING_DOWN.store(true, Ordering::Relaxed);
         }
 
