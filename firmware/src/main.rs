@@ -49,8 +49,8 @@ use teddiebox_core::sounds::{Language, Sound};
 use teddiebox_core::tone;
 
 use teddiebox_core::{
-    colour_for, db_for, Action, Core, CoreConfig, Ear, Event, LedState, Position, TagUid,
-    Unavailable, Volume, MAX_VOLUME,
+    colour_for, db_for, Action, Core, CoreConfig, Ear, Event, LedState, Position, PowerOffReason,
+    TagUid, Unavailable, Volume, MAX_VOLUME,
 };
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
@@ -1847,8 +1847,19 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         //
         // Raised rather than acted on directly: the console loop owns the
         // rails, the codec and the card's last write, and it waits for the
-        // announcement raised alongside this to finish before it acts.
-        Action::PowerOff => SHUTTING_DOWN.store(true, Ordering::Relaxed),
+        // announcement raised alongside this to finish before it acts. Said
+        // here rather than there, because this is the only place that knows
+        // which of the two authorities decided.
+        Action::PowerOff(reason) => {
+            esp_println::println!(
+                "teddiebox: plate powering off — {}",
+                match reason {
+                    PowerOffReason::PackEmpty => "the pack is below the cutoff",
+                    PowerOffReason::Idle => "nothing has used the box",
+                }
+            );
+            SHUTTING_DOWN.store(true, Ordering::Relaxed);
+        }
 
         // The rest are not reachable, and saying what was wanted is the
         // honest half of that.
@@ -3206,7 +3217,10 @@ async fn main(spawner: Spawner) {
                 }
                 Timer::after(Duration::from_millis(25)).await;
             }
-            esp_println::println!("teddiebox: battery critical — going dark");
+            // Which authority decided is said by `perform`, where it is known.
+            // This line used to name the pack unconditionally, and an idle park
+            // then reported a flat battery that was nothing of the kind.
+            esp_println::println!("teddiebox: going dark");
             quieten_codec().await;
             board.apply_all(&gates.release_for_reset());
             drain_console();

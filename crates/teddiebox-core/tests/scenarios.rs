@@ -115,5 +115,5 @@ fn an_exhausted_pack_powers_the_box_off_mid_story() {
         },
         &library,
     );
-    assert!(has(&flat, Action::PowerOff));
+    assert!(has(&flat, Action::PowerOff(PowerOffReason::PackEmpty)));
 }

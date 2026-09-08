@@ -97,7 +97,7 @@ pub enum Action {
     /// Stop a download nobody is waiting for any more.
     AbortFetch,
     PlayPrompt(Prompt),
-    PowerOff,
+    PowerOff(PowerOffReason),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,7 +204,7 @@ impl Core {
                 if self.playback.kind() != PlaybackKind::Playing
                     && idle >= self.config.idle_timeout_ms
                 {
-                    let _ = actions.push(Action::PowerOff);
+                    let _ = actions.push(Action::PowerOff(PowerOffReason::Idle));
                 }
             }
 
@@ -298,7 +298,7 @@ impl Core {
                 if self.battery.must_shut_down() && !self.announced_shutdown {
                     self.announced_shutdown = true;
                     let _ = actions.push(Action::PlayPrompt(Prompt::BatteryCritical));
-                    let _ = actions.push(Action::PowerOff);
+                    let _ = actions.push(Action::PowerOff(PowerOffReason::PackEmpty));
                 }
             }
 
@@ -487,7 +487,7 @@ mod tests {
     fn the_box_powers_off_after_a_long_idle() {
         let mut c = core();
         let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
-        assert!(contains(&actions, Action::PowerOff));
+        assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
     #[test]
@@ -495,7 +495,7 @@ mod tests {
         let mut c = core();
         c.handle(Event::TagPresent(TAG), &Index);
         let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
-        assert!(!contains(&actions, Action::PowerOff));
+        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
     /// The case finding 4 showed was unreachable: a child wanders off and leaves
@@ -509,7 +509,7 @@ mod tests {
         c.handle(Event::PlaybackEnded, &Index);
 
         let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
-        assert!(contains(&actions, Action::PowerOff));
+        assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
     /// A story that ran for longer than the idle timeout must not switch the box
@@ -528,13 +528,13 @@ mod tests {
 
         let actions = c.handle(Event::Tick(30 * 60 * 1_000 + 1_000), &Index);
         assert!(
-            !contains(&actions, Action::PowerOff),
+            !contains(&actions, Action::PowerOff(PowerOffReason::Idle)),
             "one second after the end is not idle"
         );
 
         let actions = c.handle(Event::Tick(30 * 60 * 1_000 + 5 * 60 * 1_000 + 1), &Index);
         assert!(
-            contains(&actions, Action::PowerOff),
+            contains(&actions, Action::PowerOff(PowerOffReason::Idle)),
             "five minutes after the end is"
         );
     }
@@ -545,7 +545,7 @@ mod tests {
         c.handle(Event::EarDown(Ear::Larger, 4 * 60 * 1_000), &Index);
         c.handle(Event::EarUp(Ear::Larger, 4 * 60 * 1_000 + 100), &Index);
         let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
-        assert!(!contains(&actions, Action::PowerOff));
+        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
     /// The box says what it is about to do, then does it. Both exactly once: a
@@ -563,7 +563,7 @@ mod tests {
                 },
                 &Index,
             );
-            if contains(&actions, Action::PowerOff) {
+            if contains(&actions, Action::PowerOff(PowerOffReason::PackEmpty)) {
                 seen += 1;
                 assert!(
                     contains(&actions, Action::PlayPrompt(Prompt::BatteryCritical)),
@@ -580,7 +580,10 @@ mod tests {
             },
             &Index,
         );
-        assert!(!contains(&actions, Action::PowerOff), "and not again after");
+        assert!(
+            !contains(&actions, Action::PowerOff(PowerOffReason::PackEmpty)),
+            "and not again after"
+        );
     }
 
     /// 3_250 mV is above `low_mv` (3200), so it settles into the Low bucket
@@ -627,7 +630,7 @@ mod tests {
             "3100 mV is low enough to warn about"
         );
         assert!(
-            !contains(&actions_seen, Action::PowerOff),
+            !contains(&actions_seen, Action::PowerOff(PowerOffReason::PackEmpty)),
             "but 3100 mV is above the 3000 mV cutoff, so nothing stops"
         );
         assert!(

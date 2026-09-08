@@ -173,6 +173,21 @@ pub enum Prompt {
     VolumeLimit,
 }
 
+/// Which authority decided the box should stop.
+///
+/// Both causes want the same mechanism and a child hears the same silence
+/// either way, so this changes nothing the box does. It exists because the
+/// console is the only thing that can say which of the two it was, and a
+/// shutdown that names the wrong cause sends whoever reads it to the wrong
+/// place — a bench box parked by its idle timer used to report a flat pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerOffReason {
+    /// The pack fell below the hard cutoff.
+    PackEmpty,
+    /// Nothing has used the box for `idle_timeout_ms`.
+    Idle,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
