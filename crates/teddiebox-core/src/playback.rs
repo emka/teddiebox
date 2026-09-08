@@ -129,6 +129,23 @@ impl Playback {
         actions
     }
 
+    /// The story reached its end on its own.
+    ///
+    /// Distinct from a lift: nothing is saved, because a finished story is not
+    /// a paused one and its place has just been cleared. Distinct from
+    /// `TrackFinished`, which advances a chapter — a story ending and a chapter
+    /// ending are different facts and sharing an event for them is how the
+    /// second one would silently acquire the first one's consequences.
+    ///
+    /// Only a story that was playing can end. A fetch in progress is left
+    /// alone, because the sound that just finished was something else.
+    pub fn on_playback_ended(&mut self) -> Actions {
+        if matches!(self.state, State::Playing(_)) {
+            self.state = State::Idle;
+        }
+        Actions::new()
+    }
+
     pub fn on_content_missing(&mut self, tag: TagUid, why: Unavailable) -> Actions {
         let mut actions = Actions::new();
         if self.state != State::Fetching(tag) {
@@ -359,5 +376,42 @@ mod tests {
     fn lifting_from_an_empty_plate_does_nothing() {
         let mut p = Playback::new();
         assert!(p.on_tag_absent().is_empty());
+    }
+
+    /// A story that reaches its end leaves the box idle, with the figure still on
+    /// the plate. Until this existed the only way out of `Playing` was lifting the
+    /// figure, so a finished story pinned the indicator and made the idle timeout
+    /// — gated on not-playing — unable to fire at all.
+    #[test]
+    fn a_story_reaching_its_end_leaves_the_box_idle() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &known(1));
+        let actions = p.on_playback_ended();
+        assert!(actions.is_empty());
+        assert_eq!(p.kind(), PlaybackKind::Idle);
+    }
+
+    /// Not `SavePosition`: a finished story is not a paused one, and its place has
+    /// just been cleared on purpose. Not `Pause` either — nothing is playing.
+    #[test]
+    fn a_story_reaching_its_end_saves_no_position() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &known(1));
+        p.note_position(Position::Exact { page: 900 });
+        assert!(p.on_playback_ended().is_empty());
+    }
+
+    /// A story ending while the box was fetching something else, or idle already,
+    /// changes nothing.
+    #[test]
+    fn an_end_with_nothing_playing_is_ignored() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unknown());
+        assert!(p.on_playback_ended().is_empty());
+        assert_eq!(
+            p.kind(),
+            PlaybackKind::Fetching,
+            "a fetch is not interrupted"
+        );
     }
 }

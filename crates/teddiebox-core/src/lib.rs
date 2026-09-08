@@ -61,6 +61,10 @@ pub enum Event {
     Charger(bool),
     /// The current track reached its end.
     TrackFinished,
+    /// The story reached its end on its own.
+    ///
+    /// Fed by whoever owns playback, which is the only thing that can know.
+    PlaybackEnded,
     /// Content for this tag is now available locally.
     ContentReady(TagUid),
     /// Content for this tag could not be obtained, and why.
@@ -190,7 +194,10 @@ impl Core {
             | Event::ContentMissing(..) => {
                 self.last_activity = self.last_tick;
             }
-            Event::Battery { .. } | Event::Charger(_) | Event::TrackFinished => {}
+            Event::Battery { .. }
+            | Event::Charger(_)
+            | Event::TrackFinished
+            | Event::PlaybackEnded => {}
         }
 
         match event {
@@ -303,6 +310,13 @@ impl Core {
 
             Event::TrackFinished => {
                 let _ = actions.push(Action::NextTrack);
+            }
+
+            Event::PlaybackEnded => {
+                let a = self.playback.on_playback_ended();
+                for act in a {
+                    let _ = actions.push(act);
+                }
             }
         }
 
@@ -484,6 +498,20 @@ mod tests {
         c.handle(Event::TagPresent(TAG), &Index);
         let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
         assert!(!contains(&actions, Action::PowerOff));
+    }
+
+    /// The case finding 4 showed was unreachable: a child wanders off and leaves
+    /// the figure on the plate. Before `PlaybackEnded` the reducer still believed
+    /// it was playing, so the timeout — gated on not-playing — never fired.
+    #[test]
+    fn a_finished_story_lets_the_idle_timeout_fire_with_the_figure_still_on() {
+        let mut c = Core::new(CoreConfig::default());
+        c.handle(Event::Tick(0), &Index);
+        c.handle(Event::TagPresent(TagUid([1, 2, 3, 4, 5, 6, 7, 8])), &Index);
+        c.handle(Event::PlaybackEnded, &Index);
+
+        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        assert!(contains(&actions, Action::PowerOff));
     }
 
     #[test]
