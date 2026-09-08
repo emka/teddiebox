@@ -156,6 +156,7 @@ impl Sound {
             crate::Prompt::NoNetwork => Some(Self::NoInternet),
             crate::Prompt::BatteryLow => Some(Self::BatteryLow),
             crate::Prompt::NoContent => Some(Self::NoStory),
+            crate::Prompt::WrongPassword => Some(Self::WrongPassword),
             crate::Prompt::Shutdown | crate::Prompt::VolumeLimit => None,
         }
     }
@@ -421,6 +422,23 @@ mod tests {
             Some(Sound::BatteryLow)
         );
         assert_eq!(Sound::for_prompt(Prompt::NoContent), Some(Sound::NoStory));
+        assert_eq!(
+            Sound::for_prompt(Prompt::WrongPassword),
+            Some(Sound::WrongPassword)
+        );
+    }
+
+    /// Three neighbouring files, and the box has to pick the right one of the
+    /// three: `no internet` at 0x11, `no story` at 0x12, `wrong password` at
+    /// 0x13. All three were identified by ear because the published mapping has
+    /// been wrong before, and a wrong guess here is plausible rather than
+    /// obvious — so the two a network failure can reach are pinned apart, by
+    /// number, in one place.
+    #[test]
+    fn a_refused_passphrase_and_an_absent_network_are_different_files() {
+        assert_eq!(Sound::WrongPassword.file(), 0x0000_0013);
+        assert_eq!(Sound::NoInternet.file(), 0x0000_0011);
+        assert_ne!(Sound::WrongPassword.file(), Sound::NoInternet.file());
     }
 
     /// The file a figure with no story gets. Written out rather than compared

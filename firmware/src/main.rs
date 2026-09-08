@@ -820,6 +820,22 @@ const FETCH_COMPLETED: u8 = 1;
 const FETCH_UNREACHABLE: u8 = 2;
 /// The server was reached and has nothing filed under that figure.
 const FETCH_NO_CONTENT: u8 = 3;
+/// The access point turned the box away: the card's passphrase is not its one.
+const FETCH_REFUSED: u8 = 4;
+
+/// The byte that carries one of the reducer's reasons between the two tasks.
+///
+/// Exhaustive on purpose: a reason added to [`Unavailable`] and not given a
+/// byte here is a compile error rather than a figure that silently announces
+/// the wrong fault. That is the whole reason this is a function and not a
+/// match written out at each of the two call sites.
+const fn outcome_for(why: Unavailable) -> u8 {
+    match why {
+        Unavailable::Unreachable => FETCH_UNREACHABLE,
+        Unavailable::Refused => FETCH_REFUSED,
+        Unavailable::NoContent => FETCH_NO_CONTENT,
+    }
+}
 
 /// Which figure [`FETCH_OUTCOME`] belongs to.
 ///
@@ -1986,6 +2002,7 @@ async fn media(
                         FETCH_NO_CONTENT => {
                             Some(Event::ContentMissing(tag, Unavailable::NoContent))
                         }
+                        FETCH_REFUSED => Some(Event::ContentMissing(tag, Unavailable::Refused)),
                         _ => unreachable!("outcome != FETCH_NOTHING was just checked"),
                     };
                 }
@@ -2246,12 +2263,15 @@ async fn bring_up(
     radio: &mut net::Radio<'_>,
     tls: Option<mbedtls_rs::TlsReference<'_>>,
     stay_up: bool,
-) {
+) -> Option<Unavailable> {
     let Some(config) = credentials() else {
         esp_println::println!(
             "teddiebox: net no credentials — type `net ssid <name>` then `net pw <passphrase>`"
         );
-        return;
+        // Not `Refused`: nothing was refused, because nothing was asked. A box
+        // with no credentials at all already said `ConfigError` out loud when
+        // it failed to read the card, so this stays the general word.
+        return Some(Unavailable::Unreachable);
     };
 
     // The stack seeds its port and transaction numbers from this, so it has to
@@ -2263,7 +2283,7 @@ async fn bring_up(
         Ok(pair) => pair,
         Err(e) => {
             esp_println::println!("teddiebox: net could not power the radio — {e:?}");
-            return;
+            return Some(Unavailable::Unreachable);
         }
     };
     esp_println::println!("teddiebox: net associating with {}", config.ssid);
@@ -2273,9 +2293,20 @@ async fn bring_up(
     match select(link.run(), session.connect()).await {
         Either::First(_) => unreachable!("the runner never returns"),
         Either::Second(Err(e)) => {
-            esp_println::println!("teddiebox: net association refused — {e:?}");
+            // The console keeps the driver's own reason; the reducer gets the
+            // one word it can act on, and the two words send a person to
+            // different places — the card, or the router.
+            let refused = net::refused_credentials(&e);
+            esp_println::println!(
+                "teddiebox: net association refused — {e:?}{}",
+                if refused { " — the passphrase" } else { "" }
+            );
             net::release(session, link);
-            return;
+            return Some(if refused {
+                Unavailable::Refused
+            } else {
+                Unavailable::Unreachable
+            });
         }
         Either::Second(Ok(())) => {}
     }
@@ -2298,7 +2329,9 @@ async fn bring_up(
                 DHCP_TIMEOUT.as_secs()
             );
             net::release(session, link);
-            return;
+            // Associated, so the passphrase was right; the network is simply
+            // not answering. That is the router's end, not the card's.
+            return Some(Unavailable::Unreachable);
         }
         Either::Second(Either::First(())) => report_address(&stack),
     }
@@ -2479,10 +2512,7 @@ async fn bring_up(
                                             // The console keeps the real code; the
                                             // reducer gets the one word it can act on.
                                             esp_println::println!("teddiebox: get failed — {e:?}");
-                                            fetch_ended(match why_unavailable(&e) {
-                                                Unavailable::NoContent => FETCH_NO_CONTENT,
-                                                Unavailable::Unreachable => FETCH_UNREACHABLE,
-                                            });
+                                            fetch_ended(outcome_for(why_unavailable(&e)));
                                         }
                                     }
                                 }
@@ -2522,6 +2552,9 @@ async fn bring_up(
 
     net::release(session, link);
     esp_println::println!("teddiebox: net down");
+    // It came up. Whatever happened to the fetch after that was reported by
+    // whoever was doing it, and is not this function's to name.
+    None
 }
 
 /// Prints the lease, or says there is not one.
@@ -2609,7 +2642,12 @@ async fn net(
                     ),
                 }
             }
-            NET_UP => bring_up(&mut radio, tls, true).await,
+            // The console asked, and the console is reading the log: the
+            // reason is printed inside, and there is no figure waiting to be
+            // told anything.
+            NET_UP => {
+                let _ = bring_up(&mut radio, tls, true).await;
+            }
             // `net status` and `net down` are answered inside `bring_up` while
             // it is running. Reaching them here means it is not.
             NET_STATUS | NET_DOWN | NET_TLS => {
@@ -2633,16 +2671,19 @@ async fn net(
                     // taken out of the request by the read at the top of this
                     // one, and it is the whole reason for associating.
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);
-                    bring_up(&mut radio, tls, false).await;
+                    let gave_up = bring_up(&mut radio, tls, false).await;
                     // `bring_up` answers a fetch it could not start — no
                     // credentials, no association, no lease — by returning
                     // without serving the request. Nobody else will, so
-                    // whoever asked is told here rather than left waiting.
+                    // whoever asked is told here rather than left waiting,
+                    // and told which of the two faults it was: a figure whose
+                    // story cannot be fetched because the passphrase is wrong
+                    // should not send anybody to look at a working router.
                     if FETCH_OUTCOME.load(Ordering::Relaxed) == FETCH_NOTHING
                         && DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_IDLE
                     {
                         esp_println::println!("teddiebox: net would not come up for it");
-                        fetch_ended(FETCH_UNREACHABLE);
+                        fetch_ended(outcome_for(gave_up.unwrap_or(Unavailable::Unreachable)));
                     }
                 }
             },

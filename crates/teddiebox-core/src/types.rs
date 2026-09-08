@@ -158,6 +158,12 @@ pub enum Prompt {
     Shutdown,
     NoContent,
     NoNetwork,
+    /// The access point refused the passphrase on the card.
+    ///
+    /// Separate from [`Prompt::NoNetwork`] because the two send whoever is
+    /// holding the box to different places: this one to the card, that one to
+    /// the router.
+    WrongPassword,
     BatteryLow,
     VolumeLimit,
 }

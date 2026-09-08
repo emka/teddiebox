@@ -27,6 +27,14 @@ pub enum Unavailable {
     /// Association, DHCP, TLS, the socket, a timeout, or a server that
     /// answered with a fault of its own.
     Unreachable,
+    /// The access point was there and turned the box away: the passphrase on
+    /// the card is not the one it wants.
+    ///
+    /// Deliberately narrow. Everything a caller is not *sure* about belongs in
+    /// [`Unavailable::Unreachable`], because the expensive mistake is the other
+    /// one — telling somebody their passphrase is wrong when the router was
+    /// merely off sends them to retype something that was already correct.
+    Refused,
     /// The server was reached and has nothing for this figure.
     NoContent,
 }
@@ -129,6 +137,7 @@ impl Playback {
         self.state = State::Failed;
         let _ = actions.push(Action::PlayPrompt(match why {
             Unavailable::Unreachable => Prompt::NoNetwork,
+            Unavailable::Refused => Prompt::WrongPassword,
             Unavailable::NoContent => Prompt::NoContent,
         }));
         actions
@@ -289,6 +298,22 @@ mod tests {
         p.on_tag_present(TAG, &unknown());
         let actions = p.on_content_missing(TAG, Unavailable::Unreachable);
         assert_eq!(actions.as_slice(), &[Action::PlayPrompt(Prompt::NoNetwork)]);
+        assert_eq!(p.kind(), PlaybackKind::Failed);
+    }
+
+    /// A network that refused the box is not a network that was not there, and
+    /// the two send whoever is holding the box to different places: one to the
+    /// passphrase on the card, the other to the router. Saying "no internet"
+    /// for a refused passphrase sends them to look at a router that is working.
+    #[test]
+    fn a_figure_whose_network_refused_the_passphrase_blames_the_passphrase() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unknown());
+        let actions = p.on_content_missing(TAG, Unavailable::Refused);
+        assert_eq!(
+            actions.as_slice(),
+            &[Action::PlayPrompt(Prompt::WrongPassword)]
+        );
         assert_eq!(p.kind(), PlaybackKind::Failed);
     }
 

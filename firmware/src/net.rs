@@ -25,8 +25,8 @@ use esp_hal::peripherals::WIFI;
 use esp_hal::time::Duration as EspDuration;
 use esp_radio::wifi::{
     ap::AccessPointInfo, scan::ScanConfig, scan::ScanTypeConfig, sta::StationConfig,
-    AuthenticationMethodConfig, Config as WifiConfig, ConnectionError, ControllerConfig, Interface,
-    Password, Ssid, WifiController, WifiError,
+    AuthenticationMethodConfig, Config as WifiConfig, ConnectionError, ControllerConfig,
+    DisconnectReason, Interface, Password, Ssid, WifiController, WifiError,
 };
 use teddiebox_config::Config;
 
@@ -220,6 +220,30 @@ impl Link<'_> {
     pub async fn run(&mut self) -> ! {
         self.runner.run().await
     }
+}
+
+/// Whether an association failed because the access point refused the key.
+///
+/// The one thing this module says about *why* an association failed, and it
+/// answers a bool rather than naming a reason of its own: what the box does
+/// about a refused passphrase belongs to the reducer, which is tested. This is
+/// only the part that cannot be — the reason codes live in `esp-radio` and
+/// there is no host to run them on.
+///
+/// **Narrow on purpose, and measured.** A wrong passphrase on this bench
+/// produced `FourWayHandshakeTimeout`: the access point answered, the key did
+/// not verify, and the handshake ran out. Several neighbouring reasons —
+/// `MicFailure`, `AkmpInvalid`, `CipherSuiteRejected` — also mean a key or a
+/// cipher the access point would not take, and are deliberately *not* here.
+/// Everything unlisted stays "could not be reached", because the expensive
+/// mistake is the other one: telling somebody their passphrase is wrong when
+/// the router was merely off sends them to retype something already correct.
+/// Widening this is one line, and wants its own observation behind it.
+pub fn refused_credentials(error: &ConnectionError) -> bool {
+    matches!(
+        error,
+        ConnectionError::Failed(info) if info.reason == DisconnectReason::FourWayHandshakeTimeout
+    )
 }
 
 /// Takes the radio down.
