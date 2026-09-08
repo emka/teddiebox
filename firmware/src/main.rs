@@ -3264,6 +3264,16 @@ async fn main(spawner: Spawner) {
             // then reported a flat battery that was nothing of the kind.
             esp_println::println!("teddiebox: going dark");
             quieten_codec().await;
+            // Before the rail goes down, not after. The LED is held by LEDC,
+            // which keeps driving its three channels with no processor
+            // involvement, and `Gates::led` refuses once the peripherals rail
+            // is down — so dropping the rail first left the parked box showing
+            // a steady green, seen at the bench on 2026-09-08.
+            if let Some(rgb) = rgb.as_ref() {
+                if let Ok(dark) = gates.led(board::Colour::Off) {
+                    rgb.apply(&dark, board::LED_DUTY);
+                }
+            }
             board.apply_all(&gates.release_for_reset());
             drain_console();
             // Everything a child can see or hear is now off. This is not a
