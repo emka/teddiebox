@@ -132,6 +132,11 @@ pub struct Core {
     led: LedState,
     last_activity: Millis,
     last_tick: Millis,
+    /// Set once the shutdown prompt has been played for the current
+    /// `must_shut_down` latch, so the reducer says it once rather than on
+    /// every subsequent battery reading for as long as the box has power to
+    /// keep asking.
+    announced_shutdown: bool,
 }
 
 impl Core {
@@ -147,6 +152,7 @@ impl Core {
             led: LedState::Booting,
             last_activity: 0,
             last_tick: 0,
+            announced_shutdown: false,
         }
     }
 
@@ -270,12 +276,23 @@ impl Core {
                 pack_mv,
                 under_load,
             } => {
-                if self.battery.update(pack_mv, under_load).is_some()
-                    && self.battery.level() == BatteryLevel::Low
+                // The warning follows the bucket the level settles into: Low
+                // or Critical both mean "getting low", and warning on both
+                // catches a fast drop that skips the Low bucket entirely.
+                if let Some(BatteryLevel::Low | BatteryLevel::Critical) =
+                    self.battery.update(pack_mv, under_load)
                 {
                     let _ = actions.push(Action::PlayPrompt(Prompt::BatteryLow));
                 }
-                if self.battery.must_shut_down() {
+
+                // The stop follows the hard cutoff, not the Critical bucket:
+                // `must_shut_down` latches by design (a pack that recovers
+                // voltage once the load is off is still empty), so this fires
+                // once, on the false-to-true transition, rather than on every
+                // reading for as long as the box has power to keep asking.
+                if self.battery.must_shut_down() && !self.announced_shutdown {
+                    self.announced_shutdown = true;
+                    let _ = actions.push(Action::PlayPrompt(Prompt::BatteryCritical));
                     let _ = actions.push(Action::PowerOff);
                 }
             }
@@ -476,6 +493,94 @@ mod tests {
         c.handle(Event::EarUp(Ear::Larger, 4 * 60 * 1_000 + 100), &Index);
         let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
         assert!(!contains(&actions, Action::PowerOff));
+    }
+
+    /// The box says what it is about to do, then does it. Both exactly once: a
+    /// latching shutdown that re-pushed `PowerOff` on every subsequent reading
+    /// would have the box announcing its own death every two seconds.
+    #[test]
+    fn a_pack_reaching_critical_announces_it_and_stops_once() {
+        let mut c = core();
+        let mut seen = 0;
+        for _ in 0..4 {
+            let actions = c.handle(
+                Event::Battery {
+                    pack_mv: 2_900,
+                    under_load: false,
+                },
+                &Index,
+            );
+            if contains(&actions, Action::PowerOff) {
+                seen += 1;
+                assert!(
+                    contains(&actions, Action::PlayPrompt(Prompt::BatteryCritical)),
+                    "it should say so in the same breath"
+                );
+            }
+        }
+        assert_eq!(seen, 1, "announced and acted on once, not per reading");
+
+        let actions = c.handle(
+            Event::Battery {
+                pack_mv: 2_900,
+                under_load: false,
+            },
+            &Index,
+        );
+        assert!(!contains(&actions, Action::PowerOff), "and not again after");
+    }
+
+    /// 3_250 mV is above `low_mv` (3200), so it settles into the Low bucket
+    /// rather than Critical.
+    #[test]
+    fn a_pack_falling_to_low_warns_once() {
+        let mut c = core();
+        let mut seen = 0;
+        for _ in 0..8 {
+            let actions = c.handle(
+                Event::Battery {
+                    pack_mv: 3_250,
+                    under_load: false,
+                },
+                &Index,
+            );
+            if contains(&actions, Action::PlayPrompt(Prompt::BatteryLow)) {
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 1);
+    }
+
+    /// The Critical bucket starts at `low_mv` (3200) and the hard cutoff is at
+    /// 3000. Between them the pack is very low and the box still works, so it
+    /// warns — and must not announce a shutdown it is not performing.
+    #[test]
+    fn the_critical_bucket_above_the_cutoff_warns_without_stopping() {
+        let mut c = core();
+        let mut actions_seen = Actions::new();
+        for _ in 0..6 {
+            for a in c.handle(
+                Event::Battery {
+                    pack_mv: 3_100,
+                    under_load: false,
+                },
+                &Index,
+            ) {
+                let _ = actions_seen.push(a);
+            }
+        }
+        assert!(
+            contains(&actions_seen, Action::PlayPrompt(Prompt::BatteryLow)),
+            "3100 mV is low enough to warn about"
+        );
+        assert!(
+            !contains(&actions_seen, Action::PowerOff),
+            "but 3100 mV is above the 3000 mV cutoff, so nothing stops"
+        );
+        assert!(
+            !contains(&actions_seen, Action::PlayPrompt(Prompt::BatteryCritical)),
+            "and announcing a shutdown that is not happening would be a lie"
+        );
     }
 
     #[test]
