@@ -583,6 +583,100 @@ mod tests {
         );
     }
 
+    /// A pack that keeps falling is worth mentioning again: settling into Low
+    /// warns once, and settling into Critical afterwards — a real change of
+    /// bucket, not a repeat of the same reading — warns again.
+    #[test]
+    fn a_pack_that_falls_further_is_warned_about_again() {
+        let mut c = core();
+        let mut warnings = 0;
+        for _ in 0..4 {
+            for a in c.handle(
+                Event::Battery {
+                    pack_mv: 3_250,
+                    under_load: false,
+                },
+                &Index,
+            ) {
+                if a == Action::PlayPrompt(Prompt::BatteryLow) {
+                    warnings += 1;
+                }
+            }
+        }
+        assert_eq!(warnings, 1, "settling into Low warns once");
+
+        for _ in 0..4 {
+            for a in c.handle(
+                Event::Battery {
+                    pack_mv: 3_100,
+                    under_load: false,
+                },
+                &Index,
+            ) {
+                if a == Action::PlayPrompt(Prompt::BatteryLow) {
+                    warnings += 1;
+                }
+            }
+        }
+        assert_eq!(warnings, 2, "falling on into Critical warns again");
+    }
+
+    /// A pack recovering above a threshold is good news, and good news does
+    /// not interrupt a story — but it must re-arm the warning, so a pack that
+    /// falls low again after a recharge is still worth mentioning.
+    #[test]
+    fn recovering_is_silent_but_arms_the_warning_again() {
+        let mut c = core();
+        let mut warnings = 0;
+        for _ in 0..4 {
+            for a in c.handle(
+                Event::Battery {
+                    pack_mv: 3_250,
+                    under_load: false,
+                },
+                &Index,
+            ) {
+                if a == Action::PlayPrompt(Prompt::BatteryLow) {
+                    warnings += 1;
+                }
+            }
+        }
+        assert_eq!(warnings, 1);
+
+        // 3_700 clears the Ok threshold plus hysteresis, so the level climbs
+        // back up silently: recovery is not worth interrupting anyone for.
+        for _ in 0..4 {
+            for a in c.handle(
+                Event::Battery {
+                    pack_mv: 3_700,
+                    under_load: false,
+                },
+                &Index,
+            ) {
+                assert_ne!(
+                    a,
+                    Action::PlayPrompt(Prompt::BatteryLow),
+                    "recovering must not warn"
+                );
+            }
+        }
+
+        for _ in 0..4 {
+            for a in c.handle(
+                Event::Battery {
+                    pack_mv: 3_250,
+                    under_load: false,
+                },
+                &Index,
+            ) {
+                if a == Action::PlayPrompt(Prompt::BatteryLow) {
+                    warnings += 1;
+                }
+            }
+        }
+        assert_eq!(warnings, 2, "falling low again after recovery warns again");
+    }
+
     #[test]
     fn returning_the_box_to_level_ends_the_seek() {
         let mut c = core();

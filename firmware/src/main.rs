@@ -44,8 +44,8 @@ use teddiebox_core::pipe::Pipe;
 use teddiebox_core::place::PendingPlace;
 use teddiebox_core::plate::{Presence, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEAVE};
 use teddiebox_core::position::{self, MAX_POSITION};
-use teddiebox_core::power::{self, PackState};
-use teddiebox_core::sounds::{Announcer, Language, Sound};
+use teddiebox_core::power;
+use teddiebox_core::sounds::{Language, Sound};
 use teddiebox_core::tone;
 
 use teddiebox_core::{
@@ -271,14 +271,8 @@ async fn sense(
         esp_hal::peripherals::ADC1<'static>,
     >,
 ) {
-    let mut announcer = Announcer::new();
     // The LED reads the pack, so unplugging a charger should change the colour
-    // while the hand is still on the cable. The announcer sees every sample
-    // too: `READINGS_TO_AGREE` guards against one implausible reading — this
-    // channel has produced 9453 mV from three NiMH cells — and four in a row
-    // reject that just as well in eight seconds as in forty. What it never
-    // guarded against is a pack sagging under load, because the load here is a
-    // story that runs for half an hour.
+    // while the hand is still on the cable.
     const SAMPLE_EVERY: Duration = Duration::from_secs(2);
     // Printing stays where it was, purely so a bench capture is readable.
     const PRINT_EVERY: u8 = 5;
@@ -293,8 +287,6 @@ async fn sense(
         let charger_raw = adc.read_blocking(&mut charger);
         let pack_mv = power::battery_mv(pack_raw);
         let charger_mv = power::charger_mv(charger_raw);
-
-        let pack_state = power::pack_state(pack_mv);
 
         // The reducer decides the LED, and until now it was never told the one
         // thing the LED most needs to say. Both go through the same channel
@@ -319,26 +311,9 @@ async fn sense(
         since_printed += 1;
         if since_printed >= PRINT_EVERY {
             since_printed = 0;
-            let state = match pack_state {
-                PackState::Healthy => "healthy",
-                PackState::Low => "LOW",
-                PackState::Critical => "CRITICAL",
-            };
             esp_println::println!(
-                "teddiebox: pack {pack_mv} mV ({state}, raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
+                "teddiebox: pack {pack_mv} mV (raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
             );
-        }
-
-        // The box says this itself rather than only printing it: a child does
-        // not read the console. `Announcer` decides when there is anything
-        // worth saying — on the way down, once, and only after several
-        // readings agree.
-        if let Some(sound) = announcer.observe(pack_state) {
-            esp_println::println!("teddiebox: announcing {sound:?}");
-            if sound == Sound::BatteryCritical {
-                SHUTTING_DOWN.store(true, Ordering::Relaxed);
-            }
-            SOUND_REQUEST.store(sound.file(), Ordering::Relaxed);
         }
 
         Timer::after(SAMPLE_EVERY).await;
@@ -1841,6 +1816,16 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         }
 
         Action::SetLed(state) => LED_REQUEST.store(state.code(), Ordering::Relaxed),
+
+        // The one place the box decides to stop. It used to be decided twice —
+        // here in the reducer's words, where nothing acted on it, and again by
+        // a second model of the pack in the console loop, which is what
+        // actually happened. The console loop now only samples.
+        //
+        // Raised rather than acted on directly: the console loop owns the
+        // rails, the codec and the card's last write, and it waits for the
+        // announcement raised alongside this to finish before it acts.
+        Action::PowerOff => SHUTTING_DOWN.store(true, Ordering::Relaxed),
 
         // The rest are not reachable, and saying what was wanted is the
         // honest half of that.

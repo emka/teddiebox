@@ -50,8 +50,6 @@ pub const fn charger_mv(raw: u16) -> u32 {
     scaled_mv(raw, CHARGER_DIVIDER)
 }
 
-/// Warn here. Three NiMH cells nominal 3.6 V; below this the box should say so
-/// while it still has the power to say it.
 /// Whether the charger is plugged in.
 ///
 /// The channel is uncalibrated, so this is a threshold between two observed
@@ -61,28 +59,6 @@ pub const fn charger_mv(raw: u16) -> u32 {
 /// can honestly support.
 pub const fn charger_present(raw: u16) -> bool {
     raw > 3_000
-}
-
-pub const LOW_BATTERY_MV: u32 = 3_300;
-/// Shut down here, before the flash writes start failing.
-pub const CRITICAL_BATTERY_MV: u32 = 3_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PackState {
-    Healthy,
-    Low,
-    Critical,
-}
-
-/// Judges the pack against the documented chemistry.
-pub const fn pack_state(mv: u32) -> PackState {
-    if mv < CRITICAL_BATTERY_MV {
-        PackState::Critical
-    } else if mv <= LOW_BATTERY_MV {
-        PackState::Low
-    } else {
-        PackState::Healthy
-    }
 }
 
 #[cfg(test)]
@@ -127,16 +103,6 @@ mod tests {
     #[test]
     fn a_reading_beyond_full_scale_is_clamped() {
         assert_eq!(battery_mv(9_999), battery_mv(ADC_MAX));
-    }
-
-    /// Three NiMH cells. The pack sits near 3.6 V and the spec calls for a low
-    /// battery warning, so the thresholds live here rather than in the caller.
-    #[test]
-    fn the_pack_is_judged_against_the_documented_chemistry() {
-        assert_eq!(pack_state(4_000), PackState::Healthy);
-        assert_eq!(pack_state(LOW_BATTERY_MV), PackState::Low);
-        assert_eq!(pack_state(LOW_BATTERY_MV - 1), PackState::Low);
-        assert_eq!(pack_state(CRITICAL_BATTERY_MV - 1), PackState::Critical);
     }
 
     /// The calibration point itself: the raw count the ADC actually reported
