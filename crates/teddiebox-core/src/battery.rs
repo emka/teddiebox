@@ -131,16 +131,29 @@ impl BatteryModel {
             self.agreed = 1;
         }
 
-        if self.agreed < self.config.readings_to_agree || new == self.level {
+        if self.agreed < self.config.readings_to_agree {
+            return None;
+        }
+
+        // The hard cutoff is a separate, lower threshold than the boundary of
+        // the Critical bucket — 3000 mV against 3200 — and it is the one that
+        // stops these unprotected cells being driven into reversal. So it is
+        // judged on the compensated reading rather than on which bucket the
+        // reading landed in.
+        //
+        // Checked before the early return below, because a pack that has
+        // already settled at Critical goes on falling, and that is precisely
+        // when this has to fire. Never cleared: a pack that recovers voltage
+        // once the load comes off is still empty.
+        if mv < self.config.cutoff_mv {
+            self.shut_down = true;
+        }
+
+        if new == self.level {
             return None;
         }
 
         self.level = new;
-        // Latched only once the level has settled, and never cleared: a pack
-        // that recovers voltage after the load comes off is still empty.
-        if new == BatteryLevel::Critical {
-            self.shut_down = true;
-        }
         Some(new)
     }
 }
@@ -259,8 +272,42 @@ mod tests {
     fn the_cutoff_is_judged_on_the_compensated_reading() {
         let mut b = model();
         // 2_950 under load compensates to 3_100, which is above the cutoff.
-        b.update(2_950, true);
+        for _ in 0..4 {
+            b.update(2_950, true);
+        }
         assert!(!b.must_shut_down());
+    }
+
+    /// The Critical bucket starts at `low_mv` and the hard cutoff is 200 mV
+    /// below it. Reaching the bucket is a state worth announcing; reaching the
+    /// cutoff is what stops the discharge, and conflating them switches the box
+    /// off while the pack still has usable charge.
+    #[test]
+    fn settling_at_critical_does_not_by_itself_arm_the_shutdown() {
+        let mut b = model();
+        for _ in 0..4 {
+            b.update(3_100, false);
+        }
+        assert_eq!(b.level(), BatteryLevel::Critical);
+        assert!(
+            !b.must_shut_down(),
+            "3100 mV is below the bucket, above the cutoff"
+        );
+    }
+
+    /// A pack already settled at Critical goes on falling, and the latch has to
+    /// fire then — after the level has stopped changing.
+    #[test]
+    fn falling_past_the_cutoff_arms_the_shutdown_even_once_critical_is_settled() {
+        let mut b = model();
+        for _ in 0..4 {
+            b.update(3_100, false);
+        }
+        assert!(!b.must_shut_down());
+        for _ in 0..4 {
+            b.update(2_950, false);
+        }
+        assert!(b.must_shut_down());
     }
 
     /// The very first pack sample this project ever took was 9453 mV from three
