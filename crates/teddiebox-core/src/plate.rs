@@ -17,7 +17,8 @@ use crate::TagUid;
 /// Consecutive readings of the same tag before it counts as arrived.
 ///
 /// Provisional. Nothing has calibrated this: it trades how fast a placement
-/// feels against a false arrival. The precedent is `sounds::READINGS_TO_AGREE`,
+/// feels against a false arrival. The precedent is
+/// [`BatteryConfig::readings_to_agree`](crate::BatteryConfig::readings_to_agree),
 /// which is 4 for a quantity that changes far more slowly than a hand.
 pub const ARRIVALS_TO_AGREE: u8 = 2;
 
