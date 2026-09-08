@@ -1331,21 +1331,12 @@ static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
 /// which is the right answer anyway.
 static PLATE_TAG: Signal<CriticalSectionRawMutex, PlateState> = Signal::new();
 
-/// The exact page of the most recently lifted figure.
-///
-/// One slot, not a table. Matching the stock box means remembering the figure
-/// in a child's hand, and a second figure evicting the first is correct rather
-/// than a limitation: the evicted one still has its chapter on the card. Lost
-/// on a reboot by design — that is precisely what the card's tier is for.
 /// Where the next story should start.
 ///
 /// Written by `perform` when the reducer decides to play, taken by the media
 /// task when it opens the file. Taken rather than read: a story the console
 /// starts after one a figure started must not inherit the figure's place.
 static PLAY_FROM: CsMutex<RefCell<Position>> = CsMutex::new(RefCell::new(Position::Start));
-
-pub(crate) static LAST_LIFTED: CsMutex<RefCell<Option<(u64, u32)>>> =
-    CsMutex::new(RefCell::new(None));
 
 /// The token travels with the UID it was read from. As two separate statics
 /// it would be possible to send one figure's token for another's story.
@@ -1765,14 +1756,21 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         },
 
         Action::SavePosition { tag, pos } => {
-            // Only the exact tier is kept here. The chapter is already on the
-            // card, written when that chapter began, which is what makes a
-            // flat battery survivable — by the time a figure is lifted the
-            // durable answer has been safe for minutes.
+            // The one write position memory makes, and the moment worth making
+            // it: a figure coming off is the only ending the box can see
+            // coming. Writing at every chapter boundary instead would cost
+            // twenty writes to a child holding an ear down and still not cover
+            // a battery that goes flat between them.
             if let Position::Exact { page } = pos {
-                let ruid = ruid_of(tag);
-                critical_section::with(|cs| *LAST_LIFTED.borrow_ref_mut(cs) = Some((ruid, page)));
-                esp_println::println!("teddiebox: plate remembering {ruid:016X} at page {page}");
+                match index.remember(tag, page) {
+                    Ok(()) => esp_println::println!(
+                        "teddiebox: plate remembering {:016X} at page {page}",
+                        ruid_of(tag)
+                    ),
+                    Err(reason) => {
+                        esp_println::println!("teddiebox: plate place not saved — {reason}")
+                    }
+                }
             }
         }
 
@@ -2123,42 +2121,18 @@ async fn media(
                         from if identified => from,
                         _ => Position::Start,
                     };
-                    // What the card already says, so resuming into a chapter
-                    // does not immediately rewrite the file it was read from.
-                    let mut wrote_chapter = match from {
-                        Position::Chapter(n) => n,
-                        _ => 0,
-                    };
                     let mut attend = || {
                         if let Some(event) = take_plate_event(&mut on_plate, &mut on_plate_token) {
                             apply(&mut reducer, card, event, on_plate_token);
                         }
                         apply_ear_events(&mut reducer, card, on_plate_token);
 
-                        // The exact tier, kept in RAM and free. The reducer
-                        // saves it if the figure is lifted; nothing else reads
-                        // it.
+                        // Free, and the only thing keeping the reducer's idea
+                        // of the position true: it is what gets written when
+                        // the figure comes off.
                         reducer.note_position(Position::Exact {
                             page: audio::PAGE.load(Ordering::Relaxed),
                         });
-
-                        // The card's tier, written when a chapter begins
-                        // rather than when the figure is lifted. By then the
-                        // answer for the whole chapter is already known, so
-                        // writing it now covers every ending — including the
-                        // flat battery that never reaches a lift.
-                        let chapter = audio::CHAPTER.load(Ordering::Relaxed);
-                        if identified && chapter != wrote_chapter {
-                            wrote_chapter = chapter;
-                            let mut out = [0u8; MAX_POSITION];
-                            let len = position::render(chapter, &mut out);
-                            if let Err(reason) = card.write_position(stock, dir, file, &out[..len])
-                            {
-                                esp_println::println!(
-                                    "teddiebox: taf chapter not saved — {reason}"
-                                );
-                            }
-                        }
                     };
                     // The hardware comes back, so playing again needs no
                     // reboot — which is what makes stopping worth anything.
@@ -2169,21 +2143,12 @@ async fn media(
                     }
                     if identified && matches!(outcome, Ok(audio::Finish::Ended)) {
                         // A finished story is not a paused one. Zero rather
-                        // than a deletion: `storage` has no delete, and "no
-                        // file" and "chapter zero" mean the same thing.
+                        // than a deletion: `storage` has no delete, and page 0
+                        // is the header rather than audio, so "no file" and
+                        // "page zero" already mean the same thing.
                         let mut out = [0u8; MAX_POSITION];
                         let len = position::render(0, &mut out);
                         let _ = card.write_position(stock, dir, file, &out[..len]);
-                        // And the RAM slot, but only if it holds this story: a
-                        // console `play` running to its end must not forget
-                        // where a figure on the plate had got to.
-                        let ruid = ((dir as u64) << 32) | file as u64;
-                        critical_section::with(|cs| {
-                            let mut slot = LAST_LIFTED.borrow_ref_mut(cs);
-                            if matches!(*slot, Some((held, _)) if held == ruid) {
-                                *slot = None;
-                            }
-                        });
                     }
                     ANNOUNCING.store(false, Ordering::Relaxed);
                     i2s_tx = Some(tx);

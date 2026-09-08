@@ -11,20 +11,21 @@ pub struct TagUid(pub [u8; 8]);
 ///
 /// Where a story should resume.
 ///
-/// Two tiers answer this and they carry different things. The in-RAM slot
-/// knows the exact page the decoder had reached and is lost when the box is
-/// switched off; the card knows only which chapter was playing and survives
-/// everything. Making that an enum rather than a bare `u32` means neither can
-/// be mistaken for the other — a page number read as a chapter would seek to
-/// the wrong place in silence.
+/// An enum rather than a bare `u32` so that "nothing is remembered" is a state
+/// the type carries rather than a magic zero every caller has to remember to
+/// check — and so a coarser kind can be added later without every reader
+/// silently treating it as a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
     /// Nothing is remembered: play from the beginning.
     #[default]
     Start,
-    /// The start of this chapter, zero-based. What survives a power cycle.
-    Chapter(u16),
     /// The exact container page the decoder had reached.
+    ///
+    /// A chapter variant existed here briefly, for a coarse position written
+    /// at every chapter boundary. It earned nothing: writing the exact page
+    /// costs the same bytes, and writing it when the figure is lifted costs
+    /// one write instead of one per chapter.
     Exact { page: u32 },
 }
 

@@ -505,15 +505,6 @@ async fn play_taf_inner(
     // reason to refuse to play it.
     match from {
         Position::Start => {}
-        Position::Chapter(n) => {
-            if decoder.seek_to_chapter(n as usize).is_err() {
-                esp_println::println!(
-                    "teddiebox: taf chapter {n} is not in this story — starting at the top"
-                );
-            } else {
-                esp_println::println!("teddiebox: taf resuming at chapter {n}");
-            }
-        }
         Position::Exact { page } => {
             if decoder.seek_to_page(page).is_err() {
                 esp_println::println!(

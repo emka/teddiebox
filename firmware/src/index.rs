@@ -38,6 +38,20 @@ impl<'a> CardIndex<'a> {
         }
     }
 
+    /// Records where this story should resume.
+    ///
+    /// Story-scoped card knowledge belongs here rather than in `perform`: this
+    /// type already knows how a tag becomes a path and whether that path is
+    /// stock or cached, and it is the only thing holding the card.
+    pub fn remember(&self, tag: TagUid, page: u32) -> Result<(), &'static str> {
+        let path = content_path(tag.0);
+        let stock = self.on_stock_card(path.directory, path.file);
+        let mut out = [0u8; MAX_POSITION];
+        let len = position::render(page, &mut out);
+        self.card
+            .write_position(stock, path.directory, path.file, &out[..len])
+    }
+
     fn cached(&self, directory: u32, file: u32) -> Cached {
         let mut buffer = [0u8; MAX_SIDECAR];
         // `Sidecar::parse` takes `&str`, not bytes: a sidecar that is not
@@ -88,17 +102,6 @@ impl ContentIndex for CardIndex<'_> {
     /// not a trusted input, and no byte on it should be able to strand a
     /// figure at a chapter its story does not have.
     fn saved_position(&self, tag: TagUid) -> Position {
-        // The slot answers only for the figure it holds, and only until the
-        // box is switched off — but when it answers, it is exact. This is the
-        // case a child creates constantly: pick the figure up, put it back.
-        let ruid = crate::ruid_of(tag);
-        if let Some((held, page)) = critical_section::with(|cs| *crate::LAST_LIFTED.borrow_ref(cs))
-        {
-            if held == ruid {
-                return Position::Exact { page };
-            }
-        }
-
         let path = content_path(tag.0);
         let stock = self.on_stock_card(path.directory, path.file);
         let mut buffer = [0u8; MAX_POSITION];
