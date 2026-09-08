@@ -277,6 +277,7 @@ async fn sense(
     // Printing stays where it was, purely so a bench capture is readable.
     const PRINT_EVERY: u8 = 5;
     let mut since_printed = 0u8;
+    let mut batlog_ticks: u8 = 0;
 
     loop {
         // Raw counts as well as millivolts. The conversion rests on an
@@ -314,6 +315,25 @@ async fn sense(
             esp_println::println!(
                 "teddiebox: pack {pack_mv} mV (raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
             );
+        }
+
+        // One line, no judgement. The header is printed when the log is armed
+        // so a capture can be pasted straight into a plotter.
+        let every = BATLOG_EVERY.load(Ordering::Relaxed);
+        if every > 0 {
+            batlog_ticks += 1;
+            // SAMPLE_EVERY.as_millis() is u64, so the comparison is done in
+            // u64 throughout. A `seconds` that is not a multiple of the 2 s
+            // sample period rounds up to the next tick — coarser than asked
+            // for, never finer, and that is fine for a bench capture.
+            if u64::from(batlog_ticks) * SAMPLE_EVERY.as_millis() >= u64::from(every) * 1_000 {
+                batlog_ticks = 0;
+                esp_println::println!(
+                    "batlog,{},{pack_raw},{pack_mv},{},{charger_raw}",
+                    Instant::now().as_millis(),
+                    PLAYING.load(Ordering::Relaxed) as u8
+                );
+            }
         }
 
         Timer::after(SAMPLE_EVERY).await;
@@ -1427,6 +1447,9 @@ static CONTENT_FILE: AtomicU32 = AtomicU32::new(0);
 
 /// How many frames `pcm` should print.
 static PCM_FRAMES: AtomicU8 = AtomicU8::new(0);
+
+/// Seconds between `batlog` lines, or zero for off.
+static BATLOG_EVERY: AtomicU8 = AtomicU8::new(0);
 
 /// Asked for before the rails go down, answered when the codec is quiet.
 ///
@@ -3349,6 +3372,15 @@ async fn main(spawner: Spawner) {
                     board.apply(gates.power(Rail::Storage, true));
                     PCM_FRAMES.store(frames, Ordering::Relaxed);
                     REQUEST.store(REQUEST_PCM, Ordering::Relaxed);
+                }
+                Some(Command::BatteryLog { seconds }) => {
+                    BATLOG_EVERY.store(seconds, Ordering::Relaxed);
+                    if seconds == 0 {
+                        esp_println::println!("teddiebox: batlog off");
+                    } else {
+                        esp_println::println!("teddiebox: batlog every {seconds} s");
+                        esp_println::println!("batlog,ms,raw,mv,playing,charger_raw");
+                    }
                 }
                 Some(Command::Stop) => {
                     audio::STOP.store(true, Ordering::Relaxed);

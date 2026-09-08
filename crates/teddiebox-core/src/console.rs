@@ -55,6 +55,13 @@ pub enum Command {
     /// Silent and as fast as the decoder goes, because this is a measurement
     /// rather than a listening test: what the host needs is the numbers.
     DumpPcm { frames: u8 },
+    /// Print one CSV line of pack telemetry every `seconds`, or stop if zero.
+    ///
+    /// Deliberately dumb: no judgement, no bucket, no smoothing. It exists so
+    /// one real charge-to-cutoff run can be captured and plotted on the host,
+    /// because every threshold in `BatteryConfig` currently comes from nominal
+    /// cell chemistry rather than from these three cells behind this divider.
+    BatteryLog { seconds: u8 },
     /// Decode and play the first TAF file on the card.
     ///
     /// Bench step 9. Opt-in like the rest, and the loudest thing here — it is
@@ -290,6 +297,7 @@ impl CommandWatch {
                         .or_else(|| parse_codec_set(other))
                         .or_else(|| parse_play_content(other))
                         .or_else(|| parse_dump_pcm(other))
+                        .or_else(|| parse_battery_log(other))
                         .or_else(|| parse_read_memory(other))
                         .or_else(|| parse_credential(other))
                         .or_else(|| parse_get(other)),
@@ -332,6 +340,12 @@ fn hex_u32(digits: &[u8]) -> Option<u32> {
 fn parse_dump_pcm(line: &[u8]) -> Option<Command> {
     let frames = hex_byte(line.strip_prefix(b"pcm ")?)?;
     Some(Command::DumpPcm { frames })
+}
+
+/// Reads `batlog <2 hex>`, an interval in seconds. Zero stops the log.
+fn parse_battery_log(line: &[u8]) -> Option<Command> {
+    let seconds = hex_byte(line.strip_prefix(b"batlog ")?)?;
+    Some(Command::BatteryLog { seconds })
 }
 
 /// Reads `play <8 hex>/<8 hex>`, the path the box keeps its audio under.
@@ -690,6 +704,37 @@ mod tests {
             feed_all(&mut watch, b"pcm 5\r"),
             None,
             "one digit is a typo"
+        );
+    }
+
+    #[test]
+    fn the_batlog_command_carries_an_interval_in_seconds() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"batlog 05\r"),
+            Some(Command::BatteryLog { seconds: 0x05 })
+        );
+    }
+
+    /// Zero is how the log is turned off, so it is a valid interval rather
+    /// than a rejected one.
+    #[test]
+    fn a_batlog_interval_of_zero_stops_the_log() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"batlog 00\r"),
+            Some(Command::BatteryLog { seconds: 0 })
+        );
+    }
+
+    #[test]
+    fn the_batlog_command_without_an_interval_does_not_fire() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"batlog\r"), None, "no interval");
+        assert_eq!(
+            feed_all(&mut watch, b"batlog 5\r"),
+            None,
+            "two digits, like every other count"
         );
     }
 
