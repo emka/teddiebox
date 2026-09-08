@@ -141,6 +141,9 @@ pub struct Core {
     /// every subsequent battery reading for as long as the box has power to
     /// keep asking.
     announced_shutdown: bool,
+    /// Set by the firmware when something outside the reducer's sight is
+    /// keeping the box in use. See [`Core::note_in_use`].
+    externally_in_use: bool,
 }
 
 impl Core {
@@ -157,6 +160,7 @@ impl Core {
             last_activity: 0,
             last_tick: 0,
             announced_shutdown: false,
+            externally_in_use: false,
         }
     }
 
@@ -173,6 +177,39 @@ impl Core {
     /// the card, which is not this.
     pub fn note_position(&mut self, pos: Position) {
         self.playback.note_position(pos);
+    }
+
+    /// Records that something the reducer cannot see is keeping the box in
+    /// use, so the idle timeout does not park it mid-job.
+    ///
+    /// Not an `Event`, for the same reason [`Core::note_position`] is not: it
+    /// carries no decision, only a fact the firmware holds and the reducer
+    /// cannot derive. The reducer's state answers for figures on the plate and
+    /// nothing else — a console `play` or `taf` runs with the reducer sitting
+    /// at `Idle`, and a `batlog` run is hours of deliberate use during which
+    /// the box may make no sound at all.
+    ///
+    /// The policy stays here, where a host test can reach it. All the firmware
+    /// does is report the fact.
+    pub fn note_in_use(&mut self, in_use: bool) {
+        self.externally_in_use = in_use;
+    }
+
+    /// Whether anything at all is going on, from every source that knows.
+    ///
+    /// A fetch counts: this box downloads at about 42.5 KB/s, so a 37 MB story
+    /// takes a quarter of an hour against a five-minute timeout, and parking
+    /// mid-download leaves a dark box and a half-written cache file.
+    ///
+    /// The charger counts because the spec deliberately declines to make it a
+    /// wake source: a box parked while plugged in is a box nothing can wake.
+    fn in_use(&self) -> bool {
+        self.charging
+            || self.externally_in_use
+            || matches!(
+                self.playback.kind(),
+                PlaybackKind::Playing | PlaybackKind::Fetching
+            )
     }
 
     pub fn handle<I: ContentIndex>(&mut self, event: Event, index: &I) -> Actions {
@@ -200,10 +237,13 @@ impl Core {
 
         match event {
             Event::Tick(now) => {
-                let idle = now.saturating_sub(self.last_activity);
-                if self.playback.kind() != PlaybackKind::Playing
-                    && idle >= self.config.idle_timeout_ms
-                {
+                // While the box is in use the countdown has not started, so
+                // the clock is carried forward rather than merely skipped:
+                // otherwise a use that outlasts the timeout would power the
+                // box off the instant it ended.
+                if self.in_use() {
+                    self.last_activity = now;
+                } else if now.saturating_sub(self.last_activity) >= self.config.idle_timeout_ms {
                     let _ = actions.push(Action::PowerOff(PowerOffReason::Idle));
                 }
             }
@@ -345,6 +385,19 @@ mod tests {
         }
         fn saved_position(&self, _tag: TagUid) -> Position {
             Position::Exact { page: 1 }
+        }
+    }
+
+    /// A card with nothing on it, so a test can reach `State::Fetching`. The
+    /// stub above answers `true` unconditionally, which is why nothing here
+    /// ever exercised a download despite the whole of it being host-decidable.
+    struct Unknown;
+    impl ContentIndex for Unknown {
+        fn is_available(&self, _tag: TagUid) -> bool {
+            false
+        }
+        fn saved_position(&self, _tag: TagUid) -> Position {
+            Position::Start
         }
     }
 
@@ -537,6 +590,77 @@ mod tests {
             contains(&actions, Action::PowerOff(PowerOffReason::Idle)),
             "five minutes after the end is"
         );
+    }
+
+    /// A child puts an unknown figure on the plate. This box downloads at about
+    /// 42.5 KB/s, so a 37 MB story is a quarter of an hour against a five-minute
+    /// timeout — and nothing refreshes the clock in between, because
+    /// `ContentReady` arrives only at the end. Parking here drops the rails while
+    /// the card is still being written.
+    #[test]
+    fn a_download_in_progress_holds_the_box_awake() {
+        let mut c = core();
+        c.handle(Event::Tick(0), &Unknown);
+        let actions = c.handle(Event::TagPresent(TAG), &Unknown);
+        assert!(contains(&actions, Action::RequestContent(TAG)));
+
+        let actions = c.handle(Event::Tick(15 * 60 * 1_000), &Unknown);
+        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+    }
+
+    /// A console `play` or `taf` runs with the reducer sitting at `Idle` — it has
+    /// no figure and never saw one — so the state gate alone cuts a bench story
+    /// off a second in. The same gap defeats a `batlog` run, which is hours of
+    /// deliberate use during which the box makes no sound at all.
+    #[test]
+    fn something_only_the_firmware_can_see_holds_the_box_awake() {
+        let mut c = core();
+        c.handle(Event::Tick(0), &Index);
+        c.note_in_use(true);
+
+        let actions = c.handle(Event::Tick(60 * 60 * 1_000), &Index);
+        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+
+        c.note_in_use(false);
+        let actions = c.handle(Event::Tick(60 * 60 * 1_000 + 1_000), &Index);
+        assert!(
+            !contains(&actions, Action::PowerOff(PowerOffReason::Idle)),
+            "the countdown starts when it ended"
+        );
+
+        let actions = c.handle(Event::Tick(65 * 60 * 1_000 + 1), &Index);
+        assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+    }
+
+    /// The spec deliberately declines to make the charger a wake source, so a box
+    /// parked while plugged in is a box nothing can wake — the worst of the two
+    /// available outcomes, reached by leaving it charging overnight.
+    #[test]
+    fn a_charging_box_does_not_park_itself() {
+        let mut c = core();
+        c.handle(Event::Tick(0), &Index);
+        c.handle(Event::Charger(true), &Index);
+
+        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+    }
+
+    /// Unplugging is not activity — the spec is explicit that charger events must
+    /// not defer the timeout — but it does start the countdown, because until
+    /// then there was nothing to count.
+    #[test]
+    fn unplugging_the_charger_starts_the_countdown() {
+        let mut c = core();
+        c.handle(Event::Tick(0), &Index);
+        c.handle(Event::Charger(true), &Index);
+        c.handle(Event::Tick(60 * 60 * 1_000), &Index);
+        c.handle(Event::Charger(false), &Index);
+
+        let actions = c.handle(Event::Tick(60 * 60 * 1_000 + 1_000), &Index);
+        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+
+        let actions = c.handle(Event::Tick(65 * 60 * 1_000 + 1), &Index);
+        assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
     #[test]

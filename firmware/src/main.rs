@@ -1938,6 +1938,15 @@ fn feed_tick(
     let now = Instant::now().as_millis();
     if now.saturating_sub(*last_fed) >= 1_000 {
         *last_fed = now;
+        // Reported beside the clock it guards, because the reducer's state
+        // answers for figures on the plate and nothing else. A console `play`
+        // or `taf` runs with it sitting at `Idle`, and a `batlog` run is hours
+        // of deliberate use during which the box may make no sound at all —
+        // both of which the idle timeout would otherwise cut short. The fact
+        // is reported here; the policy is the reducer's.
+        reducer.note_in_use(
+            PLAYING.load(Ordering::Relaxed) || BATLOG_EVERY.load(Ordering::Relaxed) > 0,
+        );
         apply(reducer, card, Event::Tick(now), token);
     }
 }
