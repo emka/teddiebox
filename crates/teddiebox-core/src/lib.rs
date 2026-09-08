@@ -207,13 +207,13 @@ impl Core {
                 let held = at.saturating_sub(down_at);
                 if held >= self.config.long_press_ms {
                     let _ = actions.push(match ear {
-                        Ear::Right => Action::NextTrack,
-                        Ear::Left => Action::PrevTrack,
+                        Ear::Larger => Action::NextTrack,
+                        Ear::Smaller => Action::PrevTrack,
                     });
                 } else {
                     let changed = match ear {
-                        Ear::Right => self.volume.up(),
-                        Ear::Left => self.volume.down(),
+                        Ear::Larger => self.volume.up(),
+                        Ear::Smaller => self.volume.down(),
                     };
                     match changed {
                         Some(v) => {
@@ -346,42 +346,57 @@ mod tests {
         ));
     }
 
+    /// The bigger ear does the bigger thing. A stock box puts volume up and
+    /// next-track on the large ear, and a child reaches for it without being
+    /// told which is which.
     #[test]
-    fn a_right_ear_tap_raises_the_volume() {
+    fn a_tap_on_the_larger_ear_raises_the_volume() {
         let mut c = core();
         let before = c.volume();
-        c.handle(Event::EarDown(Ear::Right, 0), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Right, 100), &Index);
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
         assert!(c.volume() > before);
         assert!(contains(&actions, Action::SetVolume(c.volume())));
     }
 
     #[test]
-    fn a_left_ear_tap_lowers_the_volume() {
+    fn a_tap_on_the_smaller_ear_lowers_the_volume() {
         let mut c = core();
         let before = c.volume();
-        c.handle(Event::EarDown(Ear::Left, 0), &Index);
-        c.handle(Event::EarUp(Ear::Left, 100), &Index);
+        c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
+        c.handle(Event::EarUp(Ear::Smaller, 100), &Index);
         assert!(c.volume() < before);
+    }
+
+    #[test]
+    fn a_hold_on_the_larger_ear_goes_forward_and_the_smaller_goes_back() {
+        let mut c = core();
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        let forward = c.handle(Event::EarUp(Ear::Larger, 1_000), &Index);
+        assert!(contains(&forward, Action::NextTrack));
+
+        c.handle(Event::EarDown(Ear::Smaller, 2_000), &Index);
+        let back = c.handle(Event::EarUp(Ear::Smaller, 3_000), &Index);
+        assert!(contains(&back, Action::PrevTrack));
     }
 
     #[test]
     fn a_tap_at_the_volume_ceiling_prompts_instead_of_changing_volume() {
         let mut c = core();
         for i in 0..10 {
-            c.handle(Event::EarDown(Ear::Right, i * 200), &Index);
-            c.handle(Event::EarUp(Ear::Right, i * 200 + 100), &Index);
+            c.handle(Event::EarDown(Ear::Larger, i * 200), &Index);
+            c.handle(Event::EarUp(Ear::Larger, i * 200 + 100), &Index);
         }
-        c.handle(Event::EarDown(Ear::Right, 5_000), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Right, 5_100), &Index);
+        c.handle(Event::EarDown(Ear::Larger, 5_000), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Larger, 5_100), &Index);
         assert!(contains(&actions, Action::PlayPrompt(Prompt::VolumeLimit)));
     }
 
     #[test]
     fn a_long_press_on_the_right_ear_skips_forward() {
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Right, 0), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Right, 900), &Index);
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Larger, 900), &Index);
         assert!(contains(&actions, Action::NextTrack));
         assert!(!contains(&actions, Action::SetVolume(c.volume())));
     }
@@ -389,15 +404,15 @@ mod tests {
     #[test]
     fn a_long_press_on_the_left_ear_skips_backward() {
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Left, 0), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Left, 900), &Index);
+        c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Smaller, 900), &Index);
         assert!(contains(&actions, Action::PrevTrack));
     }
 
     #[test]
     fn a_release_without_a_press_is_ignored() {
         let mut c = core();
-        assert!(c.handle(Event::EarUp(Ear::Right, 100), &Index).is_empty());
+        assert!(c.handle(Event::EarUp(Ear::Larger, 100), &Index).is_empty());
     }
 
     #[test]
@@ -456,8 +471,8 @@ mod tests {
     #[test]
     fn activity_defers_the_power_off() {
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Right, 4 * 60 * 1_000), &Index);
-        c.handle(Event::EarUp(Ear::Right, 4 * 60 * 1_000 + 100), &Index);
+        c.handle(Event::EarDown(Ear::Larger, 4 * 60 * 1_000), &Index);
+        c.handle(Event::EarUp(Ear::Larger, 4 * 60 * 1_000 + 100), &Index);
         let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
         assert!(!contains(&actions, Action::PowerOff));
     }

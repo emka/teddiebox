@@ -28,13 +28,24 @@ pub enum Position {
     Exact { page: u32 },
 }
 
+/// The two ears, named by size rather than by side.
+///
+/// A Toniebox has one large ear and one small one, and which is which is the
+/// only thing a person can tell without being told. "Left" and "right" are
+/// worse than useless here: they are the *box's* left and right, so an
+/// instruction to press the right ear gets the other ear pressed about half
+/// the time — which it did, at the bench, on 2026-09-08.
+///
 /// The discriminants are explicit because the reducer indexes its
-/// press-timestamp array by ear.
+/// press-timestamp array by ear, and they follow the pin order in
+/// [`crate::input`] so the two cannot drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Ear {
-    Left = 0,
-    Right = 1,
+    /// GPIO20, the box's left.
+    Larger = 0,
+    /// GPIO21, the box's right.
+    Smaller = 1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

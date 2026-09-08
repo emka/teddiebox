@@ -4,9 +4,9 @@
 //! themselves belong to the firmware.
 
 /// The left ear. Active low.
-pub const EAR_LEFT: u8 = 20;
+pub const EAR_LARGER: u8 = 20;
 /// The right ear. Active low.
-pub const EAR_RIGHT: u8 = 21;
+pub const EAR_SMALLER: u8 = 21;
 /// Wake, from the button or the charger. Documented as 1 = inactive.
 pub const WAKE: u8 = 7;
 

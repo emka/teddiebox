@@ -171,7 +171,13 @@ static LED_REQUEST: AtomicU8 = AtomicU8::new(LedState::Booting.code());
 /// the bounce duration of these particular switches measured, and a flip count
 /// beside a known poll interval is the cheapest way to see it.
 #[embassy_executor::task]
-async fn inputs(left: Input<'static>, right: Input<'static>, wake: Input<'static>) {
+/// The two ears and the wake line, polled.
+///
+/// `larger` is GPIO20 and `smaller` is GPIO21 — named by size because that is
+/// the only thing a person can tell about them without being told, and because
+/// "left" and "right" are the box's, not the listener's, which confused two
+/// people at the bench on 2026-09-08 before one tap settled it.
+async fn inputs(larger: Input<'static>, smaller: Input<'static>, wake: Input<'static>) {
     const POLL_MS: u64 = 2;
 
     // Name, debouncer, raw transitions seen since the last settled edge, and
@@ -183,15 +189,15 @@ async fn inputs(left: Input<'static>, right: Input<'static>, wake: Input<'static
     // charger, and `Core` has no event for it.
     let mut state = [
         (
-            "left ear",
-            Some(Ear::Left),
+            "larger ear",
+            Some(Ear::Larger),
             Debounced::released(),
             0u32,
             false,
         ),
         (
-            "right ear",
-            Some(Ear::Right),
+            "smaller ear",
+            Some(Ear::Smaller),
             Debounced::released(),
             0u32,
             false,
@@ -206,8 +212,8 @@ async fn inputs(left: Input<'static>, right: Input<'static>, wake: Input<'static
         // spanning the wrap would read as 49 days and count as a hold.
         let now = uptime as u32;
         let raw = [
-            input::ear_pressed(left.is_high()),
-            input::ear_pressed(right.is_high()),
+            input::ear_pressed(larger.is_high()),
+            input::ear_pressed(smaller.is_high()),
             input::wake_asserted(wake.is_high()),
         ];
 
