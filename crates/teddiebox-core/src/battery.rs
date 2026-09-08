@@ -33,7 +33,8 @@ pub struct BatteryConfig {
     /// Millivolts a reading must exceed a threshold by before the level is
     /// allowed to climb back up, preventing flicker at a boundary.
     pub hysteresis_mv: u16,
-    /// Readings that must agree before the level is allowed to change.
+    /// Readings that must agree before the level is allowed to change, and
+    /// consecutive readings below `cutoff_mv` before the shutdown latches.
     ///
     /// The pack reading has been implausible before — the very first sample
     /// this project took was 9453 mV from three NiMH cells — and a single bad
@@ -72,6 +73,14 @@ pub struct BatteryModel {
     candidate: BatteryLevel,
     /// How many consecutive readings have agreed on `candidate`.
     agreed: u8,
+    /// How many consecutive readings have been below the cutoff.
+    ///
+    /// Counted apart from `agreed`, which counts agreement on the *bucket*. A
+    /// pack settled in the Critical bucket buckets an implausible 2500 mV as
+    /// Critical too, so bucket agreement rises rather than resetting and one
+    /// bad sample used to latch the shutdown — in the 3000-3200 mV window
+    /// every discharge passes through.
+    below_cutoff: u8,
 }
 
 impl BatteryModel {
@@ -82,6 +91,7 @@ impl BatteryModel {
             shut_down: false,
             candidate: BatteryLevel::Ok,
             agreed: 0,
+            below_cutoff: 0,
         }
     }
 
@@ -131,22 +141,26 @@ impl BatteryModel {
             self.agreed = 1;
         }
 
-        if self.agreed < self.config.readings_to_agree {
-            return None;
-        }
-
         // The hard cutoff is a separate, lower threshold than the boundary of
         // the Critical bucket — 3000 mV against 3200 — and it is the one that
         // stops these unprotected cells being driven into reversal. So it is
         // judged on the compensated reading rather than on which bucket the
-        // reading landed in.
-        //
-        // Checked before the early return below, because a pack that has
-        // already settled at Critical goes on falling, and that is precisely
-        // when this has to fire. Never cleared: a pack that recovers voltage
-        // once the load comes off is still empty.
+        // reading landed in, and it keeps its own agreement rather than
+        // borrowing the bucket's: a pack already settled at Critical agrees
+        // with itself about an absurd sample, which is how a single reading
+        // used to switch the box off. Never cleared once armed: a pack that
+        // recovers voltage as soon as the load comes off is still empty.
         if mv < self.config.cutoff_mv {
-            self.shut_down = true;
+            self.below_cutoff = self.below_cutoff.saturating_add(1);
+            if self.below_cutoff >= self.config.readings_to_agree {
+                self.shut_down = true;
+            }
+        } else {
+            self.below_cutoff = 0;
+        }
+
+        if self.agreed < self.config.readings_to_agree {
+            return None;
         }
 
         if new == self.level {
@@ -341,6 +355,44 @@ mod tests {
         }
         assert_eq!(b.update(2_900, false), Some(BatteryLevel::Critical));
         assert!(b.must_shut_down());
+    }
+
+    /// The agreement filter used to guard the cutoff only by accident: it
+    /// counted agreement on the *bucket*, and a pack settled in the Critical
+    /// bucket buckets an implausible 2500 mV as Critical too. So the count went
+    /// up rather than resetting, and one bad sample latched the shutdown. The
+    /// 3000-3200 mV window is one every discharge passes through, and this ADC
+    /// has reported 9453 mV from three NiMH cells.
+    #[test]
+    fn one_implausible_reading_from_a_settled_critical_pack_does_not_arm_the_shutdown() {
+        let mut b = model();
+        for _ in 0..4 {
+            b.update(3_100, false);
+        }
+        assert_eq!(b.level(), BatteryLevel::Critical, "settled in the bucket");
+        assert!(!b.must_shut_down(), "and above the cutoff");
+
+        b.update(2_500, false);
+
+        assert!(
+            !b.must_shut_down(),
+            "one sample below the cutoff is not a pack below the cutoff"
+        );
+    }
+
+    /// The cutoff keeps its own count, so noise either side of it never
+    /// accumulates into a shutdown the way bucket agreement did.
+    #[test]
+    fn a_reading_above_the_cutoff_restarts_the_cutoff_count() {
+        let mut b = model();
+        for _ in 0..4 {
+            b.update(3_100, false);
+        }
+        for _ in 0..8 {
+            b.update(2_500, false);
+            b.update(3_100, false);
+        }
+        assert!(!b.must_shut_down());
     }
 
     /// A reading that disagrees restarts the count, so noise alternating either
