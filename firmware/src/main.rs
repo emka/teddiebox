@@ -2098,12 +2098,25 @@ async fn media(
                     // The ears are here for the same reason and it is the
                     // whole point of them: turning a story down while it plays
                     // is when anybody reaches for an ear at all.
+                    // Only a story the box can name has a place worth keeping.
+                    // A root `.TAF` played from the console arrives here too,
+                    // as `Source::First`, and `CONTENT_DIRECTORY` then holds
+                    // whatever the last real story left behind — so without
+                    // this guard a console `taf` would write its chapter into
+                    // some other figure's file, and reaching its end would
+                    // wipe that figure's place entirely.
+                    let identified = matches!(request, REQUEST_CONTENT | REQUEST_CACHE);
                     let stock = request == REQUEST_CONTENT;
                     let dir = CONTENT_DIRECTORY.load(Ordering::Relaxed);
                     let file = CONTENT_FILE.load(Ordering::Relaxed);
-                    let from = critical_section::with(|cs| {
+                    let from = match critical_section::with(|cs| {
                         core::mem::replace(&mut *PLAY_FROM.borrow_ref_mut(cs), Position::Start)
-                    });
+                    }) {
+                        // Taken either way, so a figure's place cannot be
+                        // inherited by whatever plays next.
+                        from if identified => from,
+                        _ => Position::Start,
+                    };
                     // What the card already says, so resuming into a chapter
                     // does not immediately rewrite the file it was read from.
                     let mut wrote_chapter = match from {
@@ -2129,7 +2142,7 @@ async fn media(
                         // writing it now covers every ending — including the
                         // flat battery that never reaches a lift.
                         let chapter = audio::CHAPTER.load(Ordering::Relaxed);
-                        if chapter != wrote_chapter {
+                        if identified && chapter != wrote_chapter {
                             wrote_chapter = chapter;
                             let mut out = [0u8; MAX_POSITION];
                             let len = position::render(chapter, &mut out);
@@ -2148,7 +2161,7 @@ async fn media(
                     if let Err(reason) = outcome {
                         esp_println::println!("teddiebox: playback failed — {reason}");
                     }
-                    if matches!(outcome, Ok(audio::Finish::Ended)) {
+                    if identified && matches!(outcome, Ok(audio::Finish::Ended)) {
                         // A finished story is not a paused one. Zero rather
                         // than a deletion: `storage` has no delete, and "no
                         // file" and "chapter zero" mean the same thing.
