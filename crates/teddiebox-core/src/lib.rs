@@ -141,6 +141,16 @@ pub struct Core {
     /// every subsequent battery reading for as long as the box has power to
     /// keep asking.
     announced_shutdown: bool,
+    /// Set once the idle timeout has asked the box to park, so it asks once
+    /// rather than on every tick for as long as the box has power to keep
+    /// asking — the same guard, and for the same reason, as
+    /// `announced_shutdown`.
+    ///
+    /// Never cleared. A park drops the rails and the console loop does not
+    /// come back from it, so the only exit is a reset, which builds a new
+    /// `Core` anyway. Clearing it on renewed activity would be a promise this
+    /// box cannot keep.
+    asked_to_park: bool,
     /// Set by the firmware when something outside the reducer's sight is
     /// keeping the box in use. See [`Core::note_in_use`].
     externally_in_use: bool,
@@ -160,6 +170,7 @@ impl Core {
             last_activity: 0,
             last_tick: 0,
             announced_shutdown: false,
+            asked_to_park: false,
             externally_in_use: false,
         }
     }
@@ -243,7 +254,10 @@ impl Core {
                 // box off the instant it ended.
                 if self.in_use() {
                     self.last_activity = now;
-                } else if now.saturating_sub(self.last_activity) >= self.config.idle_timeout_ms {
+                } else if !self.asked_to_park
+                    && now.saturating_sub(self.last_activity) >= self.config.idle_timeout_ms
+                {
+                    self.asked_to_park = true;
                     let _ = actions.push(Action::PowerOff(PowerOffReason::Idle));
                 }
             }
@@ -541,6 +555,23 @@ mod tests {
         let mut c = core();
         let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
         assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+    }
+
+    /// The pack-empty path latches on `announced_shutdown` precisely so it
+    /// fires once; the idle path had no such guard, and at the bench on
+    /// 2026-09-08 it asked to park 125 times in three minutes — once per tick,
+    /// for as long as the box had power to keep asking.
+    #[test]
+    fn the_idle_park_is_asked_for_once_not_on_every_tick() {
+        let mut c = core();
+        let first = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        assert!(contains(&first, Action::PowerOff(PowerOffReason::Idle)));
+
+        let again = c.handle(Event::Tick(5 * 60 * 1_000 + 2_000), &Index);
+        assert!(
+            !contains(&again, Action::PowerOff(PowerOffReason::Idle)),
+            "a box already told to park must not be told again on the next tick"
+        );
     }
 
     #[test]
