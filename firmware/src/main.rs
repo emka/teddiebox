@@ -1410,7 +1410,19 @@ static SOUND_REQUEST: AtomicU32 = AtomicU32::new(NO_SOUND);
 const NO_SOUND: u32 = u32::MAX;
 
 /// Set while a sound the box asked for is still being played.
+///
+/// Owned by the playback it names, which is why the two statics below travel
+/// with it: the flag used to be cleared by whichever playback happened to end
+/// next. A story running when the pack went critical would clear it on its own
+/// ending, and the shutdown then dropped the rails a fraction of a second into
+/// the sentence that was still being spoken — the common path, because a pack
+/// reaches the cutoff while playing far more often than while idle.
 static ANNOUNCING: AtomicBool = AtomicBool::new(false);
+
+/// Which `CONTENT/<dir>/<file>` [`ANNOUNCING`] is about, so the playback that
+/// ends can say whether it is the announcement.
+static ANNOUNCING_DIRECTORY: AtomicU32 = AtomicU32::new(0);
+static ANNOUNCING_FILE: AtomicU32 = AtomicU32::new(NO_SOUND);
 
 /// The level the codec should be playing at, in whole dB, or [`NO_VOLUME`].
 ///
@@ -2304,7 +2316,14 @@ async fn media(
                         // reducer idle too, not just a story tied to a figure.
                         apply(&mut reducer, card, Event::PlaybackEnded, on_plate_token);
                     }
-                    ANNOUNCING.store(false, Ordering::Relaxed);
+                    // Cleared only by the playback the flag names, and
+                    // whatever the outcome: a failed announcement that left it
+                    // set would be a shutdown nothing could ever reach.
+                    if dir == ANNOUNCING_DIRECTORY.load(Ordering::Relaxed)
+                        && file == ANNOUNCING_FILE.load(Ordering::Relaxed)
+                    {
+                        ANNOUNCING.store(false, Ordering::Relaxed);
+                    }
                     i2s_tx = Some(tx);
                     wav_buffer = Some(buffer);
                     // Nothing is playing now, so the speaker has no business
@@ -3205,7 +3224,10 @@ async fn main(spawner: Spawner) {
             CONTENT_FILE.store(pending, Ordering::Relaxed);
             // Marked here rather than by the task that plays it, so there is
             // no window in which the announcement is pending but nothing
-            // reports it as under way.
+            // reports it as under way. Named as well as marked, so only the
+            // playback this flag is about can clear it.
+            ANNOUNCING_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
+            ANNOUNCING_FILE.store(pending, Ordering::Relaxed);
             ANNOUNCING.store(true, Ordering::Relaxed);
             REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
         }
