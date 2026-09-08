@@ -78,6 +78,11 @@ esp_bootloader_esp_idf::esp_app_desc!();
 async fn heartbeat() {
     let mut ticks: u32 = 0;
     loop {
+        // Nothing to do for the rest of this power-on: see `PARKED`.
+        if PARKED.load(Ordering::Relaxed) {
+            park_task().await;
+        }
+
         esp_println::println!("teddiebox: alive {ticks}");
         ticks = ticks.wrapping_add(1);
         Timer::after(Duration::from_secs(1)).await;
@@ -207,6 +212,11 @@ async fn inputs(larger: Input<'static>, smaller: Input<'static>, wake: Input<'st
     ];
 
     loop {
+        // Nothing to do for the rest of this power-on: see `PARKED`.
+        if PARKED.load(Ordering::Relaxed) {
+            park_task().await;
+        }
+
         let uptime = Instant::now().as_millis();
         // `Debounced` takes a `u32` and handles its wrap; `Core` measures how
         // long an ear was held and wants the un-truncated clock, or a press
@@ -280,6 +290,11 @@ async fn sense(
     let mut batlog_ticks: u8 = 0;
 
     loop {
+        // Nothing to do for the rest of this power-on: see `PARKED`.
+        if PARKED.load(Ordering::Relaxed) {
+            park_task().await;
+        }
+
         // Raw counts as well as millivolts. The conversion rests on an
         // assumed attenuation and on GPIO9 measuring the pack rather than
         // something downstream of it, and a millivolt figure alone cannot
@@ -462,6 +477,11 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     }
 
     loop {
+        // Nothing to do for the rest of this power-on: see `PARKED`.
+        if PARKED.load(Ordering::Relaxed) {
+            park_task().await;
+        }
+
         let speaker = SPEAKER_REQUEST.swap(0, Ordering::Relaxed);
         {
             if let request @ (SPEAKER_MUTE | SPEAKER_UNMUTE) = speaker {
@@ -1453,6 +1473,31 @@ static CODEC_READY: AtomicBool = AtomicBool::new(false);
 /// something untrue, which is worse than saying nothing.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
+/// Set once the box has actually parked — rails down, nothing left to say.
+///
+/// Every periodic task reads this and stops for good. Until it existed the
+/// box parked only in the sense that a child could not see or hear it: the
+/// heartbeat went on printing once a second, `sense` went on converting two
+/// ADC channels every two seconds, and the reducer went on being ticked, all
+/// on a pack the park exists to save. Measured at the bench on 2026-09-08,
+/// three minutes of a parked box cost 125 heartbeat lines and 13 ADC rounds.
+///
+/// Set after the card flush and after the rails go down, because the tasks
+/// this stops are the ones that carry those out.
+static PARKED: AtomicBool = AtomicBool::new(false);
+
+/// Stops the calling task for the rest of this power-on.
+///
+/// `pending` never completes, so the executor never schedules the task again
+/// — no timer, no poll, no wakeup at all. Deliberately not a `return`: that
+/// would drop the pins and buses the task owns, and a dropped `Input` does
+/// not necessarily leave its pin the way a parked box wants it. Holding them
+/// in a future that never finishes keeps every pin exactly as the park left
+/// it.
+async fn park_task() {
+    core::future::pending::<()>().await;
+}
+
 /// Which content file `play` names, as two halves of `CONTENT/<dir>/<file>`.
 static CONTENT_DIRECTORY: AtomicU32 = AtomicU32::new(0);
 static CONTENT_FILE: AtomicU32 = AtomicU32::new(0);
@@ -2039,6 +2084,11 @@ async fn media(
     let mut last_tick_fed: u64 = 0;
 
     loop {
+        // Nothing to do for the rest of this power-on: see `PARKED`.
+        if PARKED.load(Ordering::Relaxed) {
+            park_task().await;
+        }
+
         // Fed before the request is read, so a `Play` decided here is picked
         // up on the same pass rather than the next one.
         let mut events: [Option<Event>; 2] = [None, None];
@@ -2834,6 +2884,11 @@ async fn nfc_reader(
     let mut believed_present = false;
 
     loop {
+        // Nothing to do for the rest of this power-on: see `PARKED`.
+        if PARKED.load(Ordering::Relaxed) {
+            park_task().await;
+        }
+
         match NFC_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
             NFC_INVENTORY => {
                 reader.inventory();
@@ -3276,13 +3331,14 @@ async fn main(spawner: Spawner) {
             }
             board.apply_all(&gates.release_for_reset());
             drain_console();
-            // Everything a child can see or hear is now off. This is not a
-            // true power-off — the chip is still running, and deep sleep is
-            // bench step 12 — so it is parked here rather than pretending
-            // otherwise.
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
+            // Everything a child can see or hear is now off, and every task
+            // that was still working on the box's behalf stops here. This is
+            // not a true power-off — the chip is still running, and deep sleep
+            // is bench step 12 — so it is parked rather than pretending
+            // otherwise. What it no longer does is spend the pack while
+            // parked.
+            PARKED.store(true, Ordering::Relaxed);
+            park_task().await;
         }
 
         let mut buf = [0u8; 16];
