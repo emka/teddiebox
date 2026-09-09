@@ -146,6 +146,22 @@ def opening_phase(discharge_only):
     return "charge" if discharge_only else "waiting"
 
 
+def opening_message(discharge_only, on_charge):
+    """What to ask of the operator once the first sample says where things are.
+
+    Held back until then because a banner printed at startup is a guess: the
+    charger line is unknown until the box says it. `None` when the first
+    sample moves the phase on its own, since that message says it already.
+    """
+    if discharge_only:
+        if on_charge:
+            return "UNPLUG THE CHARGER NOW. Recording starts the moment it is off."
+        return None
+    if on_charge:
+        return None
+    return "PLUG THE CHARGER IN NOW. Waiting for it..."
+
+
 def transition_message(old, new, reason, discharge_only):
     """What to tell the operator about one phase change."""
     if new == "charge":
@@ -237,6 +253,23 @@ def self_test():
     # `charge`, so an unplug is what begins its recording.
     assert opening_phase(discharge_only=False) == "waiting"
     assert opening_phase(discharge_only=True) == "charge"
+
+    # The opening instruction waits for the first sample, because until one
+    # arrives nothing knows whether a charger is connected. It is needed
+    # exactly when that sample causes no phase change of its own — otherwise
+    # the transition message below already says where things stand.
+    assert opening_message(discharge_only=False, on_charge=False) == (
+        "PLUG THE CHARGER IN NOW. Waiting for it..."
+    )
+    assert (
+        opening_message(discharge_only=False, on_charge=True) is None
+    ), "a full run that finds the charger already on says so, not plug it in"
+    assert opening_message(discharge_only=True, on_charge=True) == (
+        "UNPLUG THE CHARGER NOW. Recording starts the moment it is off."
+    )
+    assert (
+        opening_message(discharge_only=True, on_charge=False) is None
+    ), "never tell somebody to unplug a charger that is not plugged in"
 
     # What the operator is told at each transition. These are the whole of the
     # script's conversation with a person, so they are pinned literally.
@@ -376,6 +409,7 @@ def main():
     last_sample_at = time.time()
     last_report = 0.0
     samples = 0
+    opened = False
 
     def arm():
         # `awake on` because a run is hours of the box deliberately doing
@@ -389,14 +423,6 @@ def main():
 
     say("Arming the box. Do not unplug the serial adapter until this finishes.")
     arm()
-
-    if args.discharge_only:
-        say(
-            "UNPLUG THE CHARGER NOW, or leave it out. "
-            "Recording starts the moment it is off."
-        )
-    else:
-        say("PLUG THE CHARGER IN NOW. Waiting for it...")
 
     try:
         while True:
@@ -419,6 +445,12 @@ def main():
                 last_sample_at = time.time()
                 wall = last_sample_at - started
                 on_charge = charger_present(sample["charger_raw"])
+
+                if not opened:
+                    opened = True
+                    opening = opening_message(args.discharge_only, on_charge)
+                    if opening:
+                        say(opening)
 
                 full = (
                     phase == "charge"
