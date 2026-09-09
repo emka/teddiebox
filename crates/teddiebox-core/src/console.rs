@@ -212,6 +212,14 @@ pub enum Command {
     /// contaminate any bench measurement that involves a figure, and the
     /// download tests are exactly that.
     Plate(bool),
+    /// Hold the idle timeout off, or let it run again.
+    ///
+    /// A bench session is hours of deliberate waiting — a discharge curve, a
+    /// download, a person listening for one sound — during which the box is
+    /// doing exactly what the idle timeout was written to end. Off at boot,
+    /// like [`Command::Plate`]: a box that stays awake because a previous
+    /// session said so is a box measuring the wrong thing.
+    StayAwake(bool),
 }
 
 /// Longest network name accepted, in octets. 802.11 says 32.
@@ -293,6 +301,8 @@ impl CommandWatch {
                     b"net status" => Some(Command::NetStatus),
                     b"plate on" => Some(Command::Plate(true)),
                     b"plate off" => Some(Command::Plate(false)),
+                    b"awake on" => Some(Command::StayAwake(true)),
+                    b"awake off" => Some(Command::StayAwake(false)),
                     other => parse_password(other)
                         .or_else(|| parse_codec_set(other))
                         .or_else(|| parse_play_content(other))
@@ -1116,6 +1126,24 @@ mod tests {
     fn token_is_recognised() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"token\n"), Some(Command::ReadToken));
+    }
+
+    /// A bench session is hours of a person watching a box that is
+    /// deliberately doing nothing — which is precisely what the idle timeout
+    /// is for. Without a way to say so, half the measurements this box still
+    /// owes cannot be taken in one capture.
+    #[test]
+    fn the_idle_shutdown_can_be_held_off_from_the_console() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"awake on\r"),
+            Some(Command::StayAwake(true))
+        );
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"awake off\r"),
+            Some(Command::StayAwake(false))
+        );
     }
 
     #[test]

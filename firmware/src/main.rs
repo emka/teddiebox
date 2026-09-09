@@ -1486,6 +1486,18 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 /// this stops are the ones that carry those out.
 static PARKED: AtomicBool = AtomicBool::new(false);
 
+/// Set by `awake on`, to hold the idle timeout off for a bench session.
+///
+/// Reported to the reducer as use, rather than checked at the point of
+/// shutdown: the reducer owns the policy, and a second place that could
+/// veto a park would be a second thing to reason about when one of them
+/// gets it wrong.
+///
+/// Off at boot and lost on every reset, exactly like `PLATE_POLLING` — a box
+/// that stays awake because a previous session said so is measuring the
+/// wrong thing.
+static STAY_AWAKE: AtomicBool = AtomicBool::new(false);
+
 /// Stops the calling task for the rest of this power-on.
 ///
 /// `pending` never completes, so the executor never schedules the task again
@@ -2013,7 +2025,9 @@ fn feed_tick(
         // both of which the idle timeout would otherwise cut short. The fact
         // is reported here; the policy is the reducer's.
         reducer.note_in_use(
-            PLAYING.load(Ordering::Relaxed) || BATLOG_EVERY.load(Ordering::Relaxed) > 0,
+            PLAYING.load(Ordering::Relaxed)
+                || BATLOG_EVERY.load(Ordering::Relaxed) > 0
+                || STAY_AWAKE.load(Ordering::Relaxed),
         );
         apply(reducer, card, Event::Tick(now), token);
     }
@@ -3139,7 +3153,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds>"
+        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | plate on|off | awake on|off"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -3499,6 +3513,13 @@ async fn main(spawner: Spawner) {
                 Some(Command::Lock) => {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_LOCK, Ordering::Relaxed);
+                }
+                Some(Command::StayAwake(on)) => {
+                    STAY_AWAKE.store(on, Ordering::Relaxed);
+                    esp_println::println!(
+                        "teddiebox: staying awake {}",
+                        if on { "on" } else { "off" }
+                    );
                 }
                 Some(Command::Plate(on)) => {
                     if !on {
