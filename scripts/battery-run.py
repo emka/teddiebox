@@ -109,6 +109,27 @@ class FullCharge:
         return False
 
 
+def next_phase(phase, on_charge, full):
+    """The phase after one sample, from the charger line and the full verdict.
+
+    `waiting` -> `charge` -> `full` -> `discharge`, and back to `charge` if the
+    charger reappears. The charger line wins over `full`: a pack whose charger
+    came off is discharging whatever the detector just decided.
+
+    A discharge-only run is this same machine entered at `charge` with `full`
+    wired to False, so it can only ever fall through to `discharge`.
+    """
+    if phase == "waiting":
+        return "charge" if on_charge else "waiting"
+    if phase in ("charge", "full"):
+        if not on_charge:
+            return "discharge"
+        return "full" if (phase == "full" or full) else "charge"
+    if phase == "discharge":
+        return "charge" if on_charge else "discharge"
+    return phase
+
+
 def self_test():
     assert charger_present(4095), "railed means plugged in"
     assert charger_present(3000), "the threshold itself counts as present"
@@ -156,6 +177,24 @@ def self_test():
     d.update(0, 3800)
     for t in range(600, 5000, 300):
         assert not d.update(t, 3800 + t // 10), "a new peak resets the window"
+
+    # The whole phase table, written out. A full run starts in `waiting`; a
+    # discharge-only run starts in `charge` and never sees a `full` verdict,
+    # so the rows with full=False are that run's whole life.
+    for phase, on_charge, full, expected in [
+        ("waiting", False, False, "waiting"),
+        ("waiting", True, False, "charge"),
+        ("charge", True, False, "charge"),
+        ("charge", True, True, "full"),
+        ("charge", False, False, "discharge"),
+        ("charge", False, True, "discharge"),
+        ("full", True, True, "full"),
+        ("full", False, True, "discharge"),
+        ("discharge", False, False, "discharge"),
+        ("discharge", True, False, "charge"),
+    ]:
+        got = next_phase(phase, on_charge, full)
+        assert got == expected, f"{phase}/{on_charge}/{full} gave {got}"
 
     print("self-test: all assertions passed")
 
@@ -295,31 +334,32 @@ def main():
                 wall = last_sample_at - started
                 on_charge = charger_present(sample["charger_raw"])
 
-                if phase == "waiting":
-                    if on_charge:
-                        phase = "charge"
-                        say("Charger detected. Charging — this will take hours.")
-                elif phase == "charge":
-                    if not on_charge:
-                        phase = "discharge"
+                full = (
+                    phase == "charge"
+                    and on_charge
+                    and detector.update(wall, sample["mv"])
+                )
+                moved_to = next_phase(phase, on_charge, full)
+                if moved_to != phase:
+                    if moved_to == "charge":
                         say(
-                            "Charger removed before I called it full — "
-                            "recording the discharge from here."
+                            "Charger detected. Charging — this will take hours."
+                            if phase == "waiting"
+                            else "Charger is back on — the discharge is contaminated."
                         )
-                    elif detector.update(wall, sample["mv"]):
-                        phase = "full"
+                    elif moved_to == "full":
                         say(
                             f"Pack looks full ({detector.reason}).\n"
                             "    UNPLUG THE CHARGER NOW. Recording continues."
                         )
-                elif phase == "full":
-                    if not on_charge:
-                        phase = "discharge"
+                    elif phase == "full":
                         say("Charger removed. Recording the discharge to cutoff.")
-                elif phase == "discharge":
-                    if on_charge:
-                        say("Charger is back on — the discharge is contaminated.")
-                        phase = "charge"
+                    else:
+                        say(
+                            "Charger removed before I called it full — "
+                            "recording the discharge from here."
+                        )
+                    phase = moved_to
 
                 out.write(
                     f"{phase},{wall:.1f},{sample['ms']},{sample['raw']},"
