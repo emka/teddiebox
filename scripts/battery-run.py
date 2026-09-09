@@ -10,6 +10,11 @@ plug the charger in and take it out again, and it says when.
 
     scripts/battery-run.py --out pack-2026-09-09.csv
 
+`--discharge-only` skips the charge: it records from the moment the charger
+comes off, for a pack you have already charged some other way.
+
+    scripts/battery-run.py --discharge-only --out drain-2026-09-09.csv
+
 `--self-test` runs the logic below without a box attached.
 """
 import argparse
@@ -130,6 +135,38 @@ def next_phase(phase, on_charge, full):
     return phase
 
 
+def opening_phase(discharge_only):
+    """Where a run starts.
+
+    A full run waits for a charger to appear. A discharge-only run behaves as
+    if one is already on: it starts in `charge`, so the charger coming off is
+    what starts the recording — and if it was never on, that happens on the
+    first sample.
+    """
+    return "charge" if discharge_only else "waiting"
+
+
+def transition_message(old, new, reason, discharge_only):
+    """What to tell the operator about one phase change."""
+    if new == "charge":
+        if old == "waiting":
+            return "Charger detected. Charging — this will take hours."
+        return "Charger is back on — the discharge is contaminated."
+    if new == "full":
+        return (
+            f"Pack looks full ({reason}).\n"
+            "    UNPLUG THE CHARGER NOW. Recording continues."
+        )
+    if old == "full":
+        return "Charger removed. Recording the discharge to cutoff."
+    if discharge_only:
+        return "Charger is off. Recording the discharge to cutoff."
+    return (
+        "Charger removed before I called it full — "
+        "recording the discharge from here."
+    )
+
+
 def self_test():
     assert charger_present(4095), "railed means plugged in"
     assert charger_present(3000), "the threshold itself counts as present"
@@ -195,6 +232,38 @@ def self_test():
     ]:
         got = next_phase(phase, on_charge, full)
         assert got == expected, f"{phase}/{on_charge}/{full} gave {got}"
+
+    # Where a run starts. A discharge-only run enters the same machine at
+    # `charge`, so an unplug is what begins its recording.
+    assert opening_phase(discharge_only=False) == "waiting"
+    assert opening_phase(discharge_only=True) == "charge"
+
+    # What the operator is told at each transition. These are the whole of the
+    # script's conversation with a person, so they are pinned literally.
+    assert (
+        transition_message("waiting", "charge", None, False)
+        == "Charger detected. Charging — this will take hours."
+    )
+    assert (
+        transition_message("discharge", "charge", None, False)
+        == "Charger is back on — the discharge is contaminated."
+    )
+    assert transition_message("charge", "full", "-dV: 3884 mV", False) == (
+        "Pack looks full (-dV: 3884 mV).\n"
+        "    UNPLUG THE CHARGER NOW. Recording continues."
+    )
+    assert (
+        transition_message("full", "discharge", None, False)
+        == "Charger removed. Recording the discharge to cutoff."
+    )
+    assert transition_message("charge", "discharge", None, False) == (
+        "Charger removed before I called it full — "
+        "recording the discharge from here."
+    ), "a full run says the charge was cut short, because the pack may not be"
+    assert (
+        transition_message("charge", "discharge", None, True)
+        == "Charger is off. Recording the discharge to cutoff."
+    ), "a discharge-only run never judged fullness, so it must not imply it did"
 
     print("self-test: all assertions passed")
 
@@ -268,6 +337,11 @@ def main():
         default=5.0,
         help="minutes of silence that mean the box has died (default 5)",
     )
+    ap.add_argument(
+        "--discharge-only",
+        action="store_true",
+        help="skip the charge: record from the moment the charger comes off",
+    )
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -284,14 +358,20 @@ def main():
     out.write("# teddiebox pack run\n")
     out.write(f"# started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     out.write(f"# interval {args.every} s\n")
+    if args.discharge_only:
+        out.write("# mode discharge-only\n")
     out.write("phase,wall_s,ms,raw,mv,playing,charger_raw\n")
 
     started = time.time()
-    phase = "waiting"
-    detector = FullCharge(
-        drop_mv=args.drop_mv,
-        plateau_s=args.plateau_min * 60,
-        min_charge_s=args.min_charge_min * 60,
+    phase = opening_phase(args.discharge_only)
+    detector = (
+        None
+        if args.discharge_only
+        else FullCharge(
+            drop_mv=args.drop_mv,
+            plateau_s=args.plateau_min * 60,
+            min_charge_s=args.min_charge_min * 60,
+        )
     )
     last_sample_at = time.time()
     last_report = 0.0
@@ -310,7 +390,13 @@ def main():
     say("Arming the box. Do not unplug the serial adapter until this finishes.")
     arm()
 
-    say("PLUG THE CHARGER IN NOW. Waiting for it...")
+    if args.discharge_only:
+        say(
+            "UNPLUG THE CHARGER NOW, or leave it out. "
+            "Recording starts the moment it is off."
+        )
+    else:
+        say("PLUG THE CHARGER IN NOW. Waiting for it...")
 
     try:
         while True:
@@ -337,28 +423,19 @@ def main():
                 full = (
                     phase == "charge"
                     and on_charge
+                    and detector is not None
                     and detector.update(wall, sample["mv"])
                 )
                 moved_to = next_phase(phase, on_charge, full)
                 if moved_to != phase:
-                    if moved_to == "charge":
-                        say(
-                            "Charger detected. Charging — this will take hours."
-                            if phase == "waiting"
-                            else "Charger is back on — the discharge is contaminated."
+                    say(
+                        transition_message(
+                            phase,
+                            moved_to,
+                            detector.reason if detector else None,
+                            args.discharge_only,
                         )
-                    elif moved_to == "full":
-                        say(
-                            f"Pack looks full ({detector.reason}).\n"
-                            "    UNPLUG THE CHARGER NOW. Recording continues."
-                        )
-                    elif phase == "full":
-                        say("Charger removed. Recording the discharge to cutoff.")
-                    else:
-                        say(
-                            "Charger removed before I called it full — "
-                            "recording the discharge from here."
-                        )
+                    )
                     phase = moved_to
 
                 out.write(
