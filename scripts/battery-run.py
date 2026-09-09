@@ -19,9 +19,11 @@ comes off, for a pack you have already charged some other way.
 """
 import argparse
 import os
+import pty
 import re
 import select
 import sys
+import termios
 import time
 
 # The charger channel is uncalibrated but separates the two states cleanly:
@@ -298,6 +300,25 @@ def self_test():
         == "Charger is off. Recording the discharge to cutoff."
     ), "a discharge-only run never judged fullness, so it must not imply it did"
 
+    # The port comes up configured. An unattended run cannot depend on what
+    # the last tool left the line at: esptool leaves it at 9600, and at 9600
+    # the box's 115200 output is unreadable noise — 12 bytes of it — while the
+    # `batlog` command we send back is noise to the box, so nothing ever arms.
+    master, slave = pty.openpty()
+    con = None
+    try:
+        con = Console(os.ttyname(slave))
+        attrs = termios.tcgetattr(con.fd)
+        assert attrs[4] == termios.B115200, "input speed"
+        assert attrs[5] == termios.B115200, "output speed"
+        assert not attrs[3] & termios.ECHO, "echo sends the box its own output back"
+        assert not attrs[3] & termios.ICANON, "raw: no line discipline in the way"
+    finally:
+        if con is not None:
+            con.close()
+        os.close(master)
+        os.close(slave)
+
     print("self-test: all assertions passed")
 
 
@@ -307,7 +328,26 @@ class Console:
     def __init__(self, port):
         self.port = port
         self.fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        self.configure()
         self.buf = b""
+
+    def configure(self):
+        """Put the line at 115200 raw, the way `scripts/flash.sh` does.
+
+        Not left to whoever touched the port last: esptool leaves it at 9600,
+        and a run that starts on a misconfigured line does not fail — it sits
+        there silently for hours recording nothing, which is indistinguishable
+        from a flat pack.
+        """
+        attrs = termios.tcgetattr(self.fd)
+        attrs[0] = 0  # No input translation, no flow control.
+        attrs[1] = 0  # No output translation.
+        attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        attrs[3] = 0  # Raw: no canonical mode, no echo back at the box.
+        attrs[4] = attrs[5] = termios.B115200
+        attrs[6][termios.VMIN] = 0
+        attrs[6][termios.VTIME] = 0
+        termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
 
     def send(self, line):
         os.write(self.fd, (line + "\r").encode())
