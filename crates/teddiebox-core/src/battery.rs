@@ -4,6 +4,20 @@
 //! This reports coarse buckets with hysteresis instead. Cells have no
 //! protection circuit, so the low-voltage cutoff here is what stops the pack
 //! being driven into cell reversal.
+//!
+//! The 2026-09-09 measurement showed the curve is worse than flat: 3943 mV
+//! down to 3680 over eight hours, then 250 mV in the last two and a half.
+//! There is about 25 minutes between the first honest warning and the box
+//! failing to stay powered.
+//!
+//! **What this module cannot do.** The voltage at which the box stops working
+//! depends on what it is doing: it rebooted mid-story at 3656 mV, then idled
+//! from 3663 mV for two and a half hours. Steady playback costs only 9 mV, so
+//! the gap is transient current, invisible to a two-second ADC sample. One
+//! bucket boundary therefore cannot both leave the plateau usable and keep a
+//! story from browning the box out — deciding whether to *start* playing
+//! wants a higher bar than deciding whether to stay awake, and that decision
+//! does not live here.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BatteryLevel {
@@ -26,9 +40,16 @@ pub struct BatteryConfig {
     /// Millivolts added back to a reading taken while playing, to compensate
     /// for sag under load.
     ///
-    /// **Uncalibrated.** The default is a placeholder until Phase B step 3
-    /// measures real sag; too small and the box shuts down early, too large
-    /// and the cutoff is defeated.
+    /// Measured 2026-09-09: **9 mV** median across seven playback bouts,
+    /// 14 mV worst. The 150 mV placeholder this replaces was the "too large
+    /// and the cutoff is defeated" case in the line below — it lifted every
+    /// reading taken during a story clean over the shutdown.
+    ///
+    /// Steady sag is not what kills the box, though. It rebooted at 3656 mV
+    /// mid-story and then idled from 3663 mV for two and a half hours: the
+    /// floor moves ~250 mV with load, which 9 mV of sag cannot explain. That
+    /// is a transient the two-second sampling never sees, and no value here
+    /// addresses it — see the module docs.
     pub load_offset_mv: u16,
     /// Millivolts a reading must exceed a threshold by before the level is
     /// allowed to climb back up, preventing flicker at a boundary.
@@ -51,14 +72,23 @@ pub struct BatteryConfig {
 
 impl Default for BatteryConfig {
     fn default() -> Self {
-        // Three cells: 1.4 V/cell charged, 1.2 V/cell nominal, 1.0 V/cell empty.
+        // Measured on 2026-09-09, from a charge-to-brownout run and the
+        // discharge-only run that followed it (`battery-discharge01.csv`,
+        // `...02.csv`: 13.6 h, 3943 -> 3407 mV).
+        //
+        // These are not cell chemistry. Nominal NiMH says a cell is empty at
+        // 1.0 V, so 3000 for the pack — but the box stops booting at 3410,
+        // with charge still in the cells. A cutoff below the voltage the
+        // hardware browns out at can never fire, and never did: replayed
+        // against both runs, the shipped defaults reported `Ok` up to a
+        // mid-story reboot and `Low` through eleven more.
         Self {
-            full_mv: 3_900,
-            ok_mv: 3_500,
-            low_mv: 3_200,
-            cutoff_mv: 3_000,
-            load_offset_mv: 150,
-            hysteresis_mv: 60,
+            full_mv: 3_800,
+            ok_mv: 3_650,
+            low_mv: 3_550,
+            cutoff_mv: 3_480,
+            load_offset_mv: 10,
+            hysteresis_mv: 25,
             readings_to_agree: 4,
         }
     }
@@ -425,5 +455,94 @@ mod tests {
             "a healthy reading interrupts it"
         );
         assert_eq!(b.update(2_900, false), None, "and the count starts again");
+    }
+
+    /// The shipped calibration, against the pack it was measured on.
+    ///
+    /// Every millivolt here is a reading from the 2026-09-09 runs
+    /// (`battery-discharge01.csv`, `...02.csv`), not a number derived from the
+    /// config — so these tests can disagree with it.
+    mod calibration {
+        use super::*;
+
+        fn measured() -> BatteryModel {
+            BatteryModel::new(BatteryConfig::default())
+        }
+
+        #[test]
+        fn the_shutdown_latches_above_the_voltage_the_box_browns_out_at() {
+            // 3_410 mV is where the box rebooted, eleven times, in run 02.
+            // Reaching it means the cutoff never fired.
+            let mut b = measured();
+            for _ in 0..4 {
+                b.update(3_410, false);
+            }
+            assert!(
+                b.must_shut_down(),
+                "the pack browns out here; the cutoff has to be above it"
+            );
+        }
+
+        #[test]
+        fn a_pack_at_the_brownout_floor_is_not_still_called_ok() {
+            let mut b = measured();
+            for _ in 0..4 {
+                b.update(3_410, false);
+            }
+            assert_eq!(b.level(), BatteryLevel::Critical);
+        }
+
+        #[test]
+        fn the_load_offset_does_not_lift_a_dying_pack_over_the_cutoff() {
+            // Playing costs 9 mV of sag, median of seven bouts in run 01, so a
+            // reading taken during a story is within a few mV of the truth. An
+            // offset big enough to hide the floor defeats the cutoff entirely.
+            let mut b = measured();
+            for _ in 0..4 {
+                b.update(3_410, true);
+            }
+            assert!(
+                b.must_shut_down(),
+                "a pack at the floor is at the floor, story or no story"
+            );
+        }
+
+        #[test]
+        fn the_level_drops_before_the_curve_does() {
+            // Run 02 fell 3_570 -> 3_407 in the 40 minutes after this reading.
+            // Ok here would mean the last warning came 40 minutes before death.
+            let mut b = measured();
+            for _ in 0..4 {
+                b.update(3_550, false);
+            }
+            assert_eq!(b.level(), BatteryLevel::Low);
+        }
+
+        #[test]
+        fn a_pack_just_off_the_charger_reads_full() {
+            // 3_943 mV: run 01's first discharge sample, once the surface
+            // charge had gone.
+            let mut b = measured();
+            for _ in 0..4 {
+                b.update(3_943, false);
+            }
+            assert_eq!(b.level(), BatteryLevel::Full);
+        }
+
+        #[test]
+        fn the_eight_hour_plateau_reads_ok_throughout() {
+            // The pack spends the whole usable life here; calling any of it
+            // Low would make the warning meaningless.
+            let mut b = measured();
+            for mv in [3_900, 3_800, 3_750, 3_700, 3_680] {
+                for _ in 0..4 {
+                    b.update(mv, false);
+                }
+                assert!(
+                    b.level() >= BatteryLevel::Ok,
+                    "{mv} mV is mid-plateau, not a warning"
+                );
+            }
+        }
     }
 }

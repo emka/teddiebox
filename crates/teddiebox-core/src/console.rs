@@ -57,10 +57,11 @@ pub enum Command {
     DumpPcm { frames: u8 },
     /// Print one CSV line of pack telemetry every `seconds`, or stop if zero.
     ///
-    /// Deliberately dumb: no judgement, no bucket, no smoothing. It exists so
-    /// one real charge-to-cutoff run can be captured and plotted on the host,
-    /// because every threshold in `BatteryConfig` currently comes from nominal
-    /// cell chemistry rather than from these three cells behind this divider.
+    /// Deliberately dumb: no judgement, no bucket, no smoothing. Two runs on
+    /// 2026-09-09 gave `BatteryConfig` its first real numbers this way, which
+    /// is also how the box was found to brown out 410 mV above the cutoff that
+    /// was supposed to protect it. It stays for the next pack, and for the
+    /// playback-transient question those runs opened and did not answer.
     BatteryLog { seconds: u8 },
     /// Decode and play the first TAF file on the card.
     ///
