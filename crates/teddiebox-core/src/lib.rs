@@ -415,8 +415,26 @@ mod tests {
         }
     }
 
+    /// A core whose battery thresholds are fixed here rather than taken from
+    /// the shipped calibration.
+    ///
+    /// The tests below are about what the core *does* with a level — warn
+    /// once per bucket, stop at the cutoff, stay quiet otherwise — and none of
+    /// them are about this pack's voltages. Reading them from the default
+    /// meant a recalibration silently changed what a test was exercising.
     fn core() -> Core {
-        Core::new(CoreConfig::default())
+        Core::new(CoreConfig {
+            battery: BatteryConfig {
+                full_mv: 3_900,
+                ok_mv: 3_500,
+                low_mv: 3_200,
+                cutoff_mv: 3_000,
+                load_offset_mv: 150,
+                hysteresis_mv: 60,
+                readings_to_agree: 4,
+            },
+            ..CoreConfig::default()
+        })
     }
 
     fn contains(actions: &Actions, wanted: Action) -> bool {
