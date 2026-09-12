@@ -176,8 +176,24 @@ impl BatteryModel {
 mod tests {
     use super::*;
 
+    /// A model on fixed, deliberately round thresholds.
+    ///
+    /// Not `BatteryConfig::default()`: these tests are about the mechanism —
+    /// bucket edges, hysteresis, agreement counting, the cutoff latch — and
+    /// none of them care what this pack's real voltages are. Pinning them to
+    /// the shipped calibration meant every recalibration broke a dozen tests
+    /// that were not about calibration. The measured numbers are exercised in
+    /// `calibration` below, against the real default.
     fn model() -> BatteryModel {
-        BatteryModel::new(BatteryConfig::default())
+        BatteryModel::new(BatteryConfig {
+            full_mv: 3_900,
+            ok_mv: 3_500,
+            low_mv: 3_200,
+            cutoff_mv: 3_000,
+            load_offset_mv: 150,
+            hysteresis_mv: 60,
+            readings_to_agree: 4,
+        })
     }
 
     #[test]
