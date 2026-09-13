@@ -1822,18 +1822,19 @@ async fn sleep_now(lpwr: &mut Option<LPWR<'static>>) -> Result<(), &'static str>
         Timer::after(Duration::from_millis(50)).await;
     }
 
+    // Said before arming, not after. The line has to reach the UART before the
+    // chip stops clocking it, and that wait is dead time in which an ear press
+    // can clear the very bit sleep entry reads — so the waiting happens while
+    // nothing is armed yet, and arming is the last thing before entering.
+    esp_println::println!("teddiebox: sleeping — press an ear to wake");
+    Timer::after(Duration::from_millis(50)).await;
+
     let outcome = sleep::arm(&mut wake).and_then(|()| {
         lpwr.take()
             .ok_or("the low-power peripheral has already been taken")
     });
     match outcome {
-        Ok(lpwr) => {
-            esp_println::println!("teddiebox: sleeping — press an ear to wake");
-            // The last line has to reach the UART before the chip stops
-            // clocking it.
-            Timer::after(Duration::from_millis(50)).await;
-            sleep::enter(lpwr)
-        }
+        Ok(lpwr) => sleep::enter(lpwr),
         Err(reason) => {
             critical_section::with(|cs| {
                 WAKE_LINE.borrow_ref_mut(cs).replace(wake);
