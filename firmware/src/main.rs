@@ -3236,7 +3236,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | plate on|off | awake on|off"
+        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> | plate on|off | awake on|off"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -3655,6 +3655,9 @@ async fn main(spawner: Spawner) {
                         esp_println::println!("teddiebox: batlog every {seconds} s");
                         esp_println::println!("batlog,ms,raw,mv,playing,charger_raw");
                     }
+                }
+                Some(Command::SlapThreshold { threshold }) => {
+                    SLAP_THRESHOLD.store(threshold, Ordering::Relaxed);
                 }
                 Some(Command::Stop) => {
                     audio::STOP.store(true, Ordering::Relaxed);

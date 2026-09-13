@@ -221,6 +221,9 @@ pub enum Command {
     /// like [`Command::Plate`]: a box that stays awake because a previous
     /// session said so is a box measuring the wrong thing.
     StayAwake(bool),
+    /// Set `CLICK_THS` live, so the bench can sweep the slap threshold
+    /// without a reflash. One LSB is 16 mg at the part's default +/-2 g.
+    SlapThreshold { threshold: u8 },
 }
 
 /// Longest network name accepted, in octets. 802.11 says 32.
@@ -309,6 +312,7 @@ impl CommandWatch {
                         .or_else(|| parse_play_content(other))
                         .or_else(|| parse_dump_pcm(other))
                         .or_else(|| parse_battery_log(other))
+                        .or_else(|| slap(other))
                         .or_else(|| parse_read_memory(other))
                         .or_else(|| parse_credential(other))
                         .or_else(|| parse_get(other)),
@@ -357,6 +361,12 @@ fn parse_dump_pcm(line: &[u8]) -> Option<Command> {
 fn parse_battery_log(line: &[u8]) -> Option<Command> {
     let seconds = hex_byte(line.strip_prefix(b"batlog ")?)?;
     Some(Command::BatteryLog { seconds })
+}
+
+/// Reads `slap <2 hex>`, a click threshold.
+fn slap(line: &[u8]) -> Option<Command> {
+    let threshold = hex_byte(line.strip_prefix(b"slap ")?)?;
+    Some(Command::SlapThreshold { threshold })
 }
 
 /// Reads `play <8 hex>/<8 hex>`, the path the box keeps its audio under.
@@ -746,6 +756,26 @@ mod tests {
             feed_all(&mut watch, b"batlog 5\r"),
             None,
             "two digits, like every other count"
+        );
+    }
+
+    #[test]
+    fn the_slap_command_carries_a_threshold() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"slap 2d\r"),
+            Some(Command::SlapThreshold { threshold: 0x2D })
+        );
+    }
+
+    #[test]
+    fn a_slap_command_without_a_threshold_does_not_fire() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"slap\r"), None, "no threshold");
+        assert_eq!(
+            feed_all(&mut watch, b"slap 5\r"),
+            None,
+            "one digit is not two"
         );
     }
 
