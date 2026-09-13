@@ -35,7 +35,7 @@ use esp_hal::spi::master::Spi;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
-use lis3dh::{regs as lis, Lis3dh};
+use lis3dh::{regs as lis, ClickAxes, ClickAxis, ClickConfig, Lis3dh};
 use teddiebox_core::board::{self, Gates, Rail};
 use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
@@ -473,9 +473,23 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     esp_println::println!("teddiebox: LIS3DH at {address:#04x}");
     let mut accel = Lis3dh::new(bus, address);
     let mut since_report = ACCEL_REPORT_EVERY;
+    let mut armed_threshold = SLAP_THRESHOLD.load(Ordering::Relaxed);
     if accel.init().is_err() {
         esp_println::println!("teddiebox: LIS3DH would not start");
         return;
+    }
+
+    // All three axes, because which one a slap lands on is unmeasured; the
+    // board decides which of them means a side, and discards the rest.
+    if accel
+        .enable_click(ClickConfig {
+            axes: ClickAxes::ALL,
+            threshold: SLAP_THRESHOLD.load(Ordering::Relaxed),
+            time_limit: SLAP_TIME_LIMIT,
+        })
+        .is_err()
+    {
+        esp_println::println!("teddiebox: LIS3DH would not take a click config");
     }
 
     loop {
@@ -599,6 +613,51 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             // no longer owns the bus.
             return;
         }
+        match accel.take_click() {
+            Ok(Some(click)) => {
+                // Printed unconditionally: a click is rare, and this is the
+                // instrument the bench calibrates with. `raw` is here because
+                // the datasheet does not pin CLICK_SRC's bits down.
+                // More than one axis bit set means `take_click`'s X-then-Y-
+                // then-Z priority picked one and dropped the rest. Harmless
+                // for skipping a chapter — only one axis maps to a side — but
+                // a trap for calibration, which is here to find out WHICH axis
+                // a slap lands on and would read X every time. Say so out
+                // loud rather than leaving it in the raw byte to be noticed.
+                let axes_set = (click.raw & 0b111).count_ones();
+                esp_println::println!(
+                    "teddiebox: click {:?} {} raw {:#04x}{}",
+                    click.axis,
+                    if click.negative { "-" } else { "+" },
+                    click.raw,
+                    if axes_set > 1 { " MULTI-AXIS" } else { "" }
+                );
+                let axis = match click.axis {
+                    ClickAxis::X => board::Axis::X,
+                    ClickAxis::Y => board::Axis::Y,
+                    ClickAxis::Z => board::Axis::Z,
+                };
+                if let Some(side) = board::side_for_click(axis, click.negative) {
+                    if INPUT_EVENTS.try_send(Event::Slap(side)).is_err() {
+                        esp_println::println!("teddiebox: input queue full, slap dropped");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(_) => esp_println::println!("teddiebox: LIS3DH click read failed"),
+        }
+
+        let wanted = SLAP_THRESHOLD.load(Ordering::Relaxed);
+        if wanted != armed_threshold {
+            armed_threshold = wanted;
+            let _ = accel.enable_click(ClickConfig {
+                axes: ClickAxes::ALL,
+                threshold: wanted,
+                time_limit: SLAP_TIME_LIMIT,
+            });
+            esp_println::println!("teddiebox: slap threshold {wanted}");
+        }
+
         // Polled often so a shutdown or a re-init is not held up by an
         // accelerometer nap, but printed rarely: this console is the only
         // user interface the box has, and a reading every 200 ms buries
@@ -642,6 +701,13 @@ where
 const ACCEL_POLL_MS: u64 = 200;
 /// One reading printed per ten polls, so the console stays legible.
 const ACCEL_REPORT_EVERY: u32 = 10;
+
+/// `CLICK_THS`, live so the bench can sweep it without a reflash. 45 is
+/// 703 mg at 16 mg per LSB — the nominal figure `GestureConfig` carried,
+/// which is a starting point for calibration and not a measurement.
+static SLAP_THRESHOLD: AtomicU8 = AtomicU8::new(45);
+/// `TIME_LIMIT`, in ODR periods: 3 is 60 ms at the 50 Hz `init` sets.
+const SLAP_TIME_LIMIT: u8 = 3;
 
 /// How loud the box plays until an ear says otherwise.
 ///
