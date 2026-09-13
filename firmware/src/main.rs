@@ -35,7 +35,7 @@ use esp_hal::spi::master::Spi;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
-use lis3dh::{regs as lis, ClickAxes, ClickAxis, ClickConfig, Lis3dh};
+use lis3dh::{clamped_threshold, regs as lis, ClickAxes, ClickAxis, ClickConfig, Lis3dh};
 use teddiebox_core::board::{self, Gates, Rail};
 use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
@@ -474,7 +474,16 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     esp_println::println!("teddiebox: LIS3DH at {address:#04x}");
     let mut accel = Lis3dh::new(bus, address);
     let mut since_report = ACCEL_REPORT_EVERY;
+    // `armed_threshold` always tracks the last value a write was *attempted*
+    // with; `armed` is only set by a write that actually succeeded. Guarding
+    // the re-arm below on `armed` — not just on the threshold changing — is
+    // what lets a failed boot arm be recovered later: a failed write leaves
+    // `armed` false, so the next pass (or the operator re-typing the very
+    // same threshold the failure message names) still retries, instead of
+    // comparing equal to a value that was only ever hoped for.
     let mut armed_threshold = SLAP_THRESHOLD.load(Ordering::Relaxed);
+    let mut armed = false;
+    let mut failure_reported = false;
     if accel.init().is_err() {
         esp_println::println!("teddiebox: LIS3DH would not start");
         return;
@@ -482,18 +491,22 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
 
     // All three axes, because which one a slap lands on is unmeasured; the
     // board decides which of them means a side, and discards the rest.
-    if accel
-        .enable_click(ClickConfig {
-            axes: ClickAxes::ALL,
-            threshold: SLAP_THRESHOLD.load(Ordering::Relaxed),
-            time_limit: SLAP_TIME_LIMIT,
-        })
-        .is_err()
-    {
-        esp_println::println!(
-            "teddiebox: LIS3DH would not take a click config — \
-             slaps will not be detected until the threshold is set from the console"
-        );
+    match accel.enable_click(ClickConfig {
+        axes: ClickAxes::ALL,
+        threshold: armed_threshold,
+        time_limit: SLAP_TIME_LIMIT,
+    }) {
+        Ok(()) => armed = true,
+        Err(_) => {
+            esp_println::println!(
+                "teddiebox: LIS3DH would not take a click config — \
+                 slaps will not be detected until the threshold is set from the console"
+            );
+            // Already told the operator once, for this threshold; the loop
+            // below retries every pass without repeating itself until either
+            // the write succeeds or a different threshold is asked for.
+            failure_reported = true;
+        }
     }
 
     loop {
@@ -630,10 +643,11 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 // loud rather than leaving it in the raw byte to be noticed.
                 let axes_set = (click.raw & 0b111).count_ones();
                 esp_println::println!(
-                    "teddiebox: click {:?} {} raw {:#04x}{}",
+                    "teddiebox: click {:?} {} raw {:#04x} threshold {}{}",
                     click.axis,
                     if click.negative { "-" } else { "+" },
                     click.raw,
+                    clamped_threshold(armed_threshold),
                     if axes_set > 1 { " MULTI-AXIS" } else { "" }
                 );
                 let axis = match click.axis {
@@ -652,24 +666,46 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         }
 
         let wanted = SLAP_THRESHOLD.load(Ordering::Relaxed);
-        if wanted != armed_threshold {
-            // `armed_threshold` only advances on a confirmed write: the bench
-            // trusts this line to mean the part is actually running at
+        if !armed || wanted != armed_threshold {
+            // A different threshold being asked for is itself news, worth a
+            // fresh failure line even if the last attempt already reported
+            // one — otherwise typing a new value while the part is stuck
+            // looks like it was ignored rather than retried.
+            let threshold_changed = wanted != armed_threshold;
+            armed_threshold = wanted;
+            // `armed` only becomes true on a confirmed write: the bench
+            // trusts the success line to mean the part is actually running at
             // `wanted`, and a discarded error here would print a success the
-            // box never delivered. Leaving it unchanged on failure also means
-            // the next pass tries again rather than believing it is done.
+            // box never delivered. Clearing it on failure also means the next
+            // pass tries again rather than believing it is done — including
+            // when the retry asks for the exact value the failure message
+            // named.
             match accel.enable_click(ClickConfig {
                 axes: ClickAxes::ALL,
                 threshold: wanted,
                 time_limit: SLAP_TIME_LIMIT,
             }) {
                 Ok(()) => {
-                    armed_threshold = wanted;
-                    esp_println::println!("teddiebox: slap threshold {wanted}");
+                    armed = true;
+                    failure_reported = false;
+                    esp_println::println!(
+                        "teddiebox: slap threshold {}",
+                        clamped_threshold(wanted)
+                    );
                 }
-                Err(_) => esp_println::println!(
-                    "teddiebox: slap threshold {wanted} NOT applied, LIS3DH write failed"
-                ),
+                Err(_) => {
+                    armed = false;
+                    // Logged on transition, not on every attempt: this loop
+                    // retries every 200 ms, and the console is the box's only
+                    // user interface. Repeating the failure every pass would
+                    // bury the click prints calibration depends on.
+                    if !failure_reported || threshold_changed {
+                        esp_println::println!(
+                            "teddiebox: slap threshold {wanted} NOT applied, LIS3DH write failed"
+                        );
+                        failure_reported = true;
+                    }
+                }
             }
         }
 
