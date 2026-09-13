@@ -2,9 +2,15 @@
 
 //! Driver for the ST LIS3DH accelerometer.
 //!
-//! Enough of the part for bench step 5: prove it is there, then stream axes.
-//! Tap and tilt detection come later, and belong in `teddiebox-core` where a
-//! host test can hold them — this crate only moves bytes.
+//! Enough of the part for bench step 5 and for M7: prove it is there, stream
+//! axes, and run its click engine.
+//!
+//! Tap detection was going to live in `teddiebox-core` where a host test could
+//! hold it. It does not, because the box polls this part every 200 ms and a
+//! slap lasts a few: the part detects the click itself at its own rate and
+//! latches it, which is the only reading that survives that poll interval.
+//! What stays out of here is *policy* — which side of the box an axis means is
+//! `teddiebox_core::board`'s business, and this crate still only moves bytes.
 
 pub mod regs;
 
@@ -131,6 +137,79 @@ where
             negative: raw & regs::CLICK_SRC_SIGN != 0,
             raw,
         }))
+    }
+}
+
+/// Which axes the click engine watches.
+///
+/// A set rather than one axis: which axis a slap lands on depends on how the
+/// part is oriented in the box, and nothing has measured that. Calibration
+/// enables all three and reads the answer off `Click::axis`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickAxes {
+    pub x: bool,
+    pub y: bool,
+    pub z: bool,
+}
+
+impl ClickAxes {
+    pub const ALL: Self = Self {
+        x: true,
+        y: true,
+        z: true,
+    };
+
+    const fn bits(self) -> u8 {
+        let mut bits = 0;
+        if self.x {
+            bits |= regs::CLICK_CFG_XS;
+        }
+        if self.y {
+            bits |= regs::CLICK_CFG_YS;
+        }
+        if self.z {
+            bits |= regs::CLICK_CFG_ZS;
+        }
+        bits
+    }
+}
+
+/// How the click engine is tuned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickConfig {
+    pub axes: ClickAxes,
+    /// `CLICK_THS[6:0]`. One LSB is full scale / 128, so 16 mg at the +/-2 g
+    /// the part defaults to and [`Lis3dh::init`] leaves in place. Values above
+    /// 127 are clamped to 127, not masked.
+    pub threshold: u8,
+    /// `TIME_LIMIT[6:0]`, in ODR periods — 20 ms each at the 50 Hz `init`
+    /// sets. **The unit is not stated in DocID17530 Rev 2**; it is ST's
+    /// AN3308 that gives it as 1/ODR. Confirm at the bench before trusting it.
+    pub time_limit: u8,
+}
+
+impl<I2C, E> Lis3dh<I2C>
+where
+    I2C: I2c<Error = E>,
+{
+    /// Sets the part detecting clicks and latching them.
+    ///
+    /// Call after [`init`](Self::init): the rate and the axis enables it
+    /// writes are what the click engine runs on.
+    pub fn enable_click(&mut self, cfg: ClickConfig) -> Result<(), Error<E>> {
+        // Clamped, not masked: masking 200 would give 72 and quietly make the
+        // box twice as sensitive as asked. Clamping fails towards a missed
+        // slap, which is the safe direction for a thing that skips chapters.
+        let ths = regs::CLICK_THS_LIR | cfg.threshold.min(regs::CLICK_THS_MAX);
+        for write in [
+            [regs::CTRL_REG2, regs::CTRL_REG2_HPCLICK],
+            [regs::CLICK_CFG, cfg.axes.bits()],
+            [regs::CLICK_THS, ths],
+            [regs::TIME_LIMIT, cfg.time_limit.min(regs::TIME_LIMIT_MAX)],
+        ] {
+            self.i2c.write(self.address, &write).map_err(Error::Bus)?;
+        }
+        Ok(())
     }
 }
 

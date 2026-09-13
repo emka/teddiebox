@@ -43,3 +43,27 @@ pub const CLICK_SRC_SIGN: u8 = 0x08;
 pub const CLICK_SRC_Z: u8 = 0x04;
 pub const CLICK_SRC_Y: u8 = 0x02;
 pub const CLICK_SRC_X: u8 = 0x01;
+
+/// High-pass filter configuration.
+pub const CTRL_REG2: u8 = 0x21;
+/// `CTRL_REG2`: high-pass filter enabled for the CLICK function.
+pub const CTRL_REG2_HPCLICK: u8 = 0x04;
+
+/// Click interrupt enables, per axis.
+pub const CLICK_CFG: u8 = 0x38;
+pub const CLICK_CFG_ZS: u8 = 0x10;
+pub const CLICK_CFG_YS: u8 = 0x04;
+pub const CLICK_CFG_XS: u8 = 0x01;
+
+/// Click threshold, with the latch bit at the top.
+pub const CLICK_THS: u8 = 0x3A;
+/// `CLICK_THS`: hold the interrupt until `CLICK_SRC` is read.
+pub const CLICK_THS_LIR: u8 = 0x80;
+/// `CLICK_THS`: the threshold occupies the low seven bits.
+pub const CLICK_THS_MAX: u8 = 0x7F;
+
+/// How long the acceleration may stay over the threshold and still be a click.
+pub const TIME_LIMIT: u8 = 0x3B;
+/// `TIME_LIMIT` is seven bits too. Its own constant: the same value for a
+/// different field is a coincidence, not a shared fact.
+pub const TIME_LIMIT_MAX: u8 = 0x7F;

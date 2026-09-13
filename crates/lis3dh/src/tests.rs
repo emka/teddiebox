@@ -105,3 +105,70 @@ fn an_interrupt_with_no_axis_is_discarded() {
     assert_eq!(dev.take_click().unwrap(), None);
     dev.release().done();
 }
+
+/// Byte for byte, by hand. 0x04 is HPCLICK in CTRL_REG2 — without the
+/// high-pass filter the 1 g resting on Z biases the click comparator. 0x15 is
+/// ZS|YS|XS, single-click on all three axes and double-click on none. 0xAD is
+/// LIR_Click set over a threshold of 45, which is 703 mg at the 16 mg per LSB
+/// the part's default +/-2 g full scale gives.
+#[test]
+fn enabling_click_writes_the_filter_the_axes_the_threshold_and_the_limit() {
+    let expected = [
+        Transaction::write(ADDR, vec![0x21, 0x04]),
+        Transaction::write(ADDR, vec![0x38, 0x15]),
+        Transaction::write(ADDR, vec![0x3A, 0xAD]),
+        Transaction::write(ADDR, vec![0x3B, 0x03]),
+    ];
+    let mut dev = Lis3dh::new(I2cMock::new(&expected), ADDR);
+    dev.enable_click(ClickConfig {
+        axes: ClickAxes::ALL,
+        threshold: 45,
+        time_limit: 3,
+    })
+    .unwrap();
+    dev.release().done();
+}
+
+#[test]
+fn a_single_axis_enables_only_that_axis() {
+    let expected = [
+        Transaction::write(ADDR, vec![0x21, 0x04]),
+        Transaction::write(ADDR, vec![0x38, 0x04]),
+        Transaction::write(ADDR, vec![0x3A, 0x81]),
+        Transaction::write(ADDR, vec![0x3B, 0x00]),
+    ];
+    let mut dev = Lis3dh::new(I2cMock::new(&expected), ADDR);
+    dev.enable_click(ClickConfig {
+        axes: ClickAxes {
+            x: false,
+            y: true,
+            z: false,
+        },
+        threshold: 1,
+        time_limit: 0,
+    })
+    .unwrap();
+    dev.release().done();
+}
+
+/// The threshold is seven bits. Masking a too-large value would be silent and
+/// backwards: 200 becomes 72, and the box ends up more than twice as sensitive
+/// as the caller asked for. Clamping errs the other way, towards missing a
+/// slap rather than inventing one.
+#[test]
+fn an_oversized_threshold_clamps_to_the_least_sensitive_setting() {
+    let expected = [
+        Transaction::write(ADDR, vec![0x21, 0x04]),
+        Transaction::write(ADDR, vec![0x38, 0x15]),
+        Transaction::write(ADDR, vec![0x3A, 0xFF]),
+        Transaction::write(ADDR, vec![0x3B, 0x00]),
+    ];
+    let mut dev = Lis3dh::new(I2cMock::new(&expected), ADDR);
+    dev.enable_click(ClickConfig {
+        axes: ClickAxes::ALL,
+        threshold: 200,
+        time_limit: 0,
+    })
+    .unwrap();
+    dev.release().done();
+}
