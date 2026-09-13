@@ -80,5 +80,59 @@ where
     }
 }
 
+/// One axis of the part, as `CLICK_SRC` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickAxis {
+    X,
+    Y,
+    Z,
+}
+
+/// A click the part detected and latched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Click {
+    pub axis: ClickAxis,
+    /// `CLICK_SRC`'s sign bit: which way the box was struck.
+    pub negative: bool,
+    /// The whole register as it was read. Carried because this datasheet does
+    /// not pin the bit positions down, so the bench must be able to see what
+    /// the part actually said rather than only what we made of it.
+    pub raw: u8,
+}
+
+impl<I2C, E> Lis3dh<I2C>
+where
+    I2C: I2c<Error = E>,
+{
+    /// Takes the latched click, if there is one.
+    ///
+    /// Reading `CLICK_SRC` is what clears the latch, so a click is delivered
+    /// exactly once however long it waited.
+    pub fn take_click(&mut self) -> Result<Option<Click>, Error<E>> {
+        let mut buf = [0u8; 1];
+        self.i2c
+            .write_read(self.address, &[regs::CLICK_SRC], &mut buf)
+            .map_err(Error::Bus)?;
+        let raw = buf[0];
+        if raw & regs::CLICK_SRC_IA == 0 {
+            return Ok(None);
+        }
+        let axis = if raw & regs::CLICK_SRC_X != 0 {
+            ClickAxis::X
+        } else if raw & regs::CLICK_SRC_Y != 0 {
+            ClickAxis::Y
+        } else if raw & regs::CLICK_SRC_Z != 0 {
+            ClickAxis::Z
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(Click {
+            axis,
+            negative: raw & regs::CLICK_SRC_SIGN != 0,
+            raw,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests;
