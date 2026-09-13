@@ -5,7 +5,7 @@
 
 use core::task::Poll;
 use pollster::block_on;
-use teddiebox_cloud::{begin, Begun, Body, CloudError, ContentRequest, ETag};
+use teddiebox_cloud::{begin, probe_length, Begun, Body, CloudError, ContentRequest, ETag, Probed};
 
 const UID: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -347,4 +347,79 @@ fn a_head_too_long_for_the_buffer_is_an_error_rather_than_a_spin() {
         block_on(begin(&mut t, &request(None), &mut buf)),
         Err(CloudError::ResponseTooLong)
     );
+}
+
+/// The exact head `teddycloud.local` answered a one-byte probe with on
+/// 2026-09-13, byte for byte, including the one byte of body it carried:
+///
+/// ```text
+/// HTTP/1.1 206 Partial Content
+/// Connection: keep-alive
+/// Keep-Alive: timeout=300, max=4294967294
+/// Accept-Ranges: bytes
+/// Content-Type: application/octet-stream
+/// Content-Range: bytes 1-1/37912939
+/// Content-Length: 1
+/// ```
+#[test]
+fn a_probe_reports_the_whole_file_length_from_one_byte() {
+    let response = b"HTTP/1.1 206 Partial Content\r\n\
+Connection: keep-alive\r\n\
+Keep-Alive: timeout=300, max=4294967294\r\n\
+Accept-Ranges: bytes\r\n\
+Content-Type: application/octet-stream\r\n\
+Content-Range: bytes 1-1/37912939\r\n\
+Content-Length: 1\r\n\r\nX";
+    let mut transport = Fake::new(response);
+    let mut buf = [0u8; 512];
+
+    let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
+
+    assert_eq!(probed, Probed::Length(37_912_939));
+    let sent = String::from_utf8(transport.written.clone()).unwrap();
+    assert!(sent.contains("Range: bytes=1-1\r\n"), "sent: {sent}");
+}
+
+/// What the same server answers for a ruid it has never heard of: **410 Gone**,
+/// from the upstream proxy rather than from teddyCloud. Measured the same day.
+/// A figure the cloud has no story for is not a reason to discard a story that
+/// is sitting on the card.
+#[test]
+fn a_probe_for_an_unknown_figure_is_not_an_error() {
+    let response = b"HTTP/1.1 410 Gone\r\nContent-Length: 39\r\n\r\n";
+    let mut transport = Fake::new(response);
+    let mut buf = [0u8; 512];
+
+    let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
+
+    assert_eq!(probed, Probed::NoContent);
+}
+
+/// A server that answers the probe with the whole file — which this one does
+/// for a range at offset zero — states a `Content-Length` and no
+/// `Content-Range`. That length is the file's length, and saying so is better
+/// than reading 37 MB to find out.
+#[test]
+fn a_probe_answered_with_the_whole_file_still_reports_its_length() {
+    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 60975\r\n\r\n";
+    let mut transport = Fake::new(response);
+    let mut buf = [0u8; 512];
+
+    let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
+
+    assert_eq!(probed, Probed::Length(60_975));
+}
+
+/// A `304` carries no length. It cannot arrive in answer to a probe, which
+/// sends no conditional header — but a server is free to be wrong, and
+/// guessing a length here would mark a perfectly good file stale.
+#[test]
+fn a_probe_that_learns_no_length_says_so() {
+    let response = b"HTTP/1.1 304 Not Modified\r\n\r\n";
+    let mut transport = Fake::new(response);
+    let mut buf = [0u8; 512];
+
+    let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
+
+    assert_eq!(probed, Probed::Unstated);
 }

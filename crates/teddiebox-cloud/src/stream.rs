@@ -8,7 +8,9 @@
 //! Nothing here knows what the bytes are for. `build_content_request` and
 //! `parse_head` do the thinking; this file only moves bytes and counts them.
 
-use crate::{build_content_request, parse_head, CloudError, ContentRequest, ETag};
+use crate::{
+    build_content_request, build_length_probe, parse_head, CloudError, ContentRequest, ETag,
+};
 use embedded_io_async::{Read, Write};
 
 /// What a response turned out to be.
@@ -33,6 +35,93 @@ pub enum Begun {
     },
 }
 
+/// Reads until the response head is complete, and no further.
+///
+/// Draining to EOF instead would hand the peer control of when this returns,
+/// and a keep-alive server never hangs up — which would wedge playback rather
+/// than merely the fetch. Answers the head, where the body starts in `buf`,
+/// and how much arrived in total, since the bytes past the head are body that
+/// has already been paid for.
+async fn read_head<T: Read + Write>(
+    transport: &mut T,
+    buf: &mut [u8],
+) -> Result<(crate::ResponseHead, usize, usize), CloudError> {
+    let mut received = 0usize;
+    loop {
+        match parse_head(&buf[..received]) {
+            Ok((head, body_at)) => return Ok((head, body_at, received)),
+            Err(CloudError::MalformedResponse) if received < buf.len() => {}
+            // A head that will not fit cannot be parsed however long we wait.
+            Err(CloudError::MalformedResponse) => return Err(CloudError::ResponseTooLong),
+            Err(e) => return Err(e),
+        }
+        let n = transport
+            .read(&mut buf[received..])
+            .await
+            .map_err(|_| CloudError::Transport)?;
+        if n == 0 {
+            return Err(CloudError::MalformedResponse);
+        }
+        received += n;
+    }
+}
+
+/// What a length probe learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probed {
+    /// How long the whole file is now.
+    Length(u32),
+    /// The server has no story for this figure.
+    ///
+    /// `410 Gone` as well as `404`: measured against `teddycloud.local` on
+    /// 2026-09-13, a ruid the cloud has never heard of comes back `410` from
+    /// the upstream proxy rather than `404` from teddyCloud. Either way it is
+    /// an answer about the *server*, and no reason to discard a story already
+    /// sitting on the card.
+    NoContent,
+    /// The server answered, and its answer contains no length.
+    ///
+    /// Kept apart from a transport failure on purpose. Both mean "do not act",
+    /// but only one of them is worth saying out loud at a bench.
+    Unstated,
+}
+
+/// Asks how long a file is now, without downloading it.
+///
+/// Reads exactly as far as the head. The one byte of body a `206` carries is
+/// left in `buf` and ignored — it is a byte of story, not an answer.
+pub async fn probe_length<T: Read + Write>(
+    transport: &mut T,
+    request: &ContentRequest<'_>,
+    buf: &mut [u8],
+) -> Result<Probed, CloudError> {
+    let mut request_bytes = [0u8; 512];
+    let n = build_length_probe(request, &mut request_bytes)?;
+    transport
+        .write_all(&request_bytes[..n])
+        .await
+        .map_err(|_| CloudError::Transport)?;
+    transport.flush().await.map_err(|_| CloudError::Transport)?;
+
+    let (head, _, _) = read_head(transport, buf).await?;
+    Ok(match head.status {
+        404 | 410 => Probed::NoContent,
+        // A `206` states the whole length in its `Content-Range`; a `200` is
+        // the whole file, so its `Content-Length` is the same number. This
+        // server answers a zero-offset range with exactly that, which is why
+        // the case is real rather than defensive.
+        206 => match head.content_range.and_then(|range| range.total) {
+            Some(total) => Probed::Length(total),
+            None => Probed::Unstated,
+        },
+        200 => match head.content_length {
+            Some(length) => Probed::Length(length),
+            None => Probed::Unstated,
+        },
+        _ => Probed::Unstated,
+    })
+}
+
 /// Sends the request and parses the response head.
 ///
 /// On return, `buf` holds the head followed by however much of the body came
@@ -50,27 +139,7 @@ pub async fn begin<T: Read + Write>(
         .map_err(|_| CloudError::Transport)?;
     transport.flush().await.map_err(|_| CloudError::Transport)?;
 
-    // Read only until the head is complete. Draining to EOF instead would hand
-    // the peer control of when this returns, and a keep-alive server never
-    // hangs up.
-    let mut received = 0usize;
-    let (head, body_at) = loop {
-        match parse_head(&buf[..received]) {
-            Ok(parsed) => break parsed,
-            Err(CloudError::MalformedResponse) if received < buf.len() => {}
-            // A head that will not fit cannot be parsed however long we wait.
-            Err(CloudError::MalformedResponse) => return Err(CloudError::ResponseTooLong),
-            Err(e) => return Err(e),
-        }
-        let n = transport
-            .read(&mut buf[received..])
-            .await
-            .map_err(|_| CloudError::Transport)?;
-        if n == 0 {
-            return Err(CloudError::MalformedResponse);
-        }
-        received += n;
-    };
+    let (head, body_at, received) = read_head(transport, buf).await?;
 
     match head.status {
         304 => return Ok(Begun::Unchanged),
