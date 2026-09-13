@@ -49,6 +49,10 @@ pub const CTRL_REG2: u8 = 0x21;
 /// `CTRL_REG2`: high-pass filter enabled for the CLICK function.
 pub const CTRL_REG2_HPCLICK: u8 = 0x04;
 
+/// High-pass filter reference. Reading it resets the filter (Table 34,
+/// `HPM[1:0] = 00`: "Normal mode, reset by reading REFERENCE").
+pub const REFERENCE: u8 = 0x26;
+
 /// Click interrupt enables, per axis.
 pub const CLICK_CFG: u8 = 0x38;
 pub const CLICK_CFG_ZS: u8 = 0x10;

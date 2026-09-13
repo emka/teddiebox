@@ -107,17 +107,21 @@ fn an_interrupt_with_no_axis_is_discarded() {
 }
 
 /// Byte for byte, by hand. 0x04 is HPCLICK in CTRL_REG2 — without the
-/// high-pass filter the 1 g resting on Z biases the click comparator. 0xAD is
-/// LIR_Click set over a threshold of 45, which is 703 mg at the 15.625 mg per
-/// LSB the part's default +/-2 g full scale gives. 0x15 is ZS|YS|XS,
-/// single-click on all three axes and double-click on none — written last,
-/// after the threshold and timing it depends on, so a bus error earlier in
-/// the sequence cannot leave the axes armed at CLICK_THS's power-on default
-/// of 0.
+/// high-pass filter the 1 g resting on Z biases the click comparator. The
+/// `write_read` on 0x26 that follows is REFERENCE: reading it is what resets
+/// that filter, so it must happen before the axes are armed; the mock's
+/// return byte (0x00) is discarded by the driver and stands for any value
+/// the part might answer. 0xAD is LIR_Click set over a threshold of 45,
+/// which is 703 mg at the 15.625 mg per LSB the part's default +/-2 g full
+/// scale gives. 0x15 is ZS|YS|XS, single-click on all three axes and
+/// double-click on none — written last, after the threshold and timing it
+/// depends on, so a bus error earlier in the sequence cannot leave the axes
+/// armed at CLICK_THS's power-on default of 0.
 #[test]
 fn enabling_click_writes_the_filter_the_axes_the_threshold_and_the_limit() {
     let expected = [
         Transaction::write(ADDR, vec![0x21, 0x04]),
+        Transaction::write_read(ADDR, vec![0x26], vec![0x00]),
         Transaction::write(ADDR, vec![0x3A, 0xAD]),
         Transaction::write(ADDR, vec![0x3B, 0x03]),
         Transaction::write(ADDR, vec![0x38, 0x15]),
@@ -136,6 +140,7 @@ fn enabling_click_writes_the_filter_the_axes_the_threshold_and_the_limit() {
 fn a_single_axis_enables_only_that_axis() {
     let expected = [
         Transaction::write(ADDR, vec![0x21, 0x04]),
+        Transaction::write_read(ADDR, vec![0x26], vec![0x00]),
         Transaction::write(ADDR, vec![0x3A, 0x81]),
         Transaction::write(ADDR, vec![0x3B, 0x00]),
         Transaction::write(ADDR, vec![0x38, 0x04]),
@@ -162,6 +167,7 @@ fn a_single_axis_enables_only_that_axis() {
 fn an_oversized_threshold_clamps_to_the_least_sensitive_setting() {
     let expected = [
         Transaction::write(ADDR, vec![0x21, 0x04]),
+        Transaction::write_read(ADDR, vec![0x26], vec![0x00]),
         Transaction::write(ADDR, vec![0x3A, 0xFF]),
         Transaction::write(ADDR, vec![0x3B, 0x00]),
         Transaction::write(ADDR, vec![0x38, 0x15]),
@@ -174,4 +180,18 @@ fn an_oversized_threshold_clamps_to_the_least_sensitive_setting() {
     })
     .unwrap();
     dev.release().done();
+}
+
+/// `clamped_threshold` is the single source of truth `enable_click` uses
+/// internally and the firmware console calls to report the value actually
+/// applied. Literal outputs, not the constant re-read: 127 is `CLICK_THS`'s
+/// seven-bit ceiling.
+#[test]
+fn clamped_threshold_passes_in_range_values_through() {
+    assert_eq!(clamped_threshold(45), 45);
+}
+
+#[test]
+fn clamped_threshold_ceilings_at_127() {
+    assert_eq!(clamped_threshold(255), 127);
 }

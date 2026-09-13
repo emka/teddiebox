@@ -188,6 +188,22 @@ pub struct ClickConfig {
     pub time_limit: u8,
 }
 
+/// The threshold [`enable_click`](Lis3dh::enable_click) actually applies for
+/// a requested value.
+///
+/// `CLICK_THS` is seven bits, so anything above 127 is clamped, not masked —
+/// masking 200 would give 72 and quietly double the box's sensitivity over
+/// what was asked for. Callers that report the threshold back (the console,
+/// a click print) should call this rather than echo the raw request, and
+/// there is exactly one place that does the clamping arithmetic.
+pub const fn clamped_threshold(threshold: u8) -> u8 {
+    if threshold > regs::CLICK_THS_MAX {
+        regs::CLICK_THS_MAX
+    } else {
+        threshold
+    }
+}
+
 impl<I2C, E> Lis3dh<I2C>
 where
     I2C: I2c<Error = E>,
@@ -206,13 +222,31 @@ where
     /// means a partial write leaves the click engine disarmed — silent —
     /// rather than armed and hypersensitive. Do not reorder this back to
     /// match the register map.
+    ///
+    /// `REFERENCE` (0x26) is read, and discarded, right after `CTRL_REG2` and
+    /// before the axes are armed. See the comment on that read for why.
     pub fn enable_click(&mut self, cfg: ClickConfig) -> Result<(), Error<E>> {
-        // Clamped, not masked: masking 200 would give 72 and quietly make the
-        // box twice as sensitive as asked. Clamping fails towards a missed
-        // slap, which is the safe direction for a thing that skips chapters.
-        let ths = regs::CLICK_THS_LIR | cfg.threshold.min(regs::CLICK_THS_MAX);
+        let ths = regs::CLICK_THS_LIR | clamped_threshold(cfg.threshold);
+
+        self.i2c
+            .write(self.address, &[regs::CTRL_REG2, regs::CTRL_REG2_HPCLICK])
+            .map_err(Error::Bus)?;
+
+        // CTRL_REG2 selects HPM[1:0] = 00 — "Normal mode", which Table 34
+        // resets "by reading REFERENCE". Until that read happens, the
+        // high-pass filter's output still carries the standing 1 g on Z as a
+        // step, and that step alone can cross CLICK_THS: a click latched with
+        // nothing struck. This call re-runs on every re-arm, so without this
+        // read each threshold sweep step could inject one phantom click into
+        // the measurement the sweep exists to make. The byte read back is
+        // discarded on purpose — the read itself is what resets the filter.
+        // Do not delete this as dead code.
+        let mut reference = [0u8; 1];
+        self.i2c
+            .write_read(self.address, &[regs::REFERENCE], &mut reference)
+            .map_err(Error::Bus)?;
+
         for write in [
-            [regs::CTRL_REG2, regs::CTRL_REG2_HPCLICK],
             [regs::CLICK_THS, ths],
             [regs::TIME_LIMIT, cfg.time_limit.min(regs::TIME_LIMIT_MAX)],
             [regs::CLICK_CFG, cfg.axes.bits()],
