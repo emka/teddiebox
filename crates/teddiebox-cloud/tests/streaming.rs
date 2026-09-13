@@ -423,3 +423,21 @@ fn a_probe_that_learns_no_length_says_so() {
 
     assert_eq!(probed, Probed::Unstated);
 }
+
+/// The same `410 Gone` the probe learned about, on the fetch path.
+///
+/// Measured against `teddycloud.local` on 2026-09-13: a ruid the cloud has never
+/// heard of comes back `410` from the upstream proxy, not `404` from
+/// teddyCloud. Reported as an unexpected status, it reached the box's
+/// vocabulary as "the server could not be reached" — so a figure with no story
+/// anywhere told a child to go and look at their network.
+#[test]
+fn a_figure_the_cloud_never_heard_of_is_not_a_network_fault() {
+    let response = b"HTTP/1.1 410 Gone\r\nContent-Length: 39\r\n\r\n";
+    let mut transport = Fake::new(response);
+    let mut buf = [0u8; 512];
+
+    let begun = block_on(begin(&mut transport, &request(None), &mut buf)).unwrap();
+
+    assert_eq!(begun, Begun::NotFound);
+}

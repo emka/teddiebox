@@ -143,7 +143,13 @@ pub async fn begin<T: Read + Write>(
 
     match head.status {
         304 => return Ok(Begun::Unchanged),
-        404 => return Ok(Begun::NotFound),
+        // `410` as well as `404`. Measured against `teddycloud.local` on
+        // 2026-09-13: a ruid the cloud has never heard of comes back `410
+        // Gone` from the upstream proxy rather than `404` from teddyCloud.
+        // Reported as an unexpected status it reached the box as "the server
+        // could not be reached", which sent a child to look at a network that
+        // was working perfectly.
+        404 | 410 => return Ok(Begun::NotFound),
         200 | 206 => {}
         other => return Err(CloudError::UnexpectedStatus(other)),
     }
