@@ -491,6 +491,8 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     let mut armed = false;
     let mut failure_reported = false;
     let mut confirmed_threshold: Option<u8> = None;
+    let mut slap_refractory: u8 = 0;
+    let mut armed_limit: u8 = SLAP_TIME_LIMIT.load(Ordering::Relaxed);
     if accel.init().is_err() {
         esp_println::println!("teddiebox: LIS3DH would not start");
         return;
@@ -499,9 +501,17 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     // All three axes, because which one a slap lands on is unmeasured; the
     // board decides which of them means a side, and discards the rest.
     match accel.enable_click(ClickConfig {
-        axes: ClickAxes::ALL,
+        // Y and Z, not X. Measured upright at the bench 2026-09-13: standing
+        // as a child uses it, the box reads `accel -16000 256 64` — gravity
+        // entirely on X, so X is the VERTICAL axis and a side slap cannot
+        // produce it. Every X click recorded before this came from the box
+        // lying tipped, or from a vertical shock. The PCB sits at 45 degrees
+        // to the slap axis, so a side slap lands on Y and Z together and the
+        // part latches whichever crosses first. X stays off so setting the
+        // box down is not a chapter skip.
+        axes: SLAP_AXES,
         threshold: armed_threshold,
-        time_limit: SLAP_TIME_LIMIT,
+        time_limit: SLAP_TIME_LIMIT.load(Ordering::Relaxed),
     }) {
         Ok(()) => {
             armed = true;
@@ -682,8 +692,16 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                     ClickAxis::Z => board::Axis::Z,
                 };
                 if let Some(side) = board::side_for_click(axis, click.negative) {
-                    if INPUT_EVENTS.try_send(Event::Slap(side)).is_err() {
-                        esp_println::println!("teddiebox: input queue full, slap dropped");
+                    if slap_refractory > 0 {
+                        // Printed, not silent: during calibration the rebounds
+                        // are the measurement — they say whether the window is
+                        // long enough and the threshold low enough.
+                        esp_println::println!("teddiebox: slap ignored, within refractory");
+                    } else {
+                        slap_refractory = SLAP_REFRACTORY_POLLS;
+                        if INPUT_EVENTS.try_send(Event::Slap(side)).is_err() {
+                            esp_println::println!("teddiebox: input queue full, slap dropped");
+                        }
                     }
                 }
             }
@@ -691,14 +709,18 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             Err(_) => esp_println::println!("teddiebox: LIS3DH click read failed"),
         }
 
+        slap_refractory = slap_refractory.saturating_sub(1);
+
         let wanted = SLAP_THRESHOLD.load(Ordering::Relaxed);
-        if !armed || wanted != armed_threshold {
+        let wanted_limit = SLAP_TIME_LIMIT.load(Ordering::Relaxed);
+        if !armed || wanted != armed_threshold || wanted_limit != armed_limit {
             // A different threshold being asked for is itself news, worth a
             // fresh failure line even if the last attempt already reported
             // one — otherwise typing a new value while the part is stuck
             // looks like it was ignored rather than retried.
-            let threshold_changed = wanted != armed_threshold;
+            let threshold_changed = wanted != armed_threshold || wanted_limit != armed_limit;
             armed_threshold = wanted;
+            armed_limit = wanted_limit;
             // `armed` only becomes true on a confirmed write: the bench
             // trusts the success line to mean the part is actually running at
             // `wanted`, and a discarded error here would print a success the
@@ -707,17 +729,18 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             // when the retry asks for the exact value the failure message
             // named.
             match accel.enable_click(ClickConfig {
-                axes: ClickAxes::ALL,
+                axes: SLAP_AXES,
                 threshold: wanted,
-                time_limit: SLAP_TIME_LIMIT,
+                time_limit: wanted_limit,
             }) {
                 Ok(()) => {
                     armed = true;
                     failure_reported = false;
                     confirmed_threshold = Some(wanted);
                     esp_println::println!(
-                        "teddiebox: slap threshold {}",
-                        clamped_threshold(wanted)
+                        "teddiebox: slap threshold {} limit {}",
+                        clamped_threshold(wanted),
+                        wanted_limit
                     );
                 }
                 Err(_) => {
@@ -780,13 +803,37 @@ const ACCEL_POLL_MS: u64 = 200;
 /// One reading printed per ten polls, so the console stays legible.
 const ACCEL_REPORT_EVERY: u32 = 10;
 
-/// `CLICK_THS`, live so the bench can sweep it without a reflash. 45 is
-/// 703 mg at 15.625 mg per LSB (full scale / 128 at the +/-2 g default) —
-/// the nominal figure the pre-M7 gesture detector carried, which is a
-/// starting point for calibration and not a measurement.
-static SLAP_THRESHOLD: AtomicU8 = AtomicU8::new(45);
+/// `CLICK_THS`, live so the bench can sweep it without a reflash.
+///
+/// **40, measured 2026-09-13**: one step is 62 mg at the +/-8 g full scale
+/// `init` selects, so about 2.5 g. Eight slaps — four on each face — were
+/// caught eight times with the correct direction every time. It is the
+/// sensitive end of a bracket: 48 was silent through handling but missed a
+/// slap and mis-signed another, while 40 lets roughly one handling knock per
+/// session through. 40 was chosen, favouring the gesture
+/// working over the occasional lost place.
+static SLAP_THRESHOLD: AtomicU8 = AtomicU8::new(40);
+/// Polls to ignore clicks for after accepting a slap, at `ACCEL_POLL_MS` each:
+/// two is 400 ms, the refractory window the deleted `GestureConfig` carried.
+///
+/// One physical slap is not one click. The box rocks back off the hit, and at a
+/// threshold low enough to catch the slap through the PCB's 45-degree mounting
+/// the rebound crosses too — in the OPPOSITE sign, so it reads as a slap on the
+/// other side and skips the wrong way. Measured at the bench 2026-09-13: five
+/// slaps on one side gave two correct skips and one backwards one.
+///
+/// The latch is still read and cleared during the window; only the action is
+/// suppressed. Leaving it unread would hold a stale click for the next slap.
+const SLAP_REFRACTORY_POLLS: u8 = 2;
+
+/// Which axes the click engine watches. See the note at the boot-time arm.
+const SLAP_AXES: ClickAxes = ClickAxes {
+    x: false,
+    y: true,
+    z: false,
+};
 /// `TIME_LIMIT`, in ODR periods: 3 is 60 ms at the 50 Hz `init` sets.
-const SLAP_TIME_LIMIT: u8 = 3;
+static SLAP_TIME_LIMIT: AtomicU8 = AtomicU8::new(4);
 
 /// How loud the box plays until an ear says otherwise.
 ///
@@ -3300,7 +3347,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> | plate on|off | awake on|off"
+        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -3719,6 +3766,9 @@ async fn main(spawner: Spawner) {
                         esp_println::println!("teddiebox: batlog every {seconds} s");
                         esp_println::println!("batlog,ms,raw,mv,playing,charger_raw");
                     }
+                }
+                Some(Command::SlapTimeLimit { limit }) => {
+                    SLAP_TIME_LIMIT.store(limit, Ordering::Relaxed);
                 }
                 Some(Command::SlapThreshold { threshold }) => {
                     SLAP_THRESHOLD.store(threshold, Ordering::Relaxed);
