@@ -33,7 +33,9 @@ use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::i2s::master::{Channels, DataFormat, I2s, TdmConfig};
 use esp_hal::peripherals::LPWR;
+use esp_hal::rtc_cntl::{reset_reason, SocResetReason};
 use esp_hal::spi::master::Spi;
+use esp_hal::system::Cpu;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
@@ -51,8 +53,8 @@ use teddiebox_core::sounds::{Language, Sound};
 use teddiebox_core::tone;
 
 use teddiebox_core::{
-    colour_for, db_for, Action, Core, CoreConfig, Ear, Event, LedState, Position, PowerOffReason,
-    TagUid, Unavailable, Volume, MAX_VOLUME,
+    colour_for, db_for, Action, BatteryConfig, Core, CoreConfig, Ear, Event, LedState, Position,
+    PowerOffReason, TagUid, Unavailable, Volume, MAX_VOLUME,
 };
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
@@ -320,6 +322,16 @@ async fn sense(
         let charger_raw = adc.read_blocking(&mut charger);
         let pack_mv = power::battery_mv(pack_raw);
         let charger_mv = power::charger_mv(charger_raw);
+
+        // Published for the one reader that cannot wait for the reducer: a
+        // box deciding, before it powers anything up, whether the wake it just
+        // had is worth answering. The counter is what makes a *fresh* reading
+        // distinguishable from the same one read twice.
+        PACK_MV.store(pack_mv, Ordering::Relaxed);
+        PACK_SAMPLES.store(
+            PACK_SAMPLES.load(Ordering::Relaxed).wrapping_add(1),
+            Ordering::Relaxed,
+        );
 
         // The reducer decides the LED, and until now it was never told the one
         // thing the LED most needs to say. Both go through the same channel
@@ -1706,6 +1718,50 @@ static PARKED: AtomicBool = AtomicBool::new(false);
 /// that stays awake because a previous session said so is measuring the
 /// wrong thing.
 static STAY_AWAKE: AtomicBool = AtomicBool::new(false);
+
+/// The most recent pack reading, in millivolts, and how many have been taken.
+///
+/// Zero samples means the sense task has not answered yet, which is not the
+/// same as a flat pack and must not be read as one.
+static PACK_MV: AtomicU32 = AtomicU32::new(0);
+static PACK_SAMPLES: AtomicU32 = AtomicU32::new(0);
+
+/// Waits for fresh pack readings and answers whether they agree it is empty.
+///
+/// **Two, not the four `readings_to_agree` asks for.** Four exists to stop one
+/// implausible sample *moving the level* — the first pack reading this project
+/// ever took was 9453 mV from three NiMH cells — and two consecutive readings
+/// already kill that. Four of them is eight seconds of a box sitting dark
+/// while a child holds an ear, and the cost of being wrong here is small: the
+/// box goes back to sleep and the next press asks again.
+///
+/// `None` as soon as a reading is at or above the cutoff, and `None` if the
+/// sense task says nothing at all — booting normally is the safe answer to a
+/// question that was never answered.
+async fn pack_says_empty() -> Option<u32> {
+    const READINGS_TO_AGREE: u8 = 2;
+    let cutoff = u32::from(BatteryConfig::default().cutoff_mv);
+    let mut seen = PACK_SAMPLES.load(Ordering::Relaxed);
+    let mut agreed = 0u8;
+
+    // Ten seconds, against a sense task that samples every two.
+    for _ in 0..200 {
+        let taken = PACK_SAMPLES.load(Ordering::Relaxed);
+        if taken != seen {
+            seen = taken;
+            let mv = PACK_MV.load(Ordering::Relaxed);
+            if mv >= cutoff {
+                return None;
+            }
+            agreed += 1;
+            if agreed >= READINGS_TO_AGREE {
+                return Some(mv);
+            }
+        }
+        Timer::after(Duration::from_millis(50)).await;
+    }
+    None
+}
 
 /// Whether the end of a session is deep sleep rather than a park.
 ///
@@ -3578,6 +3634,33 @@ async fn main(spawner: Spawner) {
             None
         }
     };
+
+    // Asked on a wake, before the codec, the card, the radio or the jingle.
+    // Speaking costs a codec power-up, the amplifier, a card read and a decode
+    // — seconds of near-full-power draw on a pack that has nothing left, every
+    // time a child presses an ear, and driving these unprotected cells that
+    // far down is the thing the cutoff exists to prevent. Red is milliamps and
+    // is still an answer, and "red means plug me in" is learnable.
+    //
+    // Only on a wake from deep sleep. A cold boot on a flat pack still boots
+    // and still speaks: that path is how a box says what is wrong to somebody
+    // who just switched it on, and it has not slept, so nothing here knows
+    // sleep works on this board.
+    if reset_reason(Cpu::ProCpu) == Some(SocResetReason::CoreDeepSleep) {
+        if let Some(mv) = pack_says_empty().await {
+            esp_println::println!("teddiebox: pack {mv} mV on wake — below the cutoff, going back");
+            if let Some(rgb) = rgb.as_ref() {
+                if let Ok(red) = gates.led(colour_for(LedState::BatteryCritical)) {
+                    rgb.apply(&red, board::LED_DUTY);
+                }
+            }
+            Timer::after(Duration::from_secs(2)).await;
+            go_dark(&mut board, &mut gates, rgb.as_ref()).await;
+            if let Err(reason) = sleep_now(&mut lpwr).await {
+                esp_println::println!("teddiebox: sleep not armed — {reason}, carrying on awake");
+            }
+        }
+    }
 
     loop {
         if let Some(rgb) = rgb.as_ref() {
