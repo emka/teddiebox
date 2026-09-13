@@ -4,6 +4,8 @@
 //! The firmware owns the pins and applies what this decides; it decides
 //! nothing itself.
 
+use crate::types::Side;
+
 /// Power gate 2: the accelerometer, the codec and the LED. High enables.
 ///
 /// Also the VDD_SPI strapping pin. High at reset selects the internal 1.8 V
@@ -220,6 +222,31 @@ pub const fn dac_reset(held: bool) -> PinLevel {
     PinLevel {
         gpio: DAC_RESET,
         high: held != DAC_RESET_RUNS_HIGH,
+    }
+}
+
+/// An axis of the accelerometer, named in this module's own terms.
+///
+/// Not the driver's type: this crate depends on `heapless` and nothing else,
+/// and a driver type here would point the dependency the wrong way. The
+/// firmware owns both and translates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+/// Which side of the box a click on `axis` means, if any.
+///
+/// **The axis and the sign are both unverified.** X is what `GestureConfig`
+/// assumed; nothing has checked how the part is oriented in this box. The
+/// bench settles it, and this is the one line that then changes.
+pub const fn side_for_click(axis: Axis, negative: bool) -> Option<Side> {
+    match axis {
+        Axis::X if negative => Some(Side::Left),
+        Axis::X => Some(Side::Right),
+        Axis::Y | Axis::Z => None,
     }
 }
 
@@ -477,5 +504,24 @@ mod tests {
                 high: false
             }
         );
+    }
+
+    /// Which axis a slap lands on has not been measured — see the plan's bench
+    /// section. X is the assumption `GestureConfig` shipped with; it is recorded
+    /// here so one console session can contradict it in one place.
+    #[test]
+    fn a_slap_on_x_picks_a_side_by_its_sign() {
+        assert_eq!(side_for_click(Axis::X, false), Some(Side::Right));
+        assert_eq!(side_for_click(Axis::X, true), Some(Side::Left));
+    }
+
+    /// A click on an axis that is not the slap axis is not a slap. Z in
+    /// particular is the box being put down.
+    #[test]
+    fn a_click_on_another_axis_is_not_a_slap() {
+        assert_eq!(side_for_click(Axis::Y, false), None);
+        assert_eq!(side_for_click(Axis::Y, true), None);
+        assert_eq!(side_for_click(Axis::Z, false), None);
+        assert_eq!(side_for_click(Axis::Z, true), None);
     }
 }
