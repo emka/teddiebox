@@ -12,6 +12,7 @@ mod availability;
 mod cache;
 mod content_path;
 mod reconcile;
+mod revalidate;
 mod sidecar;
 mod throttle;
 mod units;
@@ -24,6 +25,7 @@ pub use cache::{
 };
 pub use content_path::{content_path, ContentPath};
 pub use reconcile::{reconcile, Action, Mismatch};
+pub use revalidate::{is_stale, Asked, REMEMBERED};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
 pub use throttle::{next_step, Continue, Throttle};
 pub use units::{Bytes, Pages};
