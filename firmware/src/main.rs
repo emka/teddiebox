@@ -148,7 +148,8 @@ fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_hal::system::software_reset()
 }
 
-/// Settled ear edges, waiting for the reducer to be told about them.
+/// Everything the child did to the box, waiting for the reducer to be told
+/// about it — an ear edge or a slap, not only ears.
 ///
 /// A channel rather than a `Signal` like [`PLATE_TAG`], because these are
 /// edges and not a state. `Core` pairs each `EarDown` with its `EarUp` to tell
@@ -156,11 +157,12 @@ fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
 /// and a lost release leaves an ear held for ever. A signal keeps only the
 /// last write, and both ears can settle inside one pass of the media loop.
 ///
-/// Eight is far more than the two ears can produce between two drains — the
-/// media task drains this once per pass *and* once per decoded frame — so a
-/// full queue means something else is wrong, and it says so rather than
-/// silently dropping the half of a pair that would mislead the reducer.
-static EAR_EVENTS: Channel<CriticalSectionRawMutex, Event, 8> = Channel::new();
+/// Eight is far more than the two ears (and now the accelerometer) can
+/// produce between two drains — the media task drains this once per pass
+/// *and* once per decoded frame — so a full queue means something else is
+/// wrong, and it says so rather than silently dropping an event that would
+/// mislead the reducer.
+static INPUT_EVENTS: Channel<CriticalSectionRawMutex, Event, 8> = Channel::new();
 
 /// What the reducer last decided the LED should say.
 ///
@@ -252,7 +254,7 @@ async fn inputs(larger: Input<'static>, smaller: Input<'static>, wake: Input<'st
                         Edge::Pressed => Event::EarDown(ear, uptime),
                         Edge::Released => Event::EarUp(ear, uptime),
                     };
-                    if EAR_EVENTS.try_send(event).is_err() {
+                    if INPUT_EVENTS.try_send(event).is_err() {
                         esp_println::println!("teddiebox: ear queue full — {event:?} dropped");
                     }
                 }
@@ -319,7 +321,7 @@ async fn sense(
         ] {
             // A full queue is somebody else's bug — this is the slowest
             // producer on it, at one pair every two seconds.
-            if EAR_EVENTS.try_send(event).is_err() {
+            if INPUT_EVENTS.try_send(event).is_err() {
                 esp_println::println!("teddiebox: pack event dropped — the queue is full");
             }
         }
@@ -1984,7 +1986,7 @@ fn take_plate_event(on_plate: &mut Option<TagUid>, token: &mut Option<[u8; 32]>)
 /// play and so nothing to turn down, which is what makes that acceptable
 /// rather than merely convenient.
 fn apply_ear_events(reducer: &mut Core, card: &storage::Mounted, token: Option<[u8; 32]>) {
-    while let Ok(event) = EAR_EVENTS.try_receive() {
+    while let Ok(event) = INPUT_EVENTS.try_receive() {
         apply(reducer, card, event, token);
     }
 }
