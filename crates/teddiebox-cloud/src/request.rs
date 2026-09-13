@@ -98,6 +98,49 @@ pub fn build_content_request(
     request: &ContentRequest<'_>,
     out: &mut [u8],
 ) -> Result<usize, CloudError> {
+    write_request(request, Ask::Content, out)
+}
+
+/// Which byte a length probe asks for.
+///
+/// One, not zero. Measured against `teddycloud.local` on 2026-09-13: a range at
+/// offset zero is answered `200` with the whole body and no `Content-Range`,
+/// so it is a download and not a question. Offset one is answered `206` with
+/// `Content-Range: bytes 1-1/<total>` — the number, and one byte of story.
+const PROBE_AT: u32 = 1;
+
+/// Builds a request for one byte, to learn how long the whole file is.
+///
+/// **`HEAD` is not available.** The same measurement found `HEAD` answering
+/// `404` on a route whose `GET` answers `200`, so the only way this server
+/// will state a length is in the `Content-Range` of a partial response — which
+/// is the header a resume already parses.
+///
+/// Carries the token for the same reason a fetch does: teddyCloud forwards it
+/// upstream for content it does not already hold, and a probe for a figure the
+/// server has never seen is exactly that case. Sends no conditional header: a
+/// `304` would carry no length at all.
+pub fn build_length_probe(
+    request: &ContentRequest<'_>,
+    out: &mut [u8],
+) -> Result<usize, CloudError> {
+    write_request(request, Ask::Length, out)
+}
+
+/// What a request is for. The two differ only in the `Range` they send, which
+/// is why they are one writer: everything else — the route, the reversed
+/// lower-case ruid, the token, the close — must stay identical, or a probe
+/// would be asking about a different file from the fetch that follows it.
+enum Ask {
+    Content,
+    Length,
+}
+
+fn write_request(
+    request: &ContentRequest<'_>,
+    ask: Ask,
+    out: &mut [u8],
+) -> Result<usize, CloudError> {
     let mut buf = SliceWriter { out, used: 0 };
 
     write!(buf, "GET {}", request.route.path()).map_err(|_| CloudError::RequestTooLong)?;
@@ -110,17 +153,21 @@ pub fn build_content_request(
     let server = request.server;
     write!(buf, " HTTP/1.1\r\nHost: {server}\r\n").map_err(|_| CloudError::RequestTooLong)?;
 
-    match (request.from, request.etag) {
-        (Some(from), etag) => {
+    match (ask, request.from, request.etag) {
+        (Ask::Length, _, _) => {
+            write!(buf, "Range: bytes={PROBE_AT}-{PROBE_AT}\r\n")
+                .map_err(|_| CloudError::RequestTooLong)?;
+        }
+        (Ask::Content, Some(from), etag) => {
             write!(buf, "Range: bytes={from}-\r\n").map_err(|_| CloudError::RequestTooLong)?;
             if let Some(tag) = etag {
                 write!(buf, "If-Range: {tag}\r\n").map_err(|_| CloudError::RequestTooLong)?;
             }
         }
-        (None, Some(tag)) => {
+        (Ask::Content, None, Some(tag)) => {
             write!(buf, "If-None-Match: {tag}\r\n").map_err(|_| CloudError::RequestTooLong)?;
         }
-        (None, None) => {}
+        (Ask::Content, None, None) => {}
     }
 
     if let Some(token) = request.auth {
@@ -197,6 +244,71 @@ mod tests {
         };
         let n = build_content_request(&request, &mut out).unwrap();
         heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
+    }
+
+    fn probe(auth: Option<&[u8; TOKEN_BYTES]>) -> heapless::String<512> {
+        let mut out = [0u8; 512];
+        let request = ContentRequest {
+            uid: UID,
+            route: Route::V1,
+            etag: None,
+            server: "box.lan:8080",
+            from: None,
+            auth,
+        };
+        let n = build_length_probe(&request, &mut out).unwrap();
+        heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
+    }
+
+    /// Measured against `teddycloud.local` on 2026-09-13, and every line of this
+    /// test is one of those measurements rather than a reading of the RFC:
+    ///
+    /// - `HEAD` answers **404** on a route whose `GET` answers 200, so the
+    ///   obvious way to ask a file's length is not available.
+    /// - `Range: bytes=0-0` answers **200 with the whole 37 MB body** and no
+    ///   `Content-Range` at all — a zero offset is not a probe, it is a
+    ///   download.
+    /// - `Range: bytes=1-1` answers **206**, `Content-Range: bytes 1-1/37912939`,
+    ///   one byte of body.
+    ///
+    /// So the probe starts at one, not zero, and closes its range.
+    #[test]
+    fn a_length_probe_asks_for_the_second_byte_and_nothing_else() {
+        let request = probe(None);
+        assert!(request.contains("Range: bytes=1-1\r\n"), "got: {request}");
+        assert!(!request.contains("bytes=0"), "got: {request}");
+    }
+
+    /// A probe is not a resume and must never be answered with a `304`: the
+    /// number it came for is in the `Content-Range` of a `206`, and a `304`
+    /// carries no length at all.
+    #[test]
+    fn a_length_probe_sends_no_conditional_header() {
+        let request = probe(None);
+        assert!(!request.contains("If-None-Match"), "got: {request}");
+        assert!(!request.contains("If-Range"), "got: {request}");
+    }
+
+    /// The same route and the same lower-case ruid as the fetch it may lead
+    /// to. Upper case marks the figure `nocloud` for good, and a probe is
+    /// still a request.
+    #[test]
+    fn a_length_probe_names_the_same_file_a_fetch_would() {
+        let request = probe(None);
+        assert!(
+            request.starts_with("GET /v1/content/0807060504030201 HTTP/1.1\r\n"),
+            "got: {request}"
+        );
+    }
+
+    /// teddyCloud forwards the token upstream when it does not already hold
+    /// the content, and a probe for a figure the server has never fetched is
+    /// exactly that case.
+    #[test]
+    fn a_length_probe_carries_the_tag_token_when_there_is_one() {
+        let token = [0xABu8; TOKEN_BYTES];
+        let request = probe(Some(&token));
+        assert!(request.contains("Authorization: BD ABAB"), "got: {request}");
     }
 
     fn build_with_uid(uid: [u8; 8]) -> heapless::String<512> {
