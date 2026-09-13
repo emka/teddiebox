@@ -5,7 +5,6 @@ pub mod board;
 pub mod checksum;
 pub mod console;
 pub mod cushion;
-mod gesture;
 pub mod i2c;
 pub mod input;
 mod led;
@@ -23,7 +22,6 @@ pub mod walk;
 pub mod wav;
 
 pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
-pub use gesture::{Gesture, GestureConfig, GestureDetector};
 pub use led::{colour_for, led_for, PlaybackKind};
 pub use playback::{ContentIndex, Playback, Unavailable};
 pub use types::*;
@@ -45,13 +43,6 @@ pub enum Event {
     EarUp(Ear, Millis),
     TagPresent(TagUid),
     TagAbsent,
-    /// One accelerometer sample, in milli-g per axis.
-    Motion {
-        x: i16,
-        y: i16,
-        z: i16,
-        at: Millis,
-    },
     /// Pack voltage in millivolts, and whether the box was drawing playback
     /// current when it was sampled.
     Battery {
@@ -86,10 +77,6 @@ pub enum Action {
     SeekTo(Position),
     NextTrack,
     PrevTrack,
-    /// Begin seeking within the current track.
-    Seek(SeekDir),
-    /// Stop an in-progress seek and resume normal playback.
-    SeekEnd,
     SetVolume(Volume),
     SetLed(LedState),
     SavePosition {
@@ -106,7 +93,6 @@ pub enum Action {
 #[derive(Debug, Clone, Copy)]
 pub struct CoreConfig {
     pub volume_limit: u8,
-    pub gesture: GestureConfig,
     pub battery: BatteryConfig,
     /// Milliseconds an ear must be held to count as a long press rather than
     /// a tap.
@@ -119,7 +105,6 @@ impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             volume_limit: MAX_VOLUME,
-            gesture: GestureConfig::default(),
             battery: BatteryConfig::default(),
             long_press_ms: 600,
             idle_timeout_ms: 5 * 60 * 1_000,
@@ -131,7 +116,6 @@ impl Default for CoreConfig {
 pub struct Core {
     config: CoreConfig,
     volume: VolumeModel,
-    gestures: GestureDetector,
     battery: BatteryModel,
     playback: Playback,
     charging: bool,
@@ -164,7 +148,6 @@ impl Core {
         Self {
             config,
             volume: VolumeModel::new(config.volume_limit),
-            gestures: GestureDetector::new(config.gesture),
             battery: BatteryModel::new(config.battery),
             playback: Playback::new(),
             charging: false,
@@ -236,7 +219,7 @@ impl Core {
         // as use would keep it awake forever.
         match event {
             Event::Tick(now) => self.last_tick = now,
-            Event::EarDown(_, at) | Event::EarUp(_, at) | Event::Motion { at, .. } => {
+            Event::EarDown(_, at) | Event::EarUp(_, at) => {
                 self.last_activity = at;
             }
             Event::TagPresent(_)
@@ -321,17 +304,6 @@ impl Core {
                 let a = self.playback.on_content_missing(tag, why);
                 for act in a {
                     let _ = actions.push(act);
-                }
-            }
-
-            Event::Motion { x, y, z, at } => {
-                if let Some(g) = self.gestures.feed(x, y, z, at) {
-                    let _ = actions.push(match g {
-                        Gesture::Slap(Side::Right) => Action::NextTrack,
-                        Gesture::Slap(Side::Left) => Action::PrevTrack,
-                        Gesture::Tilt(dir) => Action::Seek(dir),
-                        Gesture::TiltEnded => Action::SeekEnd,
-                    });
                 }
             }
 
@@ -539,30 +511,6 @@ mod tests {
     fn a_release_without_a_press_is_ignored() {
         let mut c = core();
         assert!(c.handle(Event::EarUp(Ear::Larger, 100), &Index).is_empty());
-    }
-
-    #[test]
-    fn a_slap_on_the_right_skips_to_the_next_track() {
-        let mut c = core();
-        c.handle(
-            Event::Motion {
-                x: 0,
-                y: 0,
-                z: 1000,
-                at: 0,
-            },
-            &Index,
-        );
-        let actions = c.handle(
-            Event::Motion {
-                x: 900,
-                y: 0,
-                z: 1000,
-                at: 20,
-            },
-            &Index,
-        );
-        assert!(contains(&actions, Action::NextTrack));
     }
 
     #[test]
@@ -915,39 +863,6 @@ mod tests {
             }
         }
         assert_eq!(warnings, 2, "falling low again after recovery warns again");
-    }
-
-    #[test]
-    fn returning_the_box_to_level_ends_the_seek() {
-        let mut c = core();
-        c.handle(
-            Event::Motion {
-                x: 0,
-                y: 600,
-                z: 800,
-                at: 0,
-            },
-            &Index,
-        );
-        c.handle(
-            Event::Motion {
-                x: 0,
-                y: 600,
-                z: 800,
-                at: 400,
-            },
-            &Index,
-        );
-        let actions = c.handle(
-            Event::Motion {
-                x: 0,
-                y: 0,
-                z: 1000,
-                at: 600,
-            },
-            &Index,
-        );
-        assert!(contains(&actions, Action::SeekEnd));
     }
 
     #[test]

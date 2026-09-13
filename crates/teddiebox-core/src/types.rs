@@ -71,12 +71,6 @@ pub enum Side {
     Right,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeekDir {
-    Forward,
-    Backward,
-}
-
 /// Volume step. Zero is silent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Volume(pub u8);

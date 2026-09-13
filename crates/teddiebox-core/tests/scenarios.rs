@@ -43,15 +43,7 @@ fn a_child_plays_a_story_adjusts_the_volume_and_lifts_the_figure() {
     let louder = core.handle(Event::EarUp(Ear::Larger, 1_100), &library);
     assert!(louder.iter().any(|a| matches!(a, Action::SetVolume(_))));
 
-    let slap = core.handle(
-        Event::Motion {
-            x: 900,
-            y: 0,
-            z: 1000,
-            at: 2_000,
-        },
-        &library,
-    );
+    let slap = core.handle(Event::Slap(Side::Right), &library);
     assert!(has(&slap, Action::NextTrack));
 
     let lift = core.handle(Event::TagAbsent, &library);
