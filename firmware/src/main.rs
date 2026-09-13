@@ -1692,6 +1692,27 @@ static PARKED: AtomicBool = AtomicBool::new(false);
 /// wrong thing.
 static STAY_AWAKE: AtomicBool = AtomicBool::new(false);
 
+/// Everything a child can see or hear, off, in the order the hardware needs.
+///
+/// One sequence, because there are two ways to reach it — the box deciding to
+/// stop, and a bench asking it to — and two copies of an order that matters
+/// would eventually stop matching.
+async fn go_dark(board: &mut BoardPins<'_>, gates: &mut Gates, rgb: Option<&led::Rgb<'_>>) {
+    quieten_codec().await;
+    // Before the rail goes down, not after. The LED is held by LEDC, which
+    // keeps driving its three channels with no processor involvement, and
+    // `Gates::led` refuses once the peripherals rail is down — so dropping the
+    // rail first left the parked box showing a steady green, seen at the bench
+    // on 2026-09-08.
+    if let Some(rgb) = rgb {
+        if let Ok(dark) = gates.led(board::Colour::Off) {
+            rgb.apply(&dark, board::LED_DUTY);
+        }
+    }
+    board.apply_all(&gates.release_for_reset());
+    drain_console();
+}
+
 /// Stops the calling task for the rest of this power-on.
 ///
 /// `pending` never completes, so the executor never schedules the task again
@@ -3526,19 +3547,7 @@ async fn main(spawner: Spawner) {
             // This line used to name the pack unconditionally, and an idle park
             // then reported a flat battery that was nothing of the kind.
             esp_println::println!("teddiebox: going dark");
-            quieten_codec().await;
-            // Before the rail goes down, not after. The LED is held by LEDC,
-            // which keeps driving its three channels with no processor
-            // involvement, and `Gates::led` refuses once the peripherals rail
-            // is down — so dropping the rail first left the parked box showing
-            // a steady green, seen at the bench on 2026-09-08.
-            if let Some(rgb) = rgb.as_ref() {
-                if let Ok(dark) = gates.led(board::Colour::Off) {
-                    rgb.apply(&dark, board::LED_DUTY);
-                }
-            }
-            board.apply_all(&gates.release_for_reset());
-            drain_console();
+            go_dark(&mut board, &mut gates, rgb.as_ref()).await;
             // Everything a child can see or hear is now off, and every task
             // that was still working on the box's behalf stops here. This is
             // not a true power-off — the chip is still running, and deep sleep
