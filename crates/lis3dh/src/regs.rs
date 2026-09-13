@@ -28,6 +28,32 @@ pub const AUTO_INCREMENT: u8 = 0x80;
 /// three bits enable Z, Y and X.
 pub const CTRL_REG1_50HZ_XYZ: u8 = 0x47;
 
+/// 400 Hz, normal mode, all three axes enabled.
+///
+/// The click engine runs at the output data rate, so this is what decides how
+/// finely `TIME_LIMIT` can separate a slap's impact from the box rocking
+/// afterwards: 2.5 ms per sample here against 20 ms at 50 Hz. Measured at the
+/// bench 2026-09-13, where at 50 Hz a slap and its recoil were
+/// indistinguishable and the latched sign was a coin toss.
+pub const CTRL_REG1_400HZ_XYZ: u8 = 0x77;
+
+/// Full-scale selection and more. `FS[1:0]` are bits 5:4.
+pub const CTRL_REG4: u8 = 0x23;
+
+/// `FS[1:0] = 10`, +/-8 g.
+///
+/// Not the +/-2 g the part resets to. Measured at the bench 2026-09-13: a
+/// slap SATURATES at +/-2 g, so its reported peak caps at about 2000 mg while
+/// ordinary handling — setting a figure on the plate, putting the box down —
+/// reaches 1500. The two are compressed into one narrow band and no threshold
+/// separates them: at 45 the box skipped a chapter six times from handling
+/// alone, at the register maximum of 127 it caught two slaps in eight.
+/// At +/-8 g a slap reports its real magnitude and clears handling easily.
+///
+/// The cost is resolution: one `CLICK_THS` step is 62 mg here against 16 at
+/// +/-2 g, per the datasheet's own table.
+pub const CTRL_REG4_FS_8G: u8 = 0x20;
+
 /// SA0 tied low. Shared with the TLV320DAC3100, which has no other address.
 pub const ADDRESS_SA0_LOW: u8 = 0x18;
 /// SA0 tied high.

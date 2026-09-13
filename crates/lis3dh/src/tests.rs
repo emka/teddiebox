@@ -27,7 +27,10 @@ fn a_foreign_device_id_is_not_a_lis3dh() {
 
 #[test]
 fn initialisation_writes_the_rate_and_the_axis_enables() {
-    let expected = [Transaction::write(ADDR, vec![0x20, 0x47])];
+    let expected = [
+        Transaction::write(ADDR, vec![0x20, 0x77]),
+        Transaction::write(ADDR, vec![0x23, 0x20]),
+    ];
     let mut dev = Lis3dh::new(I2cMock::new(&expected), ADDR);
     dev.init().unwrap();
     dev.release().done();

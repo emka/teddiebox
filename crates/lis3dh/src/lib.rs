@@ -60,7 +60,13 @@ where
     /// Starts the device at 50 Hz with all three axes enabled.
     pub fn init(&mut self) -> Result<(), Error<E>> {
         self.i2c
-            .write(self.address, &[regs::CTRL_REG1, regs::CTRL_REG1_50HZ_XYZ])
+            .write(self.address, &[regs::CTRL_REG1, regs::CTRL_REG1_400HZ_XYZ])
+            .map_err(Error::Bus)?;
+        // Full scale before anything reads or thresholds: at the reset +/-2 g
+        // a slap clips, and a clipped slap cannot be told from a firm handling
+        // knock. See `CTRL_REG4_FS_8G`.
+        self.i2c
+            .write(self.address, &[regs::CTRL_REG4, regs::CTRL_REG4_FS_8G])
             .map_err(Error::Bus)
     }
 
