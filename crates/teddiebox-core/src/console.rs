@@ -222,7 +222,8 @@ pub enum Command {
     /// session said so is a box measuring the wrong thing.
     StayAwake(bool),
     /// Set `CLICK_THS` live, so the bench can sweep the slap threshold
-    /// without a reflash. One LSB is 16 mg at the part's default +/-2 g.
+    /// without a reflash. One LSB is 15.625 mg (full scale / 128 at the
+    /// +/-2 g default).
     SlapThreshold { threshold: u8 },
 }
 
