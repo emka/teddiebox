@@ -225,6 +225,11 @@ pub enum Command {
     /// without a reflash. One LSB is 15.625 mg (full scale / 128 at the
     /// +/-2 g default).
     SlapThreshold { threshold: u8 },
+    /// Set `TIME_LIMIT` live. In output-data-rate periods — 2.5 ms each at the
+    /// 400 Hz `init` sets — it is the longest an acceleration may stay over
+    /// the threshold and still count as a click, so it is what separates a
+    /// slap's impact from the box rocking afterwards.
+    SlapTimeLimit { limit: u8 },
 }
 
 /// Longest network name accepted, in octets. 802.11 says 32.
@@ -313,6 +318,7 @@ impl CommandWatch {
                         .or_else(|| parse_play_content(other))
                         .or_else(|| parse_dump_pcm(other))
                         .or_else(|| parse_battery_log(other))
+                        .or_else(|| slap_time_limit(other))
                         .or_else(|| slap(other))
                         .or_else(|| parse_read_memory(other))
                         .or_else(|| parse_credential(other))
@@ -362,6 +368,12 @@ fn parse_dump_pcm(line: &[u8]) -> Option<Command> {
 fn parse_battery_log(line: &[u8]) -> Option<Command> {
     let seconds = hex_byte(line.strip_prefix(b"batlog ")?)?;
     Some(Command::BatteryLog { seconds })
+}
+
+/// Reads `slapt <2 hex>`, a click time limit.
+fn slap_time_limit(line: &[u8]) -> Option<Command> {
+    let limit = hex_byte(line.strip_prefix(b"slapt ")?)?;
+    Some(Command::SlapTimeLimit { limit })
 }
 
 /// Reads `slap <2 hex>`, a click threshold.
