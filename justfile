@@ -5,7 +5,7 @@
 # too, or the two drift and this stops being worth running.
 
 # everything CI runs; what to run before committing
-check: fmt lint test cross link fixtures firmware
+check: fmt lint test scripts cross link fixtures firmware
 
 # formatting, the gate no test or review will catch
 #
@@ -25,6 +25,16 @@ lint: vendor
 
 test:
     cargo test --workspace
+
+# The bench scripts' own self-tests
+#
+# These scripts decide what a bench session records, and two of them parse the
+# firmware's output. A parser nothing exercises is a parser that quietly stops
+# matching after a print statement is reworded — and the session that finds out
+# is one somebody drove to the bench for.
+scripts:
+    python3 scripts/battery-run.py --self-test
+    python3 scripts/sleep-check.py --self-test
 
 # Proves the library crates are genuinely no_std, against the target the
 # firmware actually runs on. rustc ships no prebuilt core for xtensa.

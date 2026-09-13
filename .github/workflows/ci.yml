@@ -49,6 +49,11 @@ jobs:
       - name: Test
         run: nix develop --command just test
 
+      # The bench scripts parse what the firmware prints, so a reworded line
+      # can break a measurement without breaking a build.
+      - name: Bench script self-tests
+        run: nix develop --command just scripts
+
       - name: Cross-compile check
         run: nix develop --command just cross
 
