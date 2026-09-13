@@ -3,9 +3,9 @@
 //! Debouncing and polarity, decided where a host test can see them. The pins
 //! themselves belong to the firmware.
 
-/// The left ear. Active low.
+/// The larger ear, on the box's right. Active low.
 pub const EAR_LARGER: u8 = 20;
-/// The right ear. Active low.
+/// The smaller ear, on the box's left. Active low.
 pub const EAR_SMALLER: u8 = 21;
 /// Wake, from the button or the charger. Documented as 1 = inactive.
 pub const WAKE: u8 = 7;

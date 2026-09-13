@@ -53,15 +53,21 @@ pub enum Position {
 /// instruction to press the right ear gets the other ear pressed about half
 /// the time — which it did, at the bench, on 2026-09-08.
 ///
+/// The sides below were also wrong until 2026-09-13, which is the case for
+/// naming them by size: the mistake sat here for over a month and cost
+/// nothing, because nothing in the firmware ever asked which side an ear was
+/// on. A slap does, so it had to be settled.
+///
 /// The discriminants are explicit because the reducer indexes its
 /// press-timestamp array by ear, and they follow the pin order in
 /// [`crate::input`] so the two cannot drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Ear {
-    /// GPIO20, the box's left.
+    /// GPIO20. **The box's right** — established at the bench 2026-09-13,
+    /// correcting what this said since M5.
     Larger = 0,
-    /// GPIO21, the box's right.
+    /// GPIO21, the box's left.
     Smaller = 1,
 }
 
