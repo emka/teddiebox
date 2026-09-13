@@ -69,6 +69,9 @@ pub enum Event {
     ContentReady(TagUid),
     /// Content for this tag could not be obtained, and why.
     ContentMissing(TagUid, Unavailable),
+    /// The box was struck on one side. Detected and latched by the
+    /// accelerometer, so this arrives once per slap however long it waited.
+    Slap(Side),
 }
 
 /// Everything the firmware may be asked to do.
@@ -240,7 +243,8 @@ impl Core {
             | Event::TagAbsent
             | Event::ContentReady(_)
             | Event::ContentMissing(..)
-            | Event::PlaybackEnded => {
+            | Event::PlaybackEnded
+            | Event::Slap(_) => {
                 self.last_activity = self.last_tick;
             }
             Event::Battery { .. } | Event::Charger(_) | Event::TrackFinished => {}
@@ -369,6 +373,13 @@ impl Core {
                 for act in a {
                     let _ = actions.push(act);
                 }
+            }
+
+            Event::Slap(side) => {
+                let _ = actions.push(match side {
+                    Side::Right => Action::NextTrack,
+                    Side::Left => Action::PrevTrack,
+                });
             }
         }
 
@@ -945,5 +956,19 @@ mod tests {
         c.handle(Event::TagPresent(TAG), &Index);
         let actions = c.handle(Event::Tick(1_000), &Index);
         assert!(!actions.iter().any(|a| matches!(a, Action::SetLed(_))));
+    }
+
+    #[test]
+    fn a_slap_on_the_right_goes_to_the_next_chapter() {
+        let mut c = core();
+        let actions = c.handle(Event::Slap(Side::Right), &Index);
+        assert!(contains(&actions, Action::NextTrack));
+    }
+
+    #[test]
+    fn a_slap_on_the_left_goes_back_a_chapter() {
+        let mut c = core();
+        let actions = c.handle(Event::Slap(Side::Left), &Index);
+        assert!(contains(&actions, Action::PrevTrack));
     }
 }
