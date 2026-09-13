@@ -53,8 +53,8 @@ use teddiebox_core::sounds::{Language, Sound};
 use teddiebox_core::tone;
 
 use teddiebox_core::{
-    colour_for, db_for, Action, BatteryConfig, Core, CoreConfig, Ear, Event, LedState, Position,
-    PowerOffReason, TagUid, Unavailable, Volume, MAX_VOLUME,
+    colour_for, db_for, Action, BatteryConfig, Core, CoreConfig, Ear, Event, Freshness, LedState,
+    Position, PowerOffReason, TagUid, Unavailable, Volume, MAX_VOLUME,
 };
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
@@ -946,6 +946,15 @@ struct FetchRequest {
     /// UID over in.
     ruid: u64,
     token: Option<[u8; 32]>,
+    /// Whether this is a question rather than a download.
+    ///
+    /// A probe borrows the whole of the fetch's machinery — the same request,
+    /// the same route, the same token, the radio raised and dropped the same
+    /// way — and differs only in what it asks for and what it does with the
+    /// answer. Carrying the difference here rather than in a second request
+    /// keeps one association lifecycle instead of two, and makes it
+    /// impossible for a probe and a fetch to be queued at the same time.
+    probe: bool,
 }
 
 /// The fetch about to be raised on [`NET_GET`], written whole in one go.
@@ -954,6 +963,41 @@ struct FetchRequest {
 /// action — and each writes its own [`FetchRequest`] immediately before
 /// raising the request, never touching the other's fields separately.
 static FETCH_REQUEST: CsMutex<RefCell<Option<FetchRequest>>> = CsMutex::new(RefCell::new(None));
+
+/// Nothing has been probed.
+const PROBED_NOTHING: u8 = 0;
+/// The server stated a length, and [`PROBED_TOTAL`] carries it.
+const PROBED_LENGTH: u8 = 1;
+/// The server was asked and said nothing usable — it has no story for this
+/// figure, or it answered without a length, or it could not be reached at all.
+///
+/// One code for all three on purpose: the box does the same thing with each of
+/// them, which is to play what is on the card. The console keeps the
+/// difference; the reducer has no use for it.
+const PROBED_NO_ANSWER: u8 = 2;
+static PROBED: AtomicU8 = AtomicU8::new(PROBED_NOTHING);
+static PROBED_TOTAL: AtomicU32 = AtomicU32::new(0);
+
+/// Which figure [`PROBED`] belongs to.
+///
+/// The same guard the fetch outcome has, for the same reason: an answer that
+/// arrives after the figure was lifted or swapped belongs to nobody, and
+/// attributing it to whatever is on the plate now is the bug the identity
+/// exists to prevent.
+static PROBED_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+
+/// Which figures have been asked about since the box booted.
+///
+/// RAM, like the position slots, and lost on every reset — which is the whole
+/// cadence: one boot is roughly one session, because the box switches itself
+/// off after five idle minutes.
+static ASKED: CsMutex<RefCell<teddiebox_download::Asked>> =
+    CsMutex::new(RefCell::new(teddiebox_download::Asked::new()));
+
+/// Whether this figure has already been asked about this session.
+pub(crate) fn already_asked(tag: TagUid) -> bool {
+    critical_section::with(|cs| ASKED.borrow_ref(cs).contains(tag.ruid()))
+}
 
 /// Bytes waiting to move from the network to the card.
 ///
@@ -1111,6 +1155,38 @@ fn why_unavailable(error: &tls::Error) -> Unavailable {
             Unavailable::NoContent
         }
         _ => Unavailable::Unreachable,
+    }
+}
+
+/// What a probe's answer means for the story on the card.
+///
+/// The same shape as [`why_unavailable`]: a fact from the network turned into
+/// the one word the reducer can act on. Every path that is not "the server
+/// stated a different length" answers `Current`, because none of them is
+/// evidence against a file that is sitting on the card and plays — and
+/// revalidation may never make a working box worse than it was offline.
+fn freshness_of(probed: u8, tag: TagUid, card: Option<&storage::Mounted>) -> Freshness {
+    if probed != PROBED_LENGTH {
+        return Freshness::Current;
+    }
+    let Some(card) = card else {
+        // No card is not a judgement about the file; it is the reason this
+        // question cannot be answered at all.
+        return Freshness::Current;
+    };
+    let Some(sidecar) = CardIndex::new(card).sidecar(tag) else {
+        return Freshness::Current;
+    };
+    let total = PROBED_TOTAL.load(Ordering::Relaxed);
+    if teddiebox_download::is_stale(&sidecar, teddiebox_cloud::Probed::Length(total)) {
+        esp_println::println!(
+            "teddiebox: plate {:016X} is {} bytes here and {total} there — fetching it again",
+            tag.ruid(),
+            sidecar.length
+        );
+        Freshness::Stale
+    } else {
+        Freshness::Current
     }
 }
 
@@ -2249,7 +2325,24 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             // Written whole, in the one call: see `FetchRequest` for why the
             // ruid and the token it authorises never travel separately.
             critical_section::with(|cs| {
-                *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest { ruid, token });
+                *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest {
+                    ruid,
+                    token,
+                    probe: false,
+                });
+            });
+            NET_REQUEST.store(NET_GET, Ordering::Relaxed);
+        }
+
+        Action::Revalidate(tag) => {
+            let ruid = tag.ruid();
+            esp_println::println!("teddiebox: plate asking the server about {ruid:016X}");
+            critical_section::with(|cs| {
+                *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest {
+                    ruid,
+                    token,
+                    probe: true,
+                });
             });
             NET_REQUEST.store(NET_GET, Ordering::Relaxed);
         }
@@ -2472,7 +2565,7 @@ async fn media(
 
         // Fed before the request is read, so a `Play` decided here is picked
         // up on the same pass rather than the next one.
-        let mut events: [Option<Event>; 2] = [None, None];
+        let mut events: [Option<Event>; 3] = [None, None, None];
 
         // Asked before anything else, because the answer is only useful while
         // the card is still writable.
@@ -2518,6 +2611,33 @@ async fn media(
                 ),
                 // Nobody is waiting. Already the harmless case this read
                 // exists to guarantee.
+                None => {}
+            }
+        }
+
+        // The server has answered a question about a cached story. Read every
+        // pass, and guarded by identity for the same reason the fetch outcome
+        // is: an answer that arrives after the figure was lifted or swapped
+        // belongs to nobody.
+        let probed = PROBED.swap(PROBED_NOTHING, Ordering::Relaxed);
+        if probed != PROBED_NOTHING {
+            let probed_ruid = PROBED_RUID.load(Ordering::Relaxed);
+            match on_plate {
+                Some(tag) if tag.ruid() == probed_ruid => {
+                    // Remembered whatever the answer was. A server that was
+                    // unreachable a moment ago is unreachable for the rest of
+                    // a five-minute session, and asking it again on the next
+                    // placement spends the radio to be told the same thing.
+                    critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
+                    events[2] = Some(Event::Revalidated(
+                        tag,
+                        freshness_of(probed, tag, card.as_ref()),
+                    ));
+                }
+                Some(_) => esp_println::println!(
+                    "teddiebox: plate ignoring an answer about {probed_ruid:016X} — \
+                     not the figure on the plate"
+                ),
                 None => {}
             }
         }
@@ -2898,6 +3018,50 @@ async fn bring_up(
                             Some(FetchRequest {
                                 ruid: requested,
                                 token,
+                                probe: true,
+                            }) => {
+                                let wanted = tls::Wanted {
+                                    server: &config.server,
+                                    insecure: config.insecure,
+                                    ruid: requested.to_be_bytes(),
+                                    token: token.as_ref(),
+                                    from: None,
+                                    etag: None,
+                                };
+                                let answer = tls::length(tls, &stack, &wanted).await;
+                                // Attributed before it is published, so a
+                                // reader can never see an answer without
+                                // knowing whose it is.
+                                PROBED_RUID.store(requested, Ordering::Relaxed);
+                                match answer {
+                                    Ok(teddiebox_cloud::Probed::Length(total)) => {
+                                        esp_println::println!(
+                                            "teddiebox: ask {requested:016X} is {total} bytes"
+                                        );
+                                        PROBED_TOTAL.store(total, Ordering::Relaxed);
+                                        PROBED.store(PROBED_LENGTH, Ordering::Relaxed);
+                                    }
+                                    // Every remaining case plays what is on the
+                                    // card. They are told apart here, where a
+                                    // bench can read them, and nowhere else.
+                                    Ok(other) => {
+                                        esp_println::println!(
+                                            "teddiebox: ask {requested:016X} learned nothing — {other:?}"
+                                        );
+                                        PROBED.store(PROBED_NO_ANSWER, Ordering::Relaxed);
+                                    }
+                                    Err(e) => {
+                                        esp_println::println!(
+                                            "teddiebox: ask {requested:016X} failed — {e:?}"
+                                        );
+                                        PROBED.store(PROBED_NO_ANSWER, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                            Some(FetchRequest {
+                                ruid: requested,
+                                token,
+                                probe: false,
                             }) => {
                                 // Attributed up front, from the pair this fetch was
                                 // raised with — see `FetchRequest` — rather than read
@@ -3859,6 +4023,7 @@ async fn main(spawner: Spawner) {
                         *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest {
                             ruid: u64::from_be_bytes(ruid),
                             token,
+                            probe: false,
                         });
                     });
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);

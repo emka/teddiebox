@@ -52,6 +52,16 @@ impl<'a> CardIndex<'a> {
             .write_position(stock, path.directory, path.file, &out[..len])
     }
 
+    /// What the card's sidecar promises this story's whole length is.
+    ///
+    /// `None` for stock content, for a story that is not on the card, and for
+    /// a sidecar that cannot be read — three different things, and all three
+    /// mean the same here: there is no promise to compare the server against.
+    pub fn sidecar(&self, tag: TagUid) -> Option<Sidecar> {
+        let path = content_path(tag.0);
+        self.cached(path.directory, path.file).sidecar
+    }
+
     fn cached(&self, directory: u32, file: u32) -> Cached {
         let mut buffer = [0u8; MAX_SIDECAR];
         // `Sidecar::parse` takes `&str`, not bytes: a sidecar that is not
@@ -93,6 +103,28 @@ impl ContentIndex for CardIndex<'_> {
         }
 
         available
+    }
+
+    /// Whether this figure's story should be checked against the server
+    /// before it plays.
+    ///
+    /// Three conditions, and each one removes a case that would cost the radio
+    /// for nothing. **Stock content never asks**: a file under `CONTENT/` has
+    /// no sidecar to compare a length against and was never downloaded.
+    /// **An incomplete download never asks**: it is already going to the
+    /// network, and `decide` knows whether that is a fetch or a resume.
+    /// **A figure asked about since boot never asks again**: the radio is the
+    /// largest consumer on this pack, and one boot is roughly one session
+    /// because the box switches itself off after five idle minutes.
+    fn wants_revalidation(&self, tag: TagUid) -> bool {
+        let path = content_path(tag.0);
+        if self.on_stock_card(path.directory, path.file) {
+            return false;
+        }
+        if crate::already_asked(tag) {
+            return false;
+        }
+        playable_now(false, &self.cached(path.directory, path.file))
     }
 
     /// The card's tier: which chapter this story was in when the box last

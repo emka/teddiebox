@@ -23,7 +23,7 @@ pub mod wav;
 
 pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
 pub use led::{colour_for, led_for, PlaybackKind};
-pub use playback::{ContentIndex, Playback, Unavailable};
+pub use playback::{ContentIndex, Freshness, Playback, Unavailable};
 pub use types::*;
 pub use volume::{db_for, VolumeModel};
 
@@ -58,6 +58,9 @@ pub enum Event {
     PlaybackEnded,
     /// Content for this tag is now available locally.
     ContentReady(TagUid),
+    /// What the server said about a cached story, in answer to
+    /// [`Action::Revalidate`].
+    Revalidated(TagUid, Freshness),
     /// Content for this tag could not be obtained, and why.
     ContentMissing(TagUid, Unavailable),
     /// The box was struck on one side. Detected and latched by the
@@ -84,6 +87,13 @@ pub enum Action {
         pos: Position,
     },
     RequestContent(TagUid),
+    /// Ask the server whether this figure's cached story is still its own.
+    ///
+    /// Answered by [`Event::Revalidated`]. Nothing plays until it is: a story
+    /// that may be out of date is not played while a fresh one arrives behind
+    /// it, because swapping one underneath a listening child would need two
+    /// handles on one file and a rename, and the card has neither.
+    Revalidate(TagUid),
     /// Stop a download nobody is waiting for any more.
     AbortFetch,
     PlayPrompt(Prompt),
@@ -225,6 +235,7 @@ impl Core {
             Event::TagPresent(_)
             | Event::TagAbsent
             | Event::ContentReady(_)
+            | Event::Revalidated(..)
             | Event::ContentMissing(..)
             | Event::PlaybackEnded
             | Event::Slap(_) => {
@@ -295,6 +306,13 @@ impl Core {
 
             Event::ContentReady(tag) => {
                 let a = self.playback.on_content_ready(tag, index);
+                for act in a {
+                    let _ = actions.push(act);
+                }
+            }
+
+            Event::Revalidated(tag, freshness) => {
+                let a = self.playback.on_revalidated(tag, freshness, index);
                 for act in a {
                     let _ = actions.push(act);
                 }
@@ -390,6 +408,9 @@ mod tests {
         fn saved_position(&self, _tag: TagUid) -> Position {
             Position::Exact { page: 1 }
         }
+        fn wants_revalidation(&self, _tag: TagUid) -> bool {
+            false
+        }
     }
 
     /// A card with nothing on it, so a test can reach `State::Fetching`. The
@@ -402,6 +423,9 @@ mod tests {
         }
         fn saved_position(&self, _tag: TagUid) -> Position {
             Position::Start
+        }
+        fn wants_revalidation(&self, _tag: TagUid) -> bool {
+            false
         }
     }
 

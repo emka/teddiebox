@@ -29,7 +29,7 @@ use mbedtls_rs::{
     SessionError, Tls, TlsReference, TlsVersion, X509,
 };
 use static_cell::StaticCell;
-use teddiebox_cloud::stream::{self, Begun, Body};
+use teddiebox_cloud::stream::{self, Begun, Body, Probed};
 use teddiebox_cloud::{CloudError, ContentRequest, ETag, Route};
 use teddiebox_core::checksum::Crc32;
 use teddiebox_download::Continue;
@@ -503,6 +503,79 @@ pub async fn probe(
 
     let _ = session.close().await;
     Ok(())
+}
+
+/// Asks how long a figure's story is on the server now, and downloads none of
+/// it.
+///
+/// The setup below repeats `probe`'s and `fetch`'s rather than calling a
+/// helper, for the reason `fetch` already states: the socket and the session
+/// borrow buffers that have to live in the frame that uses them. The part that
+/// is *not* repeated is the request — a probe and a fetch must name the same
+/// file the same way, which is why one writer builds both.
+pub async fn length(
+    tls: TlsReference<'_>,
+    stack: &Stack<'_>,
+    wanted: &Wanted<'_>,
+) -> Result<Probed, Error> {
+    let Wanted {
+        server,
+        insecure,
+        ruid,
+        token,
+        ..
+    } = *wanted;
+    let mut name = [0u8; MAX_NAME];
+    let (name_len, port) = split_server(server, &mut name)?;
+    let host = core::str::from_utf8(&name[..name_len - 1]).map_err(|_| Error::MalformedServer)?;
+
+    let addresses = stack
+        .dns_query(host, DnsQueryType::A)
+        .await
+        .map_err(|_| Error::NoSuchHost)?;
+    let address = *addresses.first().ok_or(Error::NoSuchHost)?;
+
+    let mut rx = [0u8; TCP_BUFFER];
+    let mut tx = [0u8; TCP_BUFFER];
+    let mut socket = TcpSocket::new(*stack, &mut rx, &mut tx);
+    socket.set_timeout(Some(CONNECT_TIMEOUT));
+    socket
+        .connect((address, port))
+        .await
+        .map_err(|_| Error::Connect)?;
+    socket.set_timeout(Some(IDLE_TIMEOUT));
+
+    let mut session = Session::new(
+        tls,
+        socket,
+        &SessionConfig::Client(client_config(insecure, credentials())),
+    )
+    .map_err(Error::Handshake)?;
+
+    let mut uid = ruid;
+    uid.reverse();
+    let request = ContentRequest {
+        uid,
+        // The same rule the fetch follows: the route and the token are one
+        // decision, and a probe that asked a different route could be answered
+        // about a different file.
+        route: if token.is_some() {
+            Route::V2
+        } else {
+            Route::V1
+        },
+        etag: None,
+        server,
+        from: None,
+        auth: token,
+    };
+
+    let mut buf = [0u8; 1024];
+    let mut wire = Reporting::new(&mut session);
+    let probed = stream::probe_length(&mut wire, &request, &mut buf).await;
+    let answer = probed.map_err(|e| wire.explain(e))?;
+    let _ = session.close().await;
+    Ok(answer)
 }
 
 /// Downloads one content file and checksums it, **writing nothing**.

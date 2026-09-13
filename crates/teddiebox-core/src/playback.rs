@@ -7,11 +7,32 @@ use crate::{Action, Actions, PlaybackKind, Position, Prompt, TagUid};
 pub trait ContentIndex {
     fn is_available(&self, tag: TagUid) -> bool;
     fn saved_position(&self, tag: TagUid) -> Position;
+    /// Whether this figure's story should be checked against the server
+    /// before it plays.
+    ///
+    /// A narrower question than [`Self::is_available`], and deliberately not
+    /// folded into it: one asks whether there is anything to play, the other
+    /// whether what there is has been questioned lately. Only cached content
+    /// can answer yes — a file shipped under `CONTENT/` has no sidecar to
+    /// compare a length against, and was never downloaded.
+    fn wants_revalidation(&self, tag: TagUid) -> bool;
+}
+
+/// What the server said about a story already on the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// Nothing contradicted the cached copy — including a server that could
+    /// not be asked at all. Offline is not a reason to refuse a story.
+    Current,
+    /// The server has a different file under this figure's name.
+    Stale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Idle,
+    /// Waiting to hear whether the cached story is still the server's.
+    Checking(TagUid),
     Fetching(TagUid),
     Playing(TagUid),
     Failed,
@@ -62,7 +83,9 @@ impl Playback {
     pub fn kind(&self) -> PlaybackKind {
         match self.state {
             State::Idle => PlaybackKind::Idle,
-            State::Fetching(_) => PlaybackKind::Fetching,
+            // Told apart internally, and not outside: to everything watching,
+            // a box waiting on the network is a box waiting on the network.
+            State::Checking(_) | State::Fetching(_) => PlaybackKind::Fetching,
             State::Playing(_) => PlaybackKind::Playing,
             State::Failed => PlaybackKind::Failed,
         }
@@ -70,7 +93,7 @@ impl Playback {
 
     pub fn current_tag(&self) -> Option<TagUid> {
         match self.state {
-            State::Fetching(t) | State::Playing(t) => Some(t),
+            State::Checking(t) | State::Fetching(t) | State::Playing(t) => Some(t),
             _ => None,
         }
     }
@@ -83,6 +106,15 @@ impl Playback {
     pub fn on_tag_present<I: ContentIndex>(&mut self, tag: TagUid, index: &I) -> Actions {
         let mut actions = Actions::new();
         if index.is_available(tag) {
+            // Asked before it plays, not behind it. A stale story swapped
+            // underneath a listening child would need two handles on one file,
+            // which `embedded-sdmmc` refuses, and a rename, which it does not
+            // have.
+            if index.wants_revalidation(tag) {
+                self.state = State::Checking(tag);
+                let _ = actions.push(Action::Revalidate(tag));
+                return actions;
+            }
             let from = index.saved_position(tag);
             self.position = from;
             self.state = State::Playing(tag);
@@ -110,9 +142,42 @@ impl Playback {
             State::Fetching(_) => {
                 let _ = actions.push(Action::AbortFetch);
             }
-            State::Idle | State::Failed => {}
+            // Nothing was fetched, so there is nothing to abort. The answer
+            // still arriving is discarded by the identity guard in
+            // `on_revalidated`.
+            State::Checking(_) | State::Idle | State::Failed => {}
         }
         self.state = State::Idle;
+        actions
+    }
+
+    /// What the server said about a cached story, and what to do about it.
+    pub fn on_revalidated<I: ContentIndex>(
+        &mut self,
+        tag: TagUid,
+        freshness: Freshness,
+        index: &I,
+    ) -> Actions {
+        let mut actions = Actions::new();
+        // The same guard the download outcome has: an answer that arrives
+        // after the figure was lifted or swapped belongs to nobody.
+        if self.state != State::Checking(tag) {
+            return actions;
+        }
+        match freshness {
+            Freshness::Current => {
+                let from = index.saved_position(tag);
+                self.position = from;
+                self.state = State::Playing(tag);
+                let _ = actions.push(Action::Play { tag, from });
+            }
+            // The path a figure with no content at all takes. One refetch, not
+            // two, so the resume rules and the failure words stay in one place.
+            Freshness::Stale => {
+                self.state = State::Fetching(tag);
+                let _ = actions.push(Action::RequestContent(tag));
+            }
+        }
         actions
     }
 
@@ -172,6 +237,7 @@ mod tests {
     struct Index {
         available: bool,
         resume: Position,
+        wants_asking: bool,
     }
 
     impl ContentIndex for Index {
@@ -181,12 +247,16 @@ mod tests {
         fn saved_position(&self, _tag: TagUid) -> Position {
             self.resume
         }
+        fn wants_revalidation(&self, _tag: TagUid) -> bool {
+            self.wants_asking
+        }
     }
 
     fn known(page: u32) -> Index {
         Index {
             available: true,
             resume: Position::Exact { page },
+            wants_asking: false,
         }
     }
 
@@ -194,7 +264,91 @@ mod tests {
         Index {
             available: false,
             resume: Position::default(),
+            wants_asking: false,
         }
+    }
+
+    /// Cached, complete, and not yet asked about since the box booted.
+    fn unchecked(page: u32) -> Index {
+        Index {
+            available: true,
+            resume: Position::Exact { page },
+            wants_asking: true,
+        }
+    }
+
+    /// Decision: a story whose cached copy may be out of
+    /// date is not played while a fresh one arrives behind it. The box asks
+    /// first, and the answer decides what happens.
+    #[test]
+    fn a_figure_that_has_not_been_asked_about_is_asked_before_it_plays() {
+        let mut p = Playback::new();
+        let actions = p.on_tag_present(TAG, &unchecked(1));
+        assert_eq!(actions.as_slice(), &[Action::Revalidate(TAG)]);
+        assert_eq!(p.kind(), PlaybackKind::Fetching);
+    }
+
+    #[test]
+    fn a_story_the_server_agrees_with_plays_from_where_it_stopped() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unchecked(412));
+        let actions = p.on_revalidated(TAG, Freshness::Current, &unchecked(412));
+        assert_eq!(
+            actions.as_slice(),
+            &[Action::Play {
+                tag: TAG,
+                from: Position::Exact { page: 412 }
+            }]
+        );
+        assert_eq!(p.kind(), PlaybackKind::Playing);
+    }
+
+    /// A stale story takes the same path a figure with no story at all takes.
+    /// One refetch code path, not two — and the child hears the new version,
+    /// not the old one with a swap happening underneath it.
+    #[test]
+    fn a_stale_story_is_fetched_again_rather_than_played() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unchecked(412));
+        let actions = p.on_revalidated(TAG, Freshness::Stale, &unchecked(412));
+        assert_eq!(actions.as_slice(), &[Action::RequestContent(TAG)]);
+        assert_eq!(p.kind(), PlaybackKind::Fetching);
+    }
+
+    /// The same identity guard the download outcome has. A probe that finishes
+    /// after the figure was lifted or swapped belongs to nobody.
+    #[test]
+    fn an_answer_for_a_figure_no_longer_on_the_plate_is_ignored() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unchecked(1));
+        let actions = p.on_revalidated(OTHER, Freshness::Stale, &unchecked(1));
+        assert!(actions.as_slice().is_empty());
+    }
+
+    /// Lifting a figure mid-question stops the box waiting for an answer it no
+    /// longer has a use for. Nothing is aborted, because nothing was fetched.
+    #[test]
+    fn lifting_a_figure_that_is_being_asked_about_aborts_nothing() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unchecked(1));
+        let actions = p.on_tag_absent();
+        assert!(actions.as_slice().is_empty());
+        assert_eq!(p.kind(), PlaybackKind::Idle);
+    }
+
+    /// A figure asked about earlier in the session plays without a word to the
+    /// server: the radio is the largest consumer on this pack.
+    #[test]
+    fn a_figure_already_asked_about_plays_straight_away() {
+        let mut p = Playback::new();
+        let actions = p.on_tag_present(TAG, &known(3));
+        assert_eq!(
+            actions.as_slice(),
+            &[Action::Play {
+                tag: TAG,
+                from: Position::Exact { page: 3 }
+            }]
+        );
     }
 
     #[test]
