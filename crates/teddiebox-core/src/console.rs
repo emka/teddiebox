@@ -221,6 +221,13 @@ pub enum Command {
     /// like [`Command::Plate`]: a box that stays awake because a previous
     /// session said so is a box measuring the wrong thing.
     StayAwake(bool),
+    /// Enter deep sleep now, wakeable by the ear line.
+    ///
+    /// Manual only. The automatic path is deliberately not wired to this until
+    /// sleep current and the state of the gate pins have been measured, and a
+    /// box that switches itself off mid-session is the wrong instrument for
+    /// taking those two numbers.
+    Sleep,
     /// Set `CLICK_THS` live, so the bench can sweep the slap threshold
     /// without a reflash. One LSB is 15.625 mg (full scale / 128 at the
     /// +/-2 g default).
@@ -311,6 +318,7 @@ impl CommandWatch {
                     b"net status" => Some(Command::NetStatus),
                     b"plate on" => Some(Command::Plate(true)),
                     b"plate off" => Some(Command::Plate(false)),
+                    b"sleep" => Some(Command::Sleep),
                     b"awake on" => Some(Command::StayAwake(true)),
                     b"awake off" => Some(Command::StayAwake(false)),
                     other => parse_password(other)
@@ -1188,6 +1196,17 @@ mod tests {
             feed_all(&mut watch, b"awake off\r"),
             Some(Command::StayAwake(false))
         );
+    }
+
+    /// Deep sleep has to exist before it can be measured, and it must not be
+    /// reachable automatically before it has been: sleep current and the state
+    /// of the gate pins are the two numbers that decide whether any of the
+    /// power story works, and they are taken with a meter and a box that can
+    /// be told to sleep on demand.
+    #[test]
+    fn sleep_is_its_own_command() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"sleep\r"), Some(Command::Sleep));
     }
 
     #[test]

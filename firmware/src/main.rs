@@ -8,6 +8,7 @@ mod libc_shim;
 mod net;
 mod nfc;
 mod pins;
+mod sleep;
 mod stack;
 mod storage;
 mod tls;
@@ -31,6 +32,7 @@ use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::i2s::master::{Channels, DataFormat, I2s, TdmConfig};
+use esp_hal::peripherals::LPWR;
 use esp_hal::spi::master::Spi;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
@@ -219,6 +221,14 @@ async fn inputs(larger: Input<'static>, smaller: Input<'static>, wake: Input<'st
             park_task().await;
         }
 
+        // The wake line is wanted by whoever is ending the session. Handed
+        // over, and then parked *still holding the ears*: a task that returns
+        // drops its pins, and a dropped `Input` does not leave a pad the way a
+        // sleeping box needs it.
+        if SLEEP_WANTED.load(Ordering::Relaxed) {
+            break;
+        }
+
         let uptime = Instant::now().as_millis();
         // `Debounced` takes a `u32` and handles its wrap; `Core` measures how
         // long an ear was held and wants the un-truncated clock, or a press
@@ -263,6 +273,11 @@ async fn inputs(larger: Input<'static>, smaller: Input<'static>, wake: Input<'st
 
         Timer::after(Duration::from_millis(POLL_MS)).await;
     }
+
+    critical_section::with(|cs| {
+        WAKE_LINE.borrow_ref_mut(cs).replace(wake);
+    });
+    park_task().await;
 }
 
 /// Reports the pack and charger voltages.
@@ -1691,6 +1706,75 @@ static PARKED: AtomicBool = AtomicBool::new(false);
 /// that stays awake because a previous session said so is measuring the
 /// wrong thing.
 static STAY_AWAKE: AtomicBool = AtomicBool::new(false);
+
+/// Asks the task that polls the wake line to hand the pin over.
+///
+/// The ending belongs to the console loop — it owns the rails, the codec and
+/// the `LPWR` peripheral — but the pin belongs to `inputs`, which polls it.
+/// Arming and entering have to happen close together and in one task: esp-hal
+/// treats a level interrupt as single-shot and clears the same bit sleep entry
+/// reads, so an ear pressed between the two turns a wakeable sleep into a
+/// panic. Moving the pin is cheaper than splitting the job.
+static SLEEP_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// Where the wake line waits between the two tasks.
+///
+/// `inputs` stops polling the moment it puts the pin here and parks with the
+/// ears still held, so nothing drops a pin the sleep depends on. Put back by
+/// [`sleep_now`] whenever the sleep does not happen, so `sleep` can be typed
+/// again once whoever was holding an ear lets go.
+static WAKE_LINE: CsMutex<RefCell<Option<Input<'static>>>> = CsMutex::new(RefCell::new(None));
+
+/// Takes the wake line, arms it, and enters deep sleep. Returns only on
+/// failure, and then the box is still awake and still dark.
+///
+/// The caller has already gone dark: this says nothing a child can hear and
+/// nothing they can see.
+async fn sleep_now(lpwr: &mut Option<LPWR<'static>>) -> Result<(), &'static str> {
+    SLEEP_WANTED.store(true, Ordering::Relaxed);
+    let mut held = None;
+    for _ in 0..40 {
+        held = critical_section::with(|cs| WAKE_LINE.borrow_ref_mut(cs).take());
+        if held.is_some() {
+            break;
+        }
+        Timer::after(Duration::from_millis(5)).await;
+    }
+    let Some(mut wake) = held else {
+        return Err("the wake line never arrived");
+    };
+
+    // A level wake on a line already at its wake level ends the sleep the
+    // instant it begins, and an ear holds this line down for as long as it is
+    // held — so the press that asked for this has to be over first. Bounded,
+    // because a line held for ten seconds is a fault and not a slow finger.
+    for _ in 0..200 {
+        if wake.is_high() {
+            break;
+        }
+        Timer::after(Duration::from_millis(50)).await;
+    }
+
+    let outcome = sleep::arm(&mut wake).and_then(|()| {
+        lpwr.take()
+            .ok_or("the low-power peripheral has already been taken")
+    });
+    match outcome {
+        Ok(lpwr) => {
+            esp_println::println!("teddiebox: sleeping — press an ear to wake");
+            // The last line has to reach the UART before the chip stops
+            // clocking it.
+            Timer::after(Duration::from_millis(50)).await;
+            sleep::enter(lpwr)
+        }
+        Err(reason) => {
+            critical_section::with(|cs| {
+                WAKE_LINE.borrow_ref_mut(cs).replace(wake);
+            });
+            Err(reason)
+        }
+    }
+}
 
 /// Everything a child can see or hear, off, in the order the hardware needs.
 ///
@@ -3335,6 +3419,11 @@ async fn main(spawner: Spawner) {
     let mut board = BoardPins::new(p.GPIO45, p.GPIO47);
     let mut gates = Gates::at_reset();
 
+    // Held until something asks the box to stop for good. Deep sleep consumes
+    // it, so it is parked in an `Option` the way the other single-use
+    // peripherals are rather than being taken at the point of use.
+    let mut lpwr = Some(p.LPWR);
+
     spawner.spawn(heartbeat().unwrap());
     spawner.spawn(net(p.WIFI, p.SHA, p.RSA, p.AES).unwrap());
 
@@ -3368,7 +3457,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off"
+        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -3716,6 +3805,20 @@ async fn main(spawner: Spawner) {
                 Some(Command::Lock) => {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_LOCK, Ordering::Relaxed);
+                }
+                // Manual, and manual only. The automatic path stays a park
+                // until sleep current and the state of the gate pins have been
+                // measured, and those two numbers are taken with a meter and a
+                // box that sleeps when it is told to — not one that decides to
+                // mid-session.
+                Some(Command::Sleep) => {
+                    go_dark(&mut board, &mut gates, rgb.as_ref()).await;
+                    if let Err(reason) = sleep_now(&mut lpwr).await {
+                        esp_println::println!(
+                            "teddiebox: sleep not armed — {reason}; the box is awake and dark, \
+                             and the ears are gone until rb"
+                        );
+                    }
                 }
                 Some(Command::StayAwake(on)) => {
                     STAY_AWAKE.store(on, Ordering::Relaxed);
