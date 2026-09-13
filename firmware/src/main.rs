@@ -489,7 +489,10 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         })
         .is_err()
     {
-        esp_println::println!("teddiebox: LIS3DH would not take a click config");
+        esp_println::println!(
+            "teddiebox: LIS3DH would not take a click config — \
+             slaps will not be detected until the threshold is set from the console"
+        );
     }
 
     loop {
@@ -649,13 +652,24 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
 
         let wanted = SLAP_THRESHOLD.load(Ordering::Relaxed);
         if wanted != armed_threshold {
-            armed_threshold = wanted;
-            let _ = accel.enable_click(ClickConfig {
+            // `armed_threshold` only advances on a confirmed write: the bench
+            // trusts this line to mean the part is actually running at
+            // `wanted`, and a discarded error here would print a success the
+            // box never delivered. Leaving it unchanged on failure also means
+            // the next pass tries again rather than believing it is done.
+            match accel.enable_click(ClickConfig {
                 axes: ClickAxes::ALL,
                 threshold: wanted,
                 time_limit: SLAP_TIME_LIMIT,
-            });
-            esp_println::println!("teddiebox: slap threshold {wanted}");
+            }) {
+                Ok(()) => {
+                    armed_threshold = wanted;
+                    esp_println::println!("teddiebox: slap threshold {wanted}");
+                }
+                Err(_) => esp_println::println!(
+                    "teddiebox: slap threshold {wanted} NOT applied, LIS3DH write failed"
+                ),
+            }
         }
 
         // Polled often so a shutdown or a re-init is not held up by an
@@ -703,8 +717,9 @@ const ACCEL_POLL_MS: u64 = 200;
 const ACCEL_REPORT_EVERY: u32 = 10;
 
 /// `CLICK_THS`, live so the bench can sweep it without a reflash. 45 is
-/// 703 mg at 16 mg per LSB — the nominal figure `GestureConfig` carried,
-/// which is a starting point for calibration and not a measurement.
+/// 703 mg at 15.625 mg per LSB (full scale / 128 at the +/-2 g default) —
+/// the nominal figure `GestureConfig` carried, which is a starting point
+/// for calibration and not a measurement.
 static SLAP_THRESHOLD: AtomicU8 = AtomicU8::new(45);
 /// `TIME_LIMIT`, in ODR periods: 3 is 60 ms at the 50 Hz `init` sets.
 const SLAP_TIME_LIMIT: u8 = 3;
