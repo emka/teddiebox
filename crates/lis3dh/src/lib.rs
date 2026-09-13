@@ -178,9 +178,9 @@ impl ClickAxes {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClickConfig {
     pub axes: ClickAxes,
-    /// `CLICK_THS[6:0]`. One LSB is full scale / 128, so 16 mg at the +/-2 g
-    /// the part defaults to and [`Lis3dh::init`] leaves in place. Values above
-    /// 127 are clamped to 127, not masked.
+    /// `CLICK_THS[6:0]`. One LSB is full scale / 128, so 15.625 mg at the
+    /// +/-2 g the part defaults to and [`Lis3dh::init`] leaves in place.
+    /// Values above 127 are clamped to 127, not masked.
     pub threshold: u8,
     /// `TIME_LIMIT[6:0]`, in ODR periods — 20 ms each at the 50 Hz `init`
     /// sets. **The unit is not stated in DocID17530 Rev 2**; it is ST's
@@ -196,6 +196,16 @@ where
     ///
     /// Call after [`init`](Self::init): the rate and the axis enables it
     /// writes are what the click engine runs on.
+    ///
+    /// `CLICK_CFG` — the per-axis enables — is written **last**, after
+    /// `CLICK_THS` and `TIME_LIMIT`, and not first as the register map is
+    /// laid out. `CLICK_THS` powers up at 0, its most sensitive setting, so a
+    /// bus error partway through this call must never leave the axes armed
+    /// against that default: on a child's toy that reads as random chapter
+    /// skips from being carried across a room. Writing the axis enables last
+    /// means a partial write leaves the click engine disarmed — silent —
+    /// rather than armed and hypersensitive. Do not reorder this back to
+    /// match the register map.
     pub fn enable_click(&mut self, cfg: ClickConfig) -> Result<(), Error<E>> {
         // Clamped, not masked: masking 200 would give 72 and quietly make the
         // box twice as sensitive as asked. Clamping fails towards a missed
@@ -203,9 +213,9 @@ where
         let ths = regs::CLICK_THS_LIR | cfg.threshold.min(regs::CLICK_THS_MAX);
         for write in [
             [regs::CTRL_REG2, regs::CTRL_REG2_HPCLICK],
-            [regs::CLICK_CFG, cfg.axes.bits()],
             [regs::CLICK_THS, ths],
             [regs::TIME_LIMIT, cfg.time_limit.min(regs::TIME_LIMIT_MAX)],
+            [regs::CLICK_CFG, cfg.axes.bits()],
         ] {
             self.i2c.write(self.address, &write).map_err(Error::Bus)?;
         }
