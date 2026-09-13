@@ -481,9 +481,16 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     // `armed` false, so the next pass (or the operator re-typing the very
     // same threshold the failure message names) still retries, instead of
     // comparing equal to a value that was only ever hoped for.
+    //
+    // `confirmed_threshold` is a separate, narrower fact: the last value a
+    // write actually landed at, for display only. It must never be set from
+    // an attempt — only from a success — because the click print reads it as
+    // "what the part is running", and during a failed re-arm window
+    // `armed_threshold` holds a number the part never accepted.
     let mut armed_threshold = SLAP_THRESHOLD.load(Ordering::Relaxed);
     let mut armed = false;
     let mut failure_reported = false;
+    let mut confirmed_threshold: Option<u8> = None;
     if accel.init().is_err() {
         esp_println::println!("teddiebox: LIS3DH would not start");
         return;
@@ -496,7 +503,10 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         threshold: armed_threshold,
         time_limit: SLAP_TIME_LIMIT,
     }) {
-        Ok(()) => armed = true,
+        Ok(()) => {
+            armed = true;
+            confirmed_threshold = Some(armed_threshold);
+        }
         Err(_) => {
             esp_println::println!(
                 "teddiebox: LIS3DH would not take a click config — \
@@ -642,14 +652,30 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 // a slap lands on and would read X every time. Say so out
                 // loud rather than leaving it in the raw byte to be noticed.
                 let axes_set = (click.raw & 0b111).count_ones();
-                esp_println::println!(
-                    "teddiebox: click {:?} {} raw {:#04x} threshold {}{}",
-                    click.axis,
-                    if click.negative { "-" } else { "+" },
-                    click.raw,
-                    clamped_threshold(armed_threshold),
-                    if axes_set > 1 { " MULTI-AXIS" } else { "" }
-                );
+                // The threshold printed here is `confirmed_threshold`, not
+                // `armed_threshold`: during a failed re-arm window the two
+                // disagree, and this line is what a calibration log is read
+                // back against after the session, once the "NOT applied"
+                // line has long since scrolled away. A click before any
+                // write has ever succeeded — only possible if the part is
+                // arming inconsistently — says so rather than guessing.
+                match confirmed_threshold {
+                    Some(threshold) => esp_println::println!(
+                        "teddiebox: click {:?} {} raw {:#04x} threshold {}{}",
+                        click.axis,
+                        if click.negative { "-" } else { "+" },
+                        click.raw,
+                        clamped_threshold(threshold),
+                        if axes_set > 1 { " MULTI-AXIS" } else { "" }
+                    ),
+                    None => esp_println::println!(
+                        "teddiebox: click {:?} {} raw {:#04x} threshold unconfirmed{}",
+                        click.axis,
+                        if click.negative { "-" } else { "+" },
+                        click.raw,
+                        if axes_set > 1 { " MULTI-AXIS" } else { "" }
+                    ),
+                }
                 let axis = match click.axis {
                     ClickAxis::X => board::Axis::X,
                     ClickAxis::Y => board::Axis::Y,
@@ -688,6 +714,7 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 Ok(()) => {
                     armed = true;
                     failure_reported = false;
+                    confirmed_threshold = Some(wanted);
                     esp_println::println!(
                         "teddiebox: slap threshold {}",
                         clamped_threshold(wanted)
