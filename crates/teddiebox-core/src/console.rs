@@ -228,6 +228,14 @@ pub enum Command {
     /// box that switches itself off mid-session is the wrong instrument for
     /// taking those two numbers.
     Sleep,
+    /// Whether the box may end a session in deep sleep rather than parking.
+    ///
+    /// Off at boot and lost on every reset, like [`Command::Plate`] and
+    /// [`Command::StayAwake`]. Until sleep current and the state of the gate
+    /// pins have been measured, a box that switches itself all the way off is
+    /// a box that cannot be asked what it did — so the automatic ending is
+    /// something a bench arms deliberately, for one session at a time.
+    AutoSleep(bool),
     /// Set `CLICK_THS` live, so the bench can sweep the slap threshold
     /// without a reflash. One LSB is 15.625 mg (full scale / 128 at the
     /// +/-2 g default).
@@ -319,6 +327,8 @@ impl CommandWatch {
                     b"plate on" => Some(Command::Plate(true)),
                     b"plate off" => Some(Command::Plate(false)),
                     b"sleep" => Some(Command::Sleep),
+                    b"autosleep on" => Some(Command::AutoSleep(true)),
+                    b"autosleep off" => Some(Command::AutoSleep(false)),
                     b"awake on" => Some(Command::StayAwake(true)),
                     b"awake off" => Some(Command::StayAwake(false)),
                     other => parse_password(other)
@@ -1207,6 +1217,24 @@ mod tests {
     fn sleep_is_its_own_command() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"sleep\r"), Some(Command::Sleep));
+    }
+
+    /// Deep sleep as the real ending of a session is not armed by default,
+    /// and is lost on every reset. A box that sleeps because a previous
+    /// session said so is a box that disappears mid-measurement, and a park
+    /// costs a power cycle to undo.
+    #[test]
+    fn the_automatic_ending_can_be_armed_from_the_console() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"autosleep on\r"),
+            Some(Command::AutoSleep(true))
+        );
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"autosleep off\r"),
+            Some(Command::AutoSleep(false))
+        );
     }
 
     #[test]

@@ -1707,6 +1707,17 @@ static PARKED: AtomicBool = AtomicBool::new(false);
 /// wrong thing.
 static STAY_AWAKE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the end of a session is deep sleep rather than a park.
+///
+/// Off at boot and lost on every reset, exactly like `PLATE_POLLING` and
+/// `STAY_AWAKE`. Sleep current and the state of the gate pins have not been
+/// measured yet, and until they have, a box that switches itself all the way
+/// off is a box that cannot be asked what it did. Parking stays the default
+/// ending for the same reason it always was: a box that drains can be
+/// recovered by charging it, and a box asleep with nothing able to wake it
+/// cannot.
+static AUTO_SLEEP: AtomicBool = AtomicBool::new(false);
+
 /// Asks the task that polls the wake line to hand the pin over.
 ///
 /// The ending belongs to the console loop — it owns the rails, the codec and
@@ -3457,7 +3468,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep"
+        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -3637,12 +3648,25 @@ async fn main(spawner: Spawner) {
             // then reported a flat battery that was nothing of the kind.
             esp_println::println!("teddiebox: going dark");
             go_dark(&mut board, &mut gates, rgb.as_ref()).await;
+            // Deep sleep is what this was always meant to be. A park keeps the
+            // executor running with the PLLs up — tens of milliamps — so the
+            // cutoff that exists to stop these unprotected cells being driven
+            // into reversal was removing the load a child can see and then
+            // draining the pack anyway.
+            //
+            // Armed for one session at a time, because the two numbers that
+            // say whether sleep works have not been taken yet.
+            if AUTO_SLEEP.load(Ordering::Relaxed) {
+                if let Err(reason) = sleep_now(&mut lpwr).await {
+                    esp_println::println!("teddiebox: sleep not armed — {reason}, parking instead");
+                }
+            }
             // Everything a child can see or hear is now off, and every task
-            // that was still working on the box's behalf stops here. This is
-            // not a true power-off — the chip is still running, and deep sleep
-            // is bench step 12 — so it is parked rather than pretending
-            // otherwise. What it no longer does is spend the pack while
-            // parked.
+            // that was still working on the box's behalf stops here. Reached
+            // when the ending is a park, and when a sleep would not arm: a box
+            // that drains is recoverable by charging, and a box asleep with
+            // nothing able to wake it is not, so this is the safe side to fall
+            // on.
             PARKED.store(true, Ordering::Relaxed);
             park_task().await;
         }
@@ -3825,6 +3849,13 @@ async fn main(spawner: Spawner) {
                     esp_println::println!(
                         "teddiebox: staying awake {}",
                         if on { "on" } else { "off" }
+                    );
+                }
+                Some(Command::AutoSleep(on)) => {
+                    AUTO_SLEEP.store(on, Ordering::Relaxed);
+                    esp_println::println!(
+                        "teddiebox: the session ends in {}",
+                        if on { "deep sleep" } else { "a park" }
                     );
                 }
                 Some(Command::Plate(on)) => {
