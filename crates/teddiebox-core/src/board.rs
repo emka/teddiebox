@@ -239,9 +239,10 @@ pub enum Axis {
 
 /// Which side of the box a click on `axis` means, if any.
 ///
-/// **The axis and the sign are both unverified.** X is what `GestureConfig`
-/// assumed; nothing has checked how the part is oriented in this box. The
-/// bench settles it, and this is the one line that then changes.
+/// **The axis and the sign are both unverified.** X is what the pre-M7
+/// gesture detector assumed; nothing has checked how the part is oriented in
+/// this box. The bench settles it, and this is the one line that then
+/// changes.
 pub const fn side_for_click(axis: Axis, negative: bool) -> Option<Side> {
     match axis {
         Axis::X if negative => Some(Side::Left),
@@ -506,8 +507,9 @@ mod tests {
         );
     }
 
-    /// Which axis a slap lands on has not been measured — see the plan's bench
-    /// section. X is the assumption `GestureConfig` shipped with; it is recorded
+    /// Which axis a slap lands on has not been measured, and the sign of the
+    /// click is equally unverified; the bench is what settles both. X is the
+    /// assumption the pre-M7 gesture detector shipped with; it is recorded
     /// here so one console session can contradict it in one place.
     #[test]
     fn a_slap_on_x_picks_a_side_by_its_sign() {

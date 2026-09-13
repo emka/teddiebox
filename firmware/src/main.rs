@@ -383,12 +383,13 @@ fn scan_i2c(i2c: &mut I2c<'_, esp_hal::Blocking>) {
     }
 }
 
-/// Identifies the accelerometer, then streams its axes.
+/// Identifies the accelerometer, then streams its axes, runs the part's
+/// click engine, and raises [`Event::Slap`] when a click lands on the axis
+/// `board::side_for_click` maps to a side.
 ///
 /// Both candidate addresses are tried because 0x18 is shared with the audio
 /// codec, which acknowledges and answers something that is not an identity
-/// register. Bench step 5 wants tilt traces captured from here as fixtures for
-/// the host-side gesture work.
+/// register.
 #[embassy_executor::task]
 async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>) {
     // Release the codec from reset before anything on this bus is believed.
@@ -718,8 +719,8 @@ const ACCEL_REPORT_EVERY: u32 = 10;
 
 /// `CLICK_THS`, live so the bench can sweep it without a reflash. 45 is
 /// 703 mg at 15.625 mg per LSB (full scale / 128 at the +/-2 g default) —
-/// the nominal figure `GestureConfig` carried, which is a starting point
-/// for calibration and not a measurement.
+/// the nominal figure the pre-M7 gesture detector carried, which is a
+/// starting point for calibration and not a measurement.
 static SLAP_THRESHOLD: AtomicU8 = AtomicU8::new(45);
 /// `TIME_LIMIT`, in ODR periods: 3 is 60 ms at the 50 Hz `init` sets.
 const SLAP_TIME_LIMIT: u8 = 3;
