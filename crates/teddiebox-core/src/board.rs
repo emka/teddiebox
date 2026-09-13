@@ -239,15 +239,24 @@ pub enum Axis {
 
 /// Which side of the box a click on `axis` means, if any.
 ///
-/// **The axis and the sign are both unverified.** X is what the pre-M7
-/// gesture detector assumed; nothing has checked how the part is oriented in
-/// this box. The bench settles it, and this is the one line that then
-/// changes.
+/// **Y, positive for the box's left.** Measured at the bench 2026-09-13 with
+/// the part running at 400 Hz: five slaps on the left face gave `Y+` four
+/// times, five on the right face gave `Y-` three times. Y is the only axis
+/// that flips with the side.
+///
+/// X and Z are deliberately not slaps. X is *vertical* when the box stands
+/// as a child uses it — gravity reads `-16000` on it — so an X click is the
+/// box being set down, not struck. Z showed `Z-` on both faces alike, so it
+/// carries how hard the box was pushed, not which side took the blow.
+///
+/// At 50 Hz none of this was visible: the engine could not separate the
+/// impact from the box rocking afterwards, and the same face produced both
+/// signs. The rate matters more than the threshold here.
 pub const fn side_for_click(axis: Axis, negative: bool) -> Option<Side> {
     match axis {
-        Axis::X if negative => Some(Side::Left),
-        Axis::X => Some(Side::Right),
-        Axis::Y | Axis::Z => None,
+        Axis::Y if negative => Some(Side::Right),
+        Axis::Y => Some(Side::Left),
+        Axis::X | Axis::Z => None,
     }
 }
 
@@ -507,22 +516,20 @@ mod tests {
         );
     }
 
-    /// Which axis a slap lands on has not been measured, and the sign of the
-    /// click is equally unverified; the bench is what settles both. X is the
-    /// assumption the pre-M7 gesture detector shipped with; it is recorded
-    /// here so one console session can contradict it in one place.
+    /// Measured 2026-09-13: left face gives `Y+`, right face `Y-`.
     #[test]
-    fn a_slap_on_x_picks_a_side_by_its_sign() {
-        assert_eq!(side_for_click(Axis::X, false), Some(Side::Right));
-        assert_eq!(side_for_click(Axis::X, true), Some(Side::Left));
+    fn a_slap_on_y_picks_a_side_by_its_sign() {
+        assert_eq!(side_for_click(Axis::Y, false), Some(Side::Left));
+        assert_eq!(side_for_click(Axis::Y, true), Some(Side::Right));
     }
 
-    /// A click on an axis that is not the slap axis is not a slap. Z in
-    /// particular is the box being put down.
+    /// X is vertical when the box stands upright, so an X click is the box
+    /// being set down. Z read the same sign on both faces, so it says how hard
+    /// rather than which side. Neither is a slap.
     #[test]
     fn a_click_on_another_axis_is_not_a_slap() {
-        assert_eq!(side_for_click(Axis::Y, false), None);
-        assert_eq!(side_for_click(Axis::Y, true), None);
+        assert_eq!(side_for_click(Axis::X, false), None);
+        assert_eq!(side_for_click(Axis::X, true), None);
         assert_eq!(side_for_click(Axis::Z, false), None);
         assert_eq!(side_for_click(Axis::Z, true), None);
     }

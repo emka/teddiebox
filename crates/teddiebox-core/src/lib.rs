@@ -349,8 +349,17 @@ impl Core {
 
             Event::Slap(side) => {
                 let _ = actions.push(match side {
-                    Side::Right => Action::NextTrack,
+                    // Left goes back, right goes forward — the transport
+                    // convention, and a call made at the bench.
+                    //
+                    // Note this only agrees with the ears if the LARGER ear is
+                    // on the box's right: `Ear::Larger` skips forward, and a
+                    // right slap now does too. `types.rs` calls GPIO20 "the
+                    // box's left", and a test in this file calls it the right
+                    // ear — one of the two is wrong and the box is the only
+                    // thing that can say which.
                     Side::Left => Action::PrevTrack,
+                    Side::Right => Action::NextTrack,
                 });
             }
         }
