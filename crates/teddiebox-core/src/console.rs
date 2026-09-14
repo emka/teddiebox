@@ -228,6 +228,14 @@ pub enum Command {
     /// box that switches itself off mid-session is the wrong instrument for
     /// taking those two numbers.
     Sleep,
+    /// Forget which figures have been asked about, so the next placement asks
+    /// the server again.
+    ///
+    /// Each figure is revalidated once per boot, because asking costs the
+    /// radio. That is the right cadence for a child and the wrong one for a
+    /// bench that has just replaced a file on the server, whose only other
+    /// way to make the box ask again is a power cycle.
+    Revalidate,
     /// Whether the box may end a session in deep sleep rather than parking.
     ///
     /// Off at boot and lost on every reset, like [`Command::Plate`] and
@@ -326,6 +334,7 @@ impl CommandWatch {
                     b"net status" => Some(Command::NetStatus),
                     b"plate on" => Some(Command::Plate(true)),
                     b"plate off" => Some(Command::Plate(false)),
+                    b"reval" => Some(Command::Revalidate),
                     b"sleep" => Some(Command::Sleep),
                     b"autosleep on" => Some(Command::AutoSleep(true)),
                     b"autosleep off" => Some(Command::AutoSleep(false)),
@@ -1235,6 +1244,15 @@ mod tests {
             feed_all(&mut watch, b"autosleep off\r"),
             Some(Command::AutoSleep(false))
         );
+    }
+
+    /// A bench that has just replaced a file on the server needs the box to
+    /// notice. Without this the only way to make it ask again is a power
+    /// cycle, because "once per boot" is exactly what the memory means.
+    #[test]
+    fn the_box_can_be_told_to_ask_the_server_again() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"reval\r"), Some(Command::Revalidate));
     }
 
     #[test]

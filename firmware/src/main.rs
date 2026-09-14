@@ -3689,7 +3689,7 @@ async fn main(spawner: Spawner) {
     // not something that can happen twice.
     let mut startup_pending = true;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off"
+        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off | reval"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -4098,6 +4098,12 @@ async fn main(spawner: Spawner) {
                     esp_println::println!(
                         "teddiebox: staying awake {}",
                         if on { "on" } else { "off" }
+                    );
+                }
+                Some(Command::Revalidate) => {
+                    critical_section::with(|cs| ASKED.borrow_ref_mut(cs).forget_all());
+                    esp_println::println!(
+                        "teddiebox: every figure will be asked about again on its next placement"
                     );
                 }
                 Some(Command::AutoSleep(on)) => {
