@@ -14,9 +14,15 @@ use heapless::String;
 /// The manifest's name, relative to the server root.
 pub const FILENAME: &str = "teddiebox.txt";
 
-/// Longest version string accepted. `git describe --always --dirty` on this
-/// repo produces well under half of this.
-pub const MAX_VERSION: usize = 48;
+/// Longest version string accepted.
+///
+/// Sized against the ESP-IDF application descriptor's `version: [c_char;
+/// 32]` field (esp-bootloader-esp-idf-0.6.0/src/lib.rs:141) — 32 bytes less
+/// a NUL. `esp-bootloader-esp-idf` truncates silently when filling that
+/// field, so a longer version here would be one `decide` accepted but
+/// `espflash board-info` would show cut short. `git describe --always
+/// --dirty` on this repo produces well under this.
+pub const MAX_VERSION: usize = 31;
 
 /// Longest image path accepted, relative to the manifest.
 pub const MAX_IMAGE_PATH: usize = 64;

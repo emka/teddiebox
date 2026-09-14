@@ -93,7 +93,9 @@ fn a_bad_digest_is_refused() {
 
 #[test]
 fn a_version_longer_than_the_buffer_is_refused() {
-    let long = "v".repeat(49);
+    // MAX_VERSION is 31 (the app descriptor's version field is 32 bytes,
+    // less a NUL), so 32 characters is one over.
+    let long = "v".repeat(32);
     let s = format!("version = {long}\nsha256 = {DIGEST}\nlength = 1\nimage = a\n");
     assert_eq!(parse(&s), Err(OtaError::ValueTooLong));
 }
