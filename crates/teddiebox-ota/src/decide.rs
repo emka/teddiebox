@@ -123,6 +123,19 @@ mod tests {
         );
     }
 
+    /// Pins the guard order deliberately: the version check runs before the
+    /// zero-length check. If our version already matches, there is nothing
+    /// to do and no flash is touched — regardless of what a stale or
+    /// malformed `length` says. Without this test, that order is an
+    /// implicit contract nothing exercises: a reordering that made a
+    /// same-version manifest with `length = 0` refuse instead of report
+    /// up-to-date would pass every other test in this file.
+    #[test]
+    fn a_same_version_manifest_is_up_to_date_even_with_a_zero_length() {
+        let m = manifest("v1", 0);
+        assert_eq!(decide(&m, "v1", SLOT), Decision::UpToDate);
+    }
+
     /// A box whose own version is empty has a build.rs that did not run. It
     /// must not conclude that every manifest is an update and reflash on
     /// every boot forever.
