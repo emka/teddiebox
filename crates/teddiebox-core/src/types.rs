@@ -155,7 +155,6 @@ impl LedState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prompt {
     Startup,
-    Shutdown,
     NoContent,
     NoNetwork,
     /// The access point refused the passphrase on the card.

@@ -129,8 +129,10 @@ impl Sound {
     ///
     /// `None` is a real answer and not an oversight. Every sound here was
     /// identified by ear on this card, because the published mapping has been
-    /// wrong before, and the two prompts that still return `None` are the two
-    /// nobody has listened for. Pointing one of them at a sound that says
+    /// wrong before — and so was the silence: all twenty-five German files were
+    /// played and listened to on 2026-09-14 before the volume ceiling was left
+    /// without one. The only candidate was `0x02`, the box's discouraging
+    /// "no", and it was turned down. Pointing a prompt at a sound that says
     /// something else would have the box say something true about the wrong
     /// thing, which is the failure this module guards against elsewhere.
     pub const fn for_prompt(prompt: crate::Prompt) -> Option<Self> {
@@ -141,7 +143,7 @@ impl Sound {
             crate::Prompt::BatteryCritical => Some(Self::BatteryCritical),
             crate::Prompt::NoContent => Some(Self::NoStory),
             crate::Prompt::WrongPassword => Some(Self::WrongPassword),
-            crate::Prompt::Shutdown | crate::Prompt::VolumeLimit => None,
+            crate::Prompt::VolumeLimit => None,
         }
     }
 
@@ -290,12 +292,13 @@ mod tests {
         assert_eq!(Sound::NoStory.file(), 0x0000_0012);
     }
 
-    /// Two prompts still have no file. Shutdown and the volume ceiling were
-    /// never identified by ear, and guessing would have the box say something
-    /// true about the wrong thing.
+    /// The volume ceiling is silent by decision, not for want of looking.
+    /// Every one of the card's twenty-five German files was played and listened
+    /// to on 2026-09-14; the only candidate was `0x02`, the discouraging
+    /// "tadum mhh mhh", and silence was chosen over it. A ceiling that says
+    /// nothing is what this box does.
     #[test]
-    fn the_prompts_with_no_identified_file_map_to_nothing() {
-        assert_eq!(Sound::for_prompt(Prompt::Shutdown), None);
+    fn the_volume_ceiling_is_deliberately_silent() {
         assert_eq!(Sound::for_prompt(Prompt::VolumeLimit), None);
     }
 
