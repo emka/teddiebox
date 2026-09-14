@@ -1,10 +1,18 @@
 //! Whether a story already on the card is still the story the server has.
 //!
-//! There is no ETag to match — teddyCloud sends none, on any route — so the
-//! question is answered with the one number it does state: how long the file
-//! is. Weaker than an ETag and honest about it: a figure's audio does not
-//! change silently, and a re-encode to exactly the same length reads as
-//! current.
+//! No ETag has ever been seen on a response to this box, so the question is
+//! answered with the one number the server does state: how long the file is.
+//! Weaker than an ETag and honest about it — a figure's audio does not change
+//! silently, and a re-encode to exactly the same length reads as current.
+//!
+//! **"No ETag, ever" is contested and is deliberately not claimed here.** The
+//! TLS design says absent on every route, local or proxied; a later review
+//! says a *forwarded* response carries both `ETag` and `Last-Modified`, and
+//! the client does emit `If-None-Match` and parse a `304`. Nothing measured on
+//! 2026-09-13 settles it: those probes were all for content the server already
+//! held. The length rule needs no answer either way, which is why it is the
+//! rule — but do not repeat either claim as fact without measuring a figure
+//! teddyCloud has to fetch upstream.
 //!
 //! The rule that matters more than the comparison is what happens when there
 //! is no answer. A server that cannot be reached, a figure the cloud has never
