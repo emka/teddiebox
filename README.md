@@ -38,6 +38,29 @@ mid-story, or the box is reset, the place falls back to whatever was last
 written to the card. This is a deliberate trade — writing every few seconds to
 survive it would wear the card for a case that leaves the box unusable anyway.
 
+### The controls do more than volume
+
+A stock box's ears do one thing between them: tap the larger for louder, the
+smaller for quieter. This box keeps that and adds holding.
+
+**Holding an ear changes the chapter.** Hold the larger — it is on the right —
+and the story moves on; hold the smaller and it goes back. The chapter changes
+after about half a second, while your finger is still on the ear, so you can
+hear that the box heard you. Letting go does nothing more.
+
+Two meanings on one ear cost something, and it is worth knowing which: until
+that half second is up the box cannot tell a tap from a hold, so the volume
+waits for you to let go.
+
+**A slap on the side of the box also changes the chapter**: the right face
+forward, the left face back. The accelerometer detects the knock itself, so it
+catches one however busy the box is.
+
+**If you would rather have stock's ears**, put `ears_skip = no` in `CONFIG.TXT`
+on the card. A press can then only mean one thing, so the volume moves the
+instant the ear goes down instead of waiting. Chapters are still reachable by
+slapping, so nothing is lost.
+
 ### The indicator says more
 
 A stock box does not show a charging colour while it sits idle. This one uses
@@ -46,7 +69,7 @@ the single RGB light to say what it is doing:
 | colour | meaning |
 |---|---|
 | green | idle, or playing a story |
-| blue | fetching a story it does not have |
+| blue | waiting on the server — fetching a story it does not have, or checking that the one it has is still the current one |
 | orange | the battery is running low |
 | red | a fault, or a battery about to give out |
 | cyan | idle, and on the charger |
