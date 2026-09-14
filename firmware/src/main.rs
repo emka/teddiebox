@@ -986,6 +986,32 @@ static PROBED_TOTAL: AtomicU32 = AtomicU32::new(0);
 /// exists to prevent.
 static PROBED_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 
+/// A cached file the server has contradicted, as `CACHE/<dir>/<file>`.
+///
+/// Armed when a probe comes back stale, and read once by the download that
+/// answers it. Nothing else is touched: the story stays playable until the
+/// refetch actually starts writing, because a box that discards what it has
+/// the moment it hears of something newer has a story fewer either way the
+/// download goes.
+static STALE_DIR: AtomicU32 = AtomicU32::new(0);
+static STALE_FILE: AtomicU32 = AtomicU32::new(0);
+static STALE_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this cache entry is the one a probe has just contradicted.
+///
+/// Consumed: a plan that has read it has answered it, and a second download of
+/// the same file has no reason to start from zero again.
+fn take_stale(dir: u32, file: u32) -> bool {
+    if !STALE_ARMED.load(Ordering::Relaxed)
+        || STALE_DIR.load(Ordering::Relaxed) != dir
+        || STALE_FILE.load(Ordering::Relaxed) != file
+    {
+        return false;
+    }
+    STALE_ARMED.store(false, Ordering::Relaxed);
+    true
+}
+
 /// Which figures have been asked about since the box booted.
 ///
 /// RAM, like the position slots, and lost on every reset — which is the whole
@@ -1198,6 +1224,12 @@ fn freshness_of(probed: u8, tag: TagUid, card: Option<&storage::Mounted>) -> Fre
             tag.ruid(),
             sidecar.length
         );
+        // Armed here, where the contradiction is known, and consumed by the
+        // download the reducer is about to ask for.
+        let path = teddiebox_download::content_path(tag.0);
+        STALE_DIR.store(path.directory, Ordering::Relaxed);
+        STALE_FILE.store(path.file, Ordering::Relaxed);
+        STALE_ARMED.store(true, Ordering::Relaxed);
         Freshness::Stale
     } else {
         Freshness::Current
@@ -1292,11 +1324,21 @@ fn plan_download(card: Option<&storage::Mounted>) {
         let length_on_card = card.cache_length(dir, file);
         on_card = length_on_card.unwrap_or(0);
 
+        // **A sidecar the server has contradicted vouches for nothing.** Read
+        // as it stands, it says the file is complete and the whole download
+        // turns into "the card already holds all of it" — which would play the
+        // very copy the probe just found stale. Dropping it needs no new rule:
+        // a file nothing vouches for is refetched from zero, truncating what
+        // is there, which is exactly what a stale file deserves.
+        let contradicted = take_stale(dir, file);
         let mut buffer = [0u8; teddiebox_download::MAX_SIDECAR];
-        let sidecar = card
-            .read_sidecar(dir, file, &mut buffer)
-            .and_then(|filled| core::str::from_utf8(&buffer[..filled]).ok())
-            .and_then(|text| teddiebox_download::Sidecar::parse(text).ok());
+        let sidecar = (!contradicted)
+            .then(|| {
+                card.read_sidecar(dir, file, &mut buffer)
+                    .and_then(|filled| core::str::from_utf8(&buffer[..filled]).ok())
+                    .and_then(|text| teddiebox_download::Sidecar::parse(text).ok())
+            })
+            .flatten();
 
         expected = sidecar.as_ref().map_or(0, |held| held.length);
         let cached = teddiebox_download::Cached {
