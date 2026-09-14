@@ -60,6 +60,25 @@ impl Sectors {
         self.erased_to = end;
         Some(start..end)
     }
+
+    /// Writes `bytes` at `offset`, erasing any sector this write is the first
+    /// to touch.
+    ///
+    /// The erase has to happen before the write and exactly once per sector:
+    /// erasing after a write throws away bytes that were already correct, and
+    /// that failure surfaces as a digest mismatch with nothing in the download
+    /// path to explain it.
+    pub fn feed<F: FlashRegionLike>(
+        &mut self,
+        flash: &mut F,
+        offset: u32,
+        bytes: &[u8],
+    ) -> Result<(), F::Error> {
+        if let Some(range) = self.erase_before(offset, bytes.len() as u32) {
+            flash.erase(range)?;
+        }
+        flash.write(offset, bytes)
+    }
 }
 
 #[cfg(test)]
@@ -69,24 +88,26 @@ mod tests {
     extern crate std;
     use std::vec::Vec;
 
-    // Unused in this task's tests: nothing here drives a write through
-    // `FlashRegionLike` yet, that lands with the real sink in a later task.
-    // Kept so the fake the doc comment above promises actually exists.
-    #[allow(dead_code)]
     #[derive(Default)]
     struct Fake {
         erased: Vec<core::ops::Range<u32>>,
         written: Vec<(u32, usize)>,
+        // Records "erase"/"write" in call order, interleaved, so a test can
+        // tell that a sector's erase happened before the write that touches
+        // it rather than only that both happened.
+        events: Vec<&'static str>,
     }
 
     impl FlashRegionLike for Fake {
         type Error = ();
         fn erase(&mut self, range: core::ops::Range<u32>) -> Result<(), ()> {
             self.erased.push(range);
+            self.events.push("erase");
             Ok(())
         }
         fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), ()> {
             self.written.push((offset, bytes.len()));
+            self.events.push("write");
             Ok(())
         }
     }
@@ -133,5 +154,47 @@ mod tests {
     #[test]
     fn a_zero_length_pads_to_nothing() {
         assert_eq!(pad_to_sector(0), 0);
+    }
+
+    #[test]
+    fn erases_are_always_sector_aligned() {
+        let mut s = Sectors::new(0x1D0000);
+        let mut f = Fake::default();
+        s.feed(&mut f, 0, &[0u8; 100]).unwrap();
+        s.feed(&mut f, 100, &[0u8; 5000]).unwrap();
+        s.feed(&mut f, 5100, &[0u8; 50]).unwrap();
+        assert!(!f.erased.is_empty());
+        for range in &f.erased {
+            assert_eq!(range.start % SECTOR, 0);
+            assert_eq!(range.end % SECTOR, 0);
+        }
+    }
+
+    #[test]
+    fn a_sector_is_erased_once_and_before_the_write_that_touches_it() {
+        let mut s = Sectors::new(0x1D0000);
+        let mut f = Fake::default();
+        s.feed(&mut f, 0, &[0u8; 100]).unwrap();
+        s.feed(&mut f, 100, &[0u8; 100]).unwrap();
+        assert_eq!(f.erased.len(), 1);
+        assert_eq!(f.events, ["erase", "write", "write"]);
+    }
+
+    #[test]
+    fn a_resumed_write_lands_where_the_watermark_says_not_at_zero() {
+        let mut s = Sectors::new(0x1D0000);
+        let mut f = Fake::default();
+        s.feed(&mut f, SECTOR * 4, &[0u8; 10]).unwrap();
+        assert_eq!(f.written, [(SECTOR * 4, 10)]);
+        assert_eq!(f.erased.len(), 1);
+        assert_eq!(f.erased[0], SECTOR * 4..SECTOR * 5);
+    }
+
+    #[test]
+    fn a_short_final_chunk_is_written_not_dropped() {
+        let mut s = Sectors::new(0x1D0000);
+        let mut f = Fake::default();
+        s.feed(&mut f, 0, &[0u8; 100]).unwrap();
+        assert_eq!(f.written, [(0, 100)]);
     }
 }
