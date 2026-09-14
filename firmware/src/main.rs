@@ -3592,6 +3592,9 @@ async fn nfc_reader(
     };
 
     let mut presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
+    // Whether polling was on last time round, so switching it on can start
+    // from a clean sheet. See where it is used.
+    let mut was_polling = false;
     let mut ticks_since_poll: u8 = 0;
     // Consecutive unanswered polls against a figure believed present.
     let mut misses: u16 = 0;
@@ -3691,7 +3694,28 @@ async fn nfc_reader(
             );
         }
 
-        if PLATE_POLLING.load(Ordering::Relaxed) {
+        let polling = PLATE_POLLING.load(Ordering::Relaxed);
+        // **Switching polling on forgets what the plate used to hold.**
+        // `Presence` reports changes, not states: a figure it already believes
+        // is present, fed again, is not an arrival — correctly, because
+        // nothing happened. But polling that stops and starts is not nothing
+        // happening, and the figure may have been swapped or taken in between,
+        // with no poll running to notice.
+        //
+        // Without this, `plate on` with a figure already sitting there
+        // announces nothing at all and its story never starts, while the
+        // reader answers perfectly — which is exactly what it looks like from
+        // a console, and cost an afternoon on 2026-09-14 being mistaken for a
+        // blind reader. The `nfc` command reading the same tag instantly is
+        // not a contradiction: it was never the reader that was quiet.
+        if polling && !was_polling {
+            presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
+            believed_present = false;
+            misses = 0;
+        }
+        was_polling = polling;
+
+        if polling {
             ticks_since_poll = ticks_since_poll.saturating_add(1);
             if ticks_since_poll >= PLATE_POLL_TICKS {
                 ticks_since_poll = 0;
