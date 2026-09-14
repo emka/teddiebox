@@ -1915,14 +1915,24 @@ async fn pack_says_empty() -> Option<u32> {
 
 /// Whether the end of a session is deep sleep rather than a park.
 ///
-/// Off at boot and lost on every reset, exactly like `PLATE_POLLING` and
-/// `STAY_AWAKE`. Sleep current and the state of the gate pins have not been
-/// measured yet, and until they have, a box that switches itself all the way
-/// off is a box that cannot be asked what it did. Parking stays the default
-/// ending for the same reason it always was: a box that drains can be
-/// recovered by charging it, and a box asleep with nothing able to wake it
-/// cannot.
-static AUTO_SLEEP: AtomicBool = AtomicBool::new(false);
+/// **On by default since 2026-09-14, when the wake was proven on hardware.**
+/// The box slept on command, stayed silent, and came back on an ear press
+/// reporting `rst:0x5 (DSLEEP)`. That settles which of the two endings is the
+/// right default, and it is not the park: a parked box answers nothing but the
+/// switch — it ignored `dl` and cost a power cycle twice, once that same
+/// morning — while a sleeping one answers an ear, which is the thing a child
+/// has.
+///
+/// Sleep current is still unmeasured, and deliberately not a reason to wait.
+/// A park draws tens of milliamps; whatever sleep draws, it is not *more*, and
+/// it is wakeable. The measurement decides how good this is, not whether it
+/// beats parking.
+///
+/// `autosleep off` turns it back into a park for one session — for a bench
+/// that wants a box which cannot disappear mid-measurement. Lost on every
+/// reset, like `PLATE_POLLING` and `STAY_AWAKE`, so the default is what a
+/// child's box does.
+static AUTO_SLEEP: AtomicBool = AtomicBool::new(true);
 
 /// Asks the task that polls the wake line to hand the pin over.
 ///
@@ -4028,8 +4038,8 @@ async fn main(spawner: Spawner) {
             // into reversal was removing the load a child can see and then
             // draining the pack anyway.
             //
-            // Armed for one session at a time, because the two numbers that
-            // say whether sleep works have not been taken yet.
+            // The default since the wake was proven on hardware. `autosleep
+            // off` is how a bench asks for a box that cannot disappear.
             if AUTO_SLEEP.load(Ordering::Relaxed) {
                 if let Err(reason) = sleep_now(&mut lpwr).await {
                     esp_println::println!("teddiebox: sleep not armed — {reason}, parking instead");
