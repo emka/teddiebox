@@ -17,9 +17,11 @@ pub const WAKE: u8 = 7;
 /// becomes one, and this is the number that moment is measured against. It
 /// sits with the other facts about what this box's switches do.
 ///
-/// 600 is a judgement nobody has tested on a child. It became testable only
-/// once the skip started landing while the ear was still down — before that,
-/// nothing happened until the release, so there was no wait to be too long.
+/// 600 was inherited as a guess and is now a judgement: both ears were held
+/// against it and it was kept. It only became judgeable
+/// once the skip started landing while the ear was still down — before that
+/// nothing happened until the release, so there was no wait to be too long and
+/// no way to feel whether this number was one.
 pub const LONG_PRESS_MS: u32 = 600;
 
 /// How long a level must hold before it counts.
