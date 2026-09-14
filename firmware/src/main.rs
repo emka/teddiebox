@@ -280,9 +280,32 @@ async fn ear(which: Ear, name: &'static str, mut pin: Input<'static>) {
         // Bounce on the way down needs nothing of its own: a release only
         // counts once the line has held high for `DEBOUNCE_MS`, so a press
         // that rattles fails that confirmation and goes on being a press.
+        //
+        // The wait for that release is also where a hold is noticed. This task
+        // is the only thing awake at the moment a press *becomes* one — the
+        // reducer sees events rather than time, and its tick is rate-limited
+        // to once a second — so it says so, and the chapter changes with the
+        // ear still down instead of when the child gives up and lets go.
         let mut bounces = 0u32;
+        let mut held = false;
         loop {
-            pin.wait_for_high().await;
+            if !held {
+                // Measured from the press, not from this iteration: a press
+                // that rattled has already spent some of its 600 ms.
+                let so_far = Instant::now().as_millis().saturating_sub(down_at);
+                let remaining = u64::from(input::LONG_PRESS_MS).saturating_sub(so_far);
+                if with_timeout(Duration::from_millis(remaining), pin.wait_for_high())
+                    .await
+                    .is_err()
+                {
+                    held = true;
+                    esp_println::println!("teddiebox: {name} held");
+                    send_input(Event::EarHeld(which, Instant::now().as_millis()));
+                    continue;
+                }
+            } else {
+                pin.wait_for_high().await;
+            }
             if with_timeout(
                 Duration::from_millis(u64::from(input::DEBOUNCE_MS)),
                 pin.wait_for_low(),

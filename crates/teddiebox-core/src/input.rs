@@ -10,6 +10,18 @@ pub const EAR_SMALLER: u8 = 21;
 /// Wake, from the button or the charger. Documented as 1 = inactive.
 pub const WAKE: u8 = 7;
 
+/// How long an ear must be held to mean "next chapter" rather than "louder".
+///
+/// Lives here rather than in `CoreConfig` because the reducer no longer reads
+/// it: a hold is announced by whoever owns the pin, at the moment the press
+/// becomes one, and this is the number that moment is measured against. It
+/// sits with the other facts about what this box's switches do.
+///
+/// 600 is a judgement nobody has tested on a child. It became testable only
+/// once the skip started landing while the ear was still down — before that,
+/// nothing happened until the release, so there was no wait to be too long.
+pub const LONG_PRESS_MS: u32 = 600;
+
 /// How long a level must hold before it counts.
 ///
 /// A starting point, not a measurement: bench step 2 exists partly to find the

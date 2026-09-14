@@ -41,6 +41,14 @@ pub enum Event {
     /// Periodic tick. Drives timeouts; the only way time advances.
     Tick(Millis),
     EarDown(Ear, Millis),
+    /// The ear has now been down long enough to be a hold rather than a tap.
+    ///
+    /// Raised by whoever owns the pin, because it is the only thing awake at
+    /// the moment a press *becomes* a hold — the reducer sees events, not
+    /// time, and its tick is rate-limited to once a second. Before this
+    /// existed, the tap-or-hold question was settled on release, which meant
+    /// no chapter could change until the ear was let go.
+    EarHeld(Ear, Millis),
     EarUp(Ear, Millis),
     TagPresent(TagUid),
     TagAbsent,
@@ -105,9 +113,6 @@ pub enum Action {
 pub struct CoreConfig {
     pub volume_limit: u8,
     pub battery: BatteryConfig,
-    /// Milliseconds an ear must be held to count as a long press rather than
-    /// a tap.
-    pub long_press_ms: Millis,
     /// Milliseconds of inactivity after which the box powers itself off.
     pub idle_timeout_ms: Millis,
 }
@@ -117,7 +122,6 @@ impl Default for CoreConfig {
         Self {
             volume_limit: MAX_VOLUME,
             battery: BatteryConfig::default(),
-            long_press_ms: 600,
             idle_timeout_ms: 5 * 60 * 1_000,
         }
     }
@@ -131,6 +135,9 @@ pub struct Core {
     playback: Playback,
     charging: bool,
     ear_down: [Option<Millis>; 2],
+    /// Set when a press has already been spent on a chapter skip, so the
+    /// release that follows steps the volume for nobody.
+    ear_spent: [bool; 2],
     led: LedState,
     last_activity: Millis,
     last_tick: Millis,
@@ -163,6 +170,7 @@ impl Core {
             playback: Playback::new(),
             charging: false,
             ear_down: [None, None],
+            ear_spent: [false, false],
             led: LedState::Booting,
             last_activity: 0,
             last_tick: 0,
@@ -230,7 +238,7 @@ impl Core {
         // as use would keep it awake forever.
         match event {
             Event::Tick(now) => self.last_tick = now,
-            Event::EarDown(_, at) | Event::EarUp(_, at) => {
+            Event::EarDown(_, at) | Event::EarHeld(_, at) | Event::EarUp(_, at) => {
                 self.last_activity = at;
             }
             Event::TagPresent(_)
@@ -263,30 +271,45 @@ impl Core {
 
             Event::EarDown(ear, at) => {
                 self.ear_down[ear as usize] = Some(at);
+                self.ear_spent[ear as usize] = false;
             }
 
-            Event::EarUp(ear, at) => {
-                let Some(down_at) = self.ear_down[ear as usize].take() else {
+            // The press becomes a chapter skip here, with the ear still down,
+            // rather than on the release. One skip per press: an ear held on
+            // and on must not walk through the story.
+            Event::EarHeld(ear, _) => {
+                if self.ear_down[ear as usize].is_none() || self.ear_spent[ear as usize] {
                     return actions;
+                }
+                self.ear_spent[ear as usize] = true;
+                let _ = actions.push(match ear {
+                    Ear::Larger => Action::NextTrack,
+                    Ear::Smaller => Action::PrevTrack,
+                });
+            }
+
+            Event::EarUp(ear, _) => {
+                let was_down = self.ear_down[ear as usize].take().is_some();
+                // A release nobody announced a press for is not a release.
+                if !was_down {
+                    return actions;
+                }
+                // Already spent on a skip. Stepping the volume as well would
+                // make every chapter change the loudness too.
+                if self.ear_spent[ear as usize] {
+                    self.ear_spent[ear as usize] = false;
+                    return actions;
+                }
+                let changed = match ear {
+                    Ear::Larger => self.volume.up(),
+                    Ear::Smaller => self.volume.down(),
                 };
-                let held = at.saturating_sub(down_at);
-                if held >= self.config.long_press_ms {
-                    let _ = actions.push(match ear {
-                        Ear::Larger => Action::NextTrack,
-                        Ear::Smaller => Action::PrevTrack,
-                    });
-                } else {
-                    let changed = match ear {
-                        Ear::Larger => self.volume.up(),
-                        Ear::Smaller => self.volume.down(),
-                    };
-                    match changed {
-                        Some(v) => {
-                            let _ = actions.push(Action::SetVolume(v));
-                        }
-                        None => {
-                            let _ = actions.push(Action::PlayPrompt(Prompt::VolumeLimit));
-                        }
+                match changed {
+                    Some(v) => {
+                        let _ = actions.push(Action::SetVolume(v));
+                    }
+                    None => {
+                        let _ = actions.push(Action::PlayPrompt(Prompt::VolumeLimit));
                     }
                 }
             }
@@ -498,16 +521,66 @@ mod tests {
         assert!(c.volume() < before);
     }
 
+    /// The skip lands while the ear is still down. Waiting for the release
+    /// made the box feel deaf: a child holds an ear, nothing happens, and the
+    /// chapter only changes once they give up and let go.
     #[test]
-    fn a_hold_on_the_larger_ear_goes_forward_and_the_smaller_goes_back() {
+    fn a_hold_skips_while_the_ear_is_still_down() {
         let mut c = core();
         c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        let forward = c.handle(Event::EarUp(Ear::Larger, 1_000), &Index);
+        let forward = c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
         assert!(contains(&forward, Action::NextTrack));
 
         c.handle(Event::EarDown(Ear::Smaller, 2_000), &Index);
-        let back = c.handle(Event::EarUp(Ear::Smaller, 3_000), &Index);
+        let back = c.handle(Event::EarHeld(Ear::Smaller, 2_600), &Index);
         assert!(contains(&back, Action::PrevTrack));
+    }
+
+    /// The press was spent on the skip. A release that stepped the volume too
+    /// would make every chapter skip a volume change as well.
+    #[test]
+    fn the_release_after_a_hold_does_nothing() {
+        let mut c = core();
+        let before = c.volume();
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Larger, 2_000), &Index);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(c.volume(), before);
+    }
+
+    /// One hold, one chapter — decided at the bench. An ear held on
+    /// and on must not walk through the story.
+    #[test]
+    fn holding_on_after_the_skip_does_not_skip_again() {
+        let mut c = core();
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
+        let again = c.handle(Event::EarHeld(Ear::Larger, 1_200), &Index);
+        assert!(!contains(&again, Action::NextTrack), "{again:?}");
+    }
+
+    /// How long the ear was down is now the firmware's business: it holds the
+    /// pin and it starts the clock. A release the reducer was never warned
+    /// about is a tap however late it arrives, because a hold would have said
+    /// so at the moment it became one.
+    #[test]
+    fn a_release_with_no_hold_before_it_is_a_tap_however_long_it_took() {
+        let mut c = core();
+        let before = c.volume();
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Larger, 10_000), &Index);
+        assert!(c.volume() > before);
+        assert!(contains(&actions, Action::SetVolume(c.volume())));
+        assert!(!contains(&actions, Action::NextTrack));
+    }
+
+    #[test]
+    fn a_hold_without_a_press_is_ignored() {
+        let mut c = core();
+        assert!(c
+            .handle(Event::EarHeld(Ear::Larger, 600), &Index)
+            .is_empty());
     }
 
     #[test]
@@ -522,11 +595,13 @@ mod tests {
         assert!(contains(&actions, Action::PlayPrompt(Prompt::VolumeLimit)));
     }
 
+    /// The larger ear is on the box's right, and right goes forward — the same
+    /// direction a slap on that side means. See `board::side_for_click`.
     #[test]
     fn a_long_press_on_the_right_ear_skips_forward() {
         let mut c = core();
         c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Larger, 900), &Index);
+        let actions = c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
         assert!(contains(&actions, Action::NextTrack));
         assert!(!contains(&actions, Action::SetVolume(c.volume())));
     }
@@ -535,7 +610,7 @@ mod tests {
     fn a_long_press_on_the_left_ear_skips_backward() {
         let mut c = core();
         c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Smaller, 900), &Index);
+        let actions = c.handle(Event::EarHeld(Ear::Smaller, 600), &Index);
         assert!(contains(&actions, Action::PrevTrack));
     }
 
