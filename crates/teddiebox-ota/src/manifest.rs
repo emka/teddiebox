@@ -65,18 +65,22 @@ impl Manifest {
             let value = value.trim();
 
             match key {
-                "version" => {
+                "version" if !value.is_empty() => {
                     version = Some(String::try_from(value).map_err(|_| OtaError::ValueTooLong)?);
                 }
                 "sha256" => sha256 = Some(crate::digest::parse_hex32(value)?),
                 "length" => {
                     length = Some(value.parse::<u32>().map_err(|_| OtaError::MalformedLine)?);
                 }
-                "image" => {
+                "image" if !value.is_empty() => {
                     image = Some(String::try_from(value).map_err(|_| OtaError::ValueTooLong)?);
                 }
                 // Unknown keys are ignored, so a manifest written for a newer
-                // firmware is still readable by an older one.
+                // firmware is still readable by an older one. An empty
+                // `version` or `image` value falls through here too, since
+                // it supplies no value — the field stays unset and the
+                // missing-field check below refuses it, rather than
+                // accepting a value nobody actually gave.
                 _ => {}
             }
         }

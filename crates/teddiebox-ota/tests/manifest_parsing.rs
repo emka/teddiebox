@@ -19,6 +19,18 @@ fn a_missing_version_is_refused() {
 }
 
 #[test]
+fn an_empty_version_is_refused() {
+    let s = format!("version = \nsha256 = {DIGEST}\nlength = 1\nimage = a.bin\n");
+    assert_eq!(parse(&s), Err(OtaError::MissingVersion));
+}
+
+#[test]
+fn a_whitespace_only_version_is_refused() {
+    let s = format!("version =    \nsha256 = {DIGEST}\nlength = 1\nimage = a.bin\n");
+    assert_eq!(parse(&s), Err(OtaError::MissingVersion));
+}
+
+#[test]
 fn a_missing_digest_is_refused() {
     let s = "version = v1\nlength = 1103728\nimage = teddiebox.bin\n";
     assert_eq!(parse(s), Err(OtaError::MissingSha256));
@@ -33,6 +45,18 @@ fn a_missing_length_is_refused() {
 #[test]
 fn a_missing_image_is_refused() {
     let s = format!("version = v1\nsha256 = {DIGEST}\nlength = 1103728\n");
+    assert_eq!(parse(&s), Err(OtaError::MissingImage));
+}
+
+#[test]
+fn an_empty_image_is_refused() {
+    let s = format!("version = v1\nsha256 = {DIGEST}\nlength = 1\nimage = \n");
+    assert_eq!(parse(&s), Err(OtaError::MissingImage));
+}
+
+#[test]
+fn a_whitespace_only_image_is_refused() {
+    let s = format!("version = v1\nsha256 = {DIGEST}\nlength = 1\nimage =    \n");
     assert_eq!(parse(&s), Err(OtaError::MissingImage));
 }
 
