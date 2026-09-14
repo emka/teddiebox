@@ -10,10 +10,12 @@
 
 mod decide;
 mod digest;
+mod image;
 mod manifest;
 mod sink;
 
 pub use decide::{decide, Decision, Refusal};
+pub use image::{image_version, may_activate};
 pub use manifest::{Manifest, FILENAME, MAX_IMAGE_PATH, MAX_MANIFEST, MAX_VERSION};
 pub use sink::{FlashRegionLike, Sectors, SinkError, SECTOR};
 
@@ -33,4 +35,13 @@ pub enum OtaError {
     Truncated,
     /// A digest was not exactly 64 hex characters.
     MalformedDigest,
+    /// The bytes handed to `image_version` are too short to hold an ESP-IDF
+    /// application descriptor, or the magic word at its start is wrong.
+    /// Fails closed: if the descriptor is not exactly where it is expected,
+    /// we do not know what was downloaded.
+    NotAnImage,
+    /// The downloaded image's own version does not match what the manifest
+    /// promised. This is the guard that stops an unbounded reflash loop when
+    /// the two disagree.
+    VersionMismatch,
 }
