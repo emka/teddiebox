@@ -8,9 +8,11 @@
 //! from ours, whether the digest matched, which sector a write lands in — so
 //! that all of them can be tested without a box.
 
+mod decide;
 mod digest;
 mod manifest;
 
+pub use decide::{decide, Decision, Refusal};
 pub use manifest::{Manifest, FILENAME, MAX_IMAGE_PATH, MAX_MANIFEST, MAX_VERSION};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
