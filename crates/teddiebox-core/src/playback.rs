@@ -105,6 +105,18 @@ impl Playback {
 
     pub fn on_tag_present<I: ContentIndex>(&mut self, tag: TagUid, index: &I) -> Actions {
         let mut actions = Actions::new();
+        // Already dealing with this very figure. A repeat arrival carries no
+        // new information, and acting on it is actively harmful: asking the
+        // card whether it holds a story it is *currently reading out* gets the
+        // answer "no", because `embedded-sdmmc` will not open one file twice —
+        // which on 2026-09-14 sent the box off to re-download nineteen
+        // megabytes over the top of the story it was playing.
+        if matches!(
+            self.state,
+            State::Playing(seen) | State::Fetching(seen) | State::Checking(seen) if seen == tag
+        ) {
+            return actions;
+        }
         if index.is_available(tag) {
             // Asked before it plays, not behind it. A stale story swapped
             // underneath a listening child would need two handles on one file,
@@ -347,6 +359,56 @@ mod tests {
             &[Action::Play {
                 tag: TAG,
                 from: Position::Exact { page: 3 }
+            }]
+        );
+    }
+
+    /// Seen on hardware 2026-09-14: the plate poller re-announced a figure
+    /// that was already playing, and the reducer asked the card whether it had
+    /// that story — **while the media task held the file open**.
+    /// `embedded-sdmmc` will not open one file twice, so the card answered
+    /// "not here" and the box raised the radio to re-download nineteen
+    /// megabytes it already had, over the top of the story it was playing.
+    ///
+    /// A figure that is already playing has arrived already. Saying so twice
+    /// is not new information, and acting on it means asking a question at the
+    /// one moment it cannot be answered.
+    #[test]
+    fn a_figure_already_playing_is_not_started_again() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &known(1));
+        let again = p.on_tag_present(TAG, &unknown());
+        assert!(
+            again.as_slice().is_empty(),
+            "a repeat arrival must do nothing at all: {again:?}"
+        );
+        assert_eq!(p.kind(), PlaybackKind::Playing);
+    }
+
+    /// The same for a fetch already under way: a repeat arrival must not
+    /// restart it, which would abandon the bytes already on the card and
+    /// begin again from zero.
+    #[test]
+    fn a_figure_already_being_fetched_is_not_fetched_again() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unknown());
+        let again = p.on_tag_present(TAG, &unknown());
+        assert!(again.as_slice().is_empty(), "got: {again:?}");
+        assert_eq!(p.kind(), PlaybackKind::Fetching);
+    }
+
+    /// A *different* figure is a real change and must still be acted on, or
+    /// swapping one figure for another would do nothing.
+    #[test]
+    fn a_different_figure_still_replaces_the_one_playing() {
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &known(1));
+        let swapped = p.on_tag_present(OTHER, &known(7));
+        assert_eq!(
+            swapped.as_slice(),
+            &[Action::Play {
+                tag: OTHER,
+                from: Position::Exact { page: 7 }
             }]
         );
     }
