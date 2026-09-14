@@ -9,7 +9,8 @@ pub mod stream;
 
 pub use client::{fetch, Outcome};
 pub use request::{
-    build_content_request, build_length_probe, ContentRequest, ETag, Route, MAX_ETAG,
+    build_content_request, build_length_probe, build_path_request, ContentRequest, ETag, Route,
+    MAX_ETAG,
 };
 pub use response::{parse_head, ContentRange, ResponseHead};
 pub use stream::{begin, probe_length, Begun, Body, Probed};

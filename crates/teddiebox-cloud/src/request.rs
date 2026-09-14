@@ -101,6 +101,41 @@ pub fn build_content_request(
     write_request(request, Ask::Content, out)
 }
 
+/// Writes a GET for a file at `path` into `out`.
+///
+/// The sibling `build_content_request` needs: fetching an update means asking
+/// teddyCloud for a path (`/teddiebox.txt`, then an image), not a figure
+/// identifier, and none of the uid, route, or upstream-forwarded token that
+/// shape a content request apply here.
+///
+/// `from: Some(n)` asks for an open-ended range from byte `n`, the same way a
+/// resumed content request does. `None` asks for the whole file. There is no
+/// etag parameter: nothing yet needs conditional revalidation for a plain
+/// path fetch, and adding one unused would be speculative.
+///
+/// Buffer discipline, header order, and the `Connection: close` close all
+/// match `build_content_request` exactly, because both are read by the same
+/// server and there is no reason for them to differ.
+pub fn build_path_request(
+    buf: &mut [u8],
+    path: &str,
+    server: &str,
+    from: Option<u32>,
+) -> Result<usize, CloudError> {
+    let mut writer = SliceWriter { out: buf, used: 0 };
+
+    write!(writer, "GET {path} HTTP/1.1\r\nHost: {server}\r\n")
+        .map_err(|_| CloudError::RequestTooLong)?;
+
+    if let Some(from) = from {
+        write!(writer, "Range: bytes={from}-\r\n").map_err(|_| CloudError::RequestTooLong)?;
+    }
+
+    write!(writer, "Connection: close\r\n\r\n").map_err(|_| CloudError::RequestTooLong)?;
+
+    Ok(writer.used)
+}
+
 /// Which byte a length probe asks for.
 ///
 /// One, not zero. Measured against `teddycloud.local` on 2026-09-13: a range at
@@ -562,6 +597,46 @@ mod tests {
     /// merely failing. It cost a day of looking at the wrong end of the wire.
     /// teddyCloud upper-cases the identifier itself when building its on-disk
     /// path, which is the tell that the wire format was always lower case.
+    /// The existing content request always closes the connection — it never
+    /// sends `keep-alive` — so a path request matches that rather than the
+    /// brief's first draft, which guessed `keep-alive`.
+    #[test]
+    fn a_path_request_asks_for_the_file_and_names_the_host() {
+        let mut buf = [0u8; 256];
+        let n = build_path_request(&mut buf, "/teddiebox.txt", "teddycloud.local", None).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&buf[..n]).unwrap(),
+            "GET /teddiebox.txt HTTP/1.1\r\n\
+             Host: teddycloud.local\r\n\
+             Connection: close\r\n\
+             \r\n"
+        );
+    }
+
+    #[test]
+    fn a_resumed_path_request_carries_an_open_ended_range() {
+        let mut buf = [0u8; 256];
+        let n =
+            build_path_request(&mut buf, "/teddiebox.bin", "teddycloud.local", Some(65536)).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&buf[..n]).unwrap(),
+            "GET /teddiebox.bin HTTP/1.1\r\n\
+             Host: teddycloud.local\r\n\
+             Range: bytes=65536-\r\n\
+             Connection: close\r\n\
+             \r\n"
+        );
+    }
+
+    #[test]
+    fn a_path_request_that_will_not_fit_the_buffer_is_refused() {
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            build_path_request(&mut buf, "/teddiebox.txt", "teddycloud.local", None),
+            Err(CloudError::RequestTooLong)
+        );
+    }
+
     #[test]
     fn the_identifier_is_written_in_lower_case() {
         let mut out = [0u8; 512];
