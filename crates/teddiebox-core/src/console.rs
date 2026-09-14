@@ -558,21 +558,10 @@ fn parse_read_memory(line: &[u8]) -> Option<Command> {
 /// plate and a broken antenna also look like.
 fn parse_password(line: &[u8]) -> Option<Command> {
     let digits = line.strip_prefix(b"pw ")?;
-    if digits.len() != 8 {
-        return None;
-    }
-
-    let mut value: u32 = 0;
-    for &byte in digits {
-        let nibble = match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => return None,
-        };
-        value = (value << 4) | u32::from(nibble);
-    }
-    Some(Command::Password(value))
+    // The same parse a build does when it bakes one in from the environment.
+    // Two implementations of "what is a valid password" is two things to get
+    // wrong about a credential, and the build's copy cannot be typed at.
+    Some(Command::Password(crate::hex::u32_from_hex(digits)?))
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ pub mod board;
 pub mod checksum;
 pub mod console;
 pub mod cushion;
+pub mod hex;
 pub mod i2c;
 pub mod input;
 mod led;

@@ -1702,11 +1702,47 @@ const SCAN_LIMIT: usize = 16;
 /// an event; it cannot catch one that never yields.
 const SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The SLIX privacy password, as typed at the console.
+/// The SLIX privacy password baked in at build time, or zero for none.
 ///
-/// RAM only, and deliberately: it is a credential, it is never written to the
-/// card or committed, and it dies with the next reset.
-static NFC_PASSWORD: AtomicU32 = AtomicU32::new(0);
+/// From `TEDDIEBOX_SLIX_PASSWORD` in the build environment — `.envrc.local`
+/// on the bench, a repository secret in CI — and never from the repository
+/// itself. The same `option_env!` treatment `TEDDIEBOX_LANGUAGE` gets, and
+/// `build.rs` declares both so that changing one is not silently ignored by a
+/// cached build.
+///
+/// **This does put a credential in the image**, which the console-only
+/// arrangement it replaces deliberately did not: anybody holding a built
+/// binary can read it back out. Chosen anyway, on 2026-09-14, because the
+/// alternative was worse in practice — a password that has to be typed every
+/// session is one an unattended box does not have, and a tag whose password
+/// is missing is *silent*, which looks exactly like an empty plate, a wrong
+/// password and a broken antenna. It nearly sank the first autonomous fetch.
+///
+/// An unset or empty variable leaves this zero, which is what a build without
+/// the secret gets and exactly how the box behaved before: nothing is
+/// unlocked until somebody types `pw`.
+const BUILT_IN_PASSWORD: u32 = match option_env!("TEDDIEBOX_SLIX_PASSWORD") {
+    None => 0,
+    Some(text) => {
+        if text.is_empty() {
+            0
+        } else {
+            match teddiebox_core::hex::u32_from_hex(text.as_bytes()) {
+                Some(value) => value,
+                // A build is the right place to find this out. The bench's
+                // way of finding out is a tag that says nothing at all.
+                None => panic!("TEDDIEBOX_SLIX_PASSWORD must be exactly eight hex digits"),
+            }
+        }
+    }
+};
+
+/// The SLIX privacy password in force.
+///
+/// Starts as [`BUILT_IN_PASSWORD`] and is replaced by whatever `pw` types, so
+/// a bench can still work with a tag the image was not built for. RAM only:
+/// it is never written to the card.
+static NFC_PASSWORD: AtomicU32 = AtomicU32::new(BUILT_IN_PASSWORD);
 
 /// The block range a pending `mem` carries: first block in the high byte,
 /// block count in the low one.

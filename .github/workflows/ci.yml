@@ -65,5 +65,11 @@ jobs:
       - name: Fixtures match their generator
         run: nix develop --command just fixtures
 
+      # The password is baked in at build time (see firmware/src/main.rs), from
+      # a secret rather than the repository. A fork or a PR without the secret
+      # gets an empty value, which builds exactly as it always did: no password
+      # until somebody types `pw`. Never echo it — a workflow log is public.
       - name: Firmware builds and links
+        env:
+          TEDDIEBOX_SLIX_PASSWORD: ${{ secrets.TEDDIEBOX_SLIX_PASSWORD }}
         run: nix develop --command just firmware
