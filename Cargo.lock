@@ -1136,6 +1136,13 @@ name = "teddiebox-opus-sys"
 version = "0.1.0"
 
 [[package]]
+name = "teddiebox-ota"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+]
+
+[[package]]
 name = "teddiebox-taf"
 version = "0.1.0"
 dependencies = [
