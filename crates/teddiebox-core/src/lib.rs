@@ -159,6 +159,8 @@ pub struct Core {
     /// Set by the firmware when something outside the reducer's sight is
     /// keeping the box in use. See [`Core::note_in_use`].
     externally_in_use: bool,
+    /// Whether a held ear skips a chapter. See [`Core::note_ears_skip`].
+    ears_skip: bool,
 }
 
 impl Core {
@@ -171,6 +173,7 @@ impl Core {
             charging: false,
             ear_down: [None, None],
             ear_spent: [false, false],
+            ears_skip: true,
             led: LedState::Booting,
             last_activity: 0,
             last_tick: 0,
@@ -209,6 +212,39 @@ impl Core {
     /// does is report the fact.
     pub fn note_in_use(&mut self, in_use: bool) {
         self.externally_in_use = in_use;
+    }
+
+    /// Steps the volume for one ear, or says the box is already at the end of
+    /// the ladder.
+    ///
+    /// One place, because the press and the release both reach it depending on
+    /// whether skipping is on, and a ceiling that prompted from one path and
+    /// not the other would be a silence nobody could explain.
+    fn step_volume(&mut self, ear: Ear, actions: &mut Actions) {
+        let changed = match ear {
+            Ear::Larger => self.volume.up(),
+            Ear::Smaller => self.volume.down(),
+        };
+        match changed {
+            Some(v) => {
+                let _ = actions.push(Action::SetVolume(v));
+            }
+            None => {
+                let _ = actions.push(Action::PlayPrompt(Prompt::VolumeLimit));
+            }
+        }
+    }
+
+    /// Reports whether a held ear skips a chapter, which the card decides.
+    ///
+    /// The reducer cannot read the card, but it has to know: the answer
+    /// decides whether a press is *ambiguous*. While a hold can mean "next
+    /// chapter", a press cannot be acted on until it is known not to be one.
+    /// With skipping off there is nothing to wait for, so the volume moves on
+    /// the press — which is what a stock box does, and what an ear feels like
+    /// it should do.
+    pub fn note_ears_skip(&mut self, skips: bool) {
+        self.ears_skip = skips;
     }
 
     /// Whether anything at all is going on, from every source that knows.
@@ -271,7 +307,13 @@ impl Core {
 
             Event::EarDown(ear, at) => {
                 self.ear_down[ear as usize] = Some(at);
-                self.ear_spent[ear as usize] = false;
+                // Spent on the press itself when a press can only mean one
+                // thing. The release then has nothing left to do, which is
+                // what stops one press stepping the volume twice.
+                self.ear_spent[ear as usize] = !self.ears_skip;
+                if !self.ears_skip {
+                    self.step_volume(ear, &mut actions);
+                }
             }
 
             // The press becomes a chapter skip here, with the ear still down,
@@ -300,18 +342,7 @@ impl Core {
                     self.ear_spent[ear as usize] = false;
                     return actions;
                 }
-                let changed = match ear {
-                    Ear::Larger => self.volume.up(),
-                    Ear::Smaller => self.volume.down(),
-                };
-                match changed {
-                    Some(v) => {
-                        let _ = actions.push(Action::SetVolume(v));
-                    }
-                    None => {
-                        let _ = actions.push(Action::PlayPrompt(Prompt::VolumeLimit));
-                    }
-                }
+                self.step_volume(ear, &mut actions);
             }
 
             Event::TagPresent(tag) => {
@@ -519,6 +550,58 @@ mod tests {
         c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
         c.handle(Event::EarUp(Ear::Smaller, 100), &Index);
         assert!(c.volume() < before);
+    }
+
+    /// A press that can only mean one thing acts on the press. With skipping
+    /// off there is nothing to wait for — the box cannot be about to be told
+    /// "next chapter" — and waiting for the release is the deafness that made
+    /// the hold feel wrong in the first place.
+    #[test]
+    fn with_skipping_off_a_press_changes_the_volume_at_once() {
+        let mut c = core();
+        c.note_ears_skip(false);
+        let before = c.volume();
+        let actions = c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        assert!(c.volume() > before);
+        assert!(contains(&actions, Action::SetVolume(c.volume())));
+    }
+
+    #[test]
+    fn with_skipping_off_the_release_does_nothing_more() {
+        let mut c = core();
+        c.note_ears_skip(false);
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        let stepped = c.volume();
+        let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(c.volume(), stepped, "one press, one step");
+    }
+
+    /// The wait exists exactly where the ambiguity does. While a hold can mean
+    /// "next chapter", a press cannot be acted on until it is known not to be
+    /// one — and stepping the volume on every skip would drift it 7 dB a time.
+    #[test]
+    fn with_skipping_on_a_press_still_waits_for_the_release() {
+        let mut c = core();
+        let before = c.volume();
+        let actions = c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        assert_eq!(c.volume(), before);
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::SetVolume(_))),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn with_skipping_off_a_press_at_the_ceiling_prompts() {
+        let mut c = core();
+        c.note_ears_skip(false);
+        for i in 0..10 {
+            c.handle(Event::EarDown(Ear::Larger, i * 200), &Index);
+            c.handle(Event::EarUp(Ear::Larger, i * 200 + 100), &Index);
+        }
+        let actions = c.handle(Event::EarDown(Ear::Larger, 5_000), &Index);
+        assert!(contains(&actions, Action::PlayPrompt(Prompt::VolumeLimit)));
     }
 
     /// The skip lands while the ear is still down. Waiting for the release

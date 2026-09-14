@@ -2665,6 +2665,11 @@ fn apply_ear_events(reducer: &mut Core, card: &storage::Mounted, token: Option<[
 /// the rest of the media loop needs the card unborrowed — which is the whole
 /// reason it is this cheap to construct.
 fn apply(reducer: &mut Core, card: &storage::Mounted, event: Event, token: Option<[u8; 32]>) {
+    // Reported on every event rather than once a second with the tick: this is
+    // what decides whether a press is ambiguous, and a press arriving in the
+    // second after `ears skip off` was typed must not be judged by the old
+    // answer. Reading it costs a critical section and no card access.
+    reducer.note_ears_skip(ears_skip());
     let index = CardIndex::new(card);
     for action in reducer.handle(event, &index) {
         perform(action, &index, token);
