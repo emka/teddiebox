@@ -34,3 +34,55 @@ pub fn parse_hex32(value: &str) -> Result<[u8; 32], OtaError> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_lower_case_digest() {
+        let d = parse_hex32("3f786850e387550fdab836ed7e6dc881de23001b000000000000000000000000")
+            .unwrap();
+        assert_eq!(d[0], 0x3f);
+        assert_eq!(d[1], 0x78);
+        assert_eq!(d[19], 0x1b);
+        assert_eq!(d[31], 0x00);
+    }
+
+    #[test]
+    fn parses_an_upper_case_digest() {
+        let d = parse_hex32("3F786850E387550FDAB836ED7E6DC881DE23001B000000000000000000000000")
+            .unwrap();
+        assert_eq!(d[0], 0x3f);
+        assert_eq!(d[19], 0x1b);
+    }
+
+    #[test]
+    fn refuses_a_digest_that_is_one_character_short() {
+        assert_eq!(
+            parse_hex32("3f786850e387550fdab836ed7e6dc881de23001b00000000000000000000000"),
+            Err(OtaError::MalformedDigest)
+        );
+    }
+
+    #[test]
+    fn refuses_a_digest_that_is_one_character_long() {
+        assert_eq!(
+            parse_hex32("3f786850e387550fdab836ed7e6dc881de23001b0000000000000000000000000"),
+            Err(OtaError::MalformedDigest)
+        );
+    }
+
+    #[test]
+    fn refuses_a_non_hex_character() {
+        assert_eq!(
+            parse_hex32("3f786850e387550fdab836ed7e6dc881de23001bg0000000000000000000000"),
+            Err(OtaError::MalformedDigest)
+        );
+    }
+
+    #[test]
+    fn refuses_an_empty_value() {
+        assert_eq!(parse_hex32(""), Err(OtaError::MalformedDigest));
+    }
+}
