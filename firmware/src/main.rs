@@ -299,8 +299,17 @@ async fn ear(which: Ear, name: &'static str, mut pin: Input<'static>) {
                     .is_err()
                 {
                     held = true;
-                    esp_println::println!("teddiebox: {name} held");
-                    send_input(Event::EarHeld(which, Instant::now().as_millis()));
+                    // A box told `ears_skip = no` has stock's ears: volume and
+                    // nothing else. The hold is still noticed and still
+                    // reported, so a bench can see the press was long — it
+                    // simply is not announced to the reducer, and the release
+                    // that follows steps the volume like any other press.
+                    if ears_skip() {
+                        esp_println::println!("teddiebox: {name} held");
+                        send_input(Event::EarHeld(which, Instant::now().as_millis()));
+                    } else {
+                        esp_println::println!("teddiebox: {name} held — ears_skip is off");
+                    }
                     continue;
                 }
             } else {
@@ -1664,6 +1673,7 @@ static CONFIGURATION: CsMutex<RefCell<Config>> = CsMutex::new(RefCell::new(Confi
     password: String::new(),
     server: String::new(),
     insecure: false,
+    ears_skip: true,
 }));
 
 /// How long to wait for a DHCP lease before calling it a failure.
@@ -1678,6 +1688,7 @@ static OVERRIDDEN: CsMutex<RefCell<Overridden>> = CsMutex::new(RefCell::new(Over
     password: false,
     server: false,
     insecure: false,
+    ears_skip: false,
 }));
 
 fn set_ssid(value: String<MAX_SSID>) {
@@ -1726,6 +1737,22 @@ fn credentials() -> Option<Config> {
         }
         Some(held.clone())
     })
+}
+
+fn set_ears_skip(value: bool) {
+    critical_section::with(|cs| {
+        CONFIGURATION.borrow_ref_mut(cs).ears_skip = value;
+        OVERRIDDEN.borrow_ref_mut(cs).ears_skip = true;
+    });
+}
+
+/// Whether a held ear should skip a chapter, as the card last said.
+///
+/// Read per press rather than held in a local, because the card is mounted
+/// lazily: an ear pressed before the first mount would otherwise pin this
+/// task to the boot default for the rest of the session.
+fn ears_skip() -> bool {
+    critical_section::with(|cs| CONFIGURATION.borrow_ref(cs).ears_skip)
 }
 
 /// Access points one scan will report.
@@ -4366,6 +4393,17 @@ async fn main(spawner: Spawner) {
                     esp_println::println!(
                         "teddiebox: the session ends in {}",
                         if on { "deep sleep" } else { "a park" }
+                    );
+                }
+                Some(Command::EarsSkip(on)) => {
+                    set_ears_skip(on);
+                    esp_println::println!(
+                        "teddiebox: a held ear {}",
+                        if on {
+                            "skips a chapter"
+                        } else {
+                            "only changes the volume"
+                        }
                     );
                 }
                 Some(Command::Plate(on)) => {

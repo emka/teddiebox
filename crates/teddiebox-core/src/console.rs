@@ -156,6 +156,12 @@ pub enum Command {
     /// certificates are checked is the setting most worth being able to flip
     /// without a screwdriver.
     NetInsecure(bool),
+    /// Whether a held ear skips a chapter, for this session.
+    ///
+    /// The card's `ears_skip` is the box's real answer; this is how a bench
+    /// tries the other one without pulling the card. Like every other typed
+    /// setting it wins over a later card read, and is lost on a reset.
+    EarsSkip(bool),
     /// Download one content file and check it, without writing to the card.
     ///
     /// The eight bytes are the identifier **as it appears in the URL and in
@@ -332,6 +338,8 @@ impl CommandWatch {
                     b"net insecure no" | b"net insecure false" => Some(Command::NetInsecure(false)),
                     b"net down" => Some(Command::NetDown),
                     b"net status" => Some(Command::NetStatus),
+                    b"ears skip on" => Some(Command::EarsSkip(true)),
+                    b"ears skip off" => Some(Command::EarsSkip(false)),
                     b"plate on" => Some(Command::Plate(true)),
                     b"plate off" => Some(Command::Plate(false)),
                     b"reval" => Some(Command::Revalidate),
@@ -1070,6 +1078,23 @@ mod tests {
     /// is not.
     /// The card is the place this belongs, but the card is inside the box and
     /// the bench is not. Same relationship `net ssid` has to the card's ssid.
+    /// `on`/`off` like the other switches a bench types, rather than the
+    /// `yes`/`no` the card takes: this is the same family as `plate on` and
+    /// `awake on`, and typing what the file says is a different act from
+    /// typing what the box should do right now.
+    #[test]
+    fn ears_skip_can_be_switched_from_the_console() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"ears skip off\n"),
+            Some(Command::EarsSkip(false))
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"ears skip on\n"),
+            Some(Command::EarsSkip(true))
+        );
+    }
+
     #[test]
     fn net_insecure_takes_the_same_words_the_config_file_takes() {
         let mut watch = CommandWatch::new();

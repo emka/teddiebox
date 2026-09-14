@@ -66,6 +66,17 @@ pub struct Config {
     ///
     /// Defaults to `false`. A file that says nothing gets the checking.
     pub insecure: bool,
+    /// Whether holding an ear skips a chapter.
+    ///
+    /// A stock box's ears do volume and nothing else; skipping on a held ear
+    /// is this box's own idea, which makes it taste rather than a fault to be
+    /// fixed. It lives on the card so that changing your mind costs an edit on
+    /// a laptop rather than a reflash.
+    ///
+    /// Defaults to `true`. A file that says nothing keeps the box doing what
+    /// it already did — and with this off, a held ear simply steps the volume
+    /// like any other press, which is what a stock box does.
+    pub ears_skip: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,9 +118,12 @@ fn strip_comment(value: &str) -> &str {
 /// box beats a silent guess in either direction.
 fn parse_bool(value: &str) -> Result<bool, ConfigError> {
     // `eq_ignore_ascii_case` compares in place; there is no allocator here.
-    if value.eq_ignore_ascii_case("yes") || value.eq_ignore_ascii_case("true") {
+    if value.eq_ignore_ascii_case("yes") || value.eq_ignore_ascii_case("true") || value == "1" {
         Ok(true)
-    } else if value.eq_ignore_ascii_case("no") || value.eq_ignore_ascii_case("false") {
+    } else if value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("false")
+        || value == "0"
+    {
         Ok(false)
     } else {
         Err(ConfigError::MalformedValue)
@@ -131,6 +145,7 @@ pub struct Overridden {
     pub password: bool,
     pub server: bool,
     pub insecure: bool,
+    pub ears_skip: bool,
 }
 
 impl Overridden {
@@ -160,6 +175,11 @@ impl Overridden {
             } else {
                 card.insecure
             },
+            ears_skip: if self.ears_skip {
+                held.ears_skip
+            } else {
+                card.ears_skip
+            },
         }
     }
 }
@@ -187,6 +207,7 @@ impl Config {
         let mut password: String<MAX_PASSWORD> = String::new();
         let mut server: Option<String<MAX_SERVER>> = None;
         let mut insecure = false;
+        let mut ears_skip = true;
 
         for raw in text.lines() {
             let line = raw.trim();
@@ -216,6 +237,9 @@ impl Config {
                 "insecure" => {
                     insecure = parse_bool(strip_comment(value))?;
                 }
+                "ears_skip" => {
+                    ears_skip = parse_bool(strip_comment(value))?;
+                }
                 // Unknown keys are ignored so a newer config file does not
                 // brick an older firmware.
                 _ => {}
@@ -233,6 +257,7 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .ok_or(ConfigError::MissingServer)?,
             insecure,
+            ears_skip,
         })
     }
 }
@@ -362,6 +387,55 @@ mod tests {
 
     /// The default has to be the safe one. A file that says nothing about
     /// certificates must not quietly get less checking than one that does.
+    /// Hold-to-skip is this box's own idea — a stock box's ears do volume and
+    /// nothing else — so whether it is wanted is taste, and taste belongs on
+    /// the card rather than behind a reflash.
+    #[test]
+    fn a_missing_ears_skip_key_leaves_the_ears_skipping() {
+        let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
+        assert!(c.ears_skip);
+    }
+
+    #[test]
+    fn ears_skip_no_makes_the_ears_volume_only() {
+        let c = Config::parse("ssid = A\nserver = s:1\nears_skip = no\n").unwrap();
+        assert!(!c.ears_skip);
+    }
+
+    /// Spelled out one form at a time. A test that looped over a list of
+    /// truthy spellings would agree with whatever list the parser happened to
+    /// hold, which is the failure these tables exist to catch.
+    #[test]
+    fn ears_skip_accepts_the_spellings_a_parent_might_reach_for() {
+        for text in [
+            "ssid = A\nserver = s:1\nears_skip = yes\n",
+            "ssid = A\nserver = s:1\nears_skip = true\n",
+            "ssid = A\nserver = s:1\nears_skip = TRUE\n",
+            "ssid = A\nserver = s:1\nears_skip = 1\n",
+        ] {
+            assert!(Config::parse(text).unwrap().ears_skip, "{text}");
+        }
+        for text in [
+            "ssid = A\nserver = s:1\nears_skip = no\n",
+            "ssid = A\nserver = s:1\nears_skip = false\n",
+            "ssid = A\nserver = s:1\nears_skip = False\n",
+            "ssid = A\nserver = s:1\nears_skip = 0\n",
+        ] {
+            assert!(!Config::parse(text).unwrap().ears_skip, "{text}");
+        }
+    }
+
+    /// A typo about the ears is refused rather than guessed, the same way
+    /// `insecure = ture` is. Silently taking it as `false` would leave a
+    /// parent believing they had switched something on.
+    #[test]
+    fn a_misspelled_ears_skip_value_is_refused() {
+        assert_eq!(
+            Config::parse("ssid = A\nserver = s:1\nears_skip = yse\n"),
+            Err(ConfigError::MalformedValue)
+        );
+    }
+
     #[test]
     fn a_missing_insecure_key_leaves_certificate_checking_on() {
         let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
