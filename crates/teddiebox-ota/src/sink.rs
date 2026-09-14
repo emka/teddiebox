@@ -194,8 +194,12 @@ mod tests {
         assert_eq!(pad_to_sector(0), 0);
     }
 
+    /// Checks alignment only — a bug that always erased sector 0 would pass
+    /// this test too.
+    /// `a_resumed_write_lands_where_the_watermark_says_not_at_zero` is what
+    /// catches that.
     #[test]
-    fn erases_are_always_sector_aligned() {
+    fn erased_ranges_start_and_end_on_a_sector_boundary() {
         let mut s = Sectors::new(0x1D0000);
         let mut f = Fake::default();
         s.feed(&mut f, 0, &[0u8; 100]).unwrap();
