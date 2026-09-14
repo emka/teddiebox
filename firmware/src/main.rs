@@ -1012,6 +1012,24 @@ fn take_stale(dir: u32, file: u32) -> bool {
     true
 }
 
+/// How long a figure waits on the server before the box plays what it has.
+///
+/// The question costs an association, and an association that is *not* going
+/// to happen costs the longest: a box carried out of range of its network
+/// still tries, and the DHCP wait alone is 20 s. A child holding a figure whose
+/// story is already on the card must not be made to wait that out — the rule
+/// this whole feature rests on is that revalidation may never make a working
+/// box worse than it was offline.
+///
+/// Ten seconds is a guess bounded by the bad case, not a measurement of the
+/// good one. **Nobody has yet timed a successful probe on this box**; when
+/// somebody has, this should be a little over that number.
+const PROBE_PATIENCE_MS: u64 = 10_000;
+
+/// The question now outstanding, and when it was asked. Zero for none.
+static ASKED_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+static ASKED_AT_MS: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+
 /// Which figures have been asked about since the box booted.
 ///
 /// RAM, like the position slots, and lost on every reset — which is the whole
@@ -2393,6 +2411,8 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         Action::Revalidate(tag) => {
             let ruid = tag.ruid();
             esp_println::println!("teddiebox: plate asking the server about {ruid:016X}");
+            ASKED_RUID.store(ruid, Ordering::Relaxed);
+            ASKED_AT_MS.store(Instant::now().as_millis(), Ordering::Relaxed);
             critical_section::with(|cs| {
                 *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest {
                     ruid,
@@ -2675,8 +2695,28 @@ async fn media(
         // pass, and guarded by identity for the same reason the fetch outcome
         // is: an answer that arrives after the figure was lifted or swapped
         // belongs to nobody.
+        // A question nobody is going to answer must not keep a story waiting.
+        // The net task answers every path it reaches; what it cannot bound is
+        // how long it takes to *get* there — an association that will not
+        // happen is the slowest failure the box has.
+        let asked_at = ASKED_AT_MS.load(Ordering::Relaxed);
+        if asked_at != 0
+            && PROBED.load(Ordering::Relaxed) == PROBED_NOTHING
+            && Instant::now().as_millis().saturating_sub(asked_at) > PROBE_PATIENCE_MS
+        {
+            let waited = ASKED_RUID.load(Ordering::Relaxed);
+            esp_println::println!(
+                "teddiebox: plate {waited:016X} — no answer in {} s, playing what is here",
+                PROBE_PATIENCE_MS / 1_000
+            );
+            // A real answer that arrives afterwards is about a figure the
+            // reducer is no longer waiting on, and its own guard drops it.
+            probe_ended(waited);
+        }
+
         let probed = PROBED.swap(PROBED_NOTHING, Ordering::Relaxed);
         if probed != PROBED_NOTHING {
+            ASKED_AT_MS.store(0, Ordering::Relaxed);
             let probed_ruid = PROBED_RUID.load(Ordering::Relaxed);
             match on_plate {
                 Some(tag) if tag.ruid() == probed_ruid => {
