@@ -64,7 +64,7 @@ impl Sectors {
     /// `None` means the sectors this write lands in are already erased —
     /// which is the ordinary case for every write after the first in a
     /// sector, and erasing anyway would discard bytes already written.
-    pub fn erase_before(&mut self, offset: u32, len: u32) -> Option<core::ops::Range<u32>> {
+    fn erase_before(&mut self, offset: u32, len: u32) -> Option<core::ops::Range<u32>> {
         // `feed` refuses (before ever calling here) any write whose end
         // overflows u32 or exceeds `slot_bytes`, so in normal use `offset +
         // len` never overflows by the time this runs. This still can't wrap
