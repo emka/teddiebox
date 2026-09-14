@@ -75,7 +75,21 @@ const RADIO_HEAP: usize = 88 * 1024;
 // The ESP-IDF-style bootloader identifies an app by this descriptor. Without
 // it the image links but no flashing tool will accept it — a failure a build
 // gate cannot see.
-esp_bootloader_esp_idf::esp_app_desc!();
+//
+// The version is stamped by build.rs from `git describe`, not taken from
+// CARGO_PKG_VERSION — which is "0.1.0" and has never changed, so an update
+// decided against it would compare a constant with itself for ever.
+esp_bootloader_esp_idf::esp_app_desc!(
+    env!("TEDDIEBOX_VERSION"),
+    env!("CARGO_PKG_NAME"),
+    esp_bootloader_esp_idf::BUILD_TIME,
+    esp_bootloader_esp_idf::BUILD_DATE,
+    esp_bootloader_esp_idf::ESP_IDF_COMPATIBLE_VERSION,
+    esp_bootloader_esp_idf::MMU_PAGE_SIZE,
+    0,
+    u16::MAX,
+    esp_bootloader_esp_idf::SECURE_VERSION
+);
 
 /// Prints on UART0 so a bench session can tell a running box from a hung one.
 #[embassy_executor::task]
