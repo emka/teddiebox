@@ -22,7 +22,7 @@ use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use heapless::String;
 use teddiebox_config::{Config, Overridden};
 use teddiebox_core::console::{MAX_PASSPHRASE, MAX_SSID};
@@ -183,39 +183,23 @@ static LED_REQUEST: AtomicU8 = AtomicU8::new(LedState::Booting.code());
 /// the bounce duration of these particular switches measured, and a flip count
 /// beside a known poll interval is the cheapest way to see it.
 #[embassy_executor::task]
-/// The two ears and the wake line, polled.
+/// The wake line, polled.
 ///
-/// `larger` is GPIO20 and `smaller` is GPIO21 — named by size because that is
-/// the only thing a person can tell about them without being told, and because
-/// "left" and "right" are the box's, not the listener's, which confused two
-/// people at the bench on 2026-09-08 before one tap settled it.
-async fn inputs(larger: Input<'static>, smaller: Input<'static>, wake: Input<'static>) {
+/// The ears left this task on 2026-09-14 for [`ear`], which the GPIO hardware
+/// wakes rather than a 2 ms sample. The wake line stays polled because `Core`
+/// has no event for it: it is the button and the charger, nothing but this
+/// print depends on it, and a sample missed under load costs a log line rather
+/// than a chapter.
+async fn inputs(wake: Input<'static>) {
     const POLL_MS: u64 = 2;
 
-    // Name, debouncer, raw transitions seen since the last settled edge, and
-    // the previous raw level. The transition count is the bounce measurement
-    // step 2 asks for, so it must count changes of the raw line — counting
-    // polls that merely disagree with the settled state yields
-    // DEBOUNCE_MS / POLL_MS every single time, which looks like data and is not.
-    // Wake carries no ear, because it is not one: it is the button and the
-    // charger, and `Core` has no event for it.
-    let mut state = [
-        (
-            "larger ear",
-            Some(Ear::Larger),
-            Debounced::released(),
-            0u32,
-            false,
-        ),
-        (
-            "smaller ear",
-            Some(Ear::Smaller),
-            Debounced::released(),
-            0u32,
-            false,
-        ),
-        ("wake", None, Debounced::released(), 0u32, false),
-    ];
+    let mut button = Debounced::released();
+    // Raw flips seen since the last settled edge. Counted on the raw line
+    // because counting polls that merely disagree with the settled state
+    // yields DEBOUNCE_MS / POLL_MS every single time, which looks like data
+    // and is not.
+    let mut transitions = 0u32;
+    let mut last_raw = false;
 
     loop {
         // Nothing to do for the rest of this power-on: see `PARKED`.
@@ -224,53 +208,32 @@ async fn inputs(larger: Input<'static>, smaller: Input<'static>, wake: Input<'st
         }
 
         // The wake line is wanted by whoever is ending the session. Handed
-        // over, and then parked *still holding the ears*: a task that returns
-        // drops its pins, and a dropped `Input` does not leave a pad the way a
+        // over, and then parked *still holding it*: a task that returns drops
+        // its pin, and a dropped `Input` does not leave a pad the way a
         // sleeping box needs it.
         if SLEEP_WANTED.load(Ordering::Relaxed) {
             break;
         }
 
-        let uptime = Instant::now().as_millis();
-        // `Debounced` takes a `u32` and handles its wrap; `Core` measures how
-        // long an ear was held and wants the un-truncated clock, or a press
-        // spanning the wrap would read as 49 days and count as a hold.
-        let now = uptime as u32;
-        let raw = [
-            input::ear_pressed(larger.is_high()),
-            input::ear_pressed(smaller.is_high()),
-            input::wake_asserted(wake.is_high()),
-        ];
+        // `Debounced` takes a `u32` and handles its wrap.
+        let now = Instant::now().as_millis() as u32;
+        let pressed = input::wake_asserted(wake.is_high());
 
-        for ((name, ear, button, transitions, last_raw), &pressed) in
-            state.iter_mut().zip(raw.iter())
-        {
-            if pressed != *last_raw {
-                *transitions += 1;
-                *last_raw = pressed;
-            }
+        if pressed != last_raw {
+            transitions += 1;
+            last_raw = pressed;
+        }
 
-            if let Some(edge) = button.update(pressed, now) {
-                let label = match edge {
-                    Edge::Pressed => "pressed",
-                    Edge::Released => "released",
-                };
-                // One transition is the change itself; anything above that is
-                // bounce. Sampled every POLL_MS, so bounce faster than that is
-                // invisible here and reads as a clean edge.
-                esp_println::println!("teddiebox: {name} {label}, {transitions} raw transitions");
-                *transitions = 0;
-
-                if let Some(ear) = *ear {
-                    let event = match edge {
-                        Edge::Pressed => Event::EarDown(ear, uptime),
-                        Edge::Released => Event::EarUp(ear, uptime),
-                    };
-                    if INPUT_EVENTS.try_send(event).is_err() {
-                        esp_println::println!("teddiebox: ear queue full — {event:?} dropped");
-                    }
-                }
-            }
+        if let Some(edge) = button.update(pressed, now) {
+            let label = match edge {
+                Edge::Pressed => "pressed",
+                Edge::Released => "released",
+            };
+            // One transition is the change itself; anything above that is
+            // bounce. Sampled every POLL_MS, so bounce faster than that is
+            // invisible here and reads as a clean edge.
+            esp_println::println!("teddiebox: wake {label}, {transitions} raw transitions");
+            transitions = 0;
         }
 
         Timer::after(Duration::from_millis(POLL_MS)).await;
@@ -280,6 +243,81 @@ async fn inputs(larger: Input<'static>, smaller: Input<'static>, wake: Input<'st
         WAKE_LINE.borrow_ref_mut(cs).replace(wake);
     });
     park_task().await;
+}
+
+/// One ear, held by the GPIO hardware instead of watched by a poll.
+///
+/// The poll this replaces sampled every 2 ms and still lost about one tap in
+/// three while a story played. Measured at the bench on 2026-09-14: six
+/// presses, five reported, twice over, and never a hold — a hold is long
+/// enough to survive any gap. Decode takes 69% of real time and a card read
+/// blocks for up to 13 ms, so this task could go tens of milliseconds without
+/// running, and a press that began and ended inside one of those gaps left no
+/// sample behind for `Debounced` to settle.
+///
+/// **The waits are on levels, not edges, and that is the whole point.**
+/// `wait_for` clears any pending interrupt as it arms — see `unlisten_and_clear`
+/// in esp-hal's `gpio/asynch.rs` — so an *edge* that happened while this task
+/// was starved is already gone by the time it asks about one. A *level*
+/// interrupt asserts immediately if the pin is holding that level, so a press
+/// that happened during a gap completes the wait the instant it is armed. The
+/// hardware keeps the fact and this task only has to turn up eventually, which
+/// is the same bargain the accelerometer's click engine makes for a slap.
+#[embassy_executor::task(pool_size = 2)]
+async fn ear(which: Ear, name: &'static str, mut pin: Input<'static>) {
+    loop {
+        // Parked still holding the pin. A task that returns drops its `Input`,
+        // and a dropped pad is not the one a sleeping box needs.
+        if PARKED.load(Ordering::Relaxed) || SLEEP_WANTED.load(Ordering::Relaxed) {
+            park_task().await;
+        }
+
+        pin.wait_for_low().await;
+        let down_at = Instant::now().as_millis();
+        esp_println::println!("teddiebox: {name} pressed");
+        send_input(Event::EarDown(which, down_at));
+
+        // Bounce on the way down needs nothing of its own: a release only
+        // counts once the line has held high for `DEBOUNCE_MS`, so a press
+        // that rattles fails that confirmation and goes on being a press.
+        let mut bounces = 0u32;
+        loop {
+            pin.wait_for_high().await;
+            if with_timeout(
+                Duration::from_millis(u64::from(input::DEBOUNCE_MS)),
+                pin.wait_for_low(),
+            )
+            .await
+            .is_err()
+            {
+                break;
+            }
+            bounces += 1;
+        }
+
+        // Dated when it happened rather than when it was confirmed. The
+        // confirmation costs `DEBOUNCE_MS` by construction, and charging that
+        // to the press would stretch every one of them by 20 ms — 3% of
+        // `long_press_ms`, all of it in the direction that turns a tap into a
+        // chapter skip.
+        let up_at = Instant::now()
+            .as_millis()
+            .saturating_sub(u64::from(input::DEBOUNCE_MS));
+        esp_println::println!("teddiebox: {name} released, {bounces} bounces");
+        send_input(Event::EarUp(which, up_at));
+    }
+}
+
+/// Hands one input event to the reducer, or says why it could not.
+///
+/// A full queue means something else is wrong: the media task drains it once
+/// per pass *and* once per decoded frame, and eight is far more than two ears
+/// and an accelerometer produce in between. So it is reported rather than
+/// dropped quietly, because a lost release leaves an ear held for ever.
+fn send_input(event: Event) {
+    if INPUT_EVENTS.try_send(event).is_err() {
+        esp_println::println!("teddiebox: ear queue full — {event:?} dropped");
+    }
 }
 
 /// Reports the pack and charger voltages.
@@ -3859,14 +3897,12 @@ async fn main(spawner: Spawner) {
     // unconnected input then reads as "not pressed" rather than floating into
     // phantom presses.
     let up = InputConfig::default().with_pull(Pull::Up);
-    spawner.spawn(
-        inputs(
-            Input::new(p.GPIO20, up),
-            Input::new(p.GPIO21, up),
-            Input::new(p.GPIO7, up),
-        )
-        .unwrap(),
-    );
+    // One task per ear, each held by its own pin: the GPIO hardware reports a
+    // press whenever this box next gets around to asking, which a 2 ms poll
+    // could not do under a decoder using 69% of real time.
+    spawner.spawn(ear(Ear::Larger, "larger ear", Input::new(p.GPIO20, up)).unwrap());
+    spawner.spawn(ear(Ear::Smaller, "smaller ear", Input::new(p.GPIO21, up)).unwrap());
+    spawner.spawn(inputs(Input::new(p.GPIO7, up)).unwrap());
 
     let mut adc_config = AdcConfig::new();
     let battery = adc_config.enable_pin(p.GPIO9, Attenuation::_11dB);
