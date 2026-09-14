@@ -31,6 +31,19 @@ pub fn pad_to_sector(len: u32) -> u32 {
     len.div_ceil(SECTOR) * SECTOR
 }
 
+/// What can go wrong feeding bytes into a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkError<E> {
+    /// The flash region itself refused.
+    Flash(E),
+    /// The write runs past the end of the slot it is being written into.
+    ///
+    /// Refused rather than clamped: a silently truncated write produces an
+    /// image that fails its digest, with nothing in the download path to say
+    /// why. Whoever computed this offset is wrong, and the error says so.
+    PastSlotEnd { offset: u32, len: u32, slot: u32 },
+}
+
 /// Tracks which sectors have already been erased, so none is erased twice.
 pub struct Sectors {
     slot_bytes: u32,
@@ -52,7 +65,18 @@ impl Sectors {
     /// which is the ordinary case for every write after the first in a
     /// sector, and erasing anyway would discard bytes already written.
     pub fn erase_before(&mut self, offset: u32, len: u32) -> Option<core::ops::Range<u32>> {
-        let end = pad_to_sector(offset + len).min(self.slot_bytes);
+        // `feed` refuses (before ever calling here) any write whose end
+        // overflows u32 or exceeds `slot_bytes`, so in normal use `offset +
+        // len` never overflows by the time this runs. This still can't wrap
+        // on its own terms: a `checked_add` that would overflow is treated
+        // as "at least the end of the slot", which lands on exactly the
+        // answer the non-overflowing branch already gives once the sum is
+        // clamped to `slot_bytes` — never a wrapped, wrong-sector answer.
+        let unpadded_end = offset
+            .checked_add(len)
+            .unwrap_or(self.slot_bytes)
+            .min(self.slot_bytes);
+        let end = pad_to_sector(unpadded_end).min(self.slot_bytes);
         let start = self.erased_to.max(offset / SECTOR * SECTOR);
         if end <= start {
             return None;
@@ -73,11 +97,25 @@ impl Sectors {
         flash: &mut F,
         offset: u32,
         bytes: &[u8],
-    ) -> Result<(), F::Error> {
-        if let Some(range) = self.erase_before(offset, bytes.len() as u32) {
-            flash.erase(range)?;
+    ) -> Result<(), SinkError<F::Error>> {
+        let len = bytes.len() as u32;
+        match offset.checked_add(len) {
+            Some(end) if end <= self.slot_bytes => {}
+            // Either the end overflowed u32, or it lands past the slot.
+            // Both are certainly past the slot, and refusing here — before
+            // any erase or write — leaves the flash untouched.
+            _ => {
+                return Err(SinkError::PastSlotEnd {
+                    offset,
+                    len,
+                    slot: self.slot_bytes,
+                })
+            }
         }
-        flash.write(offset, bytes)
+        if let Some(range) = self.erase_before(offset, len) {
+            flash.erase(range).map_err(SinkError::Flash)?;
+        }
+        flash.write(offset, bytes).map_err(SinkError::Flash)
     }
 }
 
@@ -196,5 +234,55 @@ mod tests {
         let mut f = Fake::default();
         s.feed(&mut f, 0, &[0u8; 100]).unwrap();
         assert_eq!(f.written, [(0, 100)]);
+    }
+
+    #[test]
+    fn a_write_ending_exactly_at_the_slot_end_is_accepted() {
+        let mut s = Sectors::new(8192);
+        let mut f = Fake::default();
+        s.feed(&mut f, 8172, &[7u8; 20]).unwrap();
+        assert_eq!(f.written, [(8172, 20)]);
+        assert_eq!(f.erased.len(), 1);
+        assert_eq!(f.erased[0], 4096..8192);
+    }
+
+    #[test]
+    fn a_write_ending_one_byte_past_the_slot_end_is_refused() {
+        let mut s = Sectors::new(8192);
+        let mut f = Fake::default();
+        let err = s.feed(&mut f, 8172, &[7u8; 21]).unwrap_err();
+        assert_eq!(
+            err,
+            SinkError::PastSlotEnd {
+                offset: 8172,
+                len: 21,
+                slot: 8192,
+            }
+        );
+    }
+
+    #[test]
+    fn a_refused_write_touches_nothing() {
+        let mut s = Sectors::new(8192);
+        let mut f = Fake::default();
+        s.feed(&mut f, 8172, &[7u8; 21]).unwrap_err();
+        assert!(f.erased.is_empty());
+        assert!(f.written.is_empty());
+        assert!(f.events.is_empty());
+    }
+
+    #[test]
+    fn an_overflowing_end_is_refused_not_wrapped() {
+        let mut s = Sectors::new(0x1D0000);
+        let mut f = Fake::default();
+        let err = s.feed(&mut f, u32::MAX - 4, &[9u8; 10]).unwrap_err();
+        assert_eq!(
+            err,
+            SinkError::PastSlotEnd {
+                offset: u32::MAX - 4,
+                len: 10,
+                slot: 0x1D0000,
+            }
+        );
     }
 }

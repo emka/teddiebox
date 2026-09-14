@@ -15,7 +15,7 @@ mod sink;
 
 pub use decide::{decide, Decision, Refusal};
 pub use manifest::{Manifest, FILENAME, MAX_IMAGE_PATH, MAX_MANIFEST, MAX_VERSION};
-pub use sink::{FlashRegionLike, Sectors, SECTOR};
+pub use sink::{FlashRegionLike, Sectors, SinkError, SECTOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OtaError {
