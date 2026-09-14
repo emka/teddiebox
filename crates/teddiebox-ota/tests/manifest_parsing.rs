@@ -70,19 +70,19 @@ fn a_line_without_an_equals_sign_is_refused() {
 #[test]
 fn a_non_numeric_length_is_refused() {
     let s = format!("version = v1\nsha256 = {DIGEST}\nlength = lots\nimage = a\n");
-    assert_eq!(parse(&s), Err(OtaError::MalformedLine));
+    assert_eq!(parse(&s), Err(OtaError::MalformedLength));
 }
 
 #[test]
 fn a_negative_length_is_refused() {
     let s = format!("version = v1\nsha256 = {DIGEST}\nlength = -1\nimage = a\n");
-    assert_eq!(parse(&s), Err(OtaError::MalformedLine));
+    assert_eq!(parse(&s), Err(OtaError::MalformedLength));
 }
 
 #[test]
 fn a_length_beyond_u32_is_refused() {
     let s = format!("version = v1\nsha256 = {DIGEST}\nlength = 4294967296\nimage = a\n");
-    assert_eq!(parse(&s), Err(OtaError::MalformedLine));
+    assert_eq!(parse(&s), Err(OtaError::MalformedLength));
 }
 
 #[test]

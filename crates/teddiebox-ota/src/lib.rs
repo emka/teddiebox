@@ -29,6 +29,8 @@ pub enum OtaError {
     MissingImage,
     /// A value does not fit the fixed buffer that holds it.
     ValueTooLong,
+    /// A `length` value is not a `u32`: not numeric, negative, or too large.
+    MalformedLength,
     /// The bytes are not UTF-8, so they are not this file.
     NotText,
     /// The read filled its buffer, so the file may have been cut short.

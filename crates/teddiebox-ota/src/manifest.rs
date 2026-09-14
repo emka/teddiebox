@@ -70,7 +70,11 @@ impl Manifest {
                 }
                 "sha256" => sha256 = Some(crate::digest::parse_hex32(value)?),
                 "length" => {
-                    length = Some(value.parse::<u32>().map_err(|_| OtaError::MalformedLine)?);
+                    length = Some(
+                        value
+                            .parse::<u32>()
+                            .map_err(|_| OtaError::MalformedLength)?,
+                    );
                 }
                 "image" if !value.is_empty() => {
                     image = Some(String::try_from(value).map_err(|_| OtaError::ValueTooLong)?);
