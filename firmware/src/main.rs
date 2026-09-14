@@ -1135,6 +1135,20 @@ fn fetch_ended(outcome: u8) {
     FETCH_OUTCOME.store(outcome, Ordering::Relaxed);
 }
 
+/// Records that a probe is over and taught the box nothing.
+///
+/// **Silence is the one answer a question may not have.** The reducer holds a
+/// placed figure without playing anything until it hears back, so a probe that
+/// ends without publishing leaves the box quiet with a story sitting on its
+/// card — which is exactly the failure revalidation was not allowed to cause.
+/// Every path that can end a probe calls this, and calling it twice is
+/// harmless: the media task takes the answer, so the second store finds
+/// nothing waiting.
+fn probe_ended(ruid: u64) {
+    PROBED_RUID.store(ruid, Ordering::Relaxed);
+    PROBED.store(PROBED_NO_ANSWER, Ordering::Relaxed);
+}
+
 /// Which of the reducer's two words a failed fetch deserves.
 ///
 /// A `404` or a `403` means the server answered and has no story for this
@@ -3008,7 +3022,18 @@ async fn bring_up(
                 // is several round trips and would stall without it.
                 NET_GET => {
                     match tls {
-                        None => esp_println::println!("teddiebox: tls context unavailable"),
+                        None => {
+                            esp_println::println!("teddiebox: tls context unavailable");
+                            // A probe waiting on this would otherwise never be
+                            // answered, and the figure on the plate would stay
+                            // silent for as long as it sat there.
+                            if let Some(FetchRequest {
+                                ruid, probe: true, ..
+                            }) = critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs))
+                            {
+                                probe_ended(ruid);
+                            }
+                        }
                         Some(tls) => match critical_section::with(|cs| {
                             *FETCH_REQUEST.borrow_ref(cs)
                         }) {
@@ -3363,16 +3388,35 @@ async fn net(
                 None => {
                     esp_println::println!("teddiebox: get has no request queued — nothing to fetch")
                 }
-                Some(FetchRequest { ruid, .. }) => {
+                Some(FetchRequest { ruid, probe, .. }) => {
                     // Attributed before anything can end the fetch, the same as
                     // every other path that ends one.
                     FETCH_ACTIVE_RUID.store(ruid, Ordering::Relaxed);
-                    esp_println::println!("teddiebox: net coming up for a story");
+                    esp_println::println!(
+                        "teddiebox: net coming up {}",
+                        if probe {
+                            "to ask about a figure"
+                        } else {
+                            "for a story"
+                        }
+                    );
                     // Put back for the association's own loop to serve: it was
                     // taken out of the request by the read at the top of this
                     // one, and it is the whole reason for associating.
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);
                     let gave_up = bring_up(&mut radio, tls, false).await;
+                    // A question that reaches here unanswered is answered now,
+                    // whatever went wrong. The reducer holds the figure silent
+                    // until it hears back, and a radio that would not come up
+                    // is not a reason to refuse a story that is on the card.
+                    if probe {
+                        if PROBED.load(Ordering::Relaxed) == PROBED_NOTHING {
+                            esp_println::println!(
+                                "teddiebox: net would not come up to ask — playing what is here"
+                            );
+                            probe_ended(ruid);
+                        }
+                    }
                     // `bring_up` answers a fetch it could not start — no
                     // credentials, no association, no lease — by returning
                     // without serving the request. Nobody else will, so
@@ -3380,7 +3424,7 @@ async fn net(
                     // and told which of the two faults it was: a figure whose
                     // story cannot be fetched because the passphrase is wrong
                     // should not send anybody to look at a working router.
-                    if FETCH_OUTCOME.load(Ordering::Relaxed) == FETCH_NOTHING
+                    else if FETCH_OUTCOME.load(Ordering::Relaxed) == FETCH_NOTHING
                         && DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_IDLE
                     {
                         esp_println::println!("teddiebox: net would not come up for it");
