@@ -45,6 +45,9 @@ pub const FILENAME: &str = "CONFIG.TXT";
 pub const MAX_SSID: usize = 32;
 pub const MAX_PASSWORD: usize = 63;
 pub const MAX_SERVER: usize = 64;
+/// The example in this module's docs (`update_url`) is 55 characters; 128
+/// leaves room for a real path without being silly about it.
+pub const MAX_UPDATE_URL: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -77,6 +80,17 @@ pub struct Config {
     /// it already did — and with this off, a held ear simply steps the volume
     /// like any other press, which is what a stock box does.
     pub ears_skip: bool,
+    /// Where to fetch the OTA manifest, in full — scheme, host, port and
+    /// path, e.g.
+    /// `https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt`.
+    ///
+    /// **Optional, and `None` means no OTA at all** — the box does not check
+    /// for updates. A card written for an older firmware must not suddenly
+    /// start fetching firmware images from somewhere, and there is no safe
+    /// value to default to instead.
+    ///
+    /// Defaults to `None`.
+    pub update_url: Option<String<MAX_UPDATE_URL>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +105,13 @@ pub enum ConfigError {
     Truncated,
     /// The bytes are not UTF-8, so they are not this file.
     NotText,
+    /// `update_url` was given but has no content.
+    ///
+    /// Unlike `ssid` and `server`, absence of `update_url` is not an error —
+    /// it means no OTA. So an empty value cannot reuse `Missing*`-shaped
+    /// handling; it is its own, honest mistake: `update_url =` with nothing
+    /// after it, someone who meant to write a URL and didn't.
+    EmptyUpdateUrl,
 }
 
 /// Cuts a trailing `# comment` off a value.
@@ -146,6 +167,7 @@ pub struct Overridden {
     pub server: bool,
     pub insecure: bool,
     pub ears_skip: bool,
+    pub update_url: bool,
 }
 
 impl Overridden {
@@ -180,6 +202,11 @@ impl Overridden {
             } else {
                 card.ears_skip
             },
+            update_url: if self.update_url {
+                held.update_url.clone()
+            } else {
+                card.update_url
+            },
         }
     }
 }
@@ -208,6 +235,7 @@ impl Config {
         let mut server: Option<String<MAX_SERVER>> = None;
         let mut insecure = false;
         let mut ears_skip = true;
+        let mut update_url: Option<String<MAX_UPDATE_URL>> = None;
 
         for raw in text.lines() {
             let line = raw.trim();
@@ -240,6 +268,14 @@ impl Config {
                 "ears_skip" => {
                     ears_skip = parse_bool(strip_comment(value))?;
                 }
+                "update_url" => {
+                    let value = strip_comment(value);
+                    if value.is_empty() {
+                        return Err(ConfigError::EmptyUpdateUrl);
+                    }
+                    update_url =
+                        Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
+                }
                 // Unknown keys are ignored so a newer config file does not
                 // brick an older firmware.
                 _ => {}
@@ -258,6 +294,7 @@ impl Config {
                 .ok_or(ConfigError::MissingServer)?,
             insecure,
             ears_skip,
+            update_url,
         })
     }
 }
@@ -589,5 +626,107 @@ mod tests {
         assert_eq!(merged.password.as_str(), "typed");
         assert_eq!(merged.ssid.as_str(), "FromCard");
         assert_eq!(merged.server.as_str(), "card:1");
+    }
+
+    #[test]
+    fn update_url_parses_when_present() {
+        let c = Config::parse(
+            "ssid = A\nserver = s:1\nupdate_url = https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.update_url.as_deref(),
+            Some("https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt")
+        );
+    }
+
+    /// Absence means no OTA at all, not a default location to check. A card
+    /// written for an older firmware must not suddenly start fetching images
+    /// from somewhere, and there is no safe value to default to.
+    #[test]
+    fn a_missing_update_url_key_leaves_it_none() {
+        let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
+        assert_eq!(c.update_url, None);
+    }
+
+    #[test]
+    fn an_overlong_update_url_is_rejected_rather_than_truncated() {
+        // 130 characters, over the 128-byte limit.
+        const TEXT: &str = "ssid = A\nserver = s:1\nupdate_url = https://example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
+        assert_eq!(Config::parse(TEXT), Err(ConfigError::ValueTooLong));
+    }
+
+    /// `update_url =` with nothing after it is someone who meant to write a
+    /// URL. This project has already been bitten once, in
+    /// `teddiebox-ota::manifest`, by a present-but-empty value sailing
+    /// through as though it meant "absent".
+    #[test]
+    fn an_empty_update_url_is_refused() {
+        assert_eq!(
+            Config::parse("ssid = A\nserver = s:1\nupdate_url =\n"),
+            Err(ConfigError::EmptyUpdateUrl)
+        );
+    }
+
+    #[test]
+    fn a_whitespace_only_update_url_is_refused() {
+        assert_eq!(
+            Config::parse("ssid = A\nserver = s:1\nupdate_url =    \n"),
+            Err(ConfigError::EmptyUpdateUrl)
+        );
+    }
+
+    #[test]
+    fn a_trailing_comment_is_not_part_of_the_update_url() {
+        let c = Config::parse(
+            "ssid = A\nserver = s:1\nupdate_url = https://teddycloud.local/teddiebox.txt # ours\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.update_url.as_deref(),
+            Some("https://teddycloud.local/teddiebox.txt")
+        );
+    }
+
+    /// Only a `#` that starts a word is a comment, matching `ssid` and
+    /// `server`. A URL has no legitimate `#` in this use, but the rule is the
+    /// same rule everywhere it applies.
+    #[test]
+    fn a_hash_inside_the_update_url_is_part_of_the_value() {
+        let c = Config::parse("ssid = A\nserver = s:1\nupdate_url = https://x/y#z\n").unwrap();
+        assert_eq!(c.update_url.as_deref(), Some("https://x/y#z"));
+    }
+
+    /// The bug this exists to prevent: overriding `insecure` at the console
+    /// must not throw away an `update_url` typed at the same session.
+    #[test]
+    fn overridden_update_url_survives_a_later_card_read() {
+        let mut held = card();
+        held.update_url = Some(heapless::String::try_from("https://typed/teddiebox.txt").unwrap());
+        let overridden = Overridden {
+            update_url: true,
+            ..Overridden::default()
+        };
+
+        let merged = overridden.merge(card(), &held);
+        assert_eq!(
+            merged.update_url.as_deref(),
+            Some("https://typed/teddiebox.txt")
+        );
+        assert_eq!(merged.ssid.as_str(), "FromCard");
+    }
+
+    #[test]
+    fn an_untouched_update_url_is_taken_from_the_card() {
+        let mut typed_card = card();
+        typed_card.update_url =
+            Some(heapless::String::try_from("https://card/teddiebox.txt").unwrap());
+        let held = Config::parse("ssid = Old\nserver = old:1\n").unwrap();
+
+        let merged = Overridden::default().merge(typed_card, &held);
+        assert_eq!(
+            merged.update_url.as_deref(),
+            Some("https://card/teddiebox.txt")
+        );
     }
 }

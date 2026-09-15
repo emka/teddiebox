@@ -1688,6 +1688,7 @@ static CONFIGURATION: CsMutex<RefCell<Config>> = CsMutex::new(RefCell::new(Confi
     server: String::new(),
     insecure: false,
     ears_skip: true,
+    update_url: None,
 }));
 
 /// How long to wait for a DHCP lease before calling it a failure.
@@ -1703,6 +1704,7 @@ static OVERRIDDEN: CsMutex<RefCell<Overridden>> = CsMutex::new(RefCell::new(Over
     server: false,
     insecure: false,
     ears_skip: false,
+    update_url: false,
 }));
 
 fn set_ssid(value: String<MAX_SSID>) {
