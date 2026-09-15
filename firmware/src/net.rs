@@ -14,12 +14,6 @@
 //! Nothing here has been run on hardware. It compiles and links, which is the
 //! whole of what is known about it.
 
-// Nothing calls this yet — the caller is the download task, which the device
-// plan builds once the radio has been up on a bench. It is committed unwired
-// rather than left on a branch so that the dependency set it needs is proven
-// by the same build gate as the rest of the firmware.
-#![allow(dead_code)]
-
 use embassy_net::{Runner, Stack, StackResources};
 use esp_hal::peripherals::WIFI;
 use esp_hal::time::Duration as EspDuration;
