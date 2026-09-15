@@ -158,9 +158,9 @@ async fn stay_put() -> ! {
 /// Returns only at the idle timeout. The save path does not come back through
 /// here — it resets the box from inside the handler.
 async fn serve_http(stack: Stack<'_>, card: &Mounted) {
-    // The portal's stack claim, named in one place rather than spread through
-    // the call tree: 1536 + 1536 + 4112 here, plus `page::MAX_PAGE` (4096) in
-    // `send_page` below, and 1024 + 1024 + 590 in `serve_dhcp` beside it.
+    // The portal's buffer claim, named in one place rather than spread
+    // through the call tree: 1536 + 1536 + 4112 here, `CHUNK` in `send_page`
+    // below, and 1024 + 1024 + 590 in `serve_dhcp` beside it.
     let mut rx = [0u8; 1536];
     let mut tx = [0u8; 1536];
     let mut buffer = [0u8; REQUEST];
@@ -380,7 +380,7 @@ async fn respond_error(socket: &mut TcpSocket<'_>, message: &str) {
 
 /// The last thing the phone sees before the network disappears.
 ///
-/// Its own page rather than [`page::render`], which always carries the form:
+/// Its own page rather than [`page::pieces`], which always carries the form:
 /// offering a Save button to a box that is already rebooting would only invite
 /// a submission nothing is listening for.
 async fn respond_saved(socket: &mut TcpSocket<'_>) {
@@ -397,23 +397,60 @@ body{font:16px system-ui;margin:0;padding:1rem;background:#f6f5f3;color:#1a1a1a}
 <p>The box is restarting. This network will disappear on its own.</p>\
 </body></html>";
 
-/// Renders the page and sends it under the given status.
+/// How much of an escaped run is held at a time.
+///
+/// The only thing standing in for a whole page. It has to be at least as long
+/// as the longest escape — `&quot;`, six bytes — or [`page::escape_chunk`]
+/// cannot make progress; past that the size only decides how many writes a
+/// page takes, and the socket's own transmit buffer is what actually goes on
+/// the wire.
+const CHUNK: usize = 64;
+
+/// Sends the page under the given status, a piece at a time.
+///
+/// Nothing here holds a page: [`page::length`] promises the size in the
+/// response head, and the pieces follow it. That is what keeps a full-size
+/// `CONFIG.TXT` — 1024 bytes that escaping can take to 6144 — showable
+/// without 7.6 KB of buffer sitting in `.bss` for the life of the firmware.
 async fn send_page(
     socket: &mut TcpSocket<'_>,
     status: http::Status,
     config: &[u8],
     error: Option<&str>,
 ) {
-    match page::render(config, error) {
-        Ok(body) => send(socket, status, &body).await,
-        Err(page::PageError::TooLong) => {
-            // The file plus its escaping outgrew `page::MAX_PAGE`. Nothing
-            // useful can be shown, so say so on the console and answer with a
-            // status rather than a truncated page.
-            esp_println::println!("teddiebox: portal could not fit the page around that config");
-            send(socket, http::Status::TooLarge, b"").await
+    let head = http::head(status, page::length(config, error));
+    if write_all(socket, &head).await.is_err() {
+        return;
+    }
+    for piece in page::pieces(config, error) {
+        let sent = match piece {
+            page::Piece::Literal(text) => write_all(socket, text.as_bytes()).await,
+            page::Piece::Escaped(bytes) => write_escaped(socket, bytes).await,
+        };
+        if sent.is_err() {
+            return;
         }
     }
+    let _ = socket.flush().await;
+}
+
+/// Writes `bytes` HTML-escaped, [`CHUNK`] at a time.
+async fn write_escaped(socket: &mut TcpSocket<'_>, bytes: &[u8]) -> Result<(), ()> {
+    let mut chunk = [0u8; CHUNK];
+    let mut at = 0;
+    while at < bytes.len() {
+        let (consumed, written) = page::escape_chunk(&bytes[at..], &mut chunk);
+        if consumed == 0 {
+            // `CHUNK` is larger than the longest escape, so this cannot
+            // happen — and if it ever did, looping for ever with the radio up
+            // is the one outcome worth refusing outright.
+            esp_println::println!("teddiebox: portal made no progress escaping the page");
+            return Err(());
+        }
+        at += consumed;
+        write_all(socket, &chunk[..written]).await?;
+    }
+    Ok(())
 }
 
 /// Head, body, and a flush that waits for the phone to have it.

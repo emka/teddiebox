@@ -104,9 +104,9 @@ impl Status {
 
 /// Builds the response head.
 ///
-/// Separate from the body so the page — up to `page::MAX_PAGE` — goes to the
-/// socket out of the buffer it was rendered into, rather than being copied
-/// into a second one this box has no stack for.
+/// Separate from the body because the body is never assembled: `page` is
+/// streamed piece by piece, and this head carries the length it promised
+/// rather than a length measured off a buffer that does not exist.
 ///
 /// `Connection: close` because the portal answers one request per accept: a
 /// keep-alive would have it holding a socket for a phone that has wandered
