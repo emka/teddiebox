@@ -586,11 +586,6 @@ impl Mounted {
     /// A missing file answers `Ok(0)`. That is a box being set up for the
     /// first time, which is the case this whole path exists for — not an
     /// error to report.
-    ///
-    // Nothing calls this yet — the caller is the config portal's save path,
-    // which lands in a later task. Committed unwired so this build gate
-    // proves it compiles now rather than when the caller lands.
-    #[allow(dead_code)]
     pub fn read_config_bytes(&self, buffer: &mut [u8]) -> Result<usize, &'static str> {
         let name = ShortFileName::create_from_str(teddiebox_config::FILENAME)
             .map_err(|_| "the config name is not a short name")?;
@@ -625,10 +620,6 @@ impl Mounted {
     /// card, so a truncated config is exactly the state holding both ears at
     /// boot recovers from. `tools/fat-assumptions` proves the truncation
     /// leaves no tail.
-    ///
-    // Nothing calls this yet, for the same reason as `read_config_bytes`
-    // above.
-    #[allow(dead_code)]
     pub fn write_config(&self, bytes: &[u8]) -> Result<(), &'static str> {
         let name = ShortFileName::create_from_str(teddiebox_config::FILENAME)
             .map_err(|_| "the config name is not a short name")?;

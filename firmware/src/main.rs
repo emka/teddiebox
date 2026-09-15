@@ -8,6 +8,7 @@ mod libc_shim;
 mod net;
 mod nfc;
 mod pins;
+mod portal;
 mod sleep;
 mod stack;
 mod storage;

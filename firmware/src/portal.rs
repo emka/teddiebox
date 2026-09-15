@@ -1,0 +1,444 @@
+//! The setup portal: one page, one form, one lease.
+//!
+//! Reached by holding both ears through a power-on. While this runs, the box
+//! is not a teddy bear — no decoder, no codec, no NFC — which is what makes
+//! the stack for a TCP server and a DHCP server affordable at all.
+//!
+//! The wire formats live in `teddiebox_portal` and are tested on the host.
+//! What is here is the part that cannot be: the access point, the two
+//! sockets, the card, and the order the save path does things in.
+//!
+//! Nothing here has been run on hardware. It compiles and links, which is the
+//! whole of what is known about it.
+
+// Nothing calls this yet — the caller is the boot branch that reads both ears,
+// which lands in the next task. Committed unwired rather than left on a branch
+// so the same build gate that checks the rest of the firmware checks this.
+#![allow(dead_code)]
+
+use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_net::tcp::TcpSocket;
+use embassy_net::udp::{PacketMetadata, UdpSocket};
+use embassy_net::{Ipv4Address, Stack};
+use embassy_time::{Duration, Timer};
+use teddiebox_portal::{dhcp, form, http, page, MAX_CONFIG};
+
+use crate::net;
+use crate::storage::Mounted;
+
+/// How long the box will sit with its radio up waiting to be talked to.
+///
+/// The pack on this box goes flat without warning, and an access point left
+/// beaconing overnight is a box that is dead in the morning for no reason
+/// anybody will connect to this.
+///
+/// Measured from the last connection rather than from boot, so that somebody
+/// who saves a config, reads the error and needs a second go is not cut off
+/// mid-correction. Nothing holds a socket open while a person types, so this
+/// is still a bound on typing time — it is just a bound that restarts every
+/// time the box hears from them.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How long a single connection may sit without saying anything.
+///
+/// The listener takes one connection at a time, and a phone that opens one and
+/// wanders off — captive-portal probes do this constantly — would otherwise
+/// hold the whole portal shut. Long enough that a slow phone is not cut off,
+/// short enough that a dead one is.
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long the answer gets to reach the phone before the box reboots.
+///
+/// [`send`] already waits for the bytes to be acknowledged, so this is margin
+/// and not the mechanism.
+const SETTLE: Duration = Duration::from_millis(500);
+
+/// How long to wait before rebooting a box whose radio would not start.
+///
+/// A reset is the only lever left — the failure is in the driver, not in
+/// anything this code can retry — but an immediate one loops invisibly while
+/// the ears are still held. This makes the loop slow enough to watch.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+
+/// The request buffer: the largest body plus room for the head above it.
+const REQUEST: usize = MAX_CONFIG + 512;
+
+/// Raises the access point and serves until it is done with.
+///
+/// Never returns: it resets the box itself, either because a config was saved
+/// or because nobody came.
+pub async fn run(radio: &mut net::Radio<'_>, card: &Mounted, seed: u64) -> ! {
+    let (session, mut link) = match radio.serve(seed) {
+        Ok(pair) => pair,
+        Err(trouble) => {
+            esp_println::println!(
+                "teddiebox: portal could not raise the access point — {trouble:?}"
+            );
+            crate::drain_console();
+            Timer::after(RETRY_AFTER).await;
+            esp_hal::system::software_reset();
+        }
+    };
+
+    esp_println::println!(
+        "teddiebox: portal up — join `{}` and open http://192.168.4.1/",
+        net::SETUP_SSID
+    );
+
+    // The runner has to be polled throughout rather than awaited first: it
+    // never returns, and neither server makes any progress without it. The
+    // three share one stack frame instead of three tasks because the session
+    // and the link are borrowed out of the radio and cannot be handed away.
+    let stack = session.stack();
+    match select3(link.run(), serve_http(stack, card), serve_dhcp(stack)).await {
+        Either3::First(_) => unreachable!("the runner never returns"),
+        Either3::Second(()) => esp_println::println!(
+            "teddiebox: portal heard nothing for {} minutes — restarting",
+            IDLE_TIMEOUT.as_secs() / 60
+        ),
+        Either3::Third(_) => unreachable!("the dhcp server never returns"),
+    }
+
+    crate::drain_console();
+    esp_hal::system::software_reset();
+}
+
+/// Answers one connection at a time on port 80, until nobody comes.
+///
+/// Returns only at the idle timeout. The save path does not come back through
+/// here — it resets the box from inside the handler.
+async fn serve_http(stack: Stack<'_>, card: &Mounted) {
+    // All three of these are the portal's stack claim, together with the
+    // rendered page in `send_page`. They are named here rather than spread
+    // through the call tree so the total is readable in one place:
+    // 1536 + 1536 + 1536, plus `page::MAX_PAGE` further down.
+    let mut rx = [0u8; 1536];
+    let mut tx = [0u8; 1536];
+    let mut buffer = [0u8; REQUEST];
+
+    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+    socket.set_timeout(Some(CONNECTION_TIMEOUT));
+
+    loop {
+        match select(socket.accept(80), Timer::after(IDLE_TIMEOUT)).await {
+            Either::Second(()) => return,
+            Either::First(Ok(())) => handle(&mut socket, card, &mut buffer).await,
+            Either::First(Err(trouble)) => {
+                esp_println::println!("teddiebox: portal could not accept — {trouble:?}");
+            }
+        }
+        // One request per accept, so the socket goes back to the listener
+        // rather than being kept for a phone that has already been answered.
+        // `send` has waited for the response to be acknowledged by this point,
+        // so the reset this puts on the wire cannot lose it.
+        socket.abort();
+        let _ = socket.flush().await;
+    }
+}
+
+/// Reads one request and answers it.
+async fn handle(socket: &mut TcpSocket<'_>, card: &Mounted, buffer: &mut [u8]) {
+    let filled = match receive(socket, buffer).await {
+        Received::Request(filled) => filled,
+        Received::Refused(status, why) => return send_page(socket, status, b"", Some(why)).await,
+        Received::Gone => return,
+    };
+
+    // Parsed a second time: the first parse happens inside `receive`, where
+    // holding on to the `Request` would borrow the buffer that the next read
+    // has to fill. A head is a couple of hundred bytes, and this way the
+    // borrow checker has nothing to argue with.
+    let Ok(request) = http::parse(&buffer[..filled]) else {
+        return send_page(
+            socket,
+            http::Status::BadRequest,
+            b"",
+            Some("that request did not make sense to the box"),
+        )
+        .await;
+    };
+
+    match (request.method, request.path) {
+        (http::Method::Get, "/") => show(socket, card).await,
+        (http::Method::Post, "/save") => {
+            let body = &buffer[request.header_len..request.header_len + request.content_length];
+            save(socket, card, body).await
+        }
+        // Everything else, with no body. A phone probing `/generate_204` or
+        // `/hotspot-detect.html` gets a plain 404 and correctly reports that
+        // this network has no internet, which is true.
+        _ => send(socket, http::Status::NotFound, b"").await,
+    }
+}
+
+/// What came off the socket.
+enum Received {
+    /// A whole request, this many bytes of it.
+    Request(usize),
+    /// Not one this box will answer, with the reason to show.
+    Refused(http::Status, &'static str),
+    /// The peer closed, or the socket did. There is nobody to answer.
+    Gone,
+}
+
+/// Reads until the head parses and the whole body has arrived.
+async fn receive(socket: &mut TcpSocket<'_>, buffer: &mut [u8]) -> Received {
+    let mut filled = 0;
+    loop {
+        match complete(&buffer[..filled]) {
+            Ok(true) => return Received::Request(filled),
+            Ok(false) => {}
+            Err(http::RequestError::TooLarge) => {
+                return Received::Refused(
+                    http::Status::TooLarge,
+                    "that was more than the box will take — the browser's encoding of the file has to fit 1024 bytes",
+                )
+            }
+            Err(http::RequestError::Malformed) => {
+                return Received::Refused(
+                    http::Status::BadRequest,
+                    "that request did not make sense to the box",
+                )
+            }
+            // `complete` turns this one into `Ok(false)`; it means read more.
+            Err(http::RequestError::Incomplete) => unreachable!("incomplete asks for another read"),
+        }
+
+        if filled == buffer.len() {
+            // A head that never ended. `TooLarge` refuses the body by its
+            // declared length, so what fills this buffer without parsing is
+            // headers, and there is no length to refuse it by.
+            return Received::Refused(
+                http::Status::TooLarge,
+                "that request had more headers than the box will read",
+            );
+        }
+
+        match socket.read(&mut buffer[filled..]).await {
+            Ok(0) => return Received::Gone,
+            Ok(n) => filled += n,
+            Err(trouble) => {
+                esp_println::println!("teddiebox: portal read failed — {trouble:?}");
+                return Received::Gone;
+            }
+        }
+    }
+}
+
+/// Whether what has arrived so far is a whole request.
+///
+/// Deliberately answers a `bool` rather than the `Request` it parsed: the
+/// caller needs the buffer back, mutably, the moment the answer is `false`.
+fn complete(buffer: &[u8]) -> Result<bool, http::RequestError> {
+    match http::parse(buffer) {
+        Ok(request) => Ok(buffer.len() - request.header_len >= request.content_length),
+        Err(http::RequestError::Incomplete) => Ok(false),
+        Err(other) => Err(other),
+    }
+}
+
+/// `GET /` — the card's file, in the box, as it is.
+async fn show(socket: &mut TcpSocket<'_>, card: &Mounted) {
+    let mut config = [0u8; MAX_CONFIG];
+    match card.read_config_bytes(&mut config) {
+        // `Ok(0)` is a card with no config on it — a box being set up for the
+        // first time, which is what this whole path exists for. An empty
+        // textarea is the right answer to it, not an error.
+        Ok(filled) => respond_page(socket, &config[..filled], None).await,
+        Err(why) => respond_page(socket, b"", Some(why)).await,
+    }
+}
+
+/// `POST /save` — decode, validate, write, reset.
+async fn save(socket: &mut TcpSocket<'_>, card: &Mounted, body: &[u8]) {
+    let submitted: heapless::Vec<u8, MAX_CONFIG> = match form::field(body, "config") {
+        Ok(bytes) => bytes,
+        Err(_) => return respond_error(socket, "that form did not arrive intact").await,
+    };
+
+    // Validate before writing, never after. A file the box will refuse at its
+    // next boot must not reach the card: the person who would find out is
+    // whoever picks up a box that no longer works, with no clue why.
+    let text = match core::str::from_utf8(&submitted) {
+        Ok(text) => text,
+        Err(_) => return respond_error(socket, "that is not text").await,
+    };
+    if let Err(trouble) = teddiebox_config::Config::parse(text) {
+        // The submitted bytes go back into the textarea, so a typo costs a
+        // correction rather than a retype.
+        return respond_page(socket, &submitted, Some(describe(trouble))).await;
+    }
+
+    match card.write_config(&submitted) {
+        // Only a confirmed write resets. A failed one leaves the box here so
+        // it can be tried again, rather than rebooting into whatever is on the
+        // card now.
+        Ok(()) => {
+            esp_println::println!(
+                "teddiebox: portal wrote {} bytes — restarting",
+                submitted.len()
+            );
+            respond_saved(socket).await;
+            crate::drain_console();
+            Timer::after(SETTLE).await;
+            esp_hal::system::software_reset();
+        }
+        Err(why) => respond_page(socket, &submitted, Some(why)).await,
+    }
+}
+
+/// Says what went wrong in words somebody can act on.
+///
+/// One arm per variant and no catch-all, so a new [`teddiebox_config::ConfigError`]
+/// makes this fail to compile rather than quietly telling everybody "invalid".
+fn describe(trouble: teddiebox_config::ConfigError) -> &'static str {
+    use teddiebox_config::ConfigError::*;
+    match trouble {
+        MissingSsid => "no ssid line — the box needs a network name",
+        MissingServer => "no server line — the box needs somewhere to fetch from",
+        ValueTooLong => "one of those values is too long for the box to hold",
+        MalformedLine => "a line without an = on it",
+        MalformedValue => "a key was given a value it does not accept",
+        Truncated => "that config is longer than the box will read",
+        NotText => "that is not text",
+        EmptyUpdateUrl => "update_url is there but empty — give it a URL or remove it",
+    }
+}
+
+/// The page, with whatever should be in the textarea and whatever went wrong.
+async fn respond_page(socket: &mut TcpSocket<'_>, config: &[u8], error: Option<&str>) {
+    send_page(socket, http::Status::Ok, config, error).await
+}
+
+/// The page again, but as a refusal, with nothing in the textarea.
+///
+/// For the two cases where there are no bytes worth handing back: a form that
+/// did not decode, and one that is not text. Both are things a browser does
+/// not do, so nothing a person typed is lost by not echoing them.
+async fn respond_error(socket: &mut TcpSocket<'_>, message: &str) {
+    send_page(socket, http::Status::BadRequest, b"", Some(message)).await
+}
+
+/// The last thing the phone sees before the network disappears.
+///
+/// Its own page rather than [`page::render`], which always carries the form:
+/// offering a Save button to a box that is already rebooting would only invite
+/// a submission nothing is listening for.
+async fn respond_saved(socket: &mut TcpSocket<'_>) {
+    send(socket, http::Status::Ok, SAVED.as_bytes()).await
+}
+
+/// Self-contained, for the same reason `page.rs` is: on this access point the
+/// phone has a route to nothing, so anything referenced would not load.
+const SAVED: &str = "<!doctype html><html><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>teddiebox setup</title><style>\
+body{font:16px system-ui;margin:0;padding:1rem;background:#f6f5f3;color:#1a1a1a}\
+</style></head><body><h1>saved</h1>\
+<p>The box is restarting. This network will disappear on its own.</p>\
+</body></html>";
+
+/// Renders the page and sends it under the given status.
+async fn send_page(
+    socket: &mut TcpSocket<'_>,
+    status: http::Status,
+    config: &[u8],
+    error: Option<&str>,
+) {
+    match page::render(config, error) {
+        Ok(body) => send(socket, status, &body).await,
+        Err(page::PageError::TooLong) => {
+            // The file plus its escaping outgrew `page::MAX_PAGE`. Nothing
+            // useful can be shown, so say so on the console and answer with a
+            // status rather than a truncated page.
+            esp_println::println!("teddiebox: portal could not fit the page around that config");
+            send(socket, http::Status::TooLarge, b"").await
+        }
+    }
+}
+
+/// Head, body, and a flush that waits for the phone to have it.
+///
+/// The flush is what makes it safe for the caller to abort the connection — or
+/// to reset the box — immediately afterwards.
+async fn send(socket: &mut TcpSocket<'_>, status: http::Status, body: &[u8]) {
+    let head = http::head(status, body.len());
+    if write_all(socket, &head).await.is_err() {
+        return;
+    }
+    if write_all(socket, body).await.is_err() {
+        return;
+    }
+    let _ = socket.flush().await;
+}
+
+/// Writes the whole slice.
+///
+/// `TcpSocket::write` returns how much it took, which is not always all of it;
+/// a page sent with one call silently arrives cut in half.
+async fn write_all(socket: &mut TcpSocket<'_>, bytes: &[u8]) -> Result<(), ()> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match socket.write(rest).await {
+            Ok(0) => return Err(()),
+            Ok(n) => rest = &rest[n..],
+            Err(trouble) => {
+                esp_println::println!("teddiebox: portal write failed — {trouble:?}");
+                return Err(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Hands out the one lease, to whoever asks, for as long as the portal runs.
+///
+/// Never returns: a phone that renews mid-session has to be answered, so this
+/// keeps listening even after somebody has been given an address.
+async fn serve_dhcp(stack: Stack<'_>) -> ! {
+    let mut rx_meta = [PacketMetadata::EMPTY; 4];
+    let mut rx = [0u8; 1024];
+    let mut tx_meta = [PacketMetadata::EMPTY; 4];
+    let mut tx = [0u8; 1024];
+    let mut buffer = [0u8; dhcp::MAX_DATAGRAM];
+
+    let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx, &mut tx_meta, &mut tx);
+    if let Err(trouble) = socket.bind(67) {
+        esp_println::println!("teddiebox: portal could not bind dhcp — {trouble:?}");
+        // The HTTP side can still be reached by a phone given a static
+        // address by hand, so park rather than return: returning would take
+        // the whole portal down and reboot the box.
+        core::future::pending::<()>().await;
+        unreachable!("pending never completes");
+    }
+
+    loop {
+        let (n, _from) = match socket.recv_from(&mut buffer).await {
+            Ok(received) => received,
+            Err(trouble) => {
+                esp_println::println!("teddiebox: portal dhcp recv failed — {trouble:?}");
+                continue;
+            }
+        };
+
+        let Some(incoming) = dhcp::parse(&buffer[..n]) else {
+            continue;
+        };
+        let answer = match incoming.kind {
+            dhcp::Kind::Discover => dhcp::Reply::Offer,
+            dhcp::Kind::Request => dhcp::Reply::Ack,
+            dhcp::Kind::Other => continue,
+        };
+
+        // Broadcast, not back to where it came from. A client asking for an
+        // address does not have one yet — that is the whole point of DHCP — so
+        // its source address is 0.0.0.0 and a unicast reply goes nowhere.
+        let datagram = dhcp::reply(&incoming, answer);
+        if let Err(trouble) = socket
+            .send_to(&datagram, (Ipv4Address::BROADCAST, 68))
+            .await
+        {
+            esp_println::println!("teddiebox: portal dhcp send failed — {trouble:?}");
+        }
+    }
+}
