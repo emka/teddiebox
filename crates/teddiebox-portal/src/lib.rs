@@ -10,6 +10,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod dhcp;
 pub mod form;
 pub mod http;
 pub mod page;
