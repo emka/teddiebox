@@ -55,7 +55,13 @@ pub enum OtaError {
     NotHttps,
     /// An `update_url`, or an `image` resolved against a manifest path, is
     /// not shaped the way this crate requires: no `/` after the host, a path
-    /// naming a directory rather than a file, an empty host, or a `..`
-    /// segment in a path meant to gate a flash write.
+    /// naming a directory rather than a file, an empty host, a query or
+    /// fragment riding along, a byte outside the conservative path set, or a
+    /// `..` segment.
+    ///
+    /// The `..` refusal is **hygiene, not a security boundary** — an absolute
+    /// `image` is used as-is by design, so nothing has to go through `..` to
+    /// name a path outside the manifest's directory. See the "Trust model"
+    /// section on the [`url`] module for what actually holds.
     MalformedUrl,
 }
