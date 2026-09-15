@@ -4438,29 +4438,7 @@ async fn main(spawner: Spawner) {
                     });
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);
                 }
-                Some(Command::StackReport) => match stack::high_water() {
-                    None => esp_println::println!("teddiebox: stack was never painted"),
-                    Some(used) => {
-                        if used.exhausted {
-                            // A floor, not an answer. Saying "deepest" here
-                            // would be the same mistake that has already cost
-                            // two bench sessions.
-                            esp_println::println!(
-                                "teddiebox: stack at least {} of {} bytes — the paint is gone \
-                                 everywhere, so this is a floor",
-                                used.bytes,
-                                used.total
-                            );
-                        } else {
-                            esp_println::println!(
-                                "teddiebox: stack deepest {} of {} bytes, {} spare",
-                                used.bytes,
-                                used.total,
-                                used.total.saturating_sub(used.bytes)
-                            );
-                        }
-                    }
-                },
+                Some(Command::StackReport) => stack::report(),
                 Some(Command::ReadToken) => {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_READ_TOKEN, Ordering::Relaxed);

@@ -116,6 +116,34 @@ pub fn high_water() -> Option<Used> {
     })
 }
 
+/// Prints the high-water mark, or says plainly that there is not one.
+///
+/// Two callers want this and neither wants its own wording: the `stack`
+/// console command, and the setup portal, which never reaches the loop that
+/// reads the console. Two spellings of one measurement is how a bench capture
+/// stops being greppable.
+pub fn report() {
+    match high_water() {
+        None => esp_println::println!("teddiebox: stack was never painted"),
+        Some(used) if used.exhausted => {
+            // A floor, not an answer. Saying "deepest" here would be the same
+            // mistake that has already cost two bench sessions.
+            esp_println::println!(
+                "teddiebox: stack at least {} of {} bytes — the paint is gone \
+                 everywhere, so this is a floor",
+                used.bytes,
+                used.total
+            );
+        }
+        Some(used) => esp_println::println!(
+            "teddiebox: stack deepest {} of {} bytes, {} spare",
+            used.bytes,
+            used.total,
+            used.total.saturating_sub(used.bytes)
+        ),
+    }
+}
+
 /// A stack measurement.
 pub struct Used {
     /// Bytes between the deepest point reached and the top of the stack.

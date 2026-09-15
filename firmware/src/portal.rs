@@ -20,6 +20,7 @@ use teddiebox_core::LedState;
 use teddiebox_portal::{dhcp, form, http, page, MAX_BODY, MAX_CONFIG};
 
 use crate::net;
+use crate::stack;
 use crate::storage::Mounted;
 
 /// How long the box will sit with its radio up before restarting itself.
@@ -98,6 +99,12 @@ pub async fn run(
     // box that failed to start rather than one waiting to be talked to.
     paint(LedState::Setup);
 
+    // Setup mode never reaches the console loop, so the `stack` command that
+    // would answer this question is not there to be typed. Printed on the way
+    // in and again on the way out instead: the pair is what turns the portal's
+    // own depth into a measurement rather than another estimate.
+    stack::report();
+
     let (session, mut link) = match radio.serve(seed) {
         Ok(pair) => pair,
         Err(trouble) => {
@@ -134,6 +141,7 @@ pub async fn run(
         Either::Second(_) => unreachable!("none of the three ever returns"),
     }
 
+    stack::report();
     crate::drain_console();
     esp_hal::system::software_reset();
 }
