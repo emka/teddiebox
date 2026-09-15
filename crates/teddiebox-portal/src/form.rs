@@ -109,6 +109,16 @@ mod tests {
         assert_eq!(got.unwrap_err(), FormError::BadEscape);
     }
 
+    /// The exact boundary. `MAX_CONFIG` is both what this will decode into
+    /// and what the box writes to the card, so a file of precisely that many
+    /// bytes has to survive the whole round trip — and the off-by-one that
+    /// broke reading one back had no test on this side either.
+    #[test]
+    fn a_value_of_exactly_the_capacity_is_kept() {
+        let got: heapless::Vec<u8, 4> = field(b"config=abcd", "config").unwrap();
+        assert_eq!(&got[..], b"abcd");
+    }
+
     #[test]
     fn a_value_past_capacity_is_refused() {
         let got: Result<heapless::Vec<u8, 4>, _> = field(b"config=abcdefgh", "config");

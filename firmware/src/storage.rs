@@ -596,7 +596,18 @@ impl Mounted {
         let mut filled = 0;
         let outcome = loop {
             if filled == buffer.len() {
-                break Err("the config file is larger than the buffer");
+                // Full is not the same as too long, and treating it as such
+                // made a file of exactly `buffer.len()` bytes unreadable —
+                // which is a length this box will happily *write*, so saving
+                // one left the page empty and erroring for ever. Ask for one
+                // more byte instead: if there is not one, the file ends
+                // exactly here and it fits.
+                let mut past = [0u8; 1];
+                break match self.read(file, &mut past) {
+                    Ok(0) => Ok(filled),
+                    Ok(_) => Err("the config file is larger than the buffer"),
+                    Err(_) => Err("the config file would not read"),
+                };
             }
             match self.read(file, &mut buffer[filled..]) {
                 Ok(0) => break Ok(filled),
