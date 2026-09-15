@@ -74,7 +74,25 @@ const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 /// Never returns. It resets the box itself once a config has been saved, or
 /// once nobody has come for [`IDLE_TIMEOUT`]; if the radio will not start at
 /// all it stops where it stands instead.
-pub async fn run(radio: &mut net::Radio<'_>, card: &Mounted, seed: u64) -> ! {
+///
+/// `paint` is how this reaches the LED. `main` owns the LEDC controller and
+/// never hands it away — its own loop is what paints for every other mode,
+/// and this function never reaches that loop — so it hands down a closure
+/// over the controller instead, built from the same `Gates` and `Rgb` the
+/// rest of the boot uses. Nothing here knows how a colour becomes light; it
+/// only knows which colour a state is.
+pub async fn run(
+    radio: &mut net::Radio<'_>,
+    card: &Mounted,
+    seed: u64,
+    paint: impl Fn(LedState),
+) -> ! {
+    // Painted before the access point is even asked for. This is the only
+    // feedback setup mode has — no screen, and by the time this runs, no
+    // decoder or codec either — so a dark LED here would read exactly like a
+    // box that failed to start rather than one waiting to be talked to.
+    paint(LedState::Setup);
+
     let (session, mut link) = match radio.serve(seed) {
         Ok(pair) => pair,
         Err(trouble) => {
@@ -87,7 +105,8 @@ pub async fn run(radio: &mut net::Radio<'_>, card: &Mounted, seed: u64) -> ! {
             // holds on, which from the outside is indistinguishable from a
             // brick. A box sitting still with a red LED says what happened
             // and leaves switching it off to the person holding it.
-            park(LedState::Error).await
+            paint(LedState::Error);
+            park().await
         }
     };
 
@@ -114,13 +133,16 @@ pub async fn run(radio: &mut net::Radio<'_>, card: &Mounted, seed: u64) -> ! {
     esp_hal::system::software_reset();
 }
 
-/// Stops the box where it stands, with one thing on the LED.
+/// Stops the box where it stands.
 ///
 /// Never returns and never wakes again. For the failures that leave nothing to
 /// retry and nothing to serve: the alternative is a reset, and a reset with
 /// both ears still held comes straight back here.
-async fn park(state: LedState) -> ! {
-    crate::LED_REQUEST.store(state.code(), core::sync::atomic::Ordering::Relaxed);
+///
+/// Callers paint before calling this — see [`run`] — because what is worth
+/// showing differs by failure, and this has no opinion of its own left to
+/// add once the console is drained.
+async fn park() -> ! {
     crate::drain_console();
     stay_put().await
 }

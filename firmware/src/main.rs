@@ -3964,6 +3964,32 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(heartbeat().unwrap());
 
+    // The LED is on this rail, so it has to come up before anything —
+    // including the setup portal below — can paint it.
+    board.apply(gates.power(Rail::Peripherals, true));
+
+    // The controller and its timer are bound here, ahead of everything else
+    // that used to be the first thing built after the rail, because the
+    // setup branch below needs a controller to paint through and never
+    // reaches the loop that owns one for every other mode. The channels
+    // borrow the timer, so it has to outlive them; `main` never returns,
+    // which is exactly long enough regardless of where in it this sits.
+    let ledc = led::controller(p.LEDC);
+    let timer = led::timer(&ledc);
+    let rgb = match timer.as_ref() {
+        Ok(timer) => match led::Rgb::new(&ledc, timer, p.GPIO19, p.GPIO18, p.GPIO17) {
+            Ok(rgb) => Some(rgb),
+            Err(()) => {
+                esp_println::println!("teddiebox: LED channels would not configure");
+                None
+            }
+        },
+        Err(()) => {
+            esp_println::println!("teddiebox: LED timer would not configure");
+            None
+        }
+    };
+
     // Ears and wake are all active low, so they are read with a pull-up: an
     // unconnected input then reads as "not pressed" rather than floating into
     // phantom presses.
@@ -3983,7 +4009,6 @@ async fn main(spawner: Spawner) {
     // control: once this branch is taken they are never read again.
     if larger.is_low() && smaller.is_low() {
         esp_println::println!("teddiebox: both ears held — setup portal");
-        LED_REQUEST.store(LedState::Setup.code(), Ordering::Relaxed);
 
         // Nothing before this point brings the card up: the rest of the boot
         // does that lazily, inside `media`, on the first command that needs
@@ -3992,6 +4017,20 @@ async fn main(spawner: Spawner) {
         // `&Mounted` it needs to read and rewrite `CONFIG.TXT`.
         board.apply(gates.power(Rail::Storage, true));
         Timer::after(Duration::from_millis(50)).await;
+
+        // The main loop below is what paints `LED_REQUEST` for every other
+        // mode; this branch never reaches it, so painting happens straight
+        // onto the controller built above instead. Built once and handed
+        // down rather than stored anywhere, because nothing outside this
+        // branch and `portal::run` ever needs to ask for a colour again.
+        let paint = |state: LedState| {
+            if let Some(rgb) = rgb.as_ref() {
+                if let Ok(lit) = gates.led(colour_for(state)) {
+                    rgb.apply(&lit, board::LED_DUTY);
+                }
+            }
+        };
+
         match Spi::new(p.SPI2, storage::init_config()) {
             Ok(spi) => {
                 let spi = spi
@@ -4007,13 +4046,13 @@ async fn main(spawner: Spawner) {
                         // the same choice made for the download path's
                         // `bring_up`, above.
                         let seed = Instant::now().as_micros();
-                        portal::run(&mut radio, &card, seed).await
+                        portal::run(&mut radio, &card, seed, paint).await
                     }
                     Err(reason) => {
                         esp_println::println!(
                             "teddiebox: portal could not mount the card — {reason}"
                         );
-                        LED_REQUEST.store(LedState::Error.code(), Ordering::Relaxed);
+                        paint(LedState::Error);
                         park_task().await;
                         unreachable!("park_task never returns");
                     }
@@ -4021,7 +4060,7 @@ async fn main(spawner: Spawner) {
             }
             Err(_) => {
                 esp_println::println!("teddiebox: portal's SPI would not configure");
-                LED_REQUEST.store(LedState::Error.code(), Ordering::Relaxed);
+                paint(LedState::Error);
                 park_task().await;
                 unreachable!("park_task never returns");
             }
@@ -4041,9 +4080,6 @@ async fn main(spawner: Spawner) {
     let battery = adc_config.enable_pin(p.GPIO9, Attenuation::_11dB);
     let charger = adc_config.enable_pin(p.GPIO8, Attenuation::_11dB);
     spawner.spawn(sense(Adc::new(p.ADC1, adc_config), battery, charger).unwrap());
-
-    // The LED is on this rail, so it has to come up first.
-    board.apply(gates.power(Rail::Peripherals, true));
 
     // UART0's receive half. esp-println keeps the transmit half.
     let mut console = UartRx::new(p.UART0, UartConfig::default().with_baudrate(115200))
@@ -4145,25 +4181,6 @@ async fn main(spawner: Spawner) {
     // What the LED is showing now, so a loop pass with no new decision repaints
     // the same colour rather than going dark.
     let mut shown = LedState::Booting;
-
-    // The controller and its timer are bound here rather than inside the
-    // helper because the channels borrow the timer, so it has to outlive them.
-    // `main` never returns, which is exactly long enough.
-    let ledc = led::controller(p.LEDC);
-    let timer = led::timer(&ledc);
-    let rgb = match timer.as_ref() {
-        Ok(timer) => match led::Rgb::new(&ledc, timer, p.GPIO19, p.GPIO18, p.GPIO17) {
-            Ok(rgb) => Some(rgb),
-            Err(()) => {
-                esp_println::println!("teddiebox: LED channels would not configure");
-                None
-            }
-        },
-        Err(()) => {
-            esp_println::println!("teddiebox: LED timer would not configure");
-            None
-        }
-    };
 
     // Asked on a wake, before the codec, the card, the radio or the jingle.
     // Speaking costs a codec power-up, the amplifier, a card read and a decode
