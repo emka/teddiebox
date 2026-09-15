@@ -301,6 +301,9 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use std::format;
+
     use super::*;
 
     /// A key with nothing after the `=` is the same mistake as leaving the key
@@ -651,9 +654,28 @@ mod tests {
 
     #[test]
     fn an_overlong_update_url_is_rejected_rather_than_truncated() {
-        // 130 characters, over the 128-byte limit.
+        // 143 characters, over the 128-byte limit.
         const TEXT: &str = "ssid = A\nserver = s:1\nupdate_url = https://example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
         assert_eq!(Config::parse(TEXT), Err(ConfigError::ValueTooLong));
+    }
+
+    /// Pins the boundary itself, not just a value comfortably past it — so
+    /// MAX_UPDATE_URL cannot drift (say, to 140) with this suite still green.
+    #[test]
+    fn an_update_url_at_exactly_the_limit_is_accepted() {
+        let value = format!("https://example.com/{}", "x".repeat(MAX_UPDATE_URL - 20));
+        assert_eq!(value.len(), MAX_UPDATE_URL);
+        let text = format!("ssid = A\nserver = s:1\nupdate_url = {value}\n");
+        let c = Config::parse(&text).unwrap();
+        assert_eq!(c.update_url.as_deref(), Some(value.as_str()));
+    }
+
+    #[test]
+    fn an_update_url_one_byte_over_the_limit_is_refused() {
+        let value = format!("https://example.com/{}", "x".repeat(MAX_UPDATE_URL - 19));
+        assert_eq!(value.len(), MAX_UPDATE_URL + 1);
+        let text = format!("ssid = A\nserver = s:1\nupdate_url = {value}\n");
+        assert_eq!(Config::parse(&text), Err(ConfigError::ValueTooLong));
     }
 
     /// `update_url =` with nothing after it is someone who meant to write a
