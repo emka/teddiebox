@@ -3963,17 +3963,78 @@ async fn main(spawner: Spawner) {
     let mut lpwr = Some(p.LPWR);
 
     spawner.spawn(heartbeat().unwrap());
-    spawner.spawn(net(p.WIFI, p.SHA, p.RSA, p.AES).unwrap());
 
     // Ears and wake are all active low, so they are read with a pull-up: an
     // unconnected input then reads as "not pressed" rather than floating into
     // phantom presses.
     let up = InputConfig::default().with_pull(Pull::Up);
+    let larger = Input::new(p.GPIO20, up);
+    let smaller = Input::new(p.GPIO21, up);
+
+    // Both ears held through a power-on asks for the setup portal. Read
+    // before `net` is spawned — that task is the only other claim on
+    // `p.WIFI` — and before anything else is spawned at all, because setup
+    // mode is the *absence* of almost every task below: no decoder, no
+    // codec, no NFC, no media loop. That is what makes the stack for a TCP
+    // server and a DHCP server affordable — measured at 49,024 of 58,572
+    // bytes used, with the decoder's 15.8 KB the largest single claim on it.
+    //
+    // Active low, so held is low. The ears are the gesture and not a
+    // control: once this branch is taken they are never read again.
+    if larger.is_low() && smaller.is_low() {
+        esp_println::println!("teddiebox: both ears held — setup portal");
+        LED_REQUEST.store(LedState::Setup.code(), Ordering::Relaxed);
+
+        // Nothing before this point brings the card up: the rest of the boot
+        // does that lazily, inside `media`, on the first command that needs
+        // it. Setup mode never reaches `media`, so the same bus and the same
+        // rail are brought up here instead, once, so `portal::run` has the
+        // `&Mounted` it needs to read and rewrite `CONFIG.TXT`.
+        board.apply(gates.power(Rail::Storage, true));
+        Timer::after(Duration::from_millis(50)).await;
+        match Spi::new(p.SPI2, storage::init_config()) {
+            Ok(spi) => {
+                let spi = spi
+                    .with_sck(p.GPIO35)
+                    .with_mosi(p.GPIO38)
+                    .with_miso(p.GPIO36);
+                let cs = Output::new(p.GPIO34, Level::High, OutputConfig::default());
+                match storage::Mounted::open(spi, cs, esp_hal::delay::Delay::new()) {
+                    Ok(card) => {
+                        let mut radio = net::Radio::new(p.WIFI);
+                        // The stack seeds its port and transaction numbers
+                        // from this, so it has to differ between boots; see
+                        // the same choice made for the download path's
+                        // `bring_up`, above.
+                        let seed = Instant::now().as_micros();
+                        portal::run(&mut radio, &card, seed).await
+                    }
+                    Err(reason) => {
+                        esp_println::println!(
+                            "teddiebox: portal could not mount the card — {reason}"
+                        );
+                        LED_REQUEST.store(LedState::Error.code(), Ordering::Relaxed);
+                        park_task().await;
+                        unreachable!("park_task never returns");
+                    }
+                }
+            }
+            Err(_) => {
+                esp_println::println!("teddiebox: portal's SPI would not configure");
+                LED_REQUEST.store(LedState::Error.code(), Ordering::Relaxed);
+                park_task().await;
+                unreachable!("park_task never returns");
+            }
+        }
+    }
+
+    spawner.spawn(net(p.WIFI, p.SHA, p.RSA, p.AES).unwrap());
+
     // One task per ear, each held by its own pin: the GPIO hardware reports a
     // press whenever this box next gets around to asking, which a 2 ms poll
     // could not do under a decoder using 69% of real time.
-    spawner.spawn(ear(Ear::Larger, "larger ear", Input::new(p.GPIO20, up)).unwrap());
-    spawner.spawn(ear(Ear::Smaller, "smaller ear", Input::new(p.GPIO21, up)).unwrap());
+    spawner.spawn(ear(Ear::Larger, "larger ear", larger).unwrap());
+    spawner.spawn(ear(Ear::Smaller, "smaller ear", smaller).unwrap());
     spawner.spawn(inputs(Input::new(p.GPIO7, up)).unwrap());
 
     let mut adc_config = AdcConfig::new();

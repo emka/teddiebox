@@ -11,11 +11,6 @@
 //! Nothing here has been run on hardware. It compiles and links, which is the
 //! whole of what is known about it.
 
-// Nothing calls this yet — the caller is the boot branch that reads both ears,
-// which lands in the next task. Committed unwired rather than left on a branch
-// so the same build gate that checks the rest of the firmware checks this.
-#![allow(dead_code)]
-
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
