@@ -97,12 +97,17 @@ pub enum LedState {
     /// The pack is nearly gone and the box is about to stop, in red.
     BatteryCritical,
     Error,
+    /// The box is serving the setup page and will not play anything.
+    ///
+    /// A colour used by nothing else, because the one thing somebody needs to
+    /// know on sight is that this boot is not going to become a teddy bear.
+    Setup,
 }
 
 impl LedState {
     /// Every state, so a test can prove the round trip below covers them all
     /// rather than the handful somebody remembered.
-    pub const ALL: [LedState; 9] = [
+    pub const ALL: [LedState; 10] = [
         LedState::Off,
         LedState::Booting,
         LedState::Ready,
@@ -112,6 +117,7 @@ impl LedState {
         LedState::BatteryLow,
         LedState::BatteryCritical,
         LedState::Error,
+        LedState::Setup,
     ];
 
     /// The byte that carries this state between tasks.
@@ -131,6 +137,7 @@ impl LedState {
             LedState::BatteryLow => 6,
             LedState::BatteryCritical => 7,
             LedState::Error => 8,
+            LedState::Setup => 9,
         }
     }
 
@@ -146,6 +153,7 @@ impl LedState {
             6 => Some(LedState::BatteryLow),
             7 => Some(LedState::BatteryCritical),
             8 => Some(LedState::Error),
+            9 => Some(LedState::Setup),
             _ => None,
         }
     }

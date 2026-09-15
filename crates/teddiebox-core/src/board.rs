@@ -111,6 +111,7 @@ impl Gates {
             Colour::Blue => (false, false, true),
             Colour::Orange => (true, true, false),
             Colour::Cyan => (false, true, true),
+            Colour::Magenta => (true, false, true),
         };
 
         Ok([
@@ -191,6 +192,9 @@ pub enum Colour {
     Orange,
     /// Green and blue together, for a box that is idle and on its charger.
     Cyan,
+    /// Red and blue together. Setup mode, and nothing else — the one state
+    /// where the box is deliberately not a teddy bear.
+    Magenta,
 }
 
 /// The rail feeding the requested peripheral is off.

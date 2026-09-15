@@ -70,6 +70,7 @@ pub const fn colour_for(state: LedState) -> Colour {
         // The same red as a fault, deliberately: a box about to switch itself
         // off has failed to be a box, whatever the reason.
         LedState::BatteryCritical | LedState::Error => Colour::Red,
+        LedState::Setup => Colour::Magenta,
     }
 }
 
@@ -219,5 +220,18 @@ mod tests {
             led_for(PlaybackKind::Idle, BatteryLevel::Critical, true),
             LedState::Charging
         );
+    }
+
+    #[test]
+    fn setup_has_a_colour_of_its_own() {
+        for other in LedState::ALL {
+            if other != LedState::Setup {
+                assert_ne!(
+                    colour_for(LedState::Setup),
+                    colour_for(other),
+                    "setup must not be mistakable for {other:?}"
+                );
+            }
+        }
     }
 }
