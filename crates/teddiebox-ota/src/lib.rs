@@ -13,11 +13,13 @@ mod digest;
 mod image;
 mod manifest;
 mod sink;
+mod url;
 
 pub use decide::{decide, Decision, Refusal};
 pub use image::{image_version, may_activate};
 pub use manifest::{Manifest, FILENAME, MAX_IMAGE_PATH, MAX_MANIFEST, MAX_VERSION};
 pub use sink::{FlashRegionLike, Sectors, SinkError, SECTOR};
+pub use url::{resolve_image, split, UpdateUrl, MAX_HOST, MAX_PATH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OtaError {
@@ -46,4 +48,14 @@ pub enum OtaError {
     /// promised. This is the guard that stops an unbounded reflash loop when
     /// the two disagree.
     VersionMismatch,
+    /// An `update_url` did not start with `https://`. Refused rather than
+    /// tried: the teddyCloud on this LAN is TLS-only, and a plain-HTTP
+    /// request to it hangs instead of failing, so a box that tried anyway
+    /// would present as frozen rather than as badly configured.
+    NotHttps,
+    /// An `update_url`, or an `image` resolved against a manifest path, is
+    /// not shaped the way this crate requires: no `/` after the host, a path
+    /// naming a directory rather than a file, an empty host, or a `..`
+    /// segment in a path meant to gate a flash write.
+    MalformedUrl,
 }

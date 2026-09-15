@@ -1,0 +1,224 @@
+//! Takes an `update_url` apart, and puts a manifest's `image` path back
+//! together against it.
+//!
+//! `CONFIG.TXT`'s `update_url` names the manifest in full — scheme, host,
+//! path — because that is what a parent copies out of a browser bar.
+//! `teddiebox_cloud::build_path_request` wants the host and the path
+//! separately, and a manifest's `image` key is relative to the manifest, not
+//! to the server root. Both joins are pure decision logic with no I/O, which
+//! is why they live here rather than at the call site: a wrong join silently
+//! fetches the wrong file or 404s, and that is worth testing without a box.
+
+use crate::OtaError;
+use heapless::String;
+
+/// Longest host (with port) accepted.
+pub const MAX_HOST: usize = 64;
+
+/// Longest path accepted, whether the manifest's own path or an image
+/// resolved against it.
+pub const MAX_PATH: usize = 96;
+
+/// An `update_url` taken apart into the two pieces a request needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateUrl {
+    /// `host:port`, as `build_path_request`'s `server` argument wants it.
+    pub host: String<MAX_HOST>,
+    /// Absolute path to the manifest, leading slash included.
+    pub path: String<MAX_PATH>,
+}
+
+/// Splits an `update_url` into a host and a manifest path.
+///
+/// The scheme must be `https://`. This is not fussiness: the teddyCloud on
+/// this LAN is TLS-only, and a plain-HTTP request to it hangs rather than
+/// failing — so an `http://` URL would present as a box that has frozen, not
+/// as a box with a bad config. Refusing here names the problem where someone
+/// can read it, instead of leaving it to be diagnosed from a bench.
+pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
+    const SCHEME: &str = "https://";
+
+    let rest = update_url.strip_prefix(SCHEME).ok_or(OtaError::NotHttps)?;
+
+    // The key is specified as naming the manifest in full, so there must be
+    // a `/` after the host at all.
+    let slash = rest.find('/').ok_or(OtaError::MalformedUrl)?;
+
+    let host = &rest[..slash];
+    if host.is_empty() {
+        return Err(OtaError::MalformedUrl);
+    }
+
+    let path = &rest[slash..];
+    // A path ending in `/` names a directory, not a manifest.
+    if path.ends_with('/') {
+        return Err(OtaError::MalformedUrl);
+    }
+
+    Ok(UpdateUrl {
+        host: String::try_from(host).map_err(|_| OtaError::ValueTooLong)?,
+        path: String::try_from(path).map_err(|_| OtaError::ValueTooLong)?,
+    })
+}
+
+/// Resolves a manifest's `image` value against the manifest's own path.
+///
+/// An absolute `image` (leading `/`) is used unchanged. Otherwise `image` is
+/// joined to `manifest_path`'s directory — everything up to and including its
+/// last `/` — the same rule a browser applies to a relative link.
+///
+/// Refuses any `image` containing a `..` path **segment**: traversal is
+/// meaningless for a fetch relative to a fixed manifest, is a sign of a
+/// manifest nobody should be acting on, and what this gates is a flash write.
+/// The check is segment-based, not substring-based, so a filename that merely
+/// contains two dots — `teddiebox..bin` — is not mistaken for one.
+pub fn resolve_image(manifest_path: &str, image: &str) -> Result<String<MAX_PATH>, OtaError> {
+    if image.is_empty() {
+        return Err(OtaError::MalformedUrl);
+    }
+    if image.split('/').any(|segment| segment == "..") {
+        return Err(OtaError::MalformedUrl);
+    }
+
+    let mut out = String::<MAX_PATH>::new();
+
+    if let Some(absolute) = image.strip_prefix('/') {
+        out.push('/').map_err(|_| OtaError::ValueTooLong)?;
+        out.push_str(absolute).map_err(|_| OtaError::ValueTooLong)?;
+    } else {
+        let dir_end = manifest_path.rfind('/').map_or(0, |i| i + 1);
+        out.push_str(&manifest_path[..dir_end])
+            .map_err(|_| OtaError::ValueTooLong)?;
+        out.push_str(image).map_err(|_| OtaError::ValueTooLong)?;
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use std::format;
+
+    use super::*;
+
+    #[test]
+    fn splits_the_real_example_into_host_and_path() {
+        let u = split("https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt").unwrap();
+        assert_eq!(u.host.as_str(), "teddycloud.local:8443");
+        assert_eq!(u.path.as_str(), "/content/FIRMWARE/teddiebox.txt");
+    }
+
+    #[test]
+    fn splits_a_url_with_no_port() {
+        let u = split("https://teddycloud.local/teddiebox.txt").unwrap();
+        assert_eq!(u.host.as_str(), "teddycloud.local");
+        assert_eq!(u.path.as_str(), "/teddiebox.txt");
+    }
+
+    #[test]
+    fn refuses_plain_http() {
+        assert_eq!(
+            split("http://teddycloud.local/teddiebox.txt"),
+            Err(OtaError::NotHttps)
+        );
+    }
+
+    #[test]
+    fn refuses_a_url_with_no_scheme_at_all() {
+        assert_eq!(split("teddycloud.local/teddiebox.txt"), Err(OtaError::NotHttps));
+    }
+
+    #[test]
+    fn refuses_a_host_with_no_slash_after_it() {
+        assert_eq!(
+            split("https://teddycloud.local:8443"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    #[test]
+    fn refuses_a_path_ending_in_slash() {
+        assert_eq!(
+            split("https://teddycloud.local:8443/content/FIRMWARE/"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    #[test]
+    fn refuses_an_empty_host() {
+        assert_eq!(split("https:///teddiebox.txt"), Err(OtaError::MalformedUrl));
+    }
+
+    #[test]
+    fn refuses_a_host_longer_than_max_host() {
+        // 65 'a's, one past MAX_HOST.
+        let host = "a".repeat(MAX_HOST + 1);
+        let url = format!("https://{host}/teddiebox.txt");
+        assert_eq!(split(&url), Err(OtaError::ValueTooLong));
+    }
+
+    #[test]
+    fn refuses_a_path_longer_than_max_path() {
+        // MAX_PATH 'a's after the leading slash, one past MAX_PATH overall.
+        let path = "a".repeat(MAX_PATH);
+        let url = format!("https://teddycloud.local/{path}");
+        assert_eq!(split(&url), Err(OtaError::ValueTooLong));
+    }
+
+    #[test]
+    fn resolve_image_joins_a_bare_filename_to_the_manifest_directory() {
+        let p = resolve_image("/content/FIRMWARE/teddiebox.txt", "teddiebox.bin").unwrap();
+        assert_eq!(p.as_str(), "/content/FIRMWARE/teddiebox.bin");
+    }
+
+    #[test]
+    fn resolve_image_uses_an_absolute_image_unchanged() {
+        let p = resolve_image("/content/FIRMWARE/teddiebox.txt", "/other/teddiebox.bin").unwrap();
+        assert_eq!(p.as_str(), "/other/teddiebox.bin");
+    }
+
+    #[test]
+    fn resolve_image_refuses_a_leading_dotdot_segment() {
+        assert_eq!(
+            resolve_image("/content/FIRMWARE/teddiebox.txt", "../secret.bin"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    #[test]
+    fn resolve_image_refuses_a_dotdot_segment_in_the_middle() {
+        assert_eq!(
+            resolve_image("/content/FIRMWARE/teddiebox.txt", "a/../../b.bin"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    #[test]
+    fn resolve_image_refuses_a_trailing_dotdot_segment() {
+        assert_eq!(
+            resolve_image("/content/FIRMWARE/teddiebox.txt", "a/.."),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    #[test]
+    fn resolve_image_accepts_a_filename_that_merely_contains_dots() {
+        let p = resolve_image("/content/FIRMWARE/teddiebox.txt", "teddiebox..bin").unwrap();
+        assert_eq!(p.as_str(), "/content/FIRMWARE/teddiebox..bin");
+    }
+
+    #[test]
+    fn resolve_image_refuses_an_empty_image() {
+        assert_eq!(
+            resolve_image("/content/FIRMWARE/teddiebox.txt", ""),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    #[test]
+    fn resolve_image_joins_at_a_manifest_path_at_the_root() {
+        let p = resolve_image("/teddiebox.txt", "teddiebox.bin").unwrap();
+        assert_eq!(p.as_str(), "/teddiebox.bin");
+    }
+}
