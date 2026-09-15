@@ -4068,6 +4068,20 @@ async fn main(spawner: Spawner) {
             }
         };
 
+        // Claimed before the card is even mounted, because the failure path
+        // below parks — and parking is an `await`, so anything alive at that
+        // point is a field of this task's future and therefore of `.bss`.
+        // Asking for the scratch first keeps the 812-byte `Mounted` out of
+        // it: by the time the card exists, the only remaining `await` in this
+        // branch is the one that has already handed the card away.
+        let Some(scratch) = audio::take_scratch_bytes() else {
+            esp_println::println!(
+                "teddiebox: portal cannot have the decode scratch — it is in use"
+            );
+            paint(LedState::Error);
+            portal::park().await
+        };
+
         // The access point goes up whether or not the card does. A loose or
         // dead card is exactly the box somebody is holding both ears on, and
         // painting it red with no network to join leaves them nowhere to go:
@@ -4097,12 +4111,30 @@ async fn main(spawner: Spawner) {
             }
         };
 
-        let mut radio = net::Radio::new(p.WIFI);
         // The stack seeds its port and transaction numbers from this, so it
         // has to differ between boots; see the same choice made for the
         // download path's `bring_up`, above.
         let seed = Instant::now().as_micros();
-        portal::run(&mut radio, card.as_ref(), seed, paint).await
+
+        // Setup mode runs out of the decoder's scratch. `portal::run`'s
+        // future — every socket buffer, the card, and the radio's
+        // `StackResources` — is built on the stack here and immediately moved
+        // into the 51,712 bytes `audio::SCRATCH` is holding for a decoder
+        // this mode never starts, so what stays in *this* task's future is a
+        // pointer. That is what keeps the linker's stack region where it was
+        // before the portal existed; `portal::place` carries the numbers.
+        //
+        // The claim above goes through the same gate the decoder's does, so
+        // the two cannot both have it: a box that somehow got here with audio
+        // running raises no access point and says why, rather than aliasing
+        // the buffer the decoder is writing into.
+        let Some(portal) = portal::place(scratch, portal::run(p.WIFI, card, seed, paint)) else {
+            // `place` has already said what would not fit. Park rather than
+            // reset, for the reason `portal::run` parks: the ears are still
+            // held, so a reset comes straight back here.
+            portal::park().await
+        };
+        portal.await
     }
 
     spawner.spawn(net(p.WIFI, p.SHA, p.RSA, p.AES).unwrap());

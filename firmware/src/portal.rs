@@ -13,11 +13,15 @@
 //! Nothing here has been run on hardware. It compiles and links, which is the
 //! whole of what is known about it.
 
+use core::future::Future;
+use core::pin::Pin;
+
 use embassy_futures::select::{select, select3, Either};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{Ipv4Address, Stack};
 use embassy_time::{Duration, Timer};
+use esp_hal::peripherals::WIFI;
 use teddiebox_core::LedState;
 use teddiebox_portal::{dhcp, form, http, page, MAX_BODY, MAX_CONFIG};
 
@@ -86,20 +90,32 @@ const HEAD_ROOM: usize = 1024;
 /// | wired in, page streamed | 32,140 | 18,288 |
 ///
 /// The deepest the stack has ever been measured on this box is 49,024 bytes,
-/// so 32,140 is not a smaller margin — it is an ordinary boot running out of
-/// stack. **This is not settled.**
+/// so 32,140 was not a smaller margin — it was an ordinary boot running out
+/// of stack.
 ///
-/// Two measurements bound what is left to win without changing *where* the
-/// portal runs. Shrinking every remaining buffer to nothing leaves a
-/// 6,656-byte future and 43,788 bytes of stack region; 3,472 of that 6,656 is
-/// the `StackResources<5>` inside [`net::Radio`]. So even moving every byte
-/// of buffer *and* the radio's resources into storage that costs nothing —
-/// storage some other mode already owns and setup mode never touches — stops
-/// at 47,260, still under the 49,024 already seen used.
+/// Two measurements bounded what was left to win without changing *where*
+/// the portal ran. Shrinking every remaining buffer to nothing left a
+/// 6,656-byte future and 43,788 bytes of stack region; 3,472 of that 6,656
+/// was the `StackResources<5>` inside [`net::Radio`]. So even moving every
+/// byte of buffer *and* the radio's resources into storage that costs
+/// nothing — storage some other mode already owns and setup mode never
+/// touches — stopped at 47,260, still under the 49,024 already seen used.
 ///
-/// The rest is the future itself, and the only place it can go is a task pool
-/// that already exists and sits idle in setup mode. That is a design decision
-/// about where setup mode lives, not a buffer size, and it is open.
+/// The rest was the future itself, and the only place it could go was a task
+/// pool that already exists and sits idle in setup mode: the decoder's,
+/// [`crate::audio::SCRATCH`] — 51,712 bytes setup mode never touches because
+/// setup mode starts no decoder. [`place`] is the move: it puts the whole
+/// future returned by [`run`] — this buffer, the DHCP buffers below, and the
+/// radio's `StackResources` included — into that scratch instead of `main`'s
+/// own future, gated by [`crate::audio::take_scratch_bytes`] so the two
+/// claims on the scratch can never both succeed.
+///
+/// | | `_stack_start - _stack_end` | `___embassy_main4POOL` |
+/// |---|---|---|
+/// | before the portal was wired in | 50,956 | 384 |
+/// | wired in, page held in a buffer | 23,308 | 27,120 |
+/// | wired in, page streamed | 32,140 | 18,288 |
+/// | wired in, placed in the decode scratch | 50,060 | 392 |
 const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 
 /// Raises the access point and serves until it is done with.
@@ -119,8 +135,8 @@ const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 /// rest of the boot uses. Nothing here knows how a colour becomes light; it
 /// only knows which colour a state is.
 pub async fn run(
-    radio: &mut net::Radio<'_>,
-    card: Option<&Mounted>,
+    wifi: WIFI<'static>,
+    card: Option<Mounted>,
     seed: u64,
     paint: impl Fn(LedState),
 ) -> ! {
@@ -136,6 +152,12 @@ pub async fn run(
     // own depth into a measurement rather than another estimate.
     stack::report();
 
+    // Built here rather than handed in, so that the radio's `StackResources`
+    // — 3,472 bytes of it — is part of *this* future and therefore lands in
+    // the scratch with everything else. A `&mut` from the caller would leave
+    // it in the caller's future, which is the `.bss` this whole arrangement
+    // exists to keep empty.
+    let mut radio = net::Radio::new(wifi);
     let (session, mut link) = match radio.serve(seed) {
         Ok(pair) => pair,
         Err(trouble) => {
@@ -163,7 +185,11 @@ pub async fn run(
     // three share one stack frame instead of three tasks because the session
     // and the link are borrowed out of the radio and cannot be handed away.
     let stack = session.stack();
-    let serving = select3(link.run(), serve_http(stack, card), serve_dhcp(stack));
+    let serving = select3(
+        link.run(),
+        serve_http(stack, card.as_ref()),
+        serve_dhcp(stack),
+    );
     match select(Timer::after(SETUP_WINDOW), serving).await {
         Either::First(()) => esp_println::println!(
             "teddiebox: portal's {} minutes are up — restarting",
@@ -177,6 +203,68 @@ pub async fn run(
     esp_hal::system::software_reset();
 }
 
+/// Moves a future into memory somebody else owns, and pins it there.
+///
+/// This is the whole mechanism by which setup mode costs the stack region
+/// nothing. An `async fn`'s locals that are live across an `await` are fields
+/// of its future, and a future awaited inside an embassy task is part of
+/// *that* task's future, which is a `static` in `.bss`. So awaiting [`run`]
+/// directly from `main` put every buffer in this file, plus the radio's
+/// `StackResources`, into `___embassy_main4POOL` — on every boot, ears held
+/// or not. Handing the future somewhere else to live leaves `main` holding a
+/// pointer.
+///
+/// `room` comes from [`crate::audio::take_scratch_bytes`], which is the
+/// decoder's scratch: the one large buffer this box owns that setup mode
+/// provably never touches.
+///
+/// Returns `None` if `room` cannot hold `future` aligned. That is a check and
+/// not an assertion because it is the only thing standing between a future
+/// that has grown and a write past the end of the scratch; the size is
+/// printed either way, so a bench session can see the margin rather than
+/// infer it.
+///
+/// The borrow is `room`'s own elided lifetime rather than `'static` on
+/// purpose: the future captures the LED closure, which borrows the LEDC
+/// controller `main` holds, and `main` never returns. Demanding `'static`
+/// would only force that closure to be rebuilt around owned state for no
+/// gain.
+pub fn place<F: Future>(room: &mut [u8], future: F) -> Option<Pin<&mut F>> {
+    let size = core::mem::size_of::<F>();
+    esp_println::println!(
+        "teddiebox: portal future is {size} bytes of {} in the decode scratch",
+        room.len()
+    );
+
+    let offset = room.as_ptr().align_offset(core::mem::align_of::<F>());
+    if room
+        .len()
+        .checked_sub(offset)
+        .is_none_or(|left| left < size)
+    {
+        esp_println::println!("teddiebox: portal future does not fit the decode scratch");
+        return None;
+    }
+
+    // SAFETY: `offset + size` is within `room` — the check above says so —
+    // and `offset` is what `align_offset` asked for, so `slot` is a properly
+    // aligned, in-bounds pointer to `size` writable bytes. `room` is a unique
+    // borrow that this consumes and never touches again, and the returned
+    // `Pin` borrows it for the rest of its lifetime, so nothing else can read
+    // or write those bytes while the future is alive. The bytes being
+    // overwritten are the decoder's scratch: two plain arrays with no
+    // destructor to skip. `Pin::new_unchecked` is honest because the future
+    // is reachable only through the pointer returned here, so it can never be
+    // moved again; it is never dropped, and the storage it pins is a `static`
+    // that outlives the borrow and is never handed back — so no drop is
+    // skipped over memory that is later reused.
+    unsafe {
+        let slot = room.as_mut_ptr().add(offset).cast::<F>();
+        slot.write(future);
+        Some(Pin::new_unchecked(&mut *slot))
+    }
+}
+
 /// Stops the box where it stands.
 ///
 /// Never returns and never wakes again. For the failures that leave nothing to
@@ -186,7 +274,7 @@ pub async fn run(
 /// Callers paint before calling this — see [`run`] — because what is worth
 /// showing differs by failure, and this has no opinion of its own left to
 /// add once the console is drained.
-async fn park() -> ! {
+pub async fn park() -> ! {
     crate::drain_console();
     stay_put().await
 }

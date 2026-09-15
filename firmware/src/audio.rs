@@ -254,6 +254,21 @@ static mut SCRATCH: DecodeScratch = DecodeScratch {
 };
 static SCRATCH_TAKEN: AtomicBool = AtomicBool::new(false);
 
+/// The scratch measured as plain memory, for whoever borrows it wholesale.
+///
+/// See [`take_scratch_bytes`]. The assertion below is what makes the byte
+/// view legal rather than merely convenient: `DecodeScratch` is two plain
+/// arrays and this proves the compiler laid them out with no padding between
+/// or after them, so every one of these bytes is initialised by the
+/// declaration above. Adding a field that does not pack exactly breaks the
+/// build here rather than handing somebody a slice over uninitialised bytes.
+pub const SCRATCH_BYTES: usize = core::mem::size_of::<DecodeScratch>();
+const _: () = assert!(
+    SCRATCH_BYTES
+        == core::mem::size_of::<OpusState>() + core::mem::size_of::<[i16; MAX_FRAME_SAMPLES]>(),
+    "DecodeScratch has padding, so its bytes are not all initialised"
+);
+
 /// Hands out the decode scratch, once and once only.
 ///
 /// The guard is what makes the `static mut` sound rather than merely
@@ -319,6 +334,48 @@ fn take_scratch() -> Option<&'static mut DecodeScratch> {
     // SAFETY: the swap above succeeds exactly once for the life of the
     // program, so no other reference to SCRATCH can exist.
     Some(unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) })
+}
+
+/// Hands the same scratch out as plain bytes, once and for good.
+///
+/// This is the second claimant on [`SCRATCH`], and it exists because the
+/// setup portal's whole future — every socket buffer plus the radio's
+/// `StackResources`, measured at 18,288 bytes when it lived in `main`'s own
+/// future — needs somewhere to live while 51,712 bytes of decoder scratch
+/// sit untouched: setup mode starts no decoder, and a box that is decoding
+/// is not in setup mode. `.bss` is what the linker carves the stack region
+/// out of, so two buffers that can never coexist must not both be in it —
+/// see the measurements in `portal.rs`.
+///
+/// The gate is the same [`SCRATCH_TAKEN`] flag [`take_scratch`] uses, which is
+/// what makes the sharing safe rather than merely true: whichever claimant
+/// arrives second gets `None` and says so, instead of a second `&mut` to the
+/// same bytes. A box that somehow reached setup mode with a story playing
+/// would raise no access point; one that somehow tried to play a story after
+/// the portal had this would refuse with "the decoder is already in use".
+///
+/// **There is no counterpart to [`release_scratch`] for this claim, by
+/// design.** The portal never returns — it resets the box or parks it — so
+/// there is no moment at which handing the decoder back a scratch full of
+/// HTTP would be an improvement on refusing to decode at all.
+pub fn take_scratch_bytes() -> Option<&'static mut [u8]> {
+    if SCRATCH_TAKEN.swap(true, Ordering::Relaxed) {
+        return None;
+    }
+    // SAFETY: the swap above succeeds exactly once for the life of the
+    // program and is the same gate `take_scratch` passes through, so no other
+    // reference to SCRATCH can exist while this one does. The region is
+    // SCRATCH_BYTES long by construction, fully initialised (the const
+    // assertion above rules out padding), and `u8` accepts every bit pattern
+    // and every alignment — so both the slice made here and any later
+    // `&mut DecodeScratch` over the same bytes hold a valid value whatever
+    // this writes.
+    Some(unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(SCRATCH).cast::<u8>(),
+            SCRATCH_BYTES,
+        )
+    })
 }
 
 /// Reinterprets decoded samples as the bytes I2S wants.
