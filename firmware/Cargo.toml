@@ -118,7 +118,12 @@ teddiebox-audio = { version = "0.1.0", path = "../crates/teddiebox-audio" }
 teddiebox-taf = { version = "0.1.0", path = "../crates/teddiebox-taf" }
 portable-atomic = "1.15.0"
 trf7962a = { version = "0.1.0", path = "../crates/trf7962a" }
-esp-radio = { version = "1.0.0-beta.0", features = ["esp32s3", "wifi"] }
+# "unstable": `AccessPointConfig::with_max_connections` is gated behind it in
+# the pinned esp-radio — `max_connections` carries `#[builder_lite(unstable)]`
+# upstream, so the setter does not exist without this feature. esp-hal's own
+# `unstable` is already on above, which is what `esp-radio/unstable` in turn
+# requires.
+esp-radio = { version = "1.0.0-beta.0", features = ["esp32s3", "wifi", "unstable"] }
 # The radio stack allocates; nothing else in this firmware does. See the heap
 # comment in src/main.rs.
 esp-alloc = "0.11"
@@ -127,11 +132,15 @@ embassy-net = { version = "0.9.1", features = [
     "dns",
     "proto-ipv4",
     "tcp",
+    # The setup portal's DHCP *server*. `dhcpv4` above is the client, and
+    # smoltcp has no server, so the box answers leases itself over UDP.
+    "udp",
     "medium-ethernet",
 ] }
 teddiebox-config = { path = "../crates/teddiebox-config" }
 teddiebox-cloud = { path = "../crates/teddiebox-cloud" }
 teddiebox-download = { path = "../crates/teddiebox-download" }
+teddiebox-portal = { path = "../crates/teddiebox-portal" }
 
 # esp-radio is only published as 1.0.0-beta.0, which wants esp-hal ~1.1.0 and
 # esp-radio-rtos-driver 0.3 — neither compatible with the esp-hal 1.2.0-rc.0

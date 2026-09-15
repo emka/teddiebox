@@ -24,23 +24,47 @@ use embassy_net::{Runner, Stack, StackResources};
 use esp_hal::peripherals::WIFI;
 use esp_hal::time::Duration as EspDuration;
 use esp_radio::wifi::{
-    ap::AccessPointInfo, scan::ScanConfig, scan::ScanTypeConfig, sta::StationConfig,
-    AuthenticationMethodConfig, Config as WifiConfig, ConnectionError, ControllerConfig,
-    DisconnectReason, Interface, Password, Ssid, WifiController, WifiError,
+    ap::AccessPointConfig, ap::AccessPointInfo, scan::ScanConfig, scan::ScanTypeConfig,
+    sta::StationConfig, AuthenticationMethodConfig, Config as WifiConfig, ConnectionError,
+    ControllerConfig, DisconnectReason, Interface, Password, Ssid, WifiController, WifiError,
 };
 use teddiebox_config::Config;
 
+/// The network the box raises when both ears are held at boot.
+///
+/// **Compiled in, and never read from the card.** This is what makes a
+/// truncated or unparseable `CONFIG.TXT` recoverable rather than terminal: the
+/// way back in cannot depend on the file being repaired.
+pub const SETUP_SSID: &str = "teddiebox-setup";
+
+/// The passphrase for that network, documented in `README.md`.
+///
+/// No secret from anyone holding this repository, and not meant to be. What it
+/// buys is that a neighbour's phone cannot join during the window and read the
+/// home WiFi passphrase out of the page, which is a secret and is not the
+/// box's to leak.
+pub const SETUP_PASSWORD: &str = "teddiebox";
+
 /// Socket slots the stack is given.
 ///
-/// Two of the three are spent before any of our code runs: `embassy-net`
-/// opens a DNS socket unconditionally when the `dns` feature is on, and a
-/// DHCP socket whenever the stack is built with `Config::dhcpv4`. That leaves
-/// exactly one for the TCP connection the downloader opens — which is enough,
-/// because the box talks to one server at a time by design: a second
-/// concurrent download would only be competing for the same card. Anything
-/// that wants a second socket has to raise this number, and a static IP
-/// configuration would free one.
-const SOCKETS: usize = 3;
+/// Two of the three the station path needs are spent before any of our code
+/// runs: `embassy-net` opens a DNS socket unconditionally when the `dns`
+/// feature is on, and a DHCP socket whenever the stack is built with
+/// `Config::dhcpv4`. That leaves exactly one for the TCP connection the
+/// downloader opens — which is enough, because the box talks to one server at
+/// a time by design: a second concurrent download would only be competing for
+/// the same card.
+///
+/// The other two are the setup portal's, built on a static IP rather than
+/// DHCP: one TCP listener for the HTTP server, and one UDP socket for the
+/// DHCP *server* it runs for whichever device joins the access point.
+///
+/// **This number is a guess.** The two paths never run at once — the portal
+/// only comes up over [`Radio::serve`], holding a different singleton than
+/// [`Radio::acquire`] — so 5 covers the worse of the two rather than their
+/// sum, but nothing has measured either path's actual use yet. A later bench
+/// task settles it.
+const SOCKETS: usize = 5;
 
 /// Why the radio could not be brought up.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +206,52 @@ impl<'d> Radio<'d> {
         let (stack, runner) = embassy_net::new(
             interface,
             embassy_net::Config::dhcpv4(Default::default()),
+            &mut self.resources,
+            seed,
+        );
+
+        Ok((Session { controller, stack }, Link { runner }))
+    }
+
+    /// Raises the box's own access point and builds a static stack on it.
+    ///
+    /// The counterpart to [`Radio::acquire`], and deliberately the same shape:
+    /// the caller drives [`Link::run`] and opens sockets on [`Session::stack`]
+    /// exactly as it would for a station. There is no `connect` step — an
+    /// access point is up the moment the controller starts.
+    ///
+    /// `max_connections(1)`, so a second device cannot sit on the network
+    /// while somebody types their WiFi passphrase into the page.
+    pub fn serve(&mut self, seed: u64) -> Result<(Session<'_>, Link<'_>), Error> {
+        let ap = AccessPointConfig::default()
+            .with_ssid(Ssid::try_from(SETUP_SSID)?)
+            .with_authentication(AuthenticationMethodConfig::Wpa2Personal(
+                Password::try_from(SETUP_PASSWORD)?,
+            ))
+            .with_max_connections(1);
+
+        let interface = Interface::try_access_point().ok_or(Error::Busy)?;
+
+        let mut controller =
+            WifiController::new(self.wifi.reborrow(), ControllerConfig::default())?;
+        controller.set_config(&WifiConfig::AccessPoint(ap))?;
+
+        let (stack, runner) = embassy_net::new(
+            interface,
+            embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
+                address: embassy_net::Ipv4Cidr::new(
+                    embassy_net::Ipv4Address::from(teddiebox_portal::dhcp::SERVER_IP),
+                    24,
+                ),
+                gateway: None,
+                // Not `heapless::Vec::new()`: this firmware pins `heapless`
+                // 0.8 for `teddiebox_config::Config`, but `embassy-net` 0.9.1
+                // pulls in `heapless` 0.9 for its own `Vec` — two crates with
+                // the same name, so naming the type here would build the
+                // wrong one. `Default` lets inference pick whichever
+                // `StaticConfigV4::dns_servers` actually asks for.
+                dns_servers: Default::default(),
+            }),
             &mut self.resources,
             seed,
         );
