@@ -11,6 +11,7 @@
 extern crate std;
 
 pub mod form;
+pub mod http;
 pub mod page;
 
 /// The largest `CONFIG.TXT` this box will read or write, and the largest body
