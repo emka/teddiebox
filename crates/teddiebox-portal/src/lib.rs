@@ -7,7 +7,11 @@
 //! needs the bench — the access point, the sockets, the card — lives in
 //! `firmware/src/portal.rs` and not here.
 
+#[cfg(test)]
+extern crate std;
+
 pub mod form;
+pub mod page;
 
 /// The largest `CONFIG.TXT` this box will read or write, and the largest body
 /// it will accept.
