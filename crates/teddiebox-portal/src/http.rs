@@ -249,7 +249,7 @@ Connection: close\r\n\r\n"
 
     #[test]
     fn the_largest_length_still_fits_the_head_buffer() {
-        let built = head(Status::Ok, usize::MAX);
+        let built = head(Status::TooLarge, usize::MAX);
         assert!(built.ends_with(b"\r\n\r\n"));
     }
 }
