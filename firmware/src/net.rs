@@ -33,10 +33,22 @@ pub const SETUP_SSID: &str = "teddiebox-setup";
 
 /// The passphrase for that network, documented in `README.md`.
 ///
-/// No secret from anyone holding this repository, and not meant to be. What it
-/// buys is that a neighbour's phone cannot join during the window and read the
-/// home WiFi passphrase out of the page, which is a secret and is not the
-/// box's to leak.
+/// Published, and not meant to be otherwise: it has to be written down
+/// somewhere a person can reach it while holding a box that will not start,
+/// and that somewhere is a public repository.
+///
+/// **So it is not confidentiality, and an earlier version of this comment
+/// claimed it was.** A listener in range who has this repository can capture
+/// the four-way handshake — or force one with a deauthentication — derive the
+/// session key, and read the page off the air, home WiFi passphrase included.
+/// [`Radio::serve`]'s `max_connections(1)` gates *joining*, which is a
+/// different thing from reading.
+///
+/// What WPA2 buys here is that the network is not simply open: a passer-by's
+/// phone does not associate on its own, and reading the page takes intent,
+/// proximity and a capture during the ten minutes the portal is up. Somebody
+/// who needs more than that should set the box up out of range of anyone they
+/// do not trust, and change the home passphrase afterwards if they did not.
 pub const SETUP_PASSWORD: &str = "teddiebox";
 
 /// Socket slots the stack is given.
@@ -214,8 +226,9 @@ impl<'d> Radio<'d> {
     /// exactly as it would for a station. There is no `connect` step — an
     /// access point is up the moment the controller starts.
     ///
-    /// `max_connections(1)`, so a second device cannot sit on the network
-    /// while somebody types their WiFi passphrase into the page.
+    /// `max_connections(1)`, so a second device cannot *join* while somebody
+    /// types their WiFi passphrase into the page. It does not stop anyone in
+    /// range reading it — see [`SETUP_PASSWORD`] for why not.
     pub fn serve(&mut self, seed: u64) -> Result<(Session<'_>, Link<'_>), Error> {
         let ap = AccessPointConfig::default()
             .with_ssid(Ssid::try_from(SETUP_SSID)?)
