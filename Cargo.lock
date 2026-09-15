@@ -1143,6 +1143,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-portal"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+]
+
+[[package]]
 name = "teddiebox-taf"
 version = "0.1.0"
 dependencies = [

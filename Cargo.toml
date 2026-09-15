@@ -9,6 +9,7 @@ members = [
     "crates/teddiebox-download",
     "crates/teddiebox-opus-sys",
     "crates/teddiebox-ota",
+    "crates/teddiebox-portal",
     "crates/teddiebox-taf",
     "crates/tlv320dac3100",
     "crates/trf7962a",
