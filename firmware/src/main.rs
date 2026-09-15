@@ -4014,7 +4014,7 @@ async fn main(spawner: Spawner) {
         // does that lazily, inside `media`, on the first command that needs
         // it. Setup mode never reaches `media`, so the same bus and the same
         // rail are brought up here instead, once, so `portal::run` has the
-        // `&Mounted` it needs to read and rewrite `CONFIG.TXT`.
+        // card it needs to read and rewrite `CONFIG.TXT`.
         board.apply(gates.power(Rail::Storage, true));
         Timer::after(Duration::from_millis(50)).await;
 
@@ -4031,7 +4031,13 @@ async fn main(spawner: Spawner) {
             }
         };
 
-        match Spi::new(p.SPI2, storage::init_config()) {
+        // The access point goes up whether or not the card does. A loose or
+        // dead card is exactly the box somebody is holding both ears on, and
+        // painting it red with no network to join leaves them nowhere to go:
+        // the page says what is wrong instead, and only the *save* is
+        // refused. The console keeps the specific reason; the page only needs
+        // to say there is no card.
+        let card = match Spi::new(p.SPI2, storage::init_config()) {
             Ok(spi) => {
                 let spi = spi
                     .with_sck(p.GPIO35)
@@ -4039,32 +4045,27 @@ async fn main(spawner: Spawner) {
                     .with_miso(p.GPIO36);
                 let cs = Output::new(p.GPIO34, Level::High, OutputConfig::default());
                 match storage::Mounted::open(spi, cs, esp_hal::delay::Delay::new()) {
-                    Ok(card) => {
-                        let mut radio = net::Radio::new(p.WIFI);
-                        // The stack seeds its port and transaction numbers
-                        // from this, so it has to differ between boots; see
-                        // the same choice made for the download path's
-                        // `bring_up`, above.
-                        let seed = Instant::now().as_micros();
-                        portal::run(&mut radio, &card, seed, paint).await
-                    }
+                    Ok(card) => Some(card),
                     Err(reason) => {
                         esp_println::println!(
                             "teddiebox: portal could not mount the card — {reason}"
                         );
-                        paint(LedState::Error);
-                        park_task().await;
-                        unreachable!("park_task never returns");
+                        None
                     }
                 }
             }
             Err(_) => {
                 esp_println::println!("teddiebox: portal's SPI would not configure");
-                paint(LedState::Error);
-                park_task().await;
-                unreachable!("park_task never returns");
+                None
             }
-        }
+        };
+
+        let mut radio = net::Radio::new(p.WIFI);
+        // The stack seeds its port and transaction numbers from this, so it
+        // has to differ between boots; see the same choice made for the
+        // download path's `bring_up`, above.
+        let seed = Instant::now().as_micros();
+        portal::run(&mut radio, card.as_ref(), seed, paint).await
     }
 
     spawner.spawn(net(p.WIFI, p.SHA, p.RSA, p.AES).unwrap());

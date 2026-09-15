@@ -76,6 +76,10 @@ const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 /// once [`SETUP_WINDOW`] is up; if the radio will not start at all it stops
 /// where it stands instead.
 ///
+/// `card` is an `Option` because the access point is worth raising without
+/// one: a box whose card is loose is exactly the box somebody is holding both
+/// ears on. With no card the page says so and refuses only the save.
+///
 /// `paint` is how this reaches the LED. `main` owns the LEDC controller and
 /// never hands it away — its own loop is what paints for every other mode,
 /// and this function never reaches that loop — so it hands down a closure
@@ -84,7 +88,7 @@ const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 /// only knows which colour a state is.
 pub async fn run(
     radio: &mut net::Radio<'_>,
-    card: &Mounted,
+    card: Option<&Mounted>,
     seed: u64,
     paint: impl Fn(LedState),
 ) -> ! {
@@ -159,7 +163,7 @@ async fn stay_put() -> ! {
 /// Never returns of its own accord. The window that ends the portal is
 /// [`run`]'s, and the save path does not come back through here either — it
 /// resets the box from inside the handler.
-async fn serve_http(stack: Stack<'_>, card: &Mounted) {
+async fn serve_http(stack: Stack<'_>, card: Option<&Mounted>) {
     // The portal's buffer claim, named in one place rather than spread
     // through the call tree: 1536 + 1536 + 4112 here, `CHUNK` in `send_page`
     // below, and 1024 + 1024 + 590 in `serve_dhcp` beside it.
@@ -187,7 +191,7 @@ async fn serve_http(stack: Stack<'_>, card: &Mounted) {
 }
 
 /// Reads one request and answers it.
-async fn handle(socket: &mut TcpSocket<'_>, card: &Mounted, buffer: &mut [u8]) {
+async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut [u8]) {
     let filled = match receive(socket, buffer).await {
         Received::Request(filled) => filled,
         Received::Refused(status, why) => return send_page(socket, status, b"", Some(why)).await,
@@ -287,8 +291,20 @@ fn complete(buffer: &[u8]) -> Result<bool, http::RequestError> {
     }
 }
 
+/// What the page says when the box has no card to read or write.
+///
+/// The access point comes up either way — a loose or dead card is exactly the
+/// box somebody is holding both ears on — so this is a thing to report on the
+/// page rather than a reason not to serve one.
+const NO_CARD: &str = "the box could not read its card — check it is pushed in, \
+                       then reload this page";
+
 /// `GET /` — the card's file, in the box, as it is.
-async fn show(socket: &mut TcpSocket<'_>, card: &Mounted) {
+async fn show(socket: &mut TcpSocket<'_>, card: Option<&Mounted>) {
+    let Some(card) = card else {
+        return respond_page(socket, b"", Some(NO_CARD)).await;
+    };
+
     let mut config = [0u8; MAX_CONFIG];
     match card.read_config_bytes(&mut config) {
         // `Ok(0)` is a card with no config on it — a box being set up for the
@@ -300,7 +316,7 @@ async fn show(socket: &mut TcpSocket<'_>, card: &Mounted) {
 }
 
 /// `POST /save` — decode, validate, write, reset.
-async fn save(socket: &mut TcpSocket<'_>, card: &Mounted, body: &[u8]) {
+async fn save(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, body: &[u8]) {
     // One arm per variant here too: `TooLong` is the only one of the three
     // that is about the *file* rather than about the request carrying it, and
     // it is the one somebody can do something about. Saying "did not arrive
@@ -328,6 +344,14 @@ async fn save(socket: &mut TcpSocket<'_>, card: &Mounted, body: &[u8]) {
         // correction rather than a retype.
         return respond_page(socket, &submitted, Some(describe(trouble))).await;
     }
+
+    // Checked here rather than on the way in, so that a config typed against
+    // a card that is not there is still decoded, still validated, and still
+    // handed back in the textarea. Losing what somebody typed is a second
+    // problem on top of the card.
+    let Some(card) = card else {
+        return respond_page(socket, &submitted, Some(NO_CARD)).await;
+    };
 
     match card.write_config(&submitted) {
         // Only a confirmed write resets. A failed one leaves the box here so
