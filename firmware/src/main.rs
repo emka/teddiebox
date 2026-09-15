@@ -367,6 +367,15 @@ fn send_input(event: Event) {
     }
 }
 
+/// Set when the box has entered the setup portal instead of becoming a teddy
+/// bear.
+///
+/// Read by [`sense`], which is the one task setup mode keeps. Everything that
+/// would consume what `sense` produces — the reducer, the LED loop, the
+/// shutdown — lives below the branch that sets this and is never reached, so
+/// the readings have a console to go to and nowhere else.
+static SETUP_MODE: AtomicBool = AtomicBool::new(false);
+
 /// Reports the pack and charger voltages.
 ///
 /// Bench step 3 compares these against a multimeter across a real charge and
@@ -423,18 +432,25 @@ async fn sense(
         // the ears use: the media task drains it once per loop pass and once
         // per decoded frame, so a warning is not held behind a story that has
         // half an hour left to run.
+        //
+        // Except in setup mode, where that task does not exist. Posting to a
+        // queue nothing drains fills it in sixteen seconds and then reports a
+        // dropped event every two, which buries the readings this task was
+        // kept running to produce.
         let charging = power::charger_present(charger_raw);
-        for event in [
-            Event::Battery {
-                pack_mv: pack_mv as u16,
-                under_load: PLAYING.load(Ordering::Relaxed),
-            },
-            Event::Charger(charging),
-        ] {
-            // A full queue is somebody else's bug — this is the slowest
-            // producer on it, at one pair every two seconds.
-            if INPUT_EVENTS.try_send(event).is_err() {
-                esp_println::println!("teddiebox: pack event dropped — the queue is full");
+        if !SETUP_MODE.load(Ordering::Relaxed) {
+            for event in [
+                Event::Battery {
+                    pack_mv: pack_mv as u16,
+                    under_load: PLAYING.load(Ordering::Relaxed),
+                },
+                Event::Charger(charging),
+            ] {
+                // A full queue is somebody else's bug — this is the slowest
+                // producer on it, at one pair every two seconds.
+                if INPUT_EVENTS.try_send(event).is_err() {
+                    esp_println::println!("teddiebox: pack event dropped — the queue is full");
+                }
             }
         }
 
@@ -3997,6 +4013,15 @@ async fn main(spawner: Spawner) {
     let larger = Input::new(p.GPIO20, up);
     let smaller = Input::new(p.GPIO21, up);
 
+    // Spawned above the setup branch, not below it, because setup mode is the
+    // one mode that needs it most: an access point beacons for as long as it
+    // is up, and this pack has gone flat while still reporting itself healthy.
+    // Everything else below is deliberately left until after the branch.
+    let mut adc_config = AdcConfig::new();
+    let battery = adc_config.enable_pin(p.GPIO9, Attenuation::_11dB);
+    let charger = adc_config.enable_pin(p.GPIO8, Attenuation::_11dB);
+    spawner.spawn(sense(Adc::new(p.ADC1, adc_config), battery, charger).unwrap());
+
     // Both ears held through a power-on asks for the setup portal. Read
     // before `net` is spawned — that task is the only other claim on
     // `p.WIFI` — and before anything else is spawned at all, because setup
@@ -4009,6 +4034,13 @@ async fn main(spawner: Spawner) {
     // control: once this branch is taken they are never read again.
     if larger.is_low() && smaller.is_low() {
         esp_println::println!("teddiebox: both ears held — setup portal");
+
+        // Nothing drains `INPUT_EVENTS` here: the reducer lives in the media
+        // task and that is never spawned. Told now rather than discovered
+        // later, so `sense` keeps its readings to the console instead of
+        // filling an eight-slot queue and then complaining about it once
+        // every two seconds for as long as the portal is up.
+        SETUP_MODE.store(true, Ordering::Relaxed);
 
         // Nothing before this point brings the card up: the rest of the boot
         // does that lazily, inside `media`, on the first command that needs
@@ -4076,11 +4108,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(ear(Ear::Larger, "larger ear", larger).unwrap());
     spawner.spawn(ear(Ear::Smaller, "smaller ear", smaller).unwrap());
     spawner.spawn(inputs(Input::new(p.GPIO7, up)).unwrap());
-
-    let mut adc_config = AdcConfig::new();
-    let battery = adc_config.enable_pin(p.GPIO9, Attenuation::_11dB);
-    let charger = adc_config.enable_pin(p.GPIO8, Attenuation::_11dB);
-    spawner.spawn(sense(Adc::new(p.ADC1, adc_config), battery, charger).unwrap());
 
     // UART0's receive half. esp-println keeps the transmit half.
     let mut console = UartRx::new(p.UART0, UartConfig::default().with_baudrate(115200))
