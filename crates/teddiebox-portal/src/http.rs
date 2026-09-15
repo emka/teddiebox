@@ -79,6 +79,52 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Ok,
+    NotFound,
+    BadRequest,
+    TooLarge,
+}
+
+impl Status {
+    fn line(self) -> &'static str {
+        match self {
+            Status::Ok => "200 OK",
+            Status::NotFound => "404 Not Found",
+            Status::BadRequest => "400 Bad Request",
+            Status::TooLarge => "413 Content Too Large",
+        }
+    }
+}
+
+/// Builds the response head.
+///
+/// Separate from the body so the page — up to `page::MAX_PAGE` — goes to the
+/// socket out of the buffer it was rendered into, rather than being copied
+/// into a second one this box has no stack for.
+///
+/// `Connection: close` because the portal answers one request per accept: a
+/// keep-alive would have it holding a socket for a phone that has wandered
+/// off, and it only ever has one.
+pub fn head(status: Status, content_length: usize) -> heapless::Vec<u8, 192> {
+    use core::fmt::Write;
+
+    let mut out = heapless::String::<192>::new();
+    // Bounded and measured: the fixed text is 111 bytes at the longest status
+    // line, and a `usize` is at most 20 digits — 131. 192 leaves room without
+    // pretending the margin was reasoned about more finely than that.
+    let _ = write!(
+        out,
+        "HTTP/1.1 {}\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+Content-Length: {content_length}\r\n\
+Connection: close\r\n\r\n",
+        status.line()
+    );
+    heapless::Vec::from_slice(out.as_bytes()).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +201,55 @@ mod tests {
     fn a_content_length_that_is_not_a_number_is_malformed() {
         let raw = b"POST /save HTTP/1.1\r\nContent-Length: yes\r\n\r\n";
         assert_eq!(parse(raw).unwrap_err(), RequestError::Malformed);
+    }
+
+    #[test]
+    fn an_ok_head_is_exactly_these_bytes() {
+        assert_eq!(
+            &head(Status::Ok, 42)[..],
+            b"HTTP/1.1 200 OK\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+Content-Length: 42\r\n\
+Connection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn a_not_found_head_is_exactly_these_bytes() {
+        assert_eq!(
+            &head(Status::NotFound, 0)[..],
+            b"HTTP/1.1 404 Not Found\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+Content-Length: 0\r\n\
+Connection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn a_bad_request_head_is_exactly_these_bytes() {
+        assert_eq!(
+            &head(Status::BadRequest, 7)[..],
+            b"HTTP/1.1 400 Bad Request\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+Content-Length: 7\r\n\
+Connection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn a_too_large_head_is_exactly_these_bytes() {
+        assert_eq!(
+            &head(Status::TooLarge, 9)[..],
+            b"HTTP/1.1 413 Content Too Large\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+Content-Length: 9\r\n\
+Connection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn the_largest_length_still_fits_the_head_buffer() {
+        let built = head(Status::Ok, usize::MAX);
+        assert!(built.ends_with(b"\r\n\r\n"));
     }
 }
