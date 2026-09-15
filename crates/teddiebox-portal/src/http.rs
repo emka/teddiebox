@@ -4,7 +4,7 @@
 //! one verb each — and because the box already hand-rolls its HTTP *client* in
 //! `teddiebox-cloud`, so this is the shape the project already reads.
 
-use crate::MAX_CONFIG;
+use crate::MAX_BODY;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -20,8 +20,12 @@ pub enum RequestError {
     /// The headers have not all arrived. Read more and call again.
     Incomplete,
     Malformed,
-    /// `Content-Length` exceeds [`MAX_CONFIG`] — refused before the body is
+    /// `Content-Length` exceeds [`MAX_BODY`] — refused before the body is
     /// read rather than after.
+    ///
+    /// A statement about the *request*, not about the file inside it. A file
+    /// too long for the box is refused later, by `form::field`, which can say
+    /// so in terms somebody can act on.
     TooLarge,
 }
 
@@ -61,7 +65,7 @@ pub fn parse(buf: &[u8]) -> Result<Request<'_>, RequestError> {
                 .map_err(|_| RequestError::Malformed)?;
         }
     }
-    if content_length > MAX_CONFIG {
+    if content_length > MAX_BODY {
         return Err(RequestError::TooLarge);
     }
 
@@ -195,6 +199,35 @@ mod tests {
     fn a_body_larger_than_the_cap_is_refused_before_it_is_read() {
         let raw = b"POST /save HTTP/1.1\r\nContent-Length: 99999\r\n\r\n";
         assert_eq!(parse(raw).unwrap_err(), RequestError::TooLarge);
+    }
+
+    /// The cap is on the encoded body, not on the file, and these two pin
+    /// which side of 3088 each one falls. Written as literals rather than as
+    /// `MAX_BODY` and `MAX_BODY + 1` so that moving the constant fails these
+    /// tests instead of following them silently.
+    #[test]
+    fn a_body_of_exactly_the_cap_is_accepted() {
+        assert_eq!(MAX_BODY, 3088);
+        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 3088\r\n\r\n";
+        assert_eq!(parse(raw).unwrap().content_length, 3088);
+    }
+
+    #[test]
+    fn one_byte_over_the_cap_is_refused() {
+        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 3089\r\n\r\n";
+        assert_eq!(parse(raw).unwrap_err(), RequestError::TooLarge);
+    }
+
+    /// The bug this cap was split to fix: a 1024-byte file encodes to more
+    /// than 1024 bytes, and used to be refused on the way back in by the very
+    /// constant that said it would fit.
+    #[test]
+    fn a_form_encoded_full_size_config_is_no_longer_refused() {
+        // 1024 file bytes at 1.35, the ratio a realistic config encodes at.
+        // Most of that is the line endings: a textarea submits CRLF, and each
+        // pair leaves as the six bytes `%0D%0A`.
+        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 1382\r\n\r\n";
+        assert_eq!(parse(raw).unwrap().content_length, 1382);
     }
 
     #[test]

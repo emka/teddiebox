@@ -21,7 +21,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{Ipv4Address, Stack};
 use embassy_time::{Duration, Timer};
-use teddiebox_portal::{dhcp, form, http, page, MAX_CONFIG};
+use teddiebox_portal::{dhcp, form, http, page, MAX_BODY, MAX_CONFIG};
 
 use crate::net;
 use crate::storage::Mounted;
@@ -60,8 +60,25 @@ const SETTLE: Duration = Duration::from_millis(500);
 /// the ears are still held. This makes the loop slow enough to watch.
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 
-/// The request buffer: the largest body plus room for the head above it.
-const REQUEST: usize = MAX_CONFIG + 512;
+/// Room for the head above the body in the request buffer.
+///
+/// A phone's POST head is the part nothing here controls: a request line, a
+/// `Host`, the two content headers, and then whatever the browser adds —
+/// `User-Agent`, `Accept`, `Accept-Language`, `Origin`, `Referer`, the five
+/// `Sec-Fetch-*` lines. On a current mobile Chrome that set runs six to nine
+/// hundred bytes, so 512 would leave a full-size config no room to land and
+/// the refusal would blame the body.
+///
+/// **Not measured on the box.** It is sized from what browsers are known to
+/// send, and a bench session with a real phone is what would settle it.
+const HEAD_ROOM: usize = 1024;
+
+/// The request buffer: the largest body, plus room for the head above it.
+///
+/// `MAX_BODY` (3088) + `HEAD_ROOM` (1024) = 4112 bytes, on the stack of
+/// [`serve_http`]. Affordable only because this mode starts no decoder — that
+/// alone wants 15.8 KB — and no codec, no NFC and no media loop either.
+const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 
 /// Raises the access point and serves until it is done with.
 ///
@@ -108,10 +125,9 @@ pub async fn run(radio: &mut net::Radio<'_>, card: &Mounted, seed: u64) -> ! {
 /// Returns only at the idle timeout. The save path does not come back through
 /// here — it resets the box from inside the handler.
 async fn serve_http(stack: Stack<'_>, card: &Mounted) {
-    // All three of these are the portal's stack claim, together with the
-    // rendered page in `send_page`. They are named here rather than spread
-    // through the call tree so the total is readable in one place:
-    // 1536 + 1536 + 1536, plus `page::MAX_PAGE` further down.
+    // The portal's stack claim, named in one place rather than spread through
+    // the call tree: 1536 + 1536 + 4112 here, plus `page::MAX_PAGE` (4096) in
+    // `send_page` below, and 1024 + 1024 + 590 in `serve_dhcp` beside it.
     let mut rx = [0u8; 1536];
     let mut tx = [0u8; 1536];
     let mut buffer = [0u8; REQUEST];
@@ -191,7 +207,7 @@ async fn receive(socket: &mut TcpSocket<'_>, buffer: &mut [u8]) -> Received {
             Err(http::RequestError::TooLarge) => {
                 return Received::Refused(
                     http::Status::TooLarge,
-                    "that was more than the box will take — the browser's encoding of the file has to fit 1024 bytes",
+                    "that was far more than a config file — the box stopped reading it",
                 )
             }
             Err(http::RequestError::Malformed) => {
@@ -251,9 +267,19 @@ async fn show(socket: &mut TcpSocket<'_>, card: &Mounted) {
 
 /// `POST /save` — decode, validate, write, reset.
 async fn save(socket: &mut TcpSocket<'_>, card: &Mounted, body: &[u8]) {
+    // One arm per variant here too: `TooLong` is the only one of the three
+    // that is about the *file* rather than about the request carrying it, and
+    // it is the one somebody can do something about. Saying "did not arrive
+    // intact" to a config that is simply too big sends them looking at their
+    // phone instead of at their file.
     let submitted: heapless::Vec<u8, MAX_CONFIG> = match form::field(body, "config") {
         Ok(bytes) => bytes,
-        Err(_) => return respond_error(socket, "that form did not arrive intact").await,
+        Err(form::FormError::TooLong) => {
+            return respond_error(socket, "that config is longer than the box will hold").await
+        }
+        Err(form::FormError::NotFound) | Err(form::FormError::BadEscape) => {
+            return respond_error(socket, "that form did not arrive intact").await
+        }
     };
 
     // Validate before writing, never after. A file the box will refuse at its
