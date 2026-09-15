@@ -502,3 +502,46 @@ fn a_lower_case_directory_is_reachable_by_its_short_name() {
     let _ = volumes.close_dir(dir);
     assert_eq!(&raw[..read], &[0x30, 0x82, 0x01, 0x02]);
 }
+
+/// Rewriting a file shorter than it was leaves no tail.
+///
+/// The config portal replaces `CONFIG.TXT` in place — `embedded-sdmmc` 0.10
+/// has no rename, so there is no atomic swap available. If truncation left the
+/// old tail behind, a shorter config would end in fragments of the longer one
+/// and still parse, which is the worst shape a bug here could take.
+#[test]
+fn truncating_a_rewrite_leaves_no_tail() {
+    let volumes = mounted(blank_fat_image_in_memory(8));
+    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
+    let root = volumes.open_root_dir(volume).unwrap();
+
+    let long = b"ssid = averylongnetworkname\nserver = box.lan:443\n";
+    let file = volumes
+        .open_file_in_dir(root, "CONFIG.TXT", Mode::ReadWriteCreateOrTruncate)
+        .unwrap();
+    volumes.write(file, long).unwrap();
+    volumes.flush_file(file).unwrap();
+    volumes.close_file(file).unwrap();
+
+    let short = b"ssid = x\n";
+    let file = volumes
+        .open_file_in_dir(root, "CONFIG.TXT", Mode::ReadWriteCreateOrTruncate)
+        .unwrap();
+    volumes.write(file, short).unwrap();
+    volumes.flush_file(file).unwrap();
+    assert_eq!(
+        volumes.file_length(file).unwrap(),
+        short.len() as u32,
+        "the directory entry still claims the old length"
+    );
+    volumes.close_file(file).unwrap();
+
+    let file = volumes
+        .open_file_in_dir(root, "CONFIG.TXT", Mode::ReadOnly)
+        .unwrap();
+    let mut buffer = [0u8; 128];
+    let read = volumes.read(file, &mut buffer).unwrap();
+    volumes.close_file(file).unwrap();
+
+    assert_eq!(&buffer[..read], short, "the previous config left a tail");
+}

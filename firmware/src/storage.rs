@@ -577,6 +577,79 @@ impl Mounted {
         Config::parse_read(&buffer[..filled], buffer.len()).map_err(ConfigTrouble::Refused)
     }
 
+    /// The config file's bytes, exactly as the card holds them.
+    ///
+    /// Separate from [`Mounted::read_config`], which answers a parsed
+    /// `Config`: the portal shows somebody their file to edit, comments and
+    /// all, so it needs the bytes and not the meaning.
+    ///
+    /// A missing file answers `Ok(0)`. That is a box being set up for the
+    /// first time, which is the case this whole path exists for — not an
+    /// error to report.
+    ///
+    // Nothing calls this yet — the caller is the config portal's save path,
+    // which lands in a later task. Committed unwired so this build gate
+    // proves it compiles now rather than when the caller lands.
+    #[allow(dead_code)]
+    pub fn read_config_bytes(&self, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        let name = ShortFileName::create_from_str(teddiebox_config::FILENAME)
+            .map_err(|_| "the config name is not a short name")?;
+        let Ok(file) = self.open_file(name) else {
+            return Ok(0);
+        };
+
+        let mut filled = 0;
+        let outcome = loop {
+            if filled == buffer.len() {
+                break Err("the config file is larger than the buffer");
+            }
+            match self.read(file, &mut buffer[filled..]) {
+                Ok(0) => break Ok(filled),
+                Ok(n) => filled += n,
+                Err(_) => break Err("the config file would not read"),
+            }
+        };
+        self.close_file(file);
+        outcome
+    }
+
+    /// Replaces the config file.
+    ///
+    /// **Not atomic, and it cannot be**: `embedded-sdmmc` 0.10 has no rename,
+    /// so there is no way to write beside the file and swap. A power cut
+    /// between the truncate and the flush leaves a short file and a box that
+    /// will not associate.
+    ///
+    /// That is survivable only because of what is *not* here: the setup
+    /// access point's credentials are compiled in and never read from the
+    /// card, so a truncated config is exactly the state holding both ears at
+    /// boot recovers from. `tools/fat-assumptions` proves the truncation
+    /// leaves no tail.
+    ///
+    // Nothing calls this yet, for the same reason as `read_config_bytes`
+    // above.
+    #[allow(dead_code)]
+    pub fn write_config(&self, bytes: &[u8]) -> Result<(), &'static str> {
+        let name = ShortFileName::create_from_str(teddiebox_config::FILENAME)
+            .map_err(|_| "the config name is not a short name")?;
+        let file = self
+            .volumes
+            .open_file_in_dir(self.root, name, Mode::ReadWriteCreateOrTruncate)
+            .map_err(|_| "the config file would not open for writing")?;
+
+        let outcome = self
+            .volumes
+            .write(file, bytes)
+            .map_err(|_| "the config file would not write")
+            .and_then(|()| {
+                self.volumes
+                    .flush_file(file)
+                    .map_err(|_| "the config file would not flush")
+            });
+        self.close_file(file);
+        outcome
+    }
+
     /// Opens `/CACHE/<directory>/<file>` for writing, creating whatever is
     /// missing, and **discards anything already there**.
     ///
