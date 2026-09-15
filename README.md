@@ -61,6 +61,34 @@ on the card. A press can then only mean one thing, so the volume moves the
 instant the ear goes down instead of waiting. Chapters are still reachable by
 slapping, so nothing is lost.
 
+### Its settings can be fixed without a card reader
+
+A box whose `CONFIG.TXT` is wrong or missing cannot reach the network, and on a
+stock box there would be nothing to do about it but take the card out. This one
+can be told its settings over the air:
+
+1. **Hold both ears** and switch the box on, keeping them held until the light
+   comes on. The box raises its own WiFi network instead of becoming a teddy
+   bear.
+2. **Join `teddiebox-setup`** from a phone or laptop. The passphrase is
+   `teddiebox`.
+3. **Open <http://192.168.4.1/>**. The page shows `CONFIG.TXT` exactly as it is
+   on the card — comments and all — in one editable box.
+4. **Edit it and press Save and restart.** The box checks the file before
+   writing it, so a mistake comes back as a message above the box rather than
+   as a card that has to be fixed on a laptop. The network then disappears and
+   the box restarts.
+
+The box gives up and restarts on its own after ten minutes, whether or not
+anybody joined: an access point left beaconing overnight flattens the battery.
+
+**Two things worth knowing before you use it.** The page shows your home WiFi
+passphrase in clear, because that is the file being edited. And the passphrase
+for `teddiebox-setup` is the one printed above — it is in this public
+repository, so anyone in radio range who has read this page can also read
+what is on the box's. Set the box up somewhere you would be happy saying the
+passphrase out loud.
+
 ### The indicator says more
 
 A stock box does not show a charging colour while it sits idle. This one uses
@@ -73,6 +101,7 @@ the single RGB light to say what it is doing:
 | orange | the battery is running low |
 | red | a fault, or a battery about to give out |
 | cyan | idle, and on the charger |
+| magenta | the setup page is up |
 | dark | standby |
 
 It is steady rather than breathing, and deliberately dim: this sits in a
