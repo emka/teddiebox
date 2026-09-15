@@ -11,7 +11,7 @@
 //! Nothing here has been run on hardware. It compiles and links, which is the
 //! whole of what is known about it.
 
-use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::select::{select, select3, Either};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{Ipv4Address, Stack};
@@ -22,18 +22,19 @@ use teddiebox_portal::{dhcp, form, http, page, MAX_BODY, MAX_CONFIG};
 use crate::net;
 use crate::storage::Mounted;
 
-/// How long the box will sit with its radio up waiting to be talked to.
+/// How long the box will sit with its radio up before restarting itself.
 ///
 /// The pack on this box goes flat without warning, and an access point left
 /// beaconing overnight is a box that is dead in the morning for no reason
 /// anybody will connect to this.
 ///
-/// Measured from the last connection rather than from boot, so that somebody
-/// who saves a config, reads the error and needs a second go is not cut off
-/// mid-correction. Nothing holds a socket open while a person types, so this
-/// is still a bound on typing time — it is just a bound that restarts every
-/// time the box hears from them.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+/// **Measured from entry, not from the last connection.** An idle timeout is
+/// the obvious shape and it does not work here: a phone that has joined the
+/// network runs captive-portal probes at it for as long as it stays joined,
+/// so every restart-on-activity keeps restarting and the window never closes.
+/// Ten minutes from the moment both ears were held is a bound that a phone
+/// cannot argue with, and it is far longer than editing one text file takes.
+const SETUP_WINDOW: Duration = Duration::from_secs(600);
 
 /// How long a single connection may sit without saying anything.
 ///
@@ -72,8 +73,8 @@ const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 /// Raises the access point and serves until it is done with.
 ///
 /// Never returns. It resets the box itself once a config has been saved, or
-/// once nobody has come for [`IDLE_TIMEOUT`]; if the radio will not start at
-/// all it stops where it stands instead.
+/// once [`SETUP_WINDOW`] is up; if the radio will not start at all it stops
+/// where it stands instead.
 ///
 /// `paint` is how this reaches the LED. `main` owns the LEDC controller and
 /// never hands it away — its own loop is what paints for every other mode,
@@ -120,13 +121,13 @@ pub async fn run(
     // three share one stack frame instead of three tasks because the session
     // and the link are borrowed out of the radio and cannot be handed away.
     let stack = session.stack();
-    match select3(link.run(), serve_http(stack, card), serve_dhcp(stack)).await {
-        Either3::First(_) => unreachable!("the runner never returns"),
-        Either3::Second(()) => esp_println::println!(
-            "teddiebox: portal heard nothing for {} minutes — restarting",
-            IDLE_TIMEOUT.as_secs() / 60
+    let serving = select3(link.run(), serve_http(stack, card), serve_dhcp(stack));
+    match select(Timer::after(SETUP_WINDOW), serving).await {
+        Either::First(()) => esp_println::println!(
+            "teddiebox: portal's {} minutes are up — restarting",
+            SETUP_WINDOW.as_secs() / 60
         ),
-        Either3::Third(_) => unreachable!("the dhcp server never returns"),
+        Either::Second(_) => unreachable!("none of the three ever returns"),
     }
 
     crate::drain_console();
@@ -153,10 +154,11 @@ async fn stay_put() -> ! {
     unreachable!("pending never completes")
 }
 
-/// Answers one connection at a time on port 80, until nobody comes.
+/// Answers one connection at a time on port 80, for as long as it is polled.
 ///
-/// Returns only at the idle timeout. The save path does not come back through
-/// here — it resets the box from inside the handler.
+/// Never returns of its own accord. The window that ends the portal is
+/// [`run`]'s, and the save path does not come back through here either — it
+/// resets the box from inside the handler.
 async fn serve_http(stack: Stack<'_>, card: &Mounted) {
     // The portal's buffer claim, named in one place rather than spread
     // through the call tree: 1536 + 1536 + 4112 here, `CHUNK` in `send_page`
@@ -169,10 +171,9 @@ async fn serve_http(stack: Stack<'_>, card: &Mounted) {
     socket.set_timeout(Some(CONNECTION_TIMEOUT));
 
     loop {
-        match select(socket.accept(80), Timer::after(IDLE_TIMEOUT)).await {
-            Either::Second(()) => return,
-            Either::First(Ok(())) => handle(&mut socket, card, &mut buffer).await,
-            Either::First(Err(trouble)) => {
+        match socket.accept(80).await {
+            Ok(()) => handle(&mut socket, card, &mut buffer).await,
+            Err(trouble) => {
                 esp_println::println!("teddiebox: portal could not accept — {trouble:?}");
             }
         }
