@@ -68,6 +68,12 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
     if path.ends_with('/') {
         return Err(OtaError::MalformedUrl);
     }
+    // A fragment never leaves the client, and this key never carried a
+    // query string; either riding along into a request line sent verbatim
+    // is not what the person who pasted this URL meant.
+    if path.contains('#') || path.contains('?') {
+        return Err(OtaError::MalformedUrl);
+    }
 
     Ok(UpdateUrl {
         host,
@@ -88,6 +94,20 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
 /// contains two dots — `teddiebox..bin` — is not mistaken for one.
 pub fn resolve_image(manifest_path: &str, image: &str) -> Result<String<MAX_PATH>, OtaError> {
     if image.is_empty() {
+        return Err(OtaError::MalformedUrl);
+    }
+    // `build_path_request` interpolates the resolved path into an HTTP
+    // request line unescaped, so any byte `image` contributes lands on the
+    // wire as-is. A conservative allow-list -- ASCII letters, digits, and
+    // `._-/~`, which is enough for a filename on this server -- is cheaper
+    // and safer than trying to enumerate everything that is dangerous. It
+    // also subsumes the space and the CR that would otherwise let a
+    // manifest value add tokens or a stray line terminator to the request
+    // line.
+    if !image
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b'~'))
+    {
         return Err(OtaError::MalformedUrl);
     }
     if image.split('/').any(|segment| segment == "..") {
@@ -196,6 +216,26 @@ mod tests {
         assert_eq!(split(&url), Err(OtaError::ValueTooLong));
     }
 
+    // A fragment is client-only and must never reach the wire; a query
+    // string was never part of this key's contract either. The module doc
+    // justifies taking a full URL precisely because it is what someone
+    // copies out of a browser bar -- the one place a `#fragment` comes from.
+    #[test]
+    fn refuses_a_path_with_a_fragment() {
+        assert_eq!(
+            split("https://teddycloud.local:8443/x.txt#frag"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    #[test]
+    fn refuses_a_path_with_a_query_string() {
+        assert_eq!(
+            split("https://teddycloud.local:8443/x.txt?y=1"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
     #[test]
     fn resolve_image_joins_a_bare_filename_to_the_manifest_directory() {
         let p = resolve_image("/content/FIRMWARE/teddiebox.txt", "teddiebox.bin").unwrap();
@@ -242,6 +282,36 @@ mod tests {
     fn resolve_image_refuses_an_empty_image() {
         assert_eq!(
             resolve_image("/content/FIRMWARE/teddiebox.txt", ""),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    // build_path_request interpolates the resolved path into an HTTP
+    // request line unescaped. A space adds a token to that line; this is
+    // what an unquoted `image = a.bin HTTP/1.1` in the manifest would do.
+    #[test]
+    fn resolve_image_refuses_a_space() {
+        assert_eq!(
+            resolve_image("/content/FIRMWARE/teddiebox.txt", "a.bin HTTP/1.1"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    // A lone CR is a line terminator to some HTTP parsers and proxies, even
+    // without an LF alongside it (str::lines already keeps an LF from
+    // getting this far) -- a request-smuggling primitive, not just a typo.
+    #[test]
+    fn resolve_image_refuses_a_bare_carriage_return() {
+        assert_eq!(
+            resolve_image("/content/FIRMWARE/teddiebox.txt", "a\rb.bin"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    #[test]
+    fn resolve_image_refuses_a_percent_sign() {
+        assert_eq!(
+            resolve_image("/content/FIRMWARE/teddiebox.txt", "a%2e.bin"),
             Err(OtaError::MalformedUrl)
         );
     }
