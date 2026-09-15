@@ -1,8 +1,10 @@
 //! The setup portal: one page, one form, one lease.
 //!
 //! Reached by holding both ears through a power-on. While this runs, the box
-//! is not a teddy bear — no decoder, no codec, no NFC — which is what makes
-//! the stack for a TCP server and a DHCP server affordable at all.
+//! is not a teddy bear — no decoder, no codec, no NFC, no media loop.
+//!
+//! That absence buys *stack*, and the portal's problem is not stack. See
+//! [`REQUEST`] for what it actually costs and what has been measured.
 //!
 //! The wire formats live in `teddiebox_portal` and are tested on the host.
 //! What is here is the part that cannot be: the access point, the two
@@ -66,9 +68,38 @@ const HEAD_ROOM: usize = 1024;
 
 /// The request buffer: the largest body, plus room for the head above it.
 ///
-/// `MAX_BODY` (3088) + `HEAD_ROOM` (1024) = 4112 bytes, on the stack of
-/// [`serve_http`]. Affordable only because this mode starts no decoder — that
-/// alone wants 15.8 KB — and no codec, no NFC and no media loop either.
+/// `MAX_BODY` (3088) + `HEAD_ROOM` (1024) = 4112 bytes.
+///
+/// **Not on the stack, and an earlier version of this comment said it was.**
+/// This buffer is held across `await` points, so it sizes `main`'s embassy
+/// task future, which is a `static` in `.bss`; `esp-hal` then gives the stack
+/// whatever DRAM `.bss` leaves over. Not starting the decoder frees stack —
+/// the decoder's 15.8 KB is transient depth inside another task's poll — and
+/// frees no `.bss` whatsoever, so it pays for none of this.
+///
+/// What it costs, from the linker's own symbols:
+///
+/// | | `_stack_start - _stack_end` | `___embassy_main4POOL` |
+/// |---|---|---|
+/// | before the portal was wired in | 50,956 | 384 |
+/// | wired in, page held in a buffer | 23,308 | 27,120 |
+/// | wired in, page streamed | 32,140 | 18,288 |
+///
+/// The deepest the stack has ever been measured on this box is 49,024 bytes,
+/// so 32,140 is not a smaller margin — it is an ordinary boot running out of
+/// stack. **This is not settled.**
+///
+/// Two measurements bound what is left to win without changing *where* the
+/// portal runs. Shrinking every remaining buffer to nothing leaves a
+/// 6,656-byte future and 43,788 bytes of stack region; 3,472 of that 6,656 is
+/// the `StackResources<5>` inside [`net::Radio`]. So even moving every byte
+/// of buffer *and* the radio's resources into storage that costs nothing —
+/// storage some other mode already owns and setup mode never touches — stops
+/// at 47,260, still under the 49,024 already seen used.
+///
+/// The rest is the future itself, and the only place it can go is a task pool
+/// that already exists and sits idle in setup mode. That is a design decision
+/// about where setup mode lives, not a buffer size, and it is open.
 const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 
 /// Raises the access point and serves until it is done with.
@@ -174,7 +205,8 @@ async fn stay_put() -> ! {
 async fn serve_http(stack: Stack<'_>, card: Option<&Mounted>) {
     // The portal's buffer claim, named in one place rather than spread
     // through the call tree: 1536 + 1536 + 4112 here, `CHUNK` in `send_page`
-    // below, and 1024 + 1024 + 590 in `serve_dhcp` beside it.
+    // below, and 1024 + 1024 + 590 in `serve_dhcp` beside it. None of it is
+    // stack — see [`REQUEST`].
     let mut rx = [0u8; 1536];
     let mut tx = [0u8; 1536];
     let mut buffer = [0u8; REQUEST];

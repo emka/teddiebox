@@ -4024,11 +4024,16 @@ async fn main(spawner: Spawner) {
 
     // Both ears held through a power-on asks for the setup portal. Read
     // before `net` is spawned — that task is the only other claim on
-    // `p.WIFI` — and before anything else is spawned at all, because setup
-    // mode is the *absence* of almost every task below: no decoder, no
-    // codec, no NFC, no media loop. That is what makes the stack for a TCP
-    // server and a DHCP server affordable — measured at 49,024 of 58,572
-    // bytes used, with the decoder's 15.8 KB the largest single claim on it.
+    // `p.WIFI` — and before the rest of the boot, because setup mode is the
+    // *absence* of almost every task below: no decoder, no codec, no NFC, no
+    // media loop.
+    //
+    // **That absence does not pay for the portal's memory, and an earlier
+    // version of this comment claimed it did.** What the portal costs is
+    // `.bss`, not stack: its buffers are held across `await` points, so they
+    // size this task's future, and `esp-hal` gives the stack whatever `.bss`
+    // leaves. Not starting the decoder frees no `.bss` at all — see the
+    // measurements in `portal.rs`, which are of the linker's own symbols.
     //
     // Active low, so held is low. The ears are the gesture and not a
     // control: once this branch is taken they are never read again.
