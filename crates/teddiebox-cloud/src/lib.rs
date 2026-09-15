@@ -13,7 +13,7 @@ pub use request::{
     MAX_ETAG,
 };
 pub use response::{parse_head, ContentRange, ResponseHead};
-pub use stream::{begin, probe_length, Begun, Body, Probed};
+pub use stream::{begin, begin_prepared, probe_length, Begun, Body, Probed};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloudError {

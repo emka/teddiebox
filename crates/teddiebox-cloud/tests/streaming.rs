@@ -5,7 +5,10 @@
 
 use core::task::Poll;
 use pollster::block_on;
-use teddiebox_cloud::{begin, probe_length, Begun, Body, CloudError, ContentRequest, ETag, Probed};
+use teddiebox_cloud::{
+    begin, begin_prepared, build_path_request, probe_length, Begun, Body, CloudError,
+    ContentRequest, ETag, Probed,
+};
 
 const UID: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -440,4 +443,48 @@ fn a_figure_the_cloud_never_heard_of_is_not_a_network_fault() {
     let begun = block_on(begin(&mut transport, &request(None), &mut buf)).unwrap();
 
     assert_eq!(begun, Begun::NotFound);
+}
+
+/// The seam OTA needs: a path request built by `build_path_request` goes
+/// through `begin_prepared` and comes out the same `Begun::Content` shape
+/// that `begin` produces for an equivalent content request — same status
+/// classification, same `body_end` clamp, because both run through the one
+/// copy of that logic rather than a duplicate.
+#[test]
+fn begin_prepared_parses_a_path_response_the_same_way_begin_parses_a_content_response() {
+    let raw = *b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nDATA";
+
+    let mut path_bytes = [0u8; 512];
+    let n = build_path_request(&mut path_bytes, "/teddiebox.bin", "box.lan:8080", None).unwrap();
+    let mut path_transport = Fake::new(&raw);
+    let mut path_buf = [0u8; 256];
+    let path_begun = block_on(begin_prepared(
+        &mut path_transport,
+        &path_bytes[..n],
+        &mut path_buf,
+    ))
+    .unwrap();
+
+    let mut content_transport = Fake::new(&raw);
+    let mut content_buf = [0u8; 256];
+    let content_begun = block_on(begin(
+        &mut content_transport,
+        &request(None),
+        &mut content_buf,
+    ))
+    .unwrap();
+
+    assert_eq!(path_begun, content_begun);
+    let Begun::Content {
+        body_length,
+        offset,
+        prefix,
+        ..
+    } = path_begun
+    else {
+        panic!("expected content");
+    };
+    assert_eq!(body_length, 4);
+    assert_eq!(offset, 0);
+    assert_eq!(&path_buf[prefix], b"DATA");
 }

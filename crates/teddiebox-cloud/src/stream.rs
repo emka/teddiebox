@@ -133,8 +133,22 @@ pub async fn begin<T: Read + Write>(
 ) -> Result<Begun, CloudError> {
     let mut request_bytes = [0u8; 512];
     let n = build_content_request(request, &mut request_bytes)?;
+    begin_prepared(transport, &request_bytes[..n], buf).await
+}
+
+/// Sends already-built request bytes and parses the response head.
+///
+/// The counterpart to [`begin`] for callers whose request is not a
+/// [`ContentRequest`] — a plain path fetch (`build_path_request`), for one —
+/// so that the status classification below, the `410` handling, and the
+/// `body_end` clamp exist exactly once regardless of what built the request.
+pub async fn begin_prepared<T: Read + Write>(
+    transport: &mut T,
+    request_bytes: &[u8],
+    buf: &mut [u8],
+) -> Result<Begun, CloudError> {
     transport
-        .write_all(&request_bytes[..n])
+        .write_all(request_bytes)
         .await
         .map_err(|_| CloudError::Transport)?;
     transport.flush().await.map_err(|_| CloudError::Transport)?;
