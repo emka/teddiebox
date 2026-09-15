@@ -49,6 +49,20 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
         return Err(OtaError::MalformedUrl);
     }
 
+    // `split_server` (firmware/src/tls.rs) requires a `host:port` string and
+    // refuses to guess a port itself, so a host copied without one — the
+    // ordinary shape for a default-port URL out of a browser bar — would
+    // parse clean here and then be unable to connect. The scheme is fixed at
+    // `https`, so the port to fill in is known.
+    //
+    // Length is checked after the port is appended, not before: a host that
+    // fits under MAX_HOST on its own can still overflow once `:443` is
+    // added, and checking first would accept a value that cannot be stored.
+    let mut host = String::<MAX_HOST>::try_from(host).map_err(|_| OtaError::ValueTooLong)?;
+    if !host.contains(':') {
+        host.push_str(":443").map_err(|_| OtaError::ValueTooLong)?;
+    }
+
     let path = &rest[slash..];
     // A path ending in `/` names a directory, not a manifest.
     if path.ends_with('/') {
@@ -56,7 +70,7 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
     }
 
     Ok(UpdateUrl {
-        host: String::try_from(host).map_err(|_| OtaError::ValueTooLong)?,
+        host,
         path: String::try_from(path).map_err(|_| OtaError::ValueTooLong)?,
     })
 }
@@ -109,10 +123,14 @@ mod tests {
         assert_eq!(u.path.as_str(), "/content/FIRMWARE/teddiebox.txt");
     }
 
+    // `split_server` (firmware/src/tls.rs) requires a colon in its `server`
+    // argument and never guesses a port, so a host with none left as-is
+    // parses clean here and then cannot connect. The scheme is fixed at
+    // `https`, so the default port is known — fill it in.
     #[test]
     fn splits_a_url_with_no_port() {
         let u = split("https://teddycloud.local/teddiebox.txt").unwrap();
-        assert_eq!(u.host.as_str(), "teddycloud.local");
+        assert_eq!(u.host.as_str(), "teddycloud.local:443");
         assert_eq!(u.path.as_str(), "/teddiebox.txt");
     }
 
@@ -163,6 +181,18 @@ mod tests {
         // MAX_PATH 'a's after the leading slash, one past MAX_PATH overall.
         let path = "a".repeat(MAX_PATH);
         let url = format!("https://teddycloud.local/{path}");
+        assert_eq!(split(&url), Err(OtaError::ValueTooLong));
+    }
+
+    // The host alone fits under MAX_HOST, but the default port that gets
+    // appended pushes it one byte over. Checking the length before the port
+    // is filled in would let this through with a host that cannot actually
+    // be stored.
+    #[test]
+    fn refuses_a_host_that_only_overflows_once_the_default_port_is_added() {
+        // 61 'a's + ":443" is 65, one past MAX_HOST (64).
+        let host = "a".repeat(61);
+        let url = format!("https://{host}/teddiebox.txt");
         assert_eq!(split(&url), Err(OtaError::ValueTooLong));
     }
 
