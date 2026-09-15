@@ -21,6 +21,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{Ipv4Address, Stack};
 use embassy_time::{Duration, Timer};
+use teddiebox_core::LedState;
 use teddiebox_portal::{dhcp, form, http, page, MAX_BODY, MAX_CONFIG};
 
 use crate::net;
@@ -53,13 +54,6 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 /// and not the mechanism.
 const SETTLE: Duration = Duration::from_millis(500);
 
-/// How long to wait before rebooting a box whose radio would not start.
-///
-/// A reset is the only lever left — the failure is in the driver, not in
-/// anything this code can retry — but an immediate one loops invisibly while
-/// the ears are still held. This makes the loop slow enough to watch.
-const RETRY_AFTER: Duration = Duration::from_secs(5);
-
 /// Room for the head above the body in the request buffer.
 ///
 /// A phone's POST head is the part nothing here controls: a request line, a
@@ -82,8 +76,9 @@ const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 
 /// Raises the access point and serves until it is done with.
 ///
-/// Never returns: it resets the box itself, either because a config was saved
-/// or because nobody came.
+/// Never returns. It resets the box itself once a config has been saved, or
+/// once nobody has come for [`IDLE_TIMEOUT`]; if the radio will not start at
+/// all it stops where it stands instead.
 pub async fn run(radio: &mut net::Radio<'_>, card: &Mounted, seed: u64) -> ! {
     let (session, mut link) = match radio.serve(seed) {
         Ok(pair) => pair,
@@ -91,9 +86,13 @@ pub async fn run(radio: &mut net::Radio<'_>, card: &Mounted, seed: u64) -> ! {
             esp_println::println!(
                 "teddiebox: portal could not raise the access point — {trouble:?}"
             );
-            crate::drain_console();
-            Timer::after(RETRY_AFTER).await;
-            esp_hal::system::software_reset();
+            // Stop here rather than reset. The ears are still held — that is
+            // what got the box into this mode — so a reset would re-enter
+            // setup, fail again, and keep doing it for as long as somebody
+            // holds on, which from the outside is indistinguishable from a
+            // brick. A box sitting still with a red LED says what happened
+            // and leaves switching it off to the person holding it.
+            park(LedState::Error).await
         }
     };
 
@@ -118,6 +117,23 @@ pub async fn run(radio: &mut net::Radio<'_>, card: &Mounted, seed: u64) -> ! {
 
     crate::drain_console();
     esp_hal::system::software_reset();
+}
+
+/// Stops the box where it stands, with one thing on the LED.
+///
+/// Never returns and never wakes again. For the failures that leave nothing to
+/// retry and nothing to serve: the alternative is a reset, and a reset with
+/// both ears still held comes straight back here.
+async fn park(state: LedState) -> ! {
+    crate::LED_REQUEST.store(state.code(), core::sync::atomic::Ordering::Relaxed);
+    crate::drain_console();
+    stay_put().await
+}
+
+/// Never completes, and costs nothing while not completing.
+async fn stay_put() -> ! {
+    core::future::pending::<()>().await;
+    unreachable!("pending never completes")
 }
 
 /// Answers one connection at a time on port 80, until nobody comes.
@@ -431,11 +447,11 @@ async fn serve_dhcp(stack: Stack<'_>) -> ! {
     let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx, &mut tx_meta, &mut tx);
     if let Err(trouble) = socket.bind(67) {
         esp_println::println!("teddiebox: portal could not bind dhcp — {trouble:?}");
-        // The HTTP side can still be reached by a phone given a static
-        // address by hand, so park rather than return: returning would take
-        // the whole portal down and reboot the box.
-        core::future::pending::<()>().await;
-        unreachable!("pending never completes");
+        // Only this half is lost: the HTTP side can still be reached by a
+        // phone given a static address by hand. So park this branch rather
+        // than return from it — returning completes the `select3` and takes
+        // the whole portal down with it.
+        stay_put().await;
     }
 
     loop {
