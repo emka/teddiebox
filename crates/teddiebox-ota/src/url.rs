@@ -8,6 +8,20 @@
 //! to the server root. Both joins are pure decision logic with no I/O, which
 //! is why they live here rather than at the call site: a wrong join silently
 //! fetches the wrong file or 404s, and that is worth testing without a box.
+//!
+//! ## Trust model
+//!
+//! M10 has no code signing, anywhere. `decide` only compares version
+//! strings, and `digest` checks a hash that the *same manifest* supplies —
+//! so whoever can write the manifest a box fetches dictates the bytes that
+//! get flashed. Nothing in this module changes that.
+//!
+//! The one boundary that does hold: the TLS peer is always the host taken
+//! from the card's `update_url`, never anything the manifest names. A
+//! manifest can steer which *path* on that host gets fetched; it can never
+//! steer which *server* the box talks to. Whoever writes the fetch must
+//! preserve that property — a manifest's `image` must never be allowed to
+//! become a scheme or a host.
 
 use crate::OtaError;
 use heapless::String;
@@ -87,11 +101,14 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
 /// joined to `manifest_path`'s directory — everything up to and including its
 /// last `/` — the same rule a browser applies to a relative link.
 ///
-/// Refuses any `image` containing a `..` path **segment**: traversal is
-/// meaningless for a fetch relative to a fixed manifest, is a sign of a
-/// manifest nobody should be acting on, and what this gates is a flash write.
-/// The check is segment-based, not substring-based, so a filename that merely
-/// contains two dots — `teddiebox..bin` — is not mistaken for one.
+/// Refuses any `image` containing a `..` path **segment**. This is hygiene,
+/// not a security boundary — see the module's "Trust model" section above:
+/// an absolute `image` is used as-is by design, so anyone wanting to name a
+/// path outside the manifest's directory just writes one and never needs
+/// `..` to get there. The check still earns its keep against an honest
+/// mistake in a hand-edited manifest. It is segment-based, not
+/// substring-based, so a filename that merely contains two dots —
+/// `teddiebox..bin` — is not mistaken for one.
 pub fn resolve_image(manifest_path: &str, image: &str) -> Result<String<MAX_PATH>, OtaError> {
     if image.is_empty() {
         return Err(OtaError::MalformedUrl);
@@ -120,7 +137,15 @@ pub fn resolve_image(manifest_path: &str, image: &str) -> Result<String<MAX_PATH
         out.push('/').map_err(|_| OtaError::ValueTooLong)?;
         out.push_str(absolute).map_err(|_| OtaError::ValueTooLong)?;
     } else {
-        let dir_end = manifest_path.rfind('/').map_or(0, |i| i + 1);
+        // `split`'s output always has a leading slash, so this only bites a
+        // caller that hands resolve_image a manifest_path of its own. There
+        // is no directory to join a relative image against, and silently
+        // falling back to the image alone would build a relative request
+        // line (`GET teddiebox.bin HTTP/1.1`) instead of failing loudly.
+        let dir_end = manifest_path
+            .rfind('/')
+            .map(|i| i + 1)
+            .ok_or(OtaError::MalformedUrl)?;
         out.push_str(&manifest_path[..dir_end])
             .map_err(|_| OtaError::ValueTooLong)?;
         out.push_str(image).map_err(|_| OtaError::ValueTooLong)?;
@@ -320,5 +345,32 @@ mod tests {
     fn resolve_image_joins_at_a_manifest_path_at_the_root() {
         let p = resolve_image("/teddiebox.txt", "teddiebox.bin").unwrap();
         assert_eq!(p.as_str(), "/teddiebox.bin");
+    }
+
+    // `split`'s output always has a leading slash, so this manifest_path
+    // shape cannot reach resolve_image through the ordinary path. It is
+    // still reachable through this pub fn directly, and silently returning
+    // "teddiebox.bin" would build `GET teddiebox.bin HTTP/1.1` -- a relative
+    // request line -- rather than failing loudly.
+    #[test]
+    fn resolve_image_refuses_a_manifest_path_with_no_slash_at_all() {
+        assert_eq!(
+            resolve_image("m.txt", "teddiebox.bin"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    // Refusing rather than truncating is the other safety property this
+    // function has (heapless push_str is all-or-nothing); pin it directly
+    // rather than relying on it as an accident of the other tests.
+    #[test]
+    fn resolve_image_refuses_a_join_that_overflows_max_path() {
+        // The manifest directory alone (93 bytes) fits under MAX_PATH (96);
+        // appending the 5-byte image pushes the join past it.
+        let manifest_path = format!("/{}/m.txt", "a".repeat(MAX_PATH - 5));
+        assert_eq!(
+            resolve_image(&manifest_path, "b.bin"),
+            Err(OtaError::ValueTooLong)
+        );
     }
 }
