@@ -1994,6 +1994,13 @@ const NO_VOLUME: i8 = i8::MIN;
 /// to a codec that is not listening yet.
 static CODEC_READY: AtomicBool = AtomicBool::new(false);
 
+/// Set once the card has been mounted for the first time this boot.
+///
+/// Card mount is lazy — the ordinary boot only does it once the start-up
+/// jingle asks to play — so this is the second half `ota::mark_valid` waits
+/// on, alongside `CODEC_READY`.
+static CARD_MOUNTED: AtomicBool = AtomicBool::new(false);
+
 /// Set when the box has said it is turning off, and must therefore do it.
 ///
 /// `BatteryCritical` is not a warning, it is an announcement — "battery is
@@ -2979,6 +2986,7 @@ async fn media(
             match storage::Mounted::open(spi, cs, esp_hal::delay::Delay::new()) {
                 Ok(mounted) => {
                     read_configuration_once(&mounted, &mut configured);
+                    CARD_MOUNTED.store(true, Ordering::Relaxed);
                     card = Some(mounted)
                 }
                 Err(reason) => {
@@ -3935,6 +3943,13 @@ async fn nfc_reader(
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
 
+    // Before anything else — including the stack paint below — because this
+    // is the check that catches an image which crashed on its *previous*
+    // boot before reaching mark_valid. Nothing above this line has run yet
+    // on the attempt that is being judged, so nothing above it can be the
+    // thing that failed last time.
+    ota::confirm_boot_or_revert();
+
     // esp-radio allocates. The rest of this firmware does not, and libopus in
     // particular must not — its hardening path is the only thing that ever
     // reaches libc, and it panics rather than allocating. This heap belongs to
@@ -4158,6 +4173,10 @@ async fn main(spawner: Spawner) {
     // Cleared the moment it is asked for, so a jingle is a start-up event and
     // not something that can happen twice.
     let mut startup_pending = true;
+    // Separate from startup_pending: the jingle only needs the codec, but
+    // confirming an update needs the card too, and the card mounts lazily
+    // on whichever request happens to need it first.
+    let mut boot_confirmed = false;
     esp_println::println!(
         "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off | reval"
     );
@@ -4305,6 +4324,14 @@ async fn main(spawner: Spawner) {
         if startup_pending && CODEC_READY.load(Ordering::Relaxed) {
             startup_pending = false;
             SOUND_REQUEST.store(Sound::Startup.file(), Ordering::Relaxed);
+        }
+
+        if !boot_confirmed
+            && CODEC_READY.load(Ordering::Relaxed)
+            && CARD_MOUNTED.load(Ordering::Relaxed)
+        {
+            boot_confirmed = true;
+            ota::mark_valid();
         }
 
         // A sound the box decided to say about itself. Raised here rather

@@ -105,11 +105,6 @@ fn current_state() -> Option<(AppPartitionSubType, OtaImageState)> {
 /// `PendingVerify` already sitting there from a boot that never reached
 /// `mark_valid`, switches back to the other slot immediately and reboots.
 /// A box that has never run an update takes neither branch.
-///
-/// Not yet called from `main` — that wiring is a separate, hardware-gated
-/// task. `#[allow(dead_code)]` until then, the same way `tls::Error`'s
-/// unread variants are: real code with no caller yet, not a mistake.
-#[allow(dead_code)]
 pub fn confirm_boot_or_revert() {
     let Some((current, state)) = current_state() else {
         return;
@@ -172,9 +167,6 @@ pub fn confirm_boot_or_revert() {
 /// a genuinely broken build breaks. Idempotent: it only ever transitions a
 /// slot that is still `PendingVerify`, so calling it more than once, or on a
 /// box that never ran an update, does nothing.
-///
-/// Not yet called from `main` — see [`confirm_boot_or_revert`].
-#[allow(dead_code)]
 pub fn mark_valid() {
     let Some((_, OtaImageState::PendingVerify)) = current_state() else {
         return;
