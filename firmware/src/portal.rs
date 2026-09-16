@@ -16,12 +16,14 @@
 use core::future::Future;
 use core::pin::Pin;
 
-use embassy_futures::select::{select, select3, Either};
+use embassy_futures::select::{select, select4, Either};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{Ipv4Address, Stack};
 use embassy_time::{Duration, Timer};
-use esp_hal::peripherals::WIFI;
+use esp_hal::peripherals::{GPIO44, UART0, WIFI};
+use esp_hal::uart::{Config as UartConfig, ConfigError, UartRx};
+use teddiebox_core::console::{Command, CommandWatch};
 use teddiebox_core::LedState;
 use teddiebox_portal::{dhcp, form, http, page, MAX_BODY, MAX_CONFIG};
 
@@ -136,6 +138,8 @@ const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 /// only knows which colour a state is.
 pub async fn run(
     wifi: WIFI<'static>,
+    uart: UART0<'static>,
+    rx: GPIO44<'static>,
     card: Option<Mounted>,
     seed: u64,
     paint: impl Fn(LedState),
@@ -145,6 +149,16 @@ pub async fn run(
     // decoder or codec either — so a dark LED here would read exactly like a
     // box that failed to start rather than one waiting to be talked to.
     paint(LedState::Setup);
+
+    // Built here rather than inside `serve_console`, and this is not tidiness.
+    // `UartRx::new` reconfigures UART0, whose transmit half `esp-println` is
+    // using — so constructing it lazily on the first poll of the `select4`
+    // landed in the middle of the "portal up" line and shredded it. Draining
+    // first and taking the receiver before any of this function's own output
+    // keeps the reconfiguration away from a print in flight.
+    crate::drain_console();
+    let console = UartRx::new(uart, UartConfig::default().with_baudrate(115200))
+        .map(|console| console.with_rx(rx));
 
     // Setup mode never reaches the console loop, so the `stack` command that
     // would answer this question is not there to be typed. Printed on the way
@@ -185,10 +199,11 @@ pub async fn run(
     // three share one stack frame instead of three tasks because the session
     // and the link are borrowed out of the radio and cannot be handed away.
     let stack = session.stack();
-    let serving = select3(
+    let serving = select4(
         link.run(),
         serve_http(stack, card.as_ref()),
         serve_dhcp(stack),
+        serve_console(console),
     );
     match select(Timer::after(SETUP_WINDOW), serving).await {
         Either::First(()) => esp_println::println!(
@@ -419,6 +434,62 @@ async fn receive(socket: &mut TcpSocket<'_>, buffer: &mut [u8]) -> Received {
                 return Received::Gone;
             }
         }
+    }
+}
+
+/// Answers the console, so a box serving the portal does not look like a dead one.
+///
+/// Setup mode diverges before `main` ever builds its console loop, so until
+/// this existed nothing in the box read UART0 while the portal was up. The box
+/// went on *printing* — the heartbeat and the pack watch run in both modes —
+/// so from outside it was talking and ignoring every command, which is exactly
+/// what a wedged console looks like. On 2026-09-16 that cost two failed flash
+/// attempts and a diagnosis of a box that was working perfectly.
+///
+/// `rb` is enough to fix it and is all this offers. It leaves setup mode for an
+/// ordinary boot, and `dl` works normally from there — so the way to flash a
+/// box that is serving the portal is two commands rather than a ten-minute
+/// wait. `dl` itself is deliberately not handled here: `reboot_to_download`
+/// hands the USB pads back and releases the rails through `Gates`, and setup
+/// mode has neither, so it would be a second implementation of the one path in
+/// this firmware that must not be got wrong.
+///
+/// Everything else gets a sentence saying where it is. That is the part that
+/// actually removes the trap: any command at all, including the `dl` that
+/// `scripts/flash.sh` sends first, now produces a line naming setup mode.
+async fn serve_console(console: Result<UartRx<'static, esp_hal::Blocking>, ConfigError>) -> ! {
+    let mut console = match console {
+        Ok(console) => console,
+        Err(trouble) => {
+            // Not fatal to the portal: the access point and the page are the
+            // point, and this only ever made flashing easier.
+            esp_println::println!("teddiebox: portal could not open the console — {trouble:?}");
+            stay_put().await;
+        }
+    };
+
+    let mut watch = CommandWatch::new();
+    loop {
+        let mut buf = [0u8; 16];
+        if let Ok(n) = console.read_buffered(&mut buf) {
+            if let Some(command) = buf[..n].iter().find_map(|&b| watch.feed(b)) {
+                match command {
+                    Command::Reboot => {
+                        esp_println::println!("teddiebox: leaving the configuration portal");
+                        crate::drain_console();
+                        esp_hal::system::software_reset()
+                    }
+                    _ => esp_println::println!(
+                        "teddiebox: the configuration portal is running —                          join `{}` and open http://192.168.4.1/, or send `rb` to leave it",
+                        net::SETUP_SSID
+                    ),
+                }
+            }
+        }
+        // Polled rather than awaited. `read_buffered` does not block, and the
+        // portal's other three futures must keep being polled — a console that
+        // parked here waiting for a byte would stop the access point.
+        Timer::after(Duration::from_millis(50)).await;
     }
 }
 
@@ -671,7 +742,7 @@ async fn serve_dhcp(stack: Stack<'_>) -> ! {
         esp_println::println!("teddiebox: portal could not bind dhcp — {trouble:?}");
         // Only this half is lost: the HTTP side can still be reached by a
         // phone given a static address by hand. So park this branch rather
-        // than return from it — returning completes the `select3` and takes
+        // than return from it — returning completes the `select4` and takes
         // the whole portal down with it.
         stay_put().await;
     }

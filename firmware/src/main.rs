@@ -4129,7 +4129,10 @@ async fn main(spawner: Spawner) {
         // the two cannot both have it: a box that somehow got here with audio
         // running raises no access point and says why, rather than aliasing
         // the buffer the decoder is writing into.
-        let Some(portal) = portal::place(scratch, portal::run(p.WIFI, card, seed, paint)) else {
+        let Some(portal) = portal::place(
+            scratch,
+            portal::run(p.WIFI, p.UART0, p.GPIO44, card, seed, paint),
+        ) else {
             // `place` has already said what would not fit. Park rather than
             // reset, for the reason `portal::run` parks: the ears are still
             // held, so a reset comes straight back here.
