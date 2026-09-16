@@ -16,11 +16,17 @@
 #      once followed by an esptool run that wedged the box.
 #   4. The port takes exactly one owner, so a capture still holding it makes
 #      the flash fail in a way that looks like the box is dead.
+#   5. The partition table is ours, not espflash's default: the default has a
+#      single `factory` app and no `otadata`, which cannot be updated over the
+#      air. --flash-size is stated rather than detected because the same table
+#      is refused against espflash's offline 4 MB default, and that failure
+#      reads as a bad table rather than a missing flag.
 
 set -euo pipefail
 
 PORT="${PORT:-/dev/ttyUSB0}"
 ELF="${ELF:-firmware/target/xtensa-esp32s3-none-elf/release/teddiebox-firmware}"
+TABLE="${TABLE:-partitions.csv}"
 
 die() {
     echo "flash: $*" >&2
@@ -28,6 +34,7 @@ die() {
 }
 
 [ -f "$ELF" ] || die "no firmware at $ELF — run 'just firmware' first"
+[ -f "$TABLE" ] || die "no partition table at $TABLE — run this from the repository root"
 [ -e "$PORT" ] || die "no $PORT — is the box plugged in?"
 
 if pgrep -f "bench-console.*$PORT" >/dev/null 2>&1; then
@@ -74,6 +81,7 @@ fi
 echo "flash: writing $ELF"
 # espflash first, and its status captured directly rather than through a pipe.
 if ! espflash flash --port "$PORT" --before no-reset --after no-reset \
+    --flash-size 8mb --partition-table "$TABLE" \
     -B 921600 --non-interactive "$ELF"; then
     die "espflash failed.
      NOT running esptool — after a failed flash it leaves the box needing a

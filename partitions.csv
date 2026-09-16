@@ -1,0 +1,36 @@
+# The flash layout, and the reason it is committed rather than left to espflash.
+#
+# espflash's default table has one `factory` app slot and no `otadata`, which
+# is enough to run the box and not enough to update it: OTA needs somewhere to
+# write the next image while the current one is still running, and somewhere to
+# record which of the two the bootloader should pick.
+#
+# This is the stock layout with the smallest change that makes room for
+# `otadata`. `phy_init` keeps its offset and the app still starts at 0x10000,
+# so the only partition that moves at all is `nvs`, which gives up 8 KB. That
+# is the standard ESP-IDF OTA table — 0x4000 of `nvs`, `otadata` at 0xd000 —
+# and it is standard precisely because `otadata` has to come out of the 0x7000
+# bytes between the partition table and the app, which stock fills completely.
+# `nvs` here holds Wi-Fi calibration and nothing of ours; 16 KB is what every
+# ESP-IDF OTA project ships with.
+#
+# The chip is 8 MB, measured 2026-09-16 from espflash's connection banner and
+# confirmed by the second-stage bootloader's own `SPI Flash Size : 8MB`. At
+# 8 MB the sizing question stops being interesting: 3 MB a slot against an
+# image of 1,066,128 bytes is 2.8x headroom. A slot the image outgrows is a
+# build-time failure — espflash refuses it — not a runtime one.
+#
+# There is deliberately no `factory` slot. espflash writes `ota_0` directly, a
+# third copy would cost space for recovery value that shorting J100 already
+# covers, and its presence changes which partition the bootloader prefers.
+#
+# `otadata` could instead have gone above `ota_1`, leaving even `nvs` alone.
+# It is not there because every reference table in ESP-IDF puts it at 0xd000,
+# and the boot path is the wrong place to be the first to try something else.
+#
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x4000
+otadata,    data, ota,     0xd000,   0x2000
+phy_init,   data, phy,     0xf000,   0x1000
+ota_0,      app,  ota_0,   0x10000,  0x300000
+ota_1,      app,  ota_1,   0x310000, 0x300000
