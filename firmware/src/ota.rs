@@ -57,6 +57,145 @@ fn expected(offset: u32) -> u8 {
     (offset as u8) ^ 0x5A
 }
 
+/// Maps the library's state onto the one `teddiebox-ota` reasons about.
+///
+/// `teddiebox-ota` does not depend on `esp-bootloader-esp-idf` — nothing in
+/// it does I/O — so this mapping is the boundary where that type turns into
+/// the crate's own, and it is the only place that has to know both.
+fn to_slot_state(state: OtaImageState) -> teddiebox_ota::SlotState {
+    match state {
+        OtaImageState::New => teddiebox_ota::SlotState::New,
+        OtaImageState::PendingVerify => teddiebox_ota::SlotState::PendingVerify,
+        OtaImageState::Valid | OtaImageState::Invalid | OtaImageState::Aborted => {
+            teddiebox_ota::SlotState::Confirmed
+        }
+        OtaImageState::Undefined => teddiebox_ota::SlotState::Confirmed,
+    }
+}
+
+/// Opens `otadata` and returns the running slot's own state, if there is
+/// one to reason about.
+///
+/// `None` covers both a missing `otadata` partition and a selection this
+/// firmware does not recognise (`Factory`, or an unreadable entry) — a box
+/// that has never run an update looks exactly like this, and must boot
+/// exactly as it always has.
+fn current_state() -> Option<(AppPartitionSubType, OtaImageState)> {
+    let flash = flash();
+    let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
+    let table = partitions::read_partition_table(flash, &mut buffer).ok()?;
+    let otadata = table
+        .find_partition(PartitionType::Data(DataPartitionSubType::Ota))
+        .ok()??;
+    let mut ota = Ota::new(otadata.as_flash_region(flash), 2).ok()?;
+
+    let current = match ota.current_app_partition().ok()? {
+        slot @ (AppPartitionSubType::Ota0 | AppPartitionSubType::Ota1) => slot,
+        _ => return None,
+    };
+    let state = ota.current_ota_state().ok()?;
+    Some((current, state))
+}
+
+/// The first thing `main` calls, before anything that could itself crash.
+///
+/// Spec §7a's measurement means the bootloader will never do this for us:
+/// a slot armed `New` stays `New` forever here. So this either arms the
+/// one-shot confirmation (`New` -> `PendingVerify`) or, finding
+/// `PendingVerify` already sitting there from a boot that never reached
+/// `mark_valid`, switches back to the other slot immediately and reboots.
+/// A box that has never run an update takes neither branch.
+///
+/// Not yet called from `main` — that wiring is a separate, hardware-gated
+/// task. `#[allow(dead_code)]` until then, the same way `tls::Error`'s
+/// unread variants are: real code with no caller yet, not a mistake.
+#[allow(dead_code)]
+pub fn confirm_boot_or_revert() {
+    let Some((current, state)) = current_state() else {
+        return;
+    };
+
+    match teddiebox_ota::boot_action(to_slot_state(state)) {
+        teddiebox_ota::BootAction::Proceed => {}
+        teddiebox_ota::BootAction::ConfirmFirstBoot => {
+            let flash = flash();
+            let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
+            let Ok(table) = partitions::read_partition_table(flash, &mut buffer) else {
+                return;
+            };
+            let Ok(Some(otadata)) =
+                table.find_partition(PartitionType::Data(DataPartitionSubType::Ota))
+            else {
+                return;
+            };
+            let Ok(mut ota) = Ota::new(otadata.as_flash_region(flash), 2) else {
+                return;
+            };
+            if ota
+                .set_current_ota_state(OtaImageState::PendingVerify)
+                .is_ok()
+            {
+                esp_println::println!(
+                    "teddiebox: ota first boot of this slot — armed PendingVerify"
+                );
+            }
+        }
+        teddiebox_ota::BootAction::Revert => {
+            esp_println::println!(
+                "teddiebox: ota {current:?} never confirmed — reverting and rebooting"
+            );
+            let (_, other) = slots(current);
+            let flash = flash();
+            let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
+            let Ok(table) = partitions::read_partition_table(flash, &mut buffer) else {
+                return;
+            };
+            let Ok(Some(otadata)) =
+                table.find_partition(PartitionType::Data(DataPartitionSubType::Ota))
+            else {
+                return;
+            };
+            let Ok(mut ota) = Ota::new(otadata.as_flash_region(flash), 2) else {
+                return;
+            };
+            if ota.set_current_app_partition(other).is_err() {
+                esp_println::println!("teddiebox: ota could not switch slots — booting on anyway");
+                return;
+            }
+            crate::drain_console();
+            esp_hal::system::software_reset();
+        }
+    }
+}
+
+/// Called once the card has mounted and the codec has come up — the things
+/// a genuinely broken build breaks. Idempotent: it only ever transitions a
+/// slot that is still `PendingVerify`, so calling it more than once, or on a
+/// box that never ran an update, does nothing.
+///
+/// Not yet called from `main` — see [`confirm_boot_or_revert`].
+#[allow(dead_code)]
+pub fn mark_valid() {
+    let Some((_, OtaImageState::PendingVerify)) = current_state() else {
+        return;
+    };
+    let flash = flash();
+    let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
+    let Ok(table) = partitions::read_partition_table(flash, &mut buffer) else {
+        return;
+    };
+    let Ok(Some(otadata)) = table.find_partition(PartitionType::Data(DataPartitionSubType::Ota))
+    else {
+        return;
+    };
+    let Ok(mut ota) = Ota::new(otadata.as_flash_region(flash), 2) else {
+        return;
+    };
+    if ota.set_current_ota_state(OtaImageState::Valid).is_ok() {
+        esp_println::println!("teddiebox: ota confirmed — marked Valid");
+    }
+}
+
 /// `teddiebox-ota` drives the erase bookkeeping; this is the flash under it.
 ///
 /// The adapter exists so the probe exercises the shipping code path — the same
