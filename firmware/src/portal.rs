@@ -331,6 +331,7 @@ async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut
     // has to fill. A head is a couple of hundred bytes, and this way the
     // borrow checker has nothing to argue with.
     let Ok(request) = http::parse(&buffer[..filled]) else {
+        esp_println::println!("teddiebox: portal unparseable request, {filled} bytes of {REQUEST}");
         return send_page(
             socket,
             http::Status::BadRequest,
@@ -339,6 +340,20 @@ async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut
         )
         .await;
     };
+
+    // `HEAD_ROOM` was sized from what browsers are *known* to send, never from
+    // one. This is the measurement: the head is the part nothing here
+    // controls, so what matters is how close a real phone gets to the 1024
+    // this buffer reserves above the body.
+    esp_println::println!(
+        "teddiebox: portal head {} of {} head room, body {} of {}, total {} of {}",
+        request.header_len,
+        HEAD_ROOM,
+        request.content_length,
+        MAX_BODY,
+        filled,
+        REQUEST
+    );
 
     match (request.method, request.path) {
         (http::Method::Get, "/") => show(socket, card).await,
@@ -689,5 +704,15 @@ async fn serve_dhcp(stack: Stack<'_>) -> ! {
         {
             esp_println::println!("teddiebox: portal dhcp send failed — {trouble:?}");
         }
+
+        // Printed after the reply is away, so a client with no address never
+        // waits on a diagnostic. Only failures used to print here, which meant
+        // a phone that leased perfectly and a DHCP server that never ran
+        // looked identical on the console.
+        //
+        // The full datagram was dumped here on 2026-09-16 to capture a real
+        // handset's bytes; they are pinned in `dhcp.rs`'s tests now, so the
+        // hex is gone and the summary stays.
+        esp_println::println!("teddiebox: portal dhcp {:?}, {n} bytes", incoming.kind);
     }
 }
