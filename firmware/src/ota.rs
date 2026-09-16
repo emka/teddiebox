@@ -323,6 +323,25 @@ pub fn arm_boot(slot: u8) {
         }
     };
 
+    // A freshly repartitioned box has garbage here, not zeroes. `otadata` at
+    // 0xd000 lands inside what the *old* layout called `nvs` (0x9000..0xf000),
+    // and espflash writes only the bootloader, the table and the app — so the
+    // sector still holds whatever Wi-Fi calibration was there. An erased slot
+    // would validate fine; leftover NVS does not, and every call here fails
+    // `Invalid` until something clears it.
+    //
+    // Resetting to `Factory` is the library's own way of saying "no slot is
+    // selected": it rewrites both entries to 0xff through a path that erases
+    // first. Done here rather than silently at boot because it throws away a
+    // real selection if there ever is one, and the bench should see it happen.
+    if ota.current_app_partition().is_err() {
+        esp_println::println!("teddiebox: ota otadata is not initialised — clearing it first");
+        if let Err(trouble) = ota.set_current_app_partition(AppPartitionSubType::Factory) {
+            esp_println::println!("teddiebox: ota could not clear otadata — {trouble:?}");
+            return;
+        }
+    }
+
     if let Err(trouble) = ota.set_current_app_partition(target) {
         esp_println::println!("teddiebox: ota could not select {target:?} — {trouble:?}");
         return;
