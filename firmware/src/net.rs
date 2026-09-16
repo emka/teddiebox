@@ -65,12 +65,21 @@ pub const SETUP_PASSWORD: &str = "teddiebox";
 /// DHCP: one TCP listener for the HTTP server, and one UDP socket for the
 /// DHCP *server* it runs for whichever device joins the access point.
 ///
-/// **This number is a guess.** The two paths never run at once — the portal
-/// only comes up over [`Radio::serve`], holding a different singleton than
-/// [`Radio::acquire`] — so 5 covers the worse of the two rather than their
-/// sum, but nothing has measured either path's actual use yet. A later bench
-/// task settles it.
-const SOCKETS: usize = 5;
+/// **Measured on 2026-09-16, in both directions.** The two paths never run at
+/// once — the portal only comes up over [`Radio::serve`], holding a different
+/// singleton than [`Radio::acquire`] — so this covers the worse of the two
+/// rather than their sum, and the worse of the two is the station path's three.
+///
+/// At **3** the whole station path works: associate, lease, resolve, TLS, and a
+/// download running at length. At **2** it gets further than it looks like it
+/// should — it associates, takes a lease, and even resolves the host — and then
+/// panics inside smoltcp (`socket_set.rs:83`, a full `SocketSet`) the moment
+/// TLS asks for its TCP socket. That failure is the accounting above confirmed
+/// from the other side: DNS and DHCP really are spent before our code runs.
+///
+/// It was 5 until this was measured, which was two slots of `StackResources`
+/// bought against an estimate.
+const SOCKETS: usize = 3;
 
 /// Why the radio could not be brought up.
 #[derive(Debug, Clone, PartialEq, Eq)]
