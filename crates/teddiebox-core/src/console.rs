@@ -148,6 +148,30 @@ pub enum Command {
     /// second core's stack — needs this number, and until now it has only ever
     /// been assumed.
     StackReport,
+    /// Report which slot booted and what `otadata` says about it.
+    ///
+    /// The cheap half of the OTA spikes: it reads and changes nothing, and it
+    /// is the only way to see from outside whether a rollback actually
+    /// happened or the box merely rebooted.
+    OtaStatus,
+    /// Erase, write and read back one sector of the slot that is not running.
+    ///
+    /// Spec §7b. The question is whether a flash write survives with the radio
+    /// associated — flash writes suspend the instruction cache while Wi-Fi
+    /// ISRs are firing, and if they do not survive, the image has to land on
+    /// the card first and the sink changes shape. Writing into the inactive
+    /// slot rather than a scratch area is deliberate: it is where a real
+    /// update writes, so the answer is about the thing being asked about.
+    OtaWriteProbe,
+    /// Arm the next boot on `slot`, in the state a fresh image is left in.
+    ///
+    /// Spec §7a. Sets the slot and marks it pending verification, which is
+    /// what a real update does immediately before rebooting — so if this
+    /// bootloader honours rollback, an image that panics before marking
+    /// itself valid comes back as the *other* slot. If it does not, the box
+    /// boots the panicking image for ever and the way out is J100. That is
+    /// the finding, not a mishap, but it is why the slot is typed out.
+    OtaBoot { slot: u8 },
     /// Check the server's certificate, or don't.
     ///
     /// A bench override of the card's `insecure` key, the way
@@ -334,6 +358,8 @@ impl CommandWatch {
                     b"net tls" => Some(Command::NetTls),
                     b"token" => Some(Command::ReadToken),
                     b"stack" => Some(Command::StackReport),
+                    b"otas" => Some(Command::OtaStatus),
+                    b"otaw" => Some(Command::OtaWriteProbe),
                     b"net insecure yes" | b"net insecure true" => Some(Command::NetInsecure(true)),
                     b"net insecure no" | b"net insecure false" => Some(Command::NetInsecure(false)),
                     b"net down" => Some(Command::NetDown),
@@ -357,7 +383,8 @@ impl CommandWatch {
                         .or_else(|| slap(other))
                         .or_else(|| parse_read_memory(other))
                         .or_else(|| parse_credential(other))
-                        .or_else(|| parse_get(other)),
+                        .or_else(|| parse_get(other))
+                        .or_else(|| parse_ota_boot(other)),
                 }
             };
             self.len = 0;
@@ -391,6 +418,20 @@ fn hex_u32(digits: &[u8]) -> Option<u32> {
         value = (value << 4) | u32::from(nibble);
     }
     Some(value)
+}
+
+/// Reads `otaboot <0|1>`, the slot to arm the next boot on.
+///
+/// Exactly one digit, and only the two that name a slot. Nothing here is
+/// clamped or rounded towards a valid answer: this command arms a boot that
+/// may not come back, so a line that is not exactly right is not a command at
+/// all.
+fn parse_ota_boot(line: &[u8]) -> Option<Command> {
+    match line.strip_prefix(b"otaboot ")? {
+        b"0" => Some(Command::OtaBoot { slot: 0 }),
+        b"1" => Some(Command::OtaBoot { slot: 1 }),
+        _ => None,
+    }
 }
 
 /// Reads `pcm <2 hex>`, a frame count.
@@ -1165,6 +1206,51 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304EZ\n"), None);
         assert_eq!(feed_all(&mut watch, b"get \n"), None);
     }
+    /// The three OTA spike commands, which exist to answer questions the
+    /// firmware half cannot be written without: whether a sector survives a
+    /// write while the radio is up, and whether this bootloader rolls back.
+    #[test]
+    fn ota_status_is_recognised() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"otas\n"), Some(Command::OtaStatus));
+    }
+
+    #[test]
+    fn ota_write_probe_is_recognised() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"otaw\n"),
+            Some(Command::OtaWriteProbe)
+        );
+    }
+
+    /// Naming the slot rather than saying "the other one": the command arms a
+    /// boot that may not come back, so which slot it means has to be on the
+    /// line somebody typed, not inferred from state they cannot see.
+    #[test]
+    fn ota_boot_takes_a_slot() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"otaboot 0\n"),
+            Some(Command::OtaBoot { slot: 0 })
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"otaboot 1\n"),
+            Some(Command::OtaBoot { slot: 1 })
+        );
+    }
+
+    /// There are two slots. Anything else is a typo, and arming a boot on a
+    /// typo is how a bench session ends at J100.
+    #[test]
+    fn ota_boot_refuses_anything_but_a_slot() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"otaboot 2\n"), None);
+        assert_eq!(feed_all(&mut watch, b"otaboot \n"), None);
+        assert_eq!(feed_all(&mut watch, b"otaboot\n"), None);
+        assert_eq!(feed_all(&mut watch, b"otaboot 01\n"), None);
+    }
+
     /// The measurement three experiments this session guessed at instead.
     #[test]
     fn stack_is_recognised() {

@@ -7,6 +7,7 @@ mod led;
 mod libc_shim;
 mod net;
 mod nfc;
+mod ota;
 mod pins;
 mod portal;
 mod sleep;
@@ -4476,6 +4477,9 @@ async fn main(spawner: Spawner) {
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);
                 }
                 Some(Command::StackReport) => stack::report(),
+                Some(Command::OtaStatus) => ota::status(),
+                Some(Command::OtaWriteProbe) => ota::write_probe(),
+                Some(Command::OtaBoot { slot }) => ota::arm_boot(slot),
                 Some(Command::ReadToken) => {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_READ_TOKEN, Ordering::Relaxed);

@@ -51,6 +51,22 @@ esp-println = { version = "0.18", default-features = false, features = [
 ] }
 esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
+# Named directly only to turn `critical-section` back on. `esp-storage` is
+# already here underneath `esp-bootloader-esp-idf`, which declares it
+# `default-features = false` — and `critical-section` is in esp-storage's
+# default set, so it arrives *off*.
+#
+# With it off, `maybe_with_critical_section` compiles to a bare call and the
+# ROM's erase and write run with interrupts live. The ROM turns the cache off
+# to invalidate it, so the next timer interrupt whose handler lives in flash
+# cannot be fetched — and neither can the fault handler. The box stops dead,
+# silently, with the LED frozen mid-colour. Measured on 2026-09-16: the first
+# `otaw` did exactly that and needed a power cycle.
+#
+# Cargo unifies features across the graph, so enabling it here enables it for
+# the `esp-bootloader-esp-idf` path too. Verify with
+# `cargo tree -i esp-storage -e features`, which is how its absence was found.
+esp-storage = { version = "0.10.0", features = ["critical-section"] }
 embedded-sdmmc = { version = "0.10", default-features = false }
 
 # TLS, because the teddyCloud on this LAN speaks TLS 1.2 and nothing else.
@@ -141,6 +157,10 @@ teddiebox-config = { path = "../crates/teddiebox-config" }
 teddiebox-cloud = { path = "../crates/teddiebox-cloud" }
 teddiebox-download = { path = "../crates/teddiebox-download" }
 teddiebox-portal = { path = "../crates/teddiebox-portal" }
+# The OTA decisions and the flash sector bookkeeping. Brought in for the
+# bench spikes so they drive the shipping arithmetic rather than a parallel
+# copy written for the bench; the firmware half will want it regardless.
+teddiebox-ota = { path = "../crates/teddiebox-ota" }
 
 # esp-radio is only published as 1.0.0-beta.0, which wants esp-hal ~1.1.0 and
 # esp-radio-rtos-driver 0.3 — neither compatible with the esp-hal 1.2.0-rc.0

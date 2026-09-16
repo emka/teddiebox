@@ -2874,6 +2874,7 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "esp-storage",
  "heapless 0.8.0",
  "lis3dh",
  "mbedtls-rs",
@@ -2885,6 +2886,7 @@ dependencies = [
  "teddiebox-config",
  "teddiebox-core",
  "teddiebox-download",
+ "teddiebox-ota",
  "teddiebox-portal",
  "teddiebox-taf",
  "tlv320dac3100",
@@ -2894,6 +2896,13 @@ dependencies = [
 [[package]]
 name = "teddiebox-opus-sys"
 version = "0.1.0"
+
+[[package]]
+name = "teddiebox-ota"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+]
 
 [[package]]
 name = "teddiebox-portal"
