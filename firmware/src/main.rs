@@ -1999,6 +1999,17 @@ static CODEC_READY: AtomicBool = AtomicBool::new(false);
 /// Card mount is lazy — the ordinary boot only does it once the start-up
 /// jingle asks to play — so this is the second half `ota::mark_valid` waits
 /// on, alongside `CODEC_READY`.
+///
+/// Setup mode's own card-open path deliberately never sets this — see the
+/// branch below that mounts the card for `portal::run`. That is what lets a
+/// bench session force the revert path on purpose, without ever flashing a
+/// broken image. The same absence has a cost outside the bench: holding both
+/// ears to enter setup mode shortly after a genuinely good update landed —
+/// say, to fix Wi-Fi credentials — leaves that update's slot unconfirmed, and
+/// it gets reverted on the next boot even though nothing was wrong with it.
+/// Accepted rather than fixed, because it self-heals via the next
+/// revalidation or download, and because setup mode existing at all is
+/// already an emergency recovery path.
 static CARD_MOUNTED: AtomicBool = AtomicBool::new(false);
 
 /// Set when the box has said it is turning off, and must therefore do it.
@@ -3943,6 +3954,18 @@ async fn nfc_reader(
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
 
+    // Clear the ROM's force-download-boot request. It lives in the RTC domain
+    // and survives a reset — that is what makes `dl` work — so leaving it set
+    // would send every future reset back into download mode. Clearing it here
+    // means the box can only ever be one reset away from running again.
+    //
+    // Ahead of the OTA check below on purpose: that check can itself reboot
+    // (a Revert), and a Revert before this bit is cleared would send the box
+    // into download mode instead of the other slot.
+    esp_hal::peripherals::LPWR::regs()
+        .option1()
+        .modify(|_, w| w.force_download_boot().clear_bit());
+
     // Before anything else — including the stack paint below — because this
     // is the check that catches an image which crashed on its *previous*
     // boot before reaching mark_valid. Nothing above this line has run yet
@@ -3977,14 +4000,6 @@ async fn main(spawner: Spawner) {
 
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
-
-    // Clear the ROM's force-download-boot request. It lives in the RTC domain
-    // and survives a reset — that is what makes `dl` work — so leaving it set
-    // would send every future reset back into download mode. Clearing it here
-    // means the box can only ever be one reset away from running again.
-    esp_hal::peripherals::LPWR::regs()
-        .option1()
-        .modify(|_, w| w.force_download_boot().clear_bit());
 
     let mut board = BoardPins::new(p.GPIO45, p.GPIO47);
     let mut gates = Gates::at_reset();

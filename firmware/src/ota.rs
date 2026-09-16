@@ -115,24 +115,43 @@ pub fn confirm_boot_or_revert() {
         teddiebox_ota::BootAction::ConfirmFirstBoot => {
             let flash = flash();
             let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-            let Ok(table) = partitions::read_partition_table(flash, &mut buffer) else {
-                return;
+            let table = match partitions::read_partition_table(flash, &mut buffer) {
+                Ok(table) => table,
+                Err(trouble) => {
+                    esp_println::println!(
+                        "teddiebox: ota cannot read the partition table — {trouble:?}"
+                    );
+                    return;
+                }
             };
-            let Ok(Some(otadata)) =
-                table.find_partition(PartitionType::Data(DataPartitionSubType::Ota))
-            else {
-                return;
-            };
-            let Ok(mut ota) = Ota::new(otadata.as_flash_region(flash), 2) else {
-                return;
-            };
-            if ota
-                .set_current_ota_state(OtaImageState::PendingVerify)
-                .is_ok()
+            let otadata = match table.find_partition(PartitionType::Data(DataPartitionSubType::Ota))
             {
-                esp_println::println!(
+                Ok(Some(entry)) => entry,
+                Ok(None) => {
+                    esp_println::println!(
+                        "teddiebox: ota has no otadata partition — this flash cannot update"
+                    );
+                    return;
+                }
+                Err(trouble) => {
+                    esp_println::println!("teddiebox: ota cannot find otadata — {trouble:?}");
+                    return;
+                }
+            };
+            let mut ota = match Ota::new(otadata.as_flash_region(flash), 2) {
+                Ok(ota) => ota,
+                Err(trouble) => {
+                    esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
+                    return;
+                }
+            };
+            match ota.set_current_ota_state(OtaImageState::PendingVerify) {
+                Ok(()) => esp_println::println!(
                     "teddiebox: ota first boot of this slot — armed PendingVerify"
-                );
+                ),
+                Err(trouble) => {
+                    esp_println::println!("teddiebox: ota could not set the state — {trouble:?}")
+                }
             }
         }
         teddiebox_ota::BootAction::Revert => {
@@ -157,6 +176,25 @@ pub fn confirm_boot_or_revert() {
                 esp_println::println!("teddiebox: ota could not switch slots — booting on anyway");
                 return;
             }
+            // `set_current_app_partition` only rewrites `other`'s sequence
+            // number; it says nothing about `other`'s own `ota_state`, which
+            // still holds whatever that slot's otadata entry last recorded.
+            // If that happens to be `PendingVerify` too — reachable by arming
+            // one slot, booting it unconfirmed, then arming the other before
+            // the first ever confirms — reverting *to* it would leave a slot
+            // that reverts again on its own next boot, before the console
+            // even comes up. Falling back to a slot is this firmware
+            // re-trusting it, the same as a fresh confirmation would, so it
+            // is stamped `Valid` here rather than left to whatever it said
+            // before. `set_current_app_partition` leaves this same handle
+            // addressing the slot it just selected, so this lands on `other`,
+            // never on `current`.
+            if ota.set_current_ota_state(OtaImageState::Valid).is_err() {
+                esp_println::println!(
+                    "teddiebox: ota could not stamp {other:?} valid — booting on anyway"
+                );
+                return;
+            }
             crate::drain_console();
             esp_hal::system::software_reset();
         }
@@ -173,18 +211,38 @@ pub fn mark_valid() {
     };
     let flash = flash();
     let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-    let Ok(table) = partitions::read_partition_table(flash, &mut buffer) else {
-        return;
+    let table = match partitions::read_partition_table(flash, &mut buffer) {
+        Ok(table) => table,
+        Err(trouble) => {
+            esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
+            return;
+        }
     };
-    let Ok(Some(otadata)) = table.find_partition(PartitionType::Data(DataPartitionSubType::Ota))
-    else {
-        return;
+    let otadata = match table.find_partition(PartitionType::Data(DataPartitionSubType::Ota)) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            esp_println::println!(
+                "teddiebox: ota has no otadata partition — this flash cannot update"
+            );
+            return;
+        }
+        Err(trouble) => {
+            esp_println::println!("teddiebox: ota cannot find otadata — {trouble:?}");
+            return;
+        }
     };
-    let Ok(mut ota) = Ota::new(otadata.as_flash_region(flash), 2) else {
-        return;
+    let mut ota = match Ota::new(otadata.as_flash_region(flash), 2) {
+        Ok(ota) => ota,
+        Err(trouble) => {
+            esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
+            return;
+        }
     };
-    if ota.set_current_ota_state(OtaImageState::Valid).is_ok() {
-        esp_println::println!("teddiebox: ota confirmed — marked Valid");
+    match ota.set_current_ota_state(OtaImageState::Valid) {
+        Ok(()) => esp_println::println!("teddiebox: ota confirmed — marked Valid"),
+        Err(trouble) => {
+            esp_println::println!("teddiebox: ota could not set the state — {trouble:?}")
+        }
     }
 }
 
@@ -222,10 +280,13 @@ static mut FLASH: Option<FlashStorage<'static>> = None;
 
 /// Hands out the one flash handle.
 ///
-/// SAFETY: nothing else in this firmware touches `FLASH` — it is not taken in
-/// `main`, not passed to a task, and not named anywhere else in the tree. The
-/// console loop is the only caller and runs one command at a time, so no
-/// second `&mut` to this can exist.
+/// SAFETY: every caller of this — the first line of `main`
+/// ([`confirm_boot_or_revert`]), the main loop's confirmation check
+/// ([`mark_valid`]), and the console's OTA commands ([`status`],
+/// [`write_probe`], [`arm_boot`]) — runs in the same task, and none of them
+/// holds the reference across an `.await` point. One task, never reentered
+/// while a `&mut` is live, is what keeps this to one `&mut` at a time, not
+/// which of those callers happens to be running.
 fn flash() -> &'static mut FlashStorage<'static> {
     unsafe {
         let slot = &mut *core::ptr::addr_of_mut!(FLASH);
