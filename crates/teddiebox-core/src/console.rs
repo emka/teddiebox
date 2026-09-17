@@ -206,6 +206,15 @@ pub enum Command {
     /// `play X` are the two halves of one job. The halves are already split
     /// here because that is how the directory and file are named on the card.
     PlayCache { directory: u32, file: u32 },
+    /// Checksum one file a download put in `/CACHE/`, without walking the
+    /// rest of the card.
+    ///
+    /// `sd` computes the same per-file CRC32, but only as one step of a walk
+    /// over everything on the card, which takes hours on a large one — so a
+    /// downloaded file's whole-file integrity has never been checkable on
+    /// its own. Named the same way `get X` and `play X` are: the sixteen
+    /// digits that fetched a download also name the file it landed in.
+    Crc { directory: u32, file: u32 },
     /// Drop the association and power the modem down.
     NetDown,
     /// Report whether the radio is up, and on what address.
@@ -384,6 +393,7 @@ impl CommandWatch {
                         .or_else(|| parse_read_memory(other))
                         .or_else(|| parse_credential(other))
                         .or_else(|| parse_get(other))
+                        .or_else(|| parse_crc(other))
                         .or_else(|| parse_ota_boot(other)),
                 }
             };
@@ -506,6 +516,19 @@ fn parse_get(line: &[u8]) -> Option<Command> {
         *byte = hex_byte(digits)?;
     }
     Some(Command::Get(uid))
+}
+
+/// Reads `crc <16 hex>` into the directory/file split `play`'s sixteen-digit
+/// form already uses — the same identifier, so a file just downloaded can be
+/// checked by pasting the same digits `get` and `play` took.
+fn parse_crc(line: &[u8]) -> Option<Command> {
+    let rest = line.strip_prefix(b"crc ")?;
+    if rest.len() != 16 {
+        return None;
+    }
+    let directory = hex_u32(&rest[..8])?;
+    let file = hex_u32(&rest[8..])?;
+    Some(Command::Crc { directory, file })
 }
 
 fn hex_byte(digits: &[u8]) -> Option<u8> {
@@ -1290,6 +1313,33 @@ mod tests {
             })
         );
     }
+    /// The third leg of `get`/`play`/`crc`: the same sixteen digits that
+    /// fetched a download and play it back now check it, without a walk over
+    /// the rest of the card.
+    #[test]
+    fn crc_takes_a_ruid_to_mean_the_cache() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"crc 1A2B3C4D500304E0\n"),
+            Some(Command::Crc {
+                directory: 0x1A2B_3C4D,
+                file: 0x5003_04E0
+            })
+        );
+    }
+
+    /// Short, long, or not hex is not a command — the same discipline `get`
+    /// holds identifiers to, and for the same reason: a digit out names a
+    /// different file.
+    #[test]
+    fn a_malformed_crc_identifier_is_not_a_command() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"crc 1A2B3C4D500304E\n"), None);
+        assert_eq!(feed_all(&mut watch, b"crc 1A2B3C4D500304E00\n"), None);
+        assert_eq!(feed_all(&mut watch, b"crc 1A2B3C4D500304EZ\n"), None);
+        assert_eq!(feed_all(&mut watch, b"crc \n"), None);
+    }
+
     /// Reading the token is separate from `mem` because it is not for looking
     /// at: `mem` prints blocks so a person can compare them, this keeps them so
     /// the box can spend them.

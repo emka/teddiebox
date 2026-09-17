@@ -475,6 +475,55 @@ impl Mounted {
         self.open_audio_under(CACHE_DIR, directory, file)
     }
 
+    /// Reads `CACHE/<directory>/<file>` end to end and returns its size and
+    /// CRC32, without walking the rest of the card.
+    ///
+    /// The same [`Crc32`] and the same read-and-yield loop `checksum_file`
+    /// runs as one step of `walk` — aimed here at a single named file, so a
+    /// download's whole-file integrity is checkable without the hours a walk
+    /// takes on a large card.
+    pub async fn checksum_cache(
+        &self,
+        directory: u32,
+        file: u32,
+    ) -> Result<(u32, u32), &'static str> {
+        let (raw_file, size) = self.open_cache(directory, file)?;
+
+        let mut crc = Crc32::new();
+        let mut buffer = [0u8; 512];
+        let mut read: u64 = 0;
+        let mut blocks: u32 = 0;
+
+        loop {
+            match self.read(raw_file, &mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    crc.update(&buffer[..n]);
+                    read += n as u64;
+                }
+                Err(reason) => {
+                    self.close_file(raw_file);
+                    return Err(reason);
+                }
+            }
+
+            blocks += 1;
+            if blocks.is_multiple_of(YIELD_EVERY_BLOCKS) {
+                yield_now().await;
+            }
+        }
+
+        self.close_file(raw_file);
+
+        // A short read is silent corruption otherwise: the checksum would be
+        // of less than the file and would simply disagree, without saying why.
+        if read != u64::from(size) {
+            return Err("short read");
+        }
+
+        Ok((size, crc.finish()))
+    }
+
     /// Opens `<tree>/<directory>/<file>` for reading, and says how long it is.
     ///
     /// Names are the eight upper-case hex digits FAT stores, formatted here

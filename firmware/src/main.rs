@@ -994,6 +994,7 @@ const REQUEST_TAF: u8 = 4;
 const REQUEST_CONTENT: u8 = 5;
 const REQUEST_PCM: u8 = 6;
 const REQUEST_CACHE: u8 = 7;
+const REQUEST_CRC: u8 = 8;
 
 /// What the console has asked the NFC reader to do.
 ///
@@ -2987,6 +2988,7 @@ async fn media(
                 | REQUEST_CONTENT
                 | REQUEST_CACHE
                 | REQUEST_PCM
+                | REQUEST_CRC
         ) && card.is_none()
         {
             let Some((spi, cs)) = bus.take() else {
@@ -3039,6 +3041,21 @@ async fn media(
                     let frames = PCM_FRAMES.load(Ordering::Relaxed);
                     if let Err(reason) = audio::dump_pcm(card, frames).await {
                         esp_println::println!("teddiebox: pcm failed — {reason}");
+                    }
+                }
+            }
+
+            REQUEST_CRC => {
+                if let Some(card) = card.as_ref() {
+                    let directory = CONTENT_DIRECTORY.load(Ordering::Relaxed);
+                    let file = CONTENT_FILE.load(Ordering::Relaxed);
+                    match card.checksum_cache(directory, file).await {
+                        Ok((size, crc)) => esp_println::println!(
+                            "teddiebox: crc /CACHE/{directory:08X}/{file:08X} {size} {crc:08X}"
+                        ),
+                        Err(reason) => esp_println::println!(
+                            "teddiebox: crc /CACHE/{directory:08X}/{file:08X} failed — {reason}"
+                        ),
                     }
                 }
             }
@@ -4193,7 +4210,7 @@ async fn main(spawner: Spawner) {
     // on whichever request happens to need it first.
     let mut boot_confirmed = false;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off | reval"
+        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off | reval"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -4534,6 +4551,12 @@ async fn main(spawner: Spawner) {
                     CONTENT_DIRECTORY.store(directory, Ordering::Relaxed);
                     CONTENT_FILE.store(file, Ordering::Relaxed);
                     REQUEST.store(REQUEST_CACHE, Ordering::Relaxed);
+                }
+                Some(Command::Crc { directory, file }) => {
+                    board.apply(gates.power(Rail::Storage, true));
+                    CONTENT_DIRECTORY.store(directory, Ordering::Relaxed);
+                    CONTENT_FILE.store(file, Ordering::Relaxed);
+                    REQUEST.store(REQUEST_CRC, Ordering::Relaxed);
                 }
                 Some(Command::NetTls) => {
                     NET_REQUEST.store(NET_TLS, Ordering::Relaxed);
