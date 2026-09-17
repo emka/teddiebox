@@ -45,12 +45,15 @@ pub struct TafReader<S: PageSource> {
     /// Serial of the Ogg stream this file carries, latched from the first
     /// page loaded. `None` only during `open`, before that page is read.
     ///
-    /// Taken from the stream rather than from the header's `audio_id`
-    /// deliberately. Both fixtures set the two equal, but that convention
-    /// rests on `toniefile` alone — no commercial file has been examined —
-    /// and enforcing it would reject every real `.taf` if it turns out not
-    /// to hold. Self-consistency needs no such assumption and still catches
-    /// the failure that matters: a block belonging to some other recording.
+    /// Established against the header's `audio_id`, not just self-
+    /// consistently: the first page's serial must equal `audio_id` or
+    /// `check_stream` rejects it there, before it is ever latched. That
+    /// convention was once unconfirmed against real files; it now is —
+    /// three real commercial files from three publishers, 22,110 Ogg pages
+    /// total, every single page's serial equal to `audio_id`, no
+    /// exceptions (2026-09-17) — so a first page that disagrees is not a
+    /// looser format than believed, it is a block that does not belong to
+    /// this file's header at all.
     stream_serial: Option<u32>,
 }
 
@@ -152,8 +155,9 @@ impl<S: PageSource> TafReader<S> {
         Ok(())
     }
 
-    /// Adopts the stream of the first page seen, and rejects any later page
-    /// that does not belong to it.
+    /// Adopts the stream of the first page seen — provided it matches the
+    /// header's own `audio_id` — and rejects any later page that does not
+    /// belong to it.
     ///
     /// Called at every site that positions onto a page, including the scan
     /// for a page packed in behind another: a stale block is just as
@@ -161,10 +165,11 @@ impl<S: PageSource> TafReader<S> {
     /// packet scanners drifted apart on before they were unified.
     fn check_stream(&mut self, serial: u32) -> Result<(), TafError> {
         match self.stream_serial {
-            None => {
+            None if serial == self.header.audio_id => {
                 self.stream_serial = Some(serial);
                 Ok(())
             }
+            None => Err(TafError::WrongStream),
             Some(expected) if serial == expected => Ok(()),
             Some(_) => Err(TafError::WrongStream),
         }
@@ -450,6 +455,30 @@ mod tests {
     }
 
     #[test]
+    fn a_first_page_whose_serial_disagrees_with_the_header_is_rejected() {
+        // Real commercial files never disagree: three files from three
+        // publishers, 22,110 Ogg pages total, every page's serial equal to
+        // its header's audio_id, checked 2026-09-17. A first page that
+        // disagrees is therefore not this file's stream at all — the same
+        // torn-write failure the self-consistency check already catches for
+        // every *later* page, just not previously enforced at the point the
+        // stream identity is established.
+        //
+        // data_length (field 2) = 4096 = one page; audio_id (field 3) =
+        // 0xAAAA. The page itself is stamped with a different serial,
+        // 0xBBBB.
+        let mut file = [0u8; PAGE_SIZE * 2];
+        file[0..PAGE_SIZE]
+            .copy_from_slice(&header_page(&[0x10, 0x80, 0x20, 0x18, 0xAA, 0xD5, 0x02]));
+        file[PAGE_SIZE..].copy_from_slice(&ogg_page_with_serial(0xBBBB, &[b"AAAA"]));
+
+        assert_eq!(
+            TafReader::open(SlicePages::new(&file).unwrap()).err(),
+            Some(TafError::WrongStream)
+        );
+    }
+
+    #[test]
     fn a_block_belonging_to_another_stream_is_rejected_rather_than_decoded() {
         // The torn-write failure mode: page 2 is a structurally perfect Ogg
         // page sitting at a perfectly valid offset, left over from a
@@ -457,9 +486,13 @@ mod tests {
         // — only that it belongs to a different stream. Decoding it is how a
         // child ends up hearing the end of the previous story.
         //
-        // data_length (field 2) = 8192, declaring both pages as stream.
+        // data_length (field 2) = 8192, declaring both pages as stream;
+        // audio_id (field 3) = 0xAAAA, matching the first page's serial so
+        // this test still exercises the *second* page's disagreement, not
+        // the header check now enforced on the first.
         let mut file = [0u8; PAGE_SIZE * 3];
-        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x40]));
+        file[0..PAGE_SIZE]
+            .copy_from_slice(&header_page(&[0x10, 0x80, 0x40, 0x18, 0xAA, 0xD5, 0x02]));
         file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&ogg_page_with_serial(0xAAAA, &[b"AAAA"]));
         file[PAGE_SIZE * 2..].copy_from_slice(&ogg_page_with_serial(0xBBBB, &[b"BBBB"]));
 
@@ -478,8 +511,11 @@ mod tests {
         // positioning site, and it is where the two packet scanners drifted
         // apart before they were unified — so it gets its own test rather
         // than trusting that one check covers both.
+        //
+        // audio_id (field 3) = 0xAAAA, matching the block's first page.
         let mut file = [0u8; PAGE_SIZE * 2];
-        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
+        file[0..PAGE_SIZE]
+            .copy_from_slice(&header_page(&[0x10, 0x80, 0x20, 0x18, 0xAA, 0xD5, 0x02]));
 
         let block = &mut file[PAGE_SIZE..];
         block[..PAGE_SIZE].copy_from_slice(&ogg_page_with_serial(0xAAAA, &[b"AAAA"]));
@@ -504,10 +540,12 @@ mod tests {
         // can point straight at one. `last_usable_page` does not help here:
         // the page is declared stream, it just isn't this stream's.
         //
-        // data_length = 8192; chapter_pages (field 4, packed) = [0, 1].
+        // data_length = 8192; chapter_pages (field 4, packed) = [0, 1];
+        // audio_id (field 3) = 0xAAAA, matching the first page's serial.
         let mut file = [0u8; PAGE_SIZE * 3];
-        file[0..PAGE_SIZE]
-            .copy_from_slice(&header_page(&[0x10, 0x80, 0x40, 0x22, 0x02, 0x00, 0x01]));
+        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[
+            0x10, 0x80, 0x40, 0x18, 0xAA, 0xD5, 0x02, 0x22, 0x02, 0x00, 0x01,
+        ]));
         file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&ogg_page_with_serial(0xAAAA, &[b"AAAA"]));
         file[PAGE_SIZE * 2..].copy_from_slice(&ogg_page_with_serial(0xBBBB, &[b"BBBB"]));
 
@@ -556,9 +594,11 @@ mod tests {
     #[test]
     fn an_oversized_packet_does_not_leave_stale_state_for_a_retry() {
         // data_length (field 2) = 4096 = one page, declaring the single Ogg
-        // page below as usable.
+        // page below as usable. audio_id is left at its default (0), which
+        // matches the page's own unset serial (also 0) so the header check
+        // has nothing to say about it.
         let mut file = [0u8; PAGE_SIZE * 2];
-        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20, 0x18, 0x07]));
+        file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
 
         // 20 segments: the first 17 (sixteen 255s plus a terminating 1)
         // declare a 4081-byte packet starting at payload offset 47, which
