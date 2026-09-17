@@ -3696,6 +3696,19 @@ async fn net(
                     // one, and it is the whole reason for associating.
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);
                     let gave_up = bring_up(&mut radio, tls, false).await;
+                    // The pre-arm above is only ever consumed by `bring_up`'s
+                    // own inner loop, reached after a successful association —
+                    // every early return happens before that loop starts. Left
+                    // uncleared here, this exact request would still be
+                    // sitting in `NET_REQUEST` on this task's next iteration,
+                    // and it would retry the identical fetch forever: on a
+                    // network that keeps refusing, that competed with
+                    // playback for the executor every failed attempt and
+                    // measurably glitched the audio (up to 291 DMA restarts
+                    // over 263 s, 2026-09-17).
+                    if gave_up.is_some() {
+                        NET_REQUEST.store(REQUEST_NONE, Ordering::Relaxed);
+                    }
                     // A question that reaches here unanswered is answered now,
                     // whatever went wrong. The reducer holds the figure silent
                     // until it hears back, and a radio that would not come up
