@@ -13,6 +13,24 @@ pub const MAX_ETAG: usize = 64;
 
 pub type ETag = String<MAX_ETAG>;
 
+/// Reads a server's ETag header value, or `None` if it is unusable.
+///
+/// The value is echoed back unescaped into `If-None-Match:` and `If-Range:`
+/// request lines by [`write_request`], and written into the `.MET` sidecar, so
+/// the bytes a server puts here land on our own wire. An allow-list of
+/// printable, non-space ASCII is both what RFC 9110 calls an entity-tag and the
+/// cheapest way to keep a `CR`, an `LF` or a space -- the three that would let a
+/// server add a header or a token to the next request -- out of a header value.
+///
+/// Dropping rather than failing matches the overlong case: the cost is one
+/// re-download.
+pub fn parse_etag(value: &str) -> Option<ETag> {
+    if !value.bytes().all(|b| b.is_ascii_graphic()) {
+        return None;
+    }
+    ETag::try_from(value).ok()
+}
+
 /// Everything that varies between one content request and the next.
 ///
 /// A struct rather than a parameter list because resuming adds fields, and a

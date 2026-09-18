@@ -1,6 +1,6 @@
 //! Parses just enough of an HTTP response to decide what to do with it.
 
-use crate::{CloudError, ETag};
+use crate::{request::parse_etag, CloudError, ETag};
 
 /// The `Content-Range` of a `206`, which is the only place a resumed response
 /// states the file's full length.
@@ -106,8 +106,9 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
             // The first usable value wins. Assigning unconditionally let a
             // later unusable copy write `None` straight over a good one.
             if etag.is_none() {
-                // Too long to store: drop it. The cost is one re-download.
-                etag = ETag::try_from(value).ok();
+                // Too long, or carrying a byte that has no business in a
+                // header value: drop it. The cost is one re-download.
+                etag = parse_etag(value);
             }
         } else if name.eq_ignore_ascii_case("content-length") && content_length.is_none() {
             content_length = value.parse().ok();
@@ -224,6 +225,18 @@ mod tests {
         const RAW: &[u8] = b"HTTP/1.1 200 OK\r\nETag: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n\r\n";
         let (head, _) = parse_head(RAW).unwrap();
         assert_eq!(head.etag, None, "a re-download is better than an error");
+    }
+
+    /// The value is written back out into `If-None-Match:` and `If-Range:`
+    /// request lines, and into the `.MET` sidecar, without escaping. A bare
+    /// `CR` survives the `\r\n` split that finds header lines, so a server
+    /// that puts one in an ETag writes a line terminator into our next
+    /// request.
+    #[test]
+    fn an_etag_carrying_a_bare_cr_is_dropped() {
+        const RAW: &[u8] = b"HTTP/1.1 200 OK\r\nETag: \"v1\rX-Thing: 1\"\r\n\r\n";
+        let (head, _) = parse_head(RAW).unwrap();
+        assert_eq!(head.etag, None, "a re-download is better than an injection");
     }
 
     /// Each header was assigned with `.ok()`, so a second copy that failed to
