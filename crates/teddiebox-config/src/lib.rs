@@ -114,6 +114,27 @@ pub enum ConfigError {
     EmptyUpdateUrl,
 }
 
+/// Says whether a value is shaped like the `host:port` a `Host:` header wants.
+///
+/// The value is interpolated into a request header unescaped, and a line of
+/// this file is found by splitting on `\n` -- so a `CR` in the middle of the
+/// value reaches the wire as a line terminator, and a space reaches it as a
+/// token boundary. An allow-list of what a hostname, an address and a port are
+/// made of is cheaper than enumerating what is dangerous, and refuses both.
+///
+/// Refusing rather than repairing: a `server` that is not a host is a typo, and
+/// the box saying so beats the box guessing -- the same argument `parse_bool`
+/// makes for `insecure = ture`.
+///
+/// An empty value passes, so that `server =` keeps saying `MissingServer`:
+/// a key left blank is a different mistake from a key filled in wrong, and the
+/// two send a person to different lines of the file.
+fn is_host_port(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+}
+
 /// Cuts a trailing `# comment` off a value.
 ///
 /// The `#` must begin a word — preceded by whitespace, or first in the value —
@@ -260,6 +281,9 @@ impl Config {
                 }
                 "server" => {
                     let value = strip_comment(value);
+                    if !is_host_port(value) {
+                        return Err(ConfigError::MalformedValue);
+                    }
                     server = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
                 }
                 "insecure" => {
@@ -399,6 +423,17 @@ mod tests {
         assert_eq!(
             Config::parse("server = box.lan:8080\n"),
             Err(ConfigError::MissingSsid)
+        );
+    }
+
+    /// `server` is interpolated into a `Host:` header unescaped, and a line
+    /// of a config file is found by splitting on `\n` — so a bare `CR` in the
+    /// middle of the value survives to become a line terminator in a request.
+    #[test]
+    fn a_server_carrying_a_bare_cr_is_refused() {
+        assert_eq!(
+            Config::parse("ssid = A\nserver = box.lan:8080\rX-Thing: 1\n"),
+            Err(ConfigError::MalformedValue)
         );
     }
 
