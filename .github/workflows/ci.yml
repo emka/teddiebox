@@ -73,3 +73,12 @@ jobs:
         env:
           TEDDIEBOX_SLIX_PASSWORD: ${{ secrets.TEDDIEBOX_SLIX_PASSWORD }}
         run: nix develop --command just firmware
+
+      # The image without the `bench` console commands. Nobody flashes this
+      # yet, and that is exactly why it is here: an unbuilt configuration stops
+      # compiling silently, and the one time it is wanted is the worst time to
+      # find out.
+      - name: Firmware builds without the bench commands
+        env:
+          TEDDIEBOX_SLIX_PASSWORD: ${{ secrets.TEDDIEBOX_SLIX_PASSWORD }}
+        run: nix develop --command just firmware-release

@@ -1693,6 +1693,30 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
     true
 }
 
+/// Whether a command that exists to take a box apart may run.
+///
+/// These reach the box over UART0 with no gate beyond having the case open,
+/// and the worst of them — `otaboot` onto a blank slot — leaves a box that
+/// only a J100 cold boot recovers. That is an acceptable risk at a bench and a
+/// pointless one in a box on a shelf, so the `bench` feature decides, and the
+/// refusal says which build the box is running rather than looking like a
+/// parse failure.
+///
+/// A `const` read in each arm rather than a `#[cfg]` on it: the match over
+/// `Command` stays exhaustive, so a command added later still has to be wired
+/// up or the build fails, and the branch folds at compile time either way. A
+/// helper function returning the same answer does not fold — it is called from
+/// eleven places, so it stays out of line and every gated arm stays in the
+/// image. Measured: that spelling made the release build *larger* than the
+/// bench one; this one makes it 1,900 bytes smaller.
+const BENCH: bool = cfg!(feature = "bench");
+
+/// Says why a command did nothing, so a release box does not look like it
+/// failed to parse the line.
+fn not_in_this_build(name: &str) {
+    esp_println::println!("teddiebox: {name} is a bench command — not in this build");
+}
+
 /// The box's settings: what the card said, and what the bench typed over it.
 ///
 /// Anything typed here is RAM only, gone at the next reset — the same treatment
@@ -4437,35 +4461,59 @@ async fn main(spawner: Spawner) {
                     NFC_REQUEST.store(NFC_INVENTORY, Ordering::Relaxed);
                 }
                 Some(Command::Unlock) => {
-                    board.apply(gates.power(Rail::Storage, true));
-                    NFC_REQUEST.store(NFC_UNLOCK, Ordering::Relaxed);
+                    if BENCH {
+                        board.apply(gates.power(Rail::Storage, true));
+                        NFC_REQUEST.store(NFC_UNLOCK, Ordering::Relaxed);
+                    } else {
+                        not_in_this_build("slix");
+                    }
                 }
                 Some(Command::ForceUnlock) => {
-                    board.apply(gates.power(Rail::Storage, true));
-                    NFC_REQUEST.store(NFC_FORCE_UNLOCK, Ordering::Relaxed);
+                    if BENCH {
+                        board.apply(gates.power(Rail::Storage, true));
+                        NFC_REQUEST.store(NFC_FORCE_UNLOCK, Ordering::Relaxed);
+                    } else {
+                        not_in_this_build("slixp");
+                    }
                 }
                 Some(Command::CodecSet {
                     page,
                     register,
                     value,
                 }) => {
-                    if codec_override_set(page, register, value) {
-                        esp_println::println!(
-                            "teddiebox: codec page {page} register {register:#04x} -> {value:#04x} on next cinit"
-                        );
+                    if BENCH {
+                        if codec_override_set(page, register, value) {
+                            esp_println::println!(
+                                "teddiebox: codec page {page} register {register:#04x} -> {value:#04x} on next cinit"
+                            );
+                        } else {
+                            esp_println::println!("teddiebox: no override slots left — cclr first");
+                        }
                     } else {
-                        esp_println::println!("teddiebox: no override slots left — cclr first");
+                        not_in_this_build("cset");
                     }
                 }
                 Some(Command::CodecClear) => {
-                    codec_overrides_clear();
-                    esp_println::println!("teddiebox: codec overrides cleared");
+                    if BENCH {
+                        codec_overrides_clear();
+                        esp_println::println!("teddiebox: codec overrides cleared");
+                    } else {
+                        not_in_this_build("cclr");
+                    }
                 }
                 Some(Command::CodecInit) => {
-                    CODEC_REINIT.store(true, Ordering::Relaxed);
+                    if BENCH {
+                        CODEC_REINIT.store(true, Ordering::Relaxed);
+                    } else {
+                        not_in_this_build("cinit");
+                    }
                 }
                 Some(Command::CodecDown) => {
-                    CODEC_POWER_DOWN.store(true, Ordering::Relaxed);
+                    if BENCH {
+                        CODEC_POWER_DOWN.store(true, Ordering::Relaxed);
+                    } else {
+                        not_in_this_build("cdown");
+                    }
                 }
                 Some(Command::Output(on)) => {
                     OUTPUT_REQUEST
@@ -4521,7 +4569,13 @@ async fn main(spawner: Spawner) {
                 Some(Command::StackReport) => stack::report(),
                 Some(Command::OtaStatus) => ota::status(),
                 Some(Command::OtaWriteProbe) => ota::write_probe(),
-                Some(Command::OtaBoot { slot }) => ota::arm_boot(slot),
+                Some(Command::OtaBoot { slot }) => {
+                    if BENCH {
+                        ota::arm_boot(slot)
+                    } else {
+                        not_in_this_build("otaboot");
+                    }
+                }
                 Some(Command::ReadToken) => {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_READ_TOKEN, Ordering::Relaxed);
@@ -4545,16 +4599,24 @@ async fn main(spawner: Spawner) {
                     NET_REQUEST.store(NET_STATUS, Ordering::Relaxed);
                 }
                 Some(Command::ReadMemory { first, count }) => {
-                    board.apply(gates.power(Rail::Storage, true));
-                    NFC_MEM_RANGE.store(
-                        (u32::from(first) << 8) | u32::from(count),
-                        Ordering::Relaxed,
-                    );
-                    NFC_REQUEST.store(NFC_READ_MEMORY, Ordering::Relaxed);
+                    if BENCH {
+                        board.apply(gates.power(Rail::Storage, true));
+                        NFC_MEM_RANGE.store(
+                            (u32::from(first) << 8) | u32::from(count),
+                            Ordering::Relaxed,
+                        );
+                        NFC_REQUEST.store(NFC_READ_MEMORY, Ordering::Relaxed);
+                    } else {
+                        not_in_this_build("mem");
+                    }
                 }
                 Some(Command::Lock) => {
-                    board.apply(gates.power(Rail::Storage, true));
-                    NFC_REQUEST.store(NFC_LOCK, Ordering::Relaxed);
+                    if BENCH {
+                        board.apply(gates.power(Rail::Storage, true));
+                        NFC_REQUEST.store(NFC_LOCK, Ordering::Relaxed);
+                    } else {
+                        not_in_this_build("lock");
+                    }
                 }
                 // Manual, and manual only. The automatic path stays a park
                 // until sleep current and the state of the gate pins have been
@@ -4562,12 +4624,16 @@ async fn main(spawner: Spawner) {
                 // box that sleeps when it is told to — not one that decides to
                 // mid-session.
                 Some(Command::Sleep) => {
-                    go_dark(&mut board, &mut gates, rgb.as_ref()).await;
-                    if let Err(reason) = sleep_now(&mut lpwr).await {
-                        esp_println::println!(
-                            "teddiebox: sleep not armed — {reason}; the box is awake and dark, \
-                             and the ears are gone until rb"
-                        );
+                    if BENCH {
+                        go_dark(&mut board, &mut gates, rgb.as_ref()).await;
+                        if let Err(reason) = sleep_now(&mut lpwr).await {
+                            esp_println::println!(
+                                "teddiebox: sleep not armed — {reason}; the box is awake and dark, \
+                                 and the ears are gone until rb"
+                            );
+                        }
+                    } else {
+                        not_in_this_build("sleep");
                     }
                 }
                 Some(Command::StayAwake(on)) => {
@@ -4615,10 +4681,14 @@ async fn main(spawner: Spawner) {
                     );
                 }
                 Some(Command::Password(value)) => {
-                    NFC_PASSWORD.store(value, Ordering::Relaxed);
-                    // Deliberately not echoed. It is a credential, and a bench
-                    // capture is a file that outlives the session.
-                    esp_println::println!("teddiebox: nfc password set");
+                    if BENCH {
+                        NFC_PASSWORD.store(value, Ordering::Relaxed);
+                        // Deliberately not echoed. It is a credential, and a bench
+                        // capture is a file that outlives the session.
+                        esp_println::println!("teddiebox: nfc password set");
+                    } else {
+                        not_in_this_build("pw");
+                    }
                 }
                 Some(Command::PlayTaf) => {
                     board.apply(gates.power(Rail::Storage, true));

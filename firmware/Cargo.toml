@@ -8,6 +8,19 @@ license = "MIT OR Apache-2.0"
 # candidates and must not reach the host lockfile.
 [workspace]
 
+[features]
+default = ["bench"]
+# The console commands that exist to take a box apart rather than to run one:
+# codec register pokes, `otaboot`, `sleep`, `mem`, and the three that carry the
+# SLIX password. They are reachable over UART0 with no gate at all, and one of
+# them — `otaboot` onto a blank slot — leaves a box needing a J100 cold boot
+# with the case open.
+#
+# On by default so that the build a bench session flashes is the build these
+# recipes make. `just firmware-release` is the same image without them, and CI
+# builds both so neither configuration can rot.
+bench = []
+
 [dependencies]
 teddiebox-core = { path = "../crates/teddiebox-core" }
 lis3dh = { path = "../crates/lis3dh" }
