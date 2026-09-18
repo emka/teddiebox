@@ -27,6 +27,7 @@
 //! the question with an observation rather than a brick. [`arm_boot`] arms it
 //! and [`status`] reads it back.
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_time::Instant;
 use esp_bootloader_esp_idf::ota::{Ota, OtaImageState};
 use esp_bootloader_esp_idf::partitions::{
@@ -81,13 +82,13 @@ fn to_slot_state(state: OtaImageState) -> teddiebox_ota::SlotState {
 /// that has never run an update looks exactly like this, and must boot
 /// exactly as it always has.
 fn current_state() -> Option<(AppPartitionSubType, OtaImageState)> {
-    let flash = flash();
+    let mut flash = flash();
     let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-    let table = partitions::read_partition_table(flash, &mut buffer).ok()?;
+    let table = partitions::read_partition_table(&mut flash, &mut buffer).ok()?;
     let otadata = table
         .find_partition(PartitionType::Data(DataPartitionSubType::Ota))
         .ok()??;
-    let mut ota = Ota::new(otadata.as_flash_region(flash), 2).ok()?;
+    let mut ota = Ota::new(otadata.as_flash_region(&mut flash), 2).ok()?;
 
     let current = match ota.current_app_partition().ok()? {
         slot @ (AppPartitionSubType::Ota0 | AppPartitionSubType::Ota1) => slot,
@@ -113,9 +114,9 @@ pub fn confirm_boot_or_revert() {
     match teddiebox_ota::boot_action(to_slot_state(state)) {
         teddiebox_ota::BootAction::Proceed => {}
         teddiebox_ota::BootAction::ConfirmFirstBoot => {
-            let flash = flash();
+            let mut flash = flash();
             let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-            let table = match partitions::read_partition_table(flash, &mut buffer) {
+            let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
                 Ok(table) => table,
                 Err(trouble) => {
                     esp_println::println!(
@@ -138,7 +139,7 @@ pub fn confirm_boot_or_revert() {
                     return;
                 }
             };
-            let mut ota = match Ota::new(otadata.as_flash_region(flash), 2) {
+            let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), 2) {
                 Ok(ota) => ota,
                 Err(trouble) => {
                     esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
@@ -159,9 +160,9 @@ pub fn confirm_boot_or_revert() {
                 "teddiebox: ota {current:?} never confirmed — reverting and rebooting"
             );
             let (_, other) = slots(current);
-            let flash = flash();
+            let mut flash = flash();
             let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-            let Ok(table) = partitions::read_partition_table(flash, &mut buffer) else {
+            let Ok(table) = partitions::read_partition_table(&mut flash, &mut buffer) else {
                 return;
             };
             let Ok(Some(otadata)) =
@@ -169,7 +170,7 @@ pub fn confirm_boot_or_revert() {
             else {
                 return;
             };
-            let Ok(mut ota) = Ota::new(otadata.as_flash_region(flash), 2) else {
+            let Ok(mut ota) = Ota::new(otadata.as_flash_region(&mut flash), 2) else {
                 return;
             };
             if ota.set_current_app_partition(other).is_err() {
@@ -209,9 +210,9 @@ pub fn mark_valid() {
     let Some((_, OtaImageState::PendingVerify)) = current_state() else {
         return;
     };
-    let flash = flash();
+    let mut flash = flash();
     let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-    let table = match partitions::read_partition_table(flash, &mut buffer) {
+    let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
         Ok(table) => table,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
@@ -231,7 +232,7 @@ pub fn mark_valid() {
             return;
         }
     };
-    let mut ota = match Ota::new(otadata.as_flash_region(flash), 2) {
+    let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), 2) {
         Ok(ota) => ota,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
@@ -278,19 +279,56 @@ impl FlashRegionLike for Region<'_, '_> {
 /// So it is built once. Constructing per command was the bug.
 static mut FLASH: Option<FlashStorage<'static>> = None;
 
+/// Whether the one handle is currently lent out.
+///
+/// What makes [`flash`] sound. Every caller runs in the same task and none
+/// holds the handle across an `.await`, which is true today and enforced by
+/// nothing — so this enforces it: a second borrow while the first is alive
+/// panics where it happens instead of quietly producing two `&mut` to the same
+/// peripheral. It cannot fire while the invariant holds, and if the invariant
+/// stops holding, a panic names the moment it stopped.
+static LENT: AtomicBool = AtomicBool::new(false);
+
+/// The one flash handle, borrowed. Returns itself on drop.
+pub struct Flash(&'static mut FlashStorage<'static>);
+
+impl Drop for Flash {
+    fn drop(&mut self) {
+        LENT.store(false, Ordering::Release);
+    }
+}
+
+impl core::ops::Deref for Flash {
+    type Target = FlashStorage<'static>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl core::ops::DerefMut for Flash {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+    }
+}
+
 /// Hands out the one flash handle.
 ///
-/// SAFETY: every caller of this — the first line of `main`
-/// ([`confirm_boot_or_revert`]), the main loop's confirmation check
-/// ([`mark_valid`]), and the console's OTA commands ([`status`],
-/// [`write_probe`], [`arm_boot`]) — runs in the same task, and none of them
-/// holds the reference across an `.await` point. One task, never reentered
-/// while a `&mut` is live, is what keeps this to one `&mut` at a time, not
-/// which of those callers happens to be running.
-fn flash() -> &'static mut FlashStorage<'static> {
+/// Callers are the first line of `main` ([`confirm_boot_or_revert`]), the main
+/// loop's confirmation check ([`mark_valid`]), and the console's OTA commands
+/// ([`status`], [`write_probe`], [`arm_boot`]) — all in the same task, each
+/// finishing with the handle before the next asks for it.
+fn flash() -> Flash {
+    assert!(
+        !LENT.swap(true, Ordering::Acquire),
+        "the flash handle is already lent out"
+    );
+    // SAFETY: `LENT` was false and this thread has just set it, so no other
+    // `&mut` to `FLASH` exists. It goes back to false only when the `Flash`
+    // holding that reference is dropped.
     unsafe {
         let slot = &mut *core::ptr::addr_of_mut!(FLASH);
-        slot.get_or_insert_with(|| FlashStorage::new(esp_hal::peripherals::FLASH::steal()))
+        Flash(slot.get_or_insert_with(|| FlashStorage::new(esp_hal::peripherals::FLASH::steal())))
     }
 }
 
@@ -312,9 +350,9 @@ fn slots(booted: AppPartitionSubType) -> (&'static str, AppPartitionSubType) {
 /// console otherwise — and it is how §7a's answer is read back after
 /// [`arm_boot`].
 pub fn status() {
-    let flash = flash();
+    let mut flash = flash();
     let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-    let table = match partitions::read_partition_table(flash, &mut buffer) {
+    let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
         Ok(table) => table,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
@@ -349,7 +387,7 @@ pub fn status() {
         }
     };
 
-    let mut ota = match Ota::new(otadata.as_flash_region(flash), 2) {
+    let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), 2) {
         Ok(ota) => ota,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
@@ -383,9 +421,9 @@ pub fn status() {
 /// actually perform. Writing into a scratch region would answer an easier
 /// question than the one asked.
 pub fn write_probe() {
-    let flash = flash();
+    let mut flash = flash();
     let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-    let table = match partitions::read_partition_table(flash, &mut buffer) {
+    let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
         Ok(table) => table,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
@@ -424,7 +462,7 @@ pub fn write_probe() {
         "teddiebox: ota probing {label} ({slot_bytes} bytes) while running from {running_name}"
     );
 
-    let mut region = Region(entry.as_flash_region(flash));
+    let mut region = Region(entry.as_flash_region(&mut flash));
     let mut sectors = Sectors::new(slot_bytes);
     let started = Instant::now();
 
@@ -489,9 +527,9 @@ pub fn arm_boot(slot: u8) {
         _ => AppPartitionSubType::Ota1,
     };
 
-    let flash = flash();
+    let mut flash = flash();
     let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-    let table = match partitions::read_partition_table(flash, &mut buffer) {
+    let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
         Ok(table) => table,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
@@ -507,7 +545,7 @@ pub fn arm_boot(slot: u8) {
         }
     };
 
-    let mut ota = match Ota::new(otadata.as_flash_region(flash), 2) {
+    let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), 2) {
         Ok(ota) => ota,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
