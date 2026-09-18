@@ -86,8 +86,16 @@ anybody joined: an access point left beaconing overnight flattens the battery.
 passphrase in clear, because that is the file being edited. And the passphrase
 for `teddiebox-setup` is the one printed above — it is in this public
 repository, so anyone in radio range who has read this page can also read
-what is on the box's. Set the box up somewhere you would be happy saying the
-passphrase out loud.
+what is on the box's.
+
+That second one goes further than joining. WPA2 gives each client its own key,
+but that key is derived from the four-way handshake and the passphrase — so
+somebody in range who already knows the passphrase and records the moment your
+phone joins can read the whole session afterwards, without ever joining
+themselves. The page is plain HTTP, and it cannot be anything else: a box with
+no clock and a phone with no reason to trust it have nothing to build a
+certificate check on. Set the box up somewhere you would be happy saying both
+passphrases out loud.
 
 ### The indicator says more
 
