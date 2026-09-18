@@ -3407,12 +3407,25 @@ async fn bring_up(
                                 // not wedge the console. Timing out leaves DOWNLOAD_FROM
                                 // at zero, which fetches the whole file — slow, and
                                 // correct, which is the right way round for a fallback.
+                                //
+                                // It is reachable: the media task only runs
+                                // `service_download` between requests, and `attend` —
+                                // what it calls while a sound or a story is playing —
+                                // does not. Anything on the speaker lasting longer than
+                                // this wait therefore costs a resume. Said out loud
+                                // because the symptom otherwise is a quarter of an hour
+                                // of re-download with nothing to attribute it to.
                                 let mut waited = 0;
                                 while DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_PREPARING
                                     && waited < 500
                                 {
                                     Timer::after(Duration::from_millis(10)).await;
                                     waited += 1;
+                                }
+                                if DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_PREPARING {
+                                    esp_println::println!(
+                                        "teddiebox: get the card did not answer in 5 s — asking for the whole file"
+                                    );
                                 }
 
                                 let from = DOWNLOAD_FROM.load(Ordering::Relaxed);
