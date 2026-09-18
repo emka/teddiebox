@@ -26,7 +26,7 @@ use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use heapless::String;
-use teddiebox_config::{Config, Overridden};
+use teddiebox_config::{Config, Settings};
 use teddiebox_core::console::{MAX_PASSPHRASE, MAX_SSID};
 
 use esp_backtrace as _;
@@ -1693,22 +1693,14 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
     true
 }
 
-/// Credentials typed at the bench.
+/// The box's settings: what the card said, and what the bench typed over it.
 ///
-/// RAM only, gone at the next reset — the same treatment the SLIX password
-/// gets and for the same reason: a credential belongs neither in the image nor
-/// in the repository. **This is a stop-gap.** The design has these arriving
-/// from the card's `CONFIG.TXT`, which is why `net::Radio::acquire` takes
-/// a whole `Config` rather than two strings: when the card hands one over,
-/// this static goes away and `net.rs` does not change at all.
-static CONFIGURATION: CsMutex<RefCell<Config>> = CsMutex::new(RefCell::new(Config {
-    ssid: String::new(),
-    password: String::new(),
-    server: String::new(),
-    insecure: false,
-    ears_skip: true,
-    update_url: None,
-}));
+/// Anything typed here is RAM only, gone at the next reset — the same treatment
+/// the SLIX password gets and for the same reason: a credential belongs neither
+/// in the image nor in the repository. The precedence rule between the two
+/// sources lives in [`teddiebox_config::Settings`], where it is tested without
+/// a box; this static is only the lock around it.
+static SETTINGS: CsMutex<RefCell<Settings>> = CsMutex::new(RefCell::new(Settings::new()));
 
 /// How long to wait for a DHCP lease before calling it a failure.
 ///
@@ -1716,35 +1708,16 @@ static CONFIGURATION: CsMutex<RefCell<Config>> = CsMutex::new(RefCell::new(Confi
 /// different causes, so they are waited for — and reported — separately.
 const DHCP_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// What the bench has typed, so the card cannot undo it.
-static OVERRIDDEN: CsMutex<RefCell<Overridden>> = CsMutex::new(RefCell::new(Overridden {
-    ssid: false,
-    password: false,
-    server: false,
-    insecure: false,
-    ears_skip: false,
-    update_url: false,
-}));
-
 fn set_ssid(value: String<MAX_SSID>) {
-    critical_section::with(|cs| {
-        CONFIGURATION.borrow_ref_mut(cs).ssid = value;
-        OVERRIDDEN.borrow_ref_mut(cs).ssid = true;
-    });
+    critical_section::with(|cs| SETTINGS.borrow_ref_mut(cs).set_ssid(value));
 }
 
 fn set_password(value: String<MAX_PASSPHRASE>) {
-    critical_section::with(|cs| {
-        CONFIGURATION.borrow_ref_mut(cs).password = value;
-        OVERRIDDEN.borrow_ref_mut(cs).password = true;
-    });
+    critical_section::with(|cs| SETTINGS.borrow_ref_mut(cs).set_password(value));
 }
 
 fn set_insecure(value: bool) {
-    critical_section::with(|cs| {
-        CONFIGURATION.borrow_ref_mut(cs).insecure = value;
-        OVERRIDDEN.borrow_ref_mut(cs).insecure = true;
-    });
+    critical_section::with(|cs| SETTINGS.borrow_ref_mut(cs).set_insecure(value));
 }
 
 /// Publishes what the card said.
@@ -1753,11 +1726,7 @@ fn set_insecure(value: bool) {
 /// writes over it afterwards, which is what makes a mistyped card
 /// diagnosable at the bench without pulling it.
 fn set_configuration(value: Config) {
-    critical_section::with(|cs| {
-        let overridden = *OVERRIDDEN.borrow_ref(cs);
-        let mut held = CONFIGURATION.borrow_ref_mut(cs);
-        *held = overridden.merge(value, &held);
-    });
+    critical_section::with(|cs| SETTINGS.borrow_ref_mut(cs).take_card(value));
 }
 
 /// The credentials shaped the way the radio wants them.
@@ -1765,20 +1734,11 @@ fn set_configuration(value: Config) {
 /// `None` if either half is missing, because handing the driver an empty
 /// string would fail association in a way that looks like a wrong password.
 fn credentials() -> Option<Config> {
-    critical_section::with(|cs| {
-        let held = CONFIGURATION.borrow_ref(cs);
-        if held.ssid.is_empty() || held.password.is_empty() {
-            return None;
-        }
-        Some(held.clone())
-    })
+    critical_section::with(|cs| SETTINGS.borrow_ref(cs).credentials().cloned())
 }
 
 fn set_ears_skip(value: bool) {
-    critical_section::with(|cs| {
-        CONFIGURATION.borrow_ref_mut(cs).ears_skip = value;
-        OVERRIDDEN.borrow_ref_mut(cs).ears_skip = true;
-    });
+    critical_section::with(|cs| SETTINGS.borrow_ref_mut(cs).set_ears_skip(value));
 }
 
 /// Whether a held ear should skip a chapter, as the card last said.
@@ -1787,7 +1747,7 @@ fn set_ears_skip(value: bool) {
 /// lazily: an ear pressed before the first mount would otherwise pin this
 /// task to the boot default for the rest of the session.
 fn ears_skip() -> bool {
-    critical_section::with(|cs| CONFIGURATION.borrow_ref(cs).ears_skip)
+    critical_section::with(|cs| SETTINGS.borrow_ref(cs).config().ears_skip)
 }
 
 /// Access points one scan will report.

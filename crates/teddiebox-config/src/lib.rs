@@ -135,6 +135,103 @@ fn is_host_port(value: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
 }
 
+/// The box's live configuration: what the card said, and what the bench typed
+/// over it.
+///
+/// The two cannot be kept apart at the call sites without the precedence rule
+/// being restated at each of them, which is how the card came to silently undo
+/// an override once already -- see [`Overridden`]. Here every way of changing a
+/// setting goes through one of these methods, and each one records that it was
+/// typed, so a later [`take_card`](Self::take_card) cannot take it back.
+///
+/// Holding this behind a lock is the caller's business; nothing here is shared
+/// or interior-mutable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    held: Config,
+    overridden: Overridden,
+}
+
+impl Settings {
+    /// An empty configuration: no credentials, no server, certificates
+    /// checked, ears skipping chapters.
+    ///
+    /// `const` so it can start a `static` without a lazy initialiser.
+    pub const fn new() -> Self {
+        Self {
+            held: Config {
+                ssid: String::new(),
+                password: String::new(),
+                server: String::new(),
+                insecure: false,
+                ears_skip: true,
+                update_url: None,
+            },
+            overridden: Overridden {
+                ssid: false,
+                password: false,
+                server: false,
+                insecure: false,
+                ears_skip: false,
+                update_url: false,
+            },
+        }
+    }
+
+    /// Everything as it currently stands, card and overrides already resolved.
+    pub fn config(&self) -> &Config {
+        &self.held
+    }
+
+    /// Takes what the card said for every setting nobody has typed.
+    ///
+    /// The media task owns the card and calls this at the first mount, which
+    /// may be *after* something was typed: the mount is lazy, and on this box
+    /// it is often a network command that triggers it.
+    pub fn take_card(&mut self, card: Config) {
+        self.held = self.overridden.merge(card, &self.held);
+    }
+
+    pub fn set_ssid(&mut self, value: String<MAX_SSID>) {
+        self.held.ssid = value;
+        self.overridden.ssid = true;
+    }
+
+    pub fn set_password(&mut self, value: String<MAX_PASSWORD>) {
+        self.held.password = value;
+        self.overridden.password = true;
+    }
+
+    pub fn set_insecure(&mut self, value: bool) {
+        self.held.insecure = value;
+        self.overridden.insecure = true;
+    }
+
+    pub fn set_ears_skip(&mut self, value: bool) {
+        self.held.ears_skip = value;
+        self.overridden.ears_skip = true;
+    }
+
+    /// The whole configuration, or `None` if it is not yet usable for joining
+    /// a network.
+    ///
+    /// Both halves or neither: handing the driver an empty string fails
+    /// association in a way that presents as a wrong passphrase, which sends
+    /// whoever is diagnosing it to retype something that was never there.
+    pub fn credentials(&self) -> Option<&Config> {
+        if self.held.ssid.is_empty() || self.held.password.is_empty() {
+            return None;
+        }
+        Some(&self.held)
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Cuts a trailing `# comment` off a value.
 ///
 /// The `#` must begin a word — preceded by whitespace, or first in the value —
@@ -752,6 +849,50 @@ mod tests {
     fn a_hash_inside_the_update_url_is_part_of_the_value() {
         let c = Config::parse("ssid = A\nserver = s:1\nupdate_url = https://x/y#z\n").unwrap();
         assert_eq!(c.update_url.as_deref(), Some("https://x/y#z"));
+    }
+
+    /// The sequence the firmware actually runs, in one place: something is
+    /// typed at the console, and the card is mounted afterwards because the
+    /// mount is lazy. The typed value has to win, and every value nobody typed
+    /// has to come from the card.
+    #[test]
+    fn a_typed_value_wins_over_a_card_read_after_it() {
+        let mut settings = Settings::new();
+        settings.set_ssid(String::try_from("Typed").unwrap());
+        settings.set_insecure(true);
+
+        settings.take_card(card());
+
+        assert_eq!(settings.config().ssid.as_str(), "Typed");
+        assert!(settings.config().insecure);
+        assert_eq!(settings.config().server.as_str(), "card:1");
+    }
+
+    /// The other order, which is the one the box runs when the card is good:
+    /// the card lands first, and the console still overrides it afterwards.
+    #[test]
+    fn a_value_typed_after_a_card_read_still_wins() {
+        let mut settings = Settings::new();
+        settings.take_card(card());
+
+        settings.set_ssid(String::try_from("Typed").unwrap());
+
+        assert_eq!(settings.config().ssid.as_str(), "Typed");
+        assert_eq!(settings.config().server.as_str(), "card:1");
+    }
+
+    /// Handing the radio an empty half fails association in a way that reads
+    /// as a wrong passphrase, so a half-filled config is no config.
+    #[test]
+    fn credentials_are_withheld_until_both_halves_are_there() {
+        let mut settings = Settings::new();
+        assert!(settings.credentials().is_none(), "nothing typed yet");
+
+        settings.set_ssid(String::try_from("Typed").unwrap());
+        assert!(settings.credentials().is_none(), "no passphrase yet");
+
+        settings.set_password(String::try_from("hunter2").unwrap());
+        assert!(settings.credentials().is_some());
     }
 
     /// The bug this exists to prevent: overriding `insecure` at the console
