@@ -59,7 +59,7 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
     let slash = rest.find('/').ok_or(OtaError::MalformedUrl)?;
 
     let host = &rest[..slash];
-    if host.is_empty() {
+    if host.is_empty() || !is_host_port(host) {
         return Err(OtaError::MalformedUrl);
     }
 
@@ -88,11 +88,41 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
     if path.contains('#') || path.contains('?') {
         return Err(OtaError::MalformedUrl);
     }
+    // And the same allow-list `resolve_image` applies to the half a manifest
+    // contributes, for the half the card contributes. A resolved image path is
+    // the two concatenated, so checking only one of them leaves the request
+    // line reachable from the other.
+    if !is_path_safe(path) {
+        return Err(OtaError::MalformedUrl);
+    }
 
     Ok(UpdateUrl {
         host,
         path: String::try_from(path).map_err(|_| OtaError::ValueTooLong)?,
     })
+}
+
+/// Says whether a value may be interpolated into a request line.
+///
+/// A conservative allow-list -- ASCII letters, digits, and `._-/~`, which is
+/// enough for a filename on this server -- is cheaper and safer than trying to
+/// enumerate everything that is dangerous. It subsumes the space and the CR
+/// that would otherwise let a value add tokens or a stray line terminator to
+/// the request line.
+fn is_path_safe(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b'~'))
+}
+
+/// Says whether a value is shaped like the `host:port` a `Host:` header wants.
+///
+/// Same argument as [`is_path_safe`], for the other half of the URL: a host is
+/// made of letters, digits, `.`, `-` and `_`, plus the `:` before a port.
+fn is_host_port(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
 }
 
 /// Resolves a manifest's `image` value against the manifest's own path.
@@ -113,18 +143,9 @@ pub fn resolve_image(manifest_path: &str, image: &str) -> Result<String<MAX_PATH
     if image.is_empty() {
         return Err(OtaError::MalformedUrl);
     }
-    // `build_path_request` interpolates the resolved path into an HTTP
-    // request line unescaped, so any byte `image` contributes lands on the
-    // wire as-is. A conservative allow-list -- ASCII letters, digits, and
-    // `._-/~`, which is enough for a filename on this server -- is cheaper
-    // and safer than trying to enumerate everything that is dangerous. It
-    // also subsumes the space and the CR that would otherwise let a
-    // manifest value add tokens or a stray line terminator to the request
-    // line.
-    if !image
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b'~'))
-    {
+    // `build_path_request` interpolates the resolved path into an HTTP request
+    // line unescaped, so any byte `image` contributes lands on the wire as-is.
+    if !is_path_safe(image) {
         return Err(OtaError::MalformedUrl);
     }
     if image.split('/').any(|segment| segment == "..") {
@@ -204,6 +225,26 @@ mod tests {
     fn refuses_a_path_ending_in_slash() {
         assert_eq!(
             split("https://teddycloud.local:8443/content/FIRMWARE/"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    /// Both halves go into a request unescaped -- the host into `Host:`, the
+    /// path into the request line -- and neither `split`'s callers nor
+    /// `build_path_request` escape anything. A `CR` here is a header the
+    /// server never sent; a space is an extra token on the request line.
+    #[test]
+    fn refuses_a_host_carrying_a_bare_cr() {
+        assert_eq!(
+            split("https://teddycloud.local\rX-Thing: 1:8443/teddiebox.txt"),
+            Err(OtaError::MalformedUrl)
+        );
+    }
+
+    #[test]
+    fn refuses_a_path_carrying_a_space() {
+        assert_eq!(
+            split("https://teddycloud.local:8443/ted diebox.txt"),
             Err(OtaError::MalformedUrl)
         );
     }
