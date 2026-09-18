@@ -20,7 +20,7 @@ use critical_section::Mutex as CsMutex;
 
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::Stack;
+use embassy_net::{IpAddress, Stack};
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::peripherals::{AES, RSA, SHA};
 use mbedtls_rs::sys::hook::backend::esp::{EspAccel, EspAccelQueue, EspHooksGuard};
@@ -418,6 +418,54 @@ fn split_server(server: &str, name: &mut [u8; MAX_NAME]) -> Result<(usize, u16),
     Ok((bytes.len() + 1, port))
 }
 
+/// Resolves a `host:port` string to something [`connect`] can dial.
+///
+/// The name is borrowed out of the caller's buffer rather than returned by
+/// value: `split_server` writes a NUL-terminated name into a fixed array for
+/// mbedtls, and the `&str` view of it has to keep pointing at the caller's
+/// frame. That is the whole reason this takes `name` instead of owning one.
+async fn resolve<'a>(
+    stack: &Stack<'_>,
+    server: &str,
+    name: &'a mut [u8; MAX_NAME],
+) -> Result<(&'a str, IpAddress, u16), Error> {
+    let (name_len, port) = split_server(server, name)?;
+    let host = core::str::from_utf8(&name[..name_len - 1]).map_err(|_| Error::MalformedServer)?;
+
+    let addresses = stack
+        .dns_query(host, DnsQueryType::A)
+        .await
+        .map_err(|_| Error::NoSuchHost)?;
+    let address = *addresses.first().ok_or(Error::NoSuchHost)?;
+    Ok((host, address, port))
+}
+
+/// Opens a TCP connection on the caller's buffers.
+///
+/// `rx` and `tx` stay with the caller because the socket borrows them and the
+/// session then borrows the socket, so both have to outlive everything built on
+/// top — a helper that owned them could only return a socket pointing into its
+/// own dead frame. Passing them in is what lets the dial itself be written
+/// once.
+///
+/// Leaves the connect deadline in place. Whoever goes on to read a body wants
+/// the longer idle one instead, and says so.
+async fn connect<'a>(
+    stack: &Stack<'a>,
+    address: IpAddress,
+    port: u16,
+    rx: &'a mut [u8],
+    tx: &'a mut [u8],
+) -> Result<TcpSocket<'a>, Error> {
+    let mut socket = TcpSocket::new(*stack, rx, tx);
+    socket.set_timeout(Some(CONNECT_TIMEOUT));
+    socket
+        .connect((address, port))
+        .await
+        .map_err(|_| Error::Connect)?;
+    Ok(socket)
+}
+
 /// Opens a TLS connection and asks the server one question.
 ///
 /// A `HEAD` for `/`, which every teddyCloud answers and which costs one record
@@ -433,14 +481,7 @@ pub async fn probe(
     insecure: bool,
 ) -> Result<(), Error> {
     let mut name = [0u8; MAX_NAME];
-    let (name_len, port) = split_server(server, &mut name)?;
-    let host = core::str::from_utf8(&name[..name_len - 1]).map_err(|_| Error::MalformedServer)?;
-
-    let addresses = stack
-        .dns_query(host, DnsQueryType::A)
-        .await
-        .map_err(|_| Error::NoSuchHost)?;
-    let address = *addresses.first().ok_or(Error::NoSuchHost)?;
+    let (host, address, port) = resolve(stack, server, &mut name).await?;
     esp_println::println!(
         "teddiebox: tls {host}:{port} is {address}, certificates {}",
         if insecure { "NOT checked" } else { "checked" }
@@ -448,12 +489,7 @@ pub async fn probe(
 
     let mut rx = [0u8; TCP_BUFFER];
     let mut tx = [0u8; TCP_BUFFER];
-    let mut socket = TcpSocket::new(*stack, &mut rx, &mut tx);
-    socket.set_timeout(Some(CONNECT_TIMEOUT));
-    socket
-        .connect((address, port))
-        .await
-        .map_err(|_| Error::Connect)?;
+    let socket = connect(stack, address, port, &mut rx, &mut tx).await?;
     esp_println::println!("teddiebox: tls connected, starting the handshake");
 
     // The heap is the Wi-Fi driver's, and mbedtls is a guest on it. A session
@@ -508,11 +544,8 @@ pub async fn probe(
 /// Asks how long a figure's story is on the server now, and downloads none of
 /// it.
 ///
-/// The setup below repeats `probe`'s and `fetch`'s rather than calling a
-/// helper, for the reason `fetch` already states: the socket and the session
-/// borrow buffers that have to live in the frame that uses them. The part that
-/// is *not* repeated is the request — a probe and a fetch must name the same
-/// file the same way, which is why one writer builds both.
+/// A probe and a fetch must name the same file the same way, which is why one
+/// writer builds both requests.
 pub async fn length(
     tls: TlsReference<'_>,
     stack: &Stack<'_>,
@@ -526,23 +559,11 @@ pub async fn length(
         ..
     } = *wanted;
     let mut name = [0u8; MAX_NAME];
-    let (name_len, port) = split_server(server, &mut name)?;
-    let host = core::str::from_utf8(&name[..name_len - 1]).map_err(|_| Error::MalformedServer)?;
-
-    let addresses = stack
-        .dns_query(host, DnsQueryType::A)
-        .await
-        .map_err(|_| Error::NoSuchHost)?;
-    let address = *addresses.first().ok_or(Error::NoSuchHost)?;
+    let (_host, address, port) = resolve(stack, server, &mut name).await?;
 
     let mut rx = [0u8; TCP_BUFFER];
     let mut tx = [0u8; TCP_BUFFER];
-    let mut socket = TcpSocket::new(*stack, &mut rx, &mut tx);
-    socket.set_timeout(Some(CONNECT_TIMEOUT));
-    socket
-        .connect((address, port))
-        .await
-        .map_err(|_| Error::Connect)?;
+    let mut socket = connect(stack, address, port, &mut rx, &mut tx).await?;
     socket.set_timeout(Some(IDLE_TIMEOUT));
 
     let mut session = Session::new(
@@ -665,26 +686,13 @@ pub async fn fetch(
         etag,
     } = *wanted;
     let mut name = [0u8; MAX_NAME];
-    let (name_len, port) = split_server(server, &mut name)?;
-    let host = core::str::from_utf8(&name[..name_len - 1]).map_err(|_| Error::MalformedServer)?;
+    let (_host, address, port) = resolve(stack, server, &mut name).await?;
 
-    let addresses = stack
-        .dns_query(host, DnsQueryType::A)
-        .await
-        .map_err(|_| Error::NoSuchHost)?;
-    let address = *addresses.first().ok_or(Error::NoSuchHost)?;
-
-    // The socket and the session borrow these, so they have to be built in the
-    // frame that uses them — which is why this repeats `probe`'s setup rather
-    // than calling a helper that returns a session.
+    // Still built here rather than inside a helper: the socket borrows them and
+    // the session borrows the socket, so both have to outlive this call.
     let mut rx = [0u8; TCP_BUFFER];
     let mut tx = [0u8; TCP_BUFFER];
-    let mut socket = TcpSocket::new(*stack, &mut rx, &mut tx);
-    socket.set_timeout(Some(CONNECT_TIMEOUT));
-    socket
-        .connect((address, port))
-        .await
-        .map_err(|_| Error::Connect)?;
+    let mut socket = connect(stack, address, port, &mut rx, &mut tx).await?;
     // Connected, so the deadline that matters now is the idle one.
     socket.set_timeout(Some(IDLE_TIMEOUT));
 
