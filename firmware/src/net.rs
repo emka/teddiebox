@@ -343,3 +343,23 @@ pub fn release(session: Session<'_>, link: Link<'_>) {
     drop(link);
     drop(session);
 }
+
+/// A seed for the network stack's port, sequence and transaction numbers.
+///
+/// `embassy_net::new` derives TCP initial sequence numbers, ephemeral source
+/// ports and the DHCP transaction id from this one value. The boot-relative
+/// microsecond clock that used to supply it is guessable by anyone who knows
+/// roughly when the box was switched on, which is exactly what those three
+/// numbers are meant not to be.
+///
+/// The hardware generator needs no setup and is what [`crate::tls::HardwareRng`]
+/// wraps. It is only *cryptographically* secure with the RF subsystem running,
+/// and this is called before the radio is powered — so the clock stays in, as
+/// the low bits of something that also differs between two boxes powered on at
+/// the same moment. Neither source has to be perfect for the result to be a
+/// long way better than a counter starting at zero.
+pub fn seed() -> u64 {
+    let rng = esp_hal::rng::Rng::new();
+    let random = (u64::from(rng.random()) << 32) | u64::from(rng.random());
+    random ^ embassy_time::Instant::now().as_micros()
+}

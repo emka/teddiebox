@@ -3236,10 +3236,7 @@ async fn bring_up(
         return Some(Unavailable::Unreachable);
     };
 
-    // The stack seeds its port and transaction numbers from this, so it has to
-    // differ between boots. The moment somebody typed `net up` is as good a
-    // source as this firmware has and better than a constant.
-    let seed = Instant::now().as_micros();
+    let seed = net::seed();
 
     let (mut session, mut link) = match radio.acquire(&config, seed) {
         Ok(pair) => pair,
@@ -4172,10 +4169,7 @@ async fn main(spawner: Spawner) {
             }
         };
 
-        // The stack seeds its port and transaction numbers from this, so it
-        // has to differ between boots; see the same choice made for the
-        // download path's `bring_up`, above.
-        let seed = Instant::now().as_micros();
+        let seed = net::seed();
 
         // Setup mode runs out of the decoder's scratch. `portal::run`'s
         // future — every socket buffer, the card, and the radio's
