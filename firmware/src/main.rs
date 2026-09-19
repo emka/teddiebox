@@ -1277,9 +1277,53 @@ static FETCH_OUTCOME_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU
 /// fetch, or at the card — and every one of them has to leave the same
 /// answer, attributed to [`FETCH_ACTIVE_RUID`]: whichever fetch was actually
 /// running when it happened.
+///
+/// The outcome and the figure it belongs to are two atomics, so they are
+/// written together under a critical section and [`take_fetch_outcome`] reads
+/// them the same way. Nothing today can land between the two stores — one
+/// executor, one core, no await in here — but "an outcome attributed to the
+/// wrong figure" is the exact bug the identity was added to prevent, and
+/// pairing them costs a critical section on a path that runs once per
+/// download.
 fn fetch_ended(outcome: u8) {
-    FETCH_OUTCOME_RUID.store(FETCH_ACTIVE_RUID.load(Ordering::Relaxed), Ordering::Relaxed);
-    FETCH_OUTCOME.store(outcome, Ordering::Relaxed);
+    critical_section::with(|_| {
+        FETCH_OUTCOME_RUID.store(FETCH_ACTIVE_RUID.load(Ordering::Relaxed), Ordering::Relaxed);
+        FETCH_OUTCOME.store(outcome, Ordering::Relaxed);
+    });
+}
+
+/// Records how a download ended, unless something already has.
+///
+/// Two paths reach the end of the same fetch — the net task's, which knows
+/// *why* it failed, and the media task's, which only knows the file stopped
+/// short. The first to speak wins: overwriting `NoContent` with the coarser
+/// `Unreachable` would throw away the difference between a server that has no
+/// story and one that could not be reached, which is the difference between
+/// the two things the box can say out loud.
+///
+/// Returns whether it said anything, and takes the same critical section as
+/// [`fetch_ended`], so the check and the store cannot be separated.
+fn fetch_ended_if_silent(outcome: u8) -> bool {
+    critical_section::with(|_| {
+        if FETCH_OUTCOME.load(Ordering::Relaxed) != FETCH_NOTHING {
+            return false;
+        }
+        FETCH_OUTCOME_RUID.store(FETCH_ACTIVE_RUID.load(Ordering::Relaxed), Ordering::Relaxed);
+        FETCH_OUTCOME.store(outcome, Ordering::Relaxed);
+        true
+    })
+}
+
+/// Takes the pending outcome and the figure it belongs to, together.
+///
+/// `FETCH_NOTHING` means no download has ended since the last read.
+fn take_fetch_outcome() -> (u8, u64) {
+    critical_section::with(|_| {
+        (
+            FETCH_OUTCOME.swap(FETCH_NOTHING, Ordering::Relaxed),
+            FETCH_OUTCOME_RUID.load(Ordering::Relaxed),
+        )
+    })
 }
 
 /// Records that a probe is over and taught the box nothing.
@@ -1671,19 +1715,11 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
                 DOWNLOAD_AT.load(Ordering::Relaxed).saturating_add(written),
                 DOWNLOAD_TOTAL.load(Ordering::Relaxed)
             );
-            // Only if nothing has been said yet. A fetch that failed already
-            // reported *why* through `why_unavailable`, and overwriting that
-            // with a coarser word would throw away the distinction between a
-            // server that has no story and one that could not be reached —
-            // which is the difference between the two things the box can say
-            // out loud.
-            // Nor if the download was abandoned: a figure that has been
+            // Not if the download was abandoned: a figure that has been
             // lifted is not owed an explanation, and the reducer has already
             // moved on to having no figure at all.
-            if FETCH_OUTCOME.load(Ordering::Relaxed) == FETCH_NOTHING
-                && !DOWNLOAD_ABORT.load(Ordering::Relaxed)
-            {
-                fetch_ended(FETCH_UNREACHABLE);
+            if !DOWNLOAD_ABORT.load(Ordering::Relaxed) {
+                fetch_ended_if_silent(FETCH_UNREACHABLE);
             }
         }
         DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
@@ -2831,9 +2867,8 @@ async fn media(
 
         // A download has ended somewhere this task cannot see. Read every pass
         // so a stale answer cannot arrive later attached to a different figure.
-        let outcome = FETCH_OUTCOME.swap(FETCH_NOTHING, Ordering::Relaxed);
+        let (outcome, outcome_ruid) = take_fetch_outcome();
         if outcome != FETCH_NOTHING {
-            let outcome_ruid = FETCH_OUTCOME_RUID.load(Ordering::Relaxed);
             match on_plate {
                 // The figure this outcome was for is still on the plate: the
                 // reducer's guard checks the same identity again before
@@ -3722,11 +3757,12 @@ async fn net(
                     // and told which of the two faults it was: a figure whose
                     // story cannot be fetched because the passphrase is wrong
                     // should not send anybody to look at a working router.
-                    else if FETCH_OUTCOME.load(Ordering::Relaxed) == FETCH_NOTHING
-                        && DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_IDLE
+                    else if DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_IDLE
+                        && fetch_ended_if_silent(outcome_for(
+                            gave_up.unwrap_or(Unavailable::Unreachable),
+                        ))
                     {
                         esp_println::println!("teddiebox: net would not come up for it");
-                        fetch_ended(outcome_for(gave_up.unwrap_or(Unavailable::Unreachable)));
                     }
                 }
             },
