@@ -860,3 +860,164 @@ mod tests {
         dac.release().done();
     }
 }
+
+/// Register overrides applied to a start-up sequence before it is written.
+///
+/// Which register value stops a box clicking on start-up is a question for the
+/// ear, and a reflash between guesses makes that loop minutes long. This is
+/// what lets one be typed at a console instead: the answer is a register, a
+/// page and a byte, and the sequences in this module are what they land on.
+///
+/// Six slots, because the question being asked is "which one of these is it",
+/// not "what would a whole different codec setup look like" — a table long
+/// enough to hold a second start-up sequence would hide a mistake rather than
+/// catch it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Overrides {
+    slots: [Option<(u8, u8, u8)>; OVERRIDE_SLOTS],
+}
+
+/// How many registers may be overridden at once.
+pub const OVERRIDE_SLOTS: usize = 6;
+
+impl Default for Overrides {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Overrides {
+    pub const fn new() -> Self {
+        Self {
+            slots: [None; OVERRIDE_SLOTS],
+        }
+    }
+
+    /// Records an override, or answers `false` if there is no room.
+    ///
+    /// An override of a register already overridden replaces it. Keeping both
+    /// would fill the table with one register's history and then refuse the
+    /// next register — which is the opposite of what somebody stepping a value
+    /// up and down is asking for.
+    pub fn set(&mut self, page: u8, register: u8, value: u8) -> bool {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| matches!(slot, Some((p, r, _)) if *p == page && *r == register))
+        {
+            *slot = Some((page, register, value));
+            return true;
+        }
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some((page, register, value));
+            return true;
+        }
+        false
+    }
+
+    pub fn clear(&mut self) {
+        self.slots = [None; OVERRIDE_SLOTS];
+    }
+
+    /// Copies `table` into `out`, replacing the value of any register that has
+    /// an override.
+    ///
+    /// An override naming a register the table does not contain does nothing.
+    /// It is not an error: the sequence a value belongs to is the caller's
+    /// business, and this is called once per sequence with the same table of
+    /// overrides.
+    ///
+    /// # Panics
+    ///
+    /// If `out` is shorter than `table`. Both are compiled-in sequences at
+    /// every call site, so a short buffer is a build-time mistake.
+    pub fn apply<'a>(
+        &self,
+        table: &[(u8, u8, u8)],
+        out: &'a mut [(u8, u8, u8)],
+    ) -> &'a [(u8, u8, u8)] {
+        out[..table.len()].copy_from_slice(table);
+        for entry in out[..table.len()].iter_mut() {
+            for (page, register, value) in self.slots.iter().flatten() {
+                if entry.0 == *page && entry.1 == *register {
+                    entry.2 = *value;
+                }
+            }
+        }
+        &out[..table.len()]
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    const TABLE: &[(u8, u8, u8)] = &[(0, 0x3F, 0xD4), (1, 0x2A, 0x06), (0, 0x40, 0x0C)];
+
+    #[test]
+    fn an_override_replaces_the_value_for_its_register_only() {
+        let mut overrides = Overrides::new();
+        assert!(overrides.set(1, 0x2A, 0x86));
+
+        let mut out = [(0, 0, 0); 8];
+        assert_eq!(
+            overrides.apply(TABLE, &mut out),
+            &[(0, 0x3F, 0xD4), (1, 0x2A, 0x86), (0, 0x40, 0x0C)]
+        );
+    }
+
+    /// The same register on a different page is a different register.
+    #[test]
+    fn an_override_on_another_page_leaves_the_table_alone() {
+        let mut overrides = Overrides::new();
+        assert!(overrides.set(0, 0x2A, 0x86));
+
+        let mut out = [(0, 0, 0); 8];
+        assert_eq!(overrides.apply(TABLE, &mut out), TABLE);
+    }
+
+    /// Stepping one value up and down must not consume the table.
+    #[test]
+    fn overriding_the_same_register_twice_takes_one_slot() {
+        let mut overrides = Overrides::new();
+        for value in 0..(OVERRIDE_SLOTS as u8 + 4) {
+            assert!(overrides.set(1, 0x2A, value), "slot {value} refused");
+        }
+
+        let mut out = [(0, 0, 0); 8];
+        assert_eq!(
+            overrides.apply(TABLE, &mut out)[1].2,
+            OVERRIDE_SLOTS as u8 + 3
+        );
+    }
+
+    #[test]
+    fn a_seventh_register_is_refused_rather_than_dropped_quietly() {
+        let mut overrides = Overrides::new();
+        for register in 0..OVERRIDE_SLOTS as u8 {
+            assert!(overrides.set(0, register, 1));
+        }
+        assert!(!overrides.set(0, OVERRIDE_SLOTS as u8, 1));
+    }
+
+    #[test]
+    fn clearing_puts_the_table_back() {
+        let mut overrides = Overrides::new();
+        overrides.set(1, 0x2A, 0x86);
+        overrides.clear();
+
+        let mut out = [(0, 0, 0); 8];
+        assert_eq!(overrides.apply(TABLE, &mut out), TABLE);
+    }
+
+    /// An override for a register this sequence does not carry is not an
+    /// error: `cset` is typed once and both sequences are run through it.
+    #[test]
+    fn an_override_for_an_absent_register_does_nothing() {
+        let mut overrides = Overrides::new();
+        overrides.set(9, 0x11, 0x22);
+
+        let mut out = [(0, 0, 0); 8];
+        assert_eq!(overrides.apply(TABLE, &mut out), TABLE);
+    }
+}

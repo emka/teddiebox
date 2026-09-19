@@ -2284,44 +2284,24 @@ const OUTPUT_UP: u8 = 2;
 
 /// Register overrides applied to the codec's start-up sequence.
 ///
-/// Which register value stops the box clicking on start-up is a question for
-/// the ear, and a reflash between guesses makes that loop minutes long. Each
-/// slot is packed as `page << 16 | register << 8 | value`, with the top byte
-/// set to mark it used, so the whole table is lock-free and needs no
-/// allocator.
-static CODEC_OVERRIDES: [AtomicU32; CODEC_OVERRIDE_SLOTS] =
-    [const { AtomicU32::new(0) }; CODEC_OVERRIDE_SLOTS];
-const CODEC_OVERRIDE_SLOTS: usize = 6;
-const CODEC_OVERRIDE_USED: u32 = 1 << 24;
+/// The table and its three rules live in `tlv320dac3100`, where they are
+/// tested without a box; this is the lock around one. It was an array of
+/// packed `AtomicU32` here, lock-free so a console write and a codec bring-up
+/// could not collide — which bought nothing a critical section around six
+/// `Option`s does not, and cost the rules a form anything could test.
+static CODEC_OVERRIDES: CsMutex<RefCell<tlv320dac3100::Overrides>> =
+    CsMutex::new(RefCell::new(tlv320dac3100::Overrides::new()));
 
 fn codec_override_set(page: u8, register: u8, value: u8) -> bool {
-    let packed = CODEC_OVERRIDE_USED
-        | (u32::from(page) << 16)
-        | (u32::from(register) << 8)
-        | u32::from(value);
-    let same_register = |slot: u32| slot & 0x00FF_FF00 == packed & 0x00FF_FF00;
-    // Replace an override of the same register rather than filling the table
-    // with a history of one register's values.
-    for slot in CODEC_OVERRIDES.iter() {
-        let current = slot.load(Ordering::Relaxed);
-        if current & CODEC_OVERRIDE_USED != 0 && same_register(current) {
-            slot.store(packed, Ordering::Relaxed);
-            return true;
-        }
-    }
-    for slot in CODEC_OVERRIDES.iter() {
-        if slot.load(Ordering::Relaxed) & CODEC_OVERRIDE_USED == 0 {
-            slot.store(packed, Ordering::Relaxed);
-            return true;
-        }
-    }
-    false
+    critical_section::with(|cs| {
+        CODEC_OVERRIDES
+            .borrow_ref_mut(cs)
+            .set(page, register, value)
+    })
 }
 
 fn codec_overrides_clear() {
-    for slot in CODEC_OVERRIDES.iter() {
-        slot.store(0, Ordering::Relaxed);
-    }
+    critical_section::with(|cs| CODEC_OVERRIDES.borrow_ref_mut(cs).clear());
 }
 
 /// Copies `table` into `out`, applying any override for each register.
@@ -2329,21 +2309,7 @@ fn codec_apply_overrides<'a>(
     table: &[(u8, u8, u8)],
     out: &'a mut [(u8, u8, u8)],
 ) -> &'a [(u8, u8, u8)] {
-    out[..table.len()].copy_from_slice(table);
-    for entry in out[..table.len()].iter_mut() {
-        for slot in CODEC_OVERRIDES.iter() {
-            let packed = slot.load(Ordering::Relaxed);
-            if packed & CODEC_OVERRIDE_USED == 0 {
-                continue;
-            }
-            let page = ((packed >> 16) & 0xFF) as u8;
-            let register = ((packed >> 8) & 0xFF) as u8;
-            if entry.0 == page && entry.1 == register {
-                entry.2 = (packed & 0xFF) as u8;
-            }
-        }
-    }
-    &out[..table.len()]
+    critical_section::with(|cs| CODEC_OVERRIDES.borrow_ref(cs).apply(table, out))
 }
 
 /// How long a reboot waits for the codec before going ahead regardless.
