@@ -75,12 +75,12 @@ firmware: vendor
     cd firmware && cargo build --release
 
 # `TEDDIEBOX_RELEASE` is off unless set, so `just firmware` and `just flash`
-# build the image a bench session wants. Setting it drops the console commands
-# that exist to take a box apart — the codec register pokes, `otaboot`,
-# `sleep`, `mem`, and the three that carry the SLIX password — from the image
-# entirely. It works on any recipe that builds firmware, so a release flash is
-# `TEDDIEBOX_RELEASE=1 just flash`; this recipe exists so CI builds that
-# configuration too, because one nothing builds is one that rots.
+# build the image a bench session wants. Setting it leaves `dl` as the only
+# console command in the image — enough to flash a bench build back on, and
+# nothing else — which is 18,848 bytes smaller. It works on any recipe that
+# builds firmware, so a release flash is `TEDDIEBOX_RELEASE=1 just flash`; this
+# recipe exists so CI builds that configuration too, because one nothing builds
+# is one that rots.
 
 # the same image without the bench console commands
 firmware-release: vendor
