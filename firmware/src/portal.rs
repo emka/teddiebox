@@ -564,7 +564,9 @@ async fn serve_console(
                         }
                     }
                     _ => esp_println::println!(
-                        "teddiebox: the configuration portal is running —                          join `{}` and open http://192.168.4.1/, or send `rb` to leave it",
+                        "teddiebox: the configuration portal is running — join `{}` and open \
+                         http://192.168.4.1/, `setup pw off` to put its passphrase back to \
+                         the published one, or `rb` to leave",
                         net::SETUP_SSID
                     ),
                 }
