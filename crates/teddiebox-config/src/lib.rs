@@ -10,7 +10,8 @@
 //! means what it looks like, while `ssid = net#1` keeps its hash. **`password`
 //! is exempt**: it is opaque bytes, `#` is common in them, and a password
 //! truncated by a comment rule fails at the box where the cause is invisible.
-//! Everything after `password =` is the password.
+//! Everything after `password =` is the password. `setup_password` is exempt
+//! for the same reason.
 //!
 //! Unknown keys are ignored, so a card written for a newer firmware still boots
 //! an older one. A *known* key given a value it does not accept is refused —
@@ -91,6 +92,16 @@ pub struct Config {
     ///
     /// Defaults to `None`.
     pub update_url: Option<String<MAX_UPDATE_URL>>,
+    /// Passphrase for the box's own setup access point.
+    ///
+    /// `None` means the compiled-in one, which is published in `README.md` and
+    /// has to be: the way back into a box that will not start cannot depend on
+    /// a file somebody may have got wrong. Setting this narrows the ten-minute
+    /// window to people who know this value — at the price that a card whose
+    /// `CONFIG.TXT` still *parses* is a card whose portal answers to nothing
+    /// else. Forgetting it costs a card reader, which is the one thing the
+    /// portal exists to avoid.
+    pub setup_password: Option<String<MAX_PASSWORD>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +124,13 @@ pub enum ConfigError {
     /// after it, someone who meant to write a URL and didn't.
     EmptyUpdateUrl,
 }
+
+/// The range WPA2 accepts for a passphrase.
+///
+/// Outside it the driver refuses the access point, and a box that cannot raise
+/// its own network is the one box nobody can reach to ask why — so the
+/// complaint belongs at the parser, in front of whoever edited the file.
+const WPA2_PASSPHRASE: core::ops::RangeInclusive<usize> = 8..=63;
 
 /// Says whether a value is shaped like the `host:port` a `Host:` header wants.
 ///
@@ -166,6 +184,7 @@ impl Settings {
                 insecure: false,
                 ears_skip: true,
                 update_url: None,
+                setup_password: None,
             },
             overridden: Overridden {
                 ssid: false,
@@ -174,6 +193,7 @@ impl Settings {
                 insecure: false,
                 ears_skip: false,
                 update_url: false,
+                setup_password: false,
             },
         }
     }
@@ -286,6 +306,7 @@ pub struct Overridden {
     pub insecure: bool,
     pub ears_skip: bool,
     pub update_url: bool,
+    pub setup_password: bool,
 }
 
 impl Overridden {
@@ -325,6 +346,11 @@ impl Overridden {
             } else {
                 card.update_url
             },
+            setup_password: if self.setup_password {
+                held.setup_password.clone()
+            } else {
+                card.setup_password
+            },
         }
     }
 }
@@ -354,6 +380,7 @@ impl Config {
         let mut insecure = false;
         let mut ears_skip = true;
         let mut update_url: Option<String<MAX_UPDATE_URL>> = None;
+        let mut setup_password: Option<String<MAX_PASSWORD>> = None;
 
         for raw in text.lines() {
             let line = raw.trim();
@@ -389,6 +416,15 @@ impl Config {
                 "ears_skip" => {
                     ears_skip = parse_bool(strip_comment(value))?;
                 }
+                // Not comment-stripped, for `password`'s reason: it is a
+                // passphrase, and `#` is common in one.
+                "setup_password" => {
+                    if !WPA2_PASSPHRASE.contains(&value.len()) {
+                        return Err(ConfigError::MalformedValue);
+                    }
+                    setup_password =
+                        Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
+                }
                 "update_url" => {
                     let value = strip_comment(value);
                     if value.is_empty() {
@@ -416,6 +452,7 @@ impl Config {
             insecure,
             ears_skip,
             update_url,
+            setup_password,
         })
     }
 }
@@ -893,6 +930,42 @@ mod tests {
 
         settings.set_password(String::try_from("hunter2").unwrap());
         assert!(settings.credentials().is_some());
+    }
+
+    #[test]
+    fn a_setup_password_is_read_when_the_card_gives_one() {
+        let c = Config::parse("ssid = A\nserver = s:1\nsetup_password = our#house\n").unwrap();
+        assert_eq!(c.setup_password.as_deref(), Some("our#house"));
+    }
+
+    /// Absence is the ordinary case, and means the compiled-in one.
+    #[test]
+    fn no_setup_password_is_absent_rather_than_empty() {
+        let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
+        assert_eq!(c.setup_password, None);
+    }
+
+    /// WPA2 will not take a passphrase outside 8..=63 characters, and a box
+    /// that refuses to raise its own access point is the one box nobody can
+    /// reach to find out why. Refusing at the parser puts the complaint in
+    /// front of whoever edited the file.
+    #[test]
+    fn a_setup_password_too_short_for_wpa2_is_refused() {
+        assert_eq!(
+            Config::parse("ssid = A\nserver = s:1\nsetup_password = short\n"),
+            Err(ConfigError::MalformedValue)
+        );
+    }
+
+    #[test]
+    fn a_setup_password_too_long_for_wpa2_is_refused() {
+        let long = "x".repeat(64);
+        assert_eq!(
+            Config::parse(&format!(
+                "ssid = A\nserver = s:1\nsetup_password = {long}\n"
+            )),
+            Err(ConfigError::MalformedValue)
+        );
     }
 
     /// The bug this exists to prevent: overriding `insecure` at the console

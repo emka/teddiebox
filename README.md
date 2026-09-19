@@ -97,6 +97,15 @@ no clock and a phone with no reason to trust it have nothing to build a
 certificate check on. Set the box up somewhere you would be happy saying both
 passphrases out loud.
 
+**You can give the box its own setup passphrase.** Put `setup_password =` and
+between 8 and 63 characters of your own in `CONFIG.TXT`, and the box asks for
+that instead of `teddiebox`. Worth understanding before you do: the published
+passphrase is what a box with no card, an unreadable card, or a `CONFIG.TXT`
+too broken to parse falls back to — so it always gets you in to *those*. What
+it will not get you into is a box whose file still parses and names a
+passphrase you have forgotten. That one needs a card reader, which is the one
+thing this page exists to avoid.
+
 ### The indicator says more
 
 A stock box does not show a charging colour while it sits idle. This one uses

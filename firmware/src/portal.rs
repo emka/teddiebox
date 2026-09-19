@@ -166,13 +166,31 @@ pub async fn run(
     // own depth into a measurement rather than another estimate.
     stack::report();
 
+    // Read before the access point exists, because it decides what the access
+    // point's passphrase is. Anything that goes wrong here — no card, an
+    // unreadable file, a file that does not parse — falls back to the
+    // published passphrase, which is the property this mode rests on: the way
+    // back into a box cannot depend on the file somebody is here to repair.
+    let setup_password = card
+        .as_ref()
+        .and_then(|card| {
+            let mut bytes = [0u8; MAX_CONFIG];
+            let filled = card.read_config_bytes(&mut bytes).ok()?;
+            let text = core::str::from_utf8(&bytes[..filled]).ok()?;
+            teddiebox_config::Config::parse(text).ok()?.setup_password
+        })
+        .unwrap_or_else(|| {
+            heapless::String::try_from(net::SETUP_PASSWORD)
+                .expect("the compiled-in passphrase fits a WPA2 passphrase")
+        });
+
     // Built here rather than handed in, so that the radio's `StackResources`
     // — 3,472 bytes of it — is part of *this* future and therefore lands in
     // the scratch with everything else. A `&mut` from the caller would leave
     // it in the caller's future, which is the `.bss` this whole arrangement
     // exists to keep empty.
     let mut radio = net::Radio::new(wifi);
-    let (session, mut link) = match radio.serve(seed) {
+    let (session, mut link) = match radio.serve(seed, &setup_password) {
         Ok(pair) => pair,
         Err(trouble) => {
             esp_println::println!(
@@ -190,8 +208,13 @@ pub async fn run(
     };
 
     esp_println::println!(
-        "teddiebox: portal up — join `{}` and open http://192.168.4.1/",
-        net::SETUP_SSID
+        "teddiebox: portal up — join `{}` ({}) and open http://192.168.4.1/",
+        net::SETUP_SSID,
+        if setup_password == net::SETUP_PASSWORD {
+            "the published passphrase"
+        } else {
+            "the card's own passphrase"
+        }
     );
 
     // The runner has to be polled throughout rather than awaited first: it

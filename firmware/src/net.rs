@@ -49,6 +49,12 @@ pub const SETUP_SSID: &str = "teddiebox-setup";
 /// proximity and a capture during the ten minutes the portal is up. Somebody
 /// who needs more than that should set the box up out of range of anyone they
 /// do not trust, and change the home passphrase afterwards if they did not.
+///
+/// A card may name its own with `setup_password` in `CONFIG.TXT`, which narrows
+/// the window to people who know that value. This stays the fallback, and has
+/// to: it is what a box with no card, an unreadable card or an unparseable
+/// `CONFIG.TXT` answers to, and those are the boxes somebody is holding both
+/// ears on.
 pub const SETUP_PASSWORD: &str = "teddiebox";
 
 /// Socket slots the stack is given.
@@ -238,11 +244,16 @@ impl<'d> Radio<'d> {
     /// `max_connections(1)`, so a second device cannot *join* while somebody
     /// types their WiFi passphrase into the page. It does not stop anyone in
     /// range reading it — see [`SETUP_PASSWORD`] for why not.
-    pub fn serve(&mut self, seed: u64) -> Result<(Session<'_>, Link<'_>), Error> {
+    ///
+    /// `password` is the card's `setup_password` when it has one and
+    /// [`SETUP_PASSWORD`] when it does not. It is an argument rather than a
+    /// read from here because this module does not open the card — the same
+    /// rule that keeps the station's credentials a caller's business.
+    pub fn serve(&mut self, seed: u64, password: &str) -> Result<(Session<'_>, Link<'_>), Error> {
         let ap = AccessPointConfig::default()
             .with_ssid(Ssid::try_from(SETUP_SSID)?)
             .with_authentication(AuthenticationMethodConfig::Wpa2Personal(
-                Password::try_from(SETUP_PASSWORD)?,
+                Password::try_from(password)?,
             ))
             .with_max_connections(1);
 
