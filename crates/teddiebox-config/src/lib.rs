@@ -134,6 +134,60 @@ pub enum ConfigError {
     EmptyUpdateUrl,
 }
 
+/// Writes `text` into `out` with one key changed, added or taken out.
+///
+/// Every other line survives byte for byte — comments, blank lines, spacing,
+/// the order somebody put them in. That is the whole point: this edits a file a
+/// person wrote and will read again, so anything it reformats is something
+/// they have to notice and forgive.
+///
+/// `value` of `None` removes the key's line. A key that is not there and is
+/// being removed is not an error: the outcome asked for is already the case.
+/// A key that is not there and is being set is appended, on its own line, with
+/// a newline first if the file did not end in one.
+///
+/// Refuses rather than truncates when `out` is too small — a config cut
+/// mid-line is the dangerous kind of wrong, which is the same argument
+/// [`Config::parse_read`] makes about a file cut mid-read.
+pub fn set_key<const N: usize>(
+    text: &str,
+    key: &str,
+    value: Option<&str>,
+    out: &mut String<N>,
+) -> Result<(), ConfigError> {
+    let too_long = |_| ConfigError::ValueTooLong;
+    let mut replaced = false;
+
+    for line in text.lines() {
+        let names_the_key = line
+            .split_once('=')
+            .is_some_and(|(name, _)| name.trim() == key);
+        if names_the_key {
+            replaced = true;
+            let Some(value) = value else {
+                continue;
+            };
+            out.push_str(key).map_err(too_long)?;
+            out.push_str(" = ").map_err(too_long)?;
+            out.push_str(value).map_err(too_long)?;
+        } else {
+            out.push_str(line).map_err(too_long)?;
+        }
+        out.push('\n').map_err(too_long)?;
+    }
+
+    if !replaced {
+        if let Some(value) = value {
+            out.push_str(key).map_err(too_long)?;
+            out.push_str(" = ").map_err(too_long)?;
+            out.push_str(value).map_err(too_long)?;
+            out.push('\n').map_err(too_long)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// The range WPA2 accepts for a passphrase.
 ///
 /// Outside it the driver refuses the access point, and a box that cannot raise
@@ -974,6 +1028,80 @@ mod tests {
                 "ssid = A\nserver = s:1\nsetup_password = {long}\n"
             )),
             Err(ConfigError::MalformedValue)
+        );
+    }
+
+    #[test]
+    fn rewriting_a_key_leaves_every_other_line_exactly_as_it_was() {
+        let mut out = String::<256>::new();
+        set_key(
+            "# our box\n\nssid = Home\nsetup_password = old one\nserver = s:1\n",
+            "setup_password",
+            Some("a new one"),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            out.as_str(),
+            "# our box\n\nssid = Home\nsetup_password = a new one\nserver = s:1\n"
+        );
+    }
+
+    #[test]
+    fn removing_a_key_takes_its_whole_line_with_it() {
+        let mut out = String::<256>::new();
+        set_key(
+            "ssid = Home\nsetup_password = old one\nserver = s:1\n",
+            "setup_password",
+            None,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.as_str(), "ssid = Home\nserver = s:1\n");
+    }
+
+    #[test]
+    fn a_key_that_is_not_there_yet_is_appended() {
+        let mut out = String::<256>::new();
+        set_key(
+            "ssid = Home\n",
+            "setup_password",
+            Some("a new one"),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.as_str(), "ssid = Home\nsetup_password = a new one\n");
+    }
+
+    /// Removing what is not there is what `setup pw off` does on a card that
+    /// never had the key — the outcome asked for is already the case.
+    #[test]
+    fn removing_a_key_that_is_not_there_changes_nothing() {
+        let mut out = String::<256>::new();
+        set_key("ssid = Home\n", "setup_password", None, &mut out).unwrap();
+        assert_eq!(out.as_str(), "ssid = Home\n");
+    }
+
+    /// A file whose last line has no newline is one a hand editor leaves
+    /// behind, and appending to it must not join two keys into one line.
+    #[test]
+    fn appending_to_a_file_with_no_trailing_newline_still_starts_a_line() {
+        let mut out = String::<256>::new();
+        set_key("ssid = Home", "setup_password", Some("a new one"), &mut out).unwrap();
+        assert_eq!(out.as_str(), "ssid = Home\nsetup_password = a new one\n");
+    }
+
+    #[test]
+    fn a_result_too_long_for_the_buffer_is_refused_rather_than_truncated() {
+        let mut out = String::<16>::new();
+        assert_eq!(
+            set_key(
+                "ssid = Home\n",
+                "setup_password",
+                Some("a new one"),
+                &mut out
+            ),
+            Err(ConfigError::ValueTooLong)
         );
     }
 

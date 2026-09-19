@@ -226,7 +226,7 @@ pub async fn run(
         link.run(),
         serve_http(stack, card.as_ref()),
         serve_dhcp(stack),
-        serve_console(console),
+        serve_console(console, card.as_ref()),
     );
     match select(Timer::after(SETUP_WINDOW), serving).await {
         Either::First(()) => esp_println::println!(
@@ -480,7 +480,58 @@ async fn receive(socket: &mut TcpSocket<'_>, buffer: &mut [u8]) -> Received {
 /// Everything else gets a sentence saying where it is. That is the part that
 /// actually removes the trap: any command at all, including the `dl` that
 /// `scripts/flash.sh` sends first, now produces a line naming setup mode.
-async fn serve_console(console: Result<UartRx<'static, esp_hal::Blocking>, ConfigError>) -> ! {
+/// Writes `CONFIG.TXT` back with `setup_password` set, or taken out.
+///
+/// Returns whether the card now holds it, so the caller only resets on a write
+/// that happened.
+///
+/// Validated by re-parsing the whole file rather than by checking the value,
+/// so `teddiebox_config` stays the one authority on what this key may be — and
+/// so a file that was *already* wrong is refused here rather than saved into a
+/// box that will not boot. Same order as `save`: validate, then write, never
+/// the other way round.
+fn rewrite_setup_password(card: Option<&Mounted>, value: Option<&str>) -> bool {
+    let Some(card) = card else {
+        esp_println::println!("teddiebox: setup no card to write to");
+        return false;
+    };
+
+    let mut bytes = [0u8; MAX_CONFIG];
+    let filled = match card.read_config_bytes(&mut bytes) {
+        Ok(filled) => filled,
+        Err(why) => {
+            esp_println::println!("teddiebox: setup cannot read the config — {why}");
+            return false;
+        }
+    };
+    let Ok(text) = core::str::from_utf8(&bytes[..filled]) else {
+        esp_println::println!("teddiebox: setup the config on the card is not text");
+        return false;
+    };
+
+    let mut rewritten = heapless::String::<MAX_CONFIG>::new();
+    if let Err(trouble) = teddiebox_config::set_key(text, "setup_password", value, &mut rewritten) {
+        esp_println::println!("teddiebox: setup the config would not take it — {trouble:?}");
+        return false;
+    }
+    if let Err(trouble) = teddiebox_config::Config::parse(&rewritten) {
+        esp_println::println!("teddiebox: setup that leaves an invalid config — {trouble:?}");
+        return false;
+    }
+
+    match card.write_config(rewritten.as_bytes()) {
+        Ok(()) => true,
+        Err(trouble) => {
+            esp_println::println!("teddiebox: setup could not write the card — {trouble}");
+            false
+        }
+    }
+}
+
+async fn serve_console(
+    console: Result<UartRx<'static, esp_hal::Blocking>, ConfigError>,
+    card: Option<&Mounted>,
+) -> ! {
     let mut console = match console {
         Ok(console) => console,
         Err(trouble) => {
@@ -501,6 +552,16 @@ async fn serve_console(console: Result<UartRx<'static, esp_hal::Blocking>, Confi
                         esp_println::println!("teddiebox: leaving the configuration portal");
                         crate::drain_console();
                         esp_hal::system::software_reset()
+                    }
+                    // The one command that is *more* use here than in the
+                    // ordinary console: it changes the passphrase of the
+                    // access point standing between somebody and this page.
+                    Command::SetupPassword(value) => {
+                        if rewrite_setup_password(card, value.as_deref()) {
+                            esp_println::println!("teddiebox: setup passphrase saved — restarting");
+                            crate::drain_console();
+                            esp_hal::system::software_reset()
+                        }
                     }
                     _ => esp_println::println!(
                         "teddiebox: the configuration portal is running —                          join `{}` and open http://192.168.4.1/, or send `rb` to leave it",

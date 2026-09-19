@@ -133,6 +133,13 @@ pub enum Command {
     ///
     /// Never echoed, and the reason [`MAX_LINE`] is as long as it is.
     NetPassword(String<MAX_PASSPHRASE>),
+    /// Change, or remove, the passphrase of the box's own setup access point.
+    ///
+    /// `None` removes the key, putting the card back to the published
+    /// passphrase. Only setup mode acts on this: it is the way back into a box
+    /// whose `setup_password` was forgotten, and by the time it is needed the
+    /// access point it changes is already the thing standing in the way.
+    SetupPassword(Option<String<MAX_PASSPHRASE>>),
     /// Associate with the remembered network and take a DHCP lease.
     NetUp,
     /// Open a TLS connection to the configured server and hang up.
@@ -392,6 +399,7 @@ impl CommandWatch {
                         .or_else(|| slap(other))
                         .or_else(|| parse_read_memory(other))
                         .or_else(|| parse_credential(other))
+                        .or_else(|| parse_setup_password(other))
                         .or_else(|| parse_get(other))
                         .or_else(|| parse_crc(other))
                         .or_else(|| parse_ota_boot(other)),
@@ -585,6 +593,28 @@ pub const MAX_MEMORY_BLOCKS: u8 = 32;
 /// Empty is refused — it is a typo, and one the driver would otherwise be
 /// handed as though it were meant. Too long is refused rather than truncated,
 /// for the same reason.
+/// `setup pw off`, or `setup pw` and a passphrase.
+///
+/// Everything after the space is the passphrase, `#` included, for the reason
+/// `CONFIG.TXT` exempts `password` from its comment rule. `off` is not a
+/// passphrase anyone can lose to this: WPA2 will not take three characters, so
+/// the word could never have been set in the first place.
+///
+/// Length is not checked here. The firmware writes the value into the file and
+/// re-parses the whole thing before it saves, so `teddiebox_config` stays the
+/// one authority on what a `setup_password` may be.
+fn parse_setup_password(line: &[u8]) -> Option<Command> {
+    let rest = line.strip_prefix(b"setup pw ")?;
+    if rest == b"off" {
+        return Some(Command::SetupPassword(None));
+    }
+    let text = core::str::from_utf8(rest).ok()?;
+    String::try_from(text)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| Command::SetupPassword(Some(s)))
+}
+
 fn parse_credential(line: &[u8]) -> Option<Command> {
     if let Some(rest) = line.strip_prefix(b"net ssid ") {
         let text = core::str::from_utf8(rest).ok()?;
@@ -642,6 +672,36 @@ mod tests {
 
     fn feed_all(watch: &mut CommandWatch, bytes: &[u8]) -> Option<Command> {
         bytes.iter().find_map(|&b| watch.feed(b))
+    }
+
+    /// The way back into a box whose `setup_password` was forgotten, typed on
+    /// the console the portal already runs.
+    #[test]
+    fn setup_pw_carries_the_passphrase_as_written() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"setup pw our house #1\n"),
+            Some(Command::SetupPassword(Some(
+                String::try_from("our house #1").unwrap()
+            )))
+        );
+    }
+
+    /// `off` puts the card back to the published passphrase. It can never
+    /// collide with a real one: WPA2 will not take three characters.
+    #[test]
+    fn setup_pw_off_asks_for_the_key_to_be_removed() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"setup pw off\n"),
+            Some(Command::SetupPassword(None))
+        );
+    }
+
+    #[test]
+    fn setup_pw_with_nothing_after_it_is_not_a_command() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(feed_all(&mut watch, b"setup pw \n"), None);
     }
 
     #[test]

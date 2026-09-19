@@ -101,10 +101,14 @@ passphrases out loud.
 between 8 and 63 characters of your own in `CONFIG.TXT`, and the box asks for
 that instead of `teddiebox`. Worth understanding before you do: the published
 passphrase is what a box with no card, an unreadable card, or a `CONFIG.TXT`
-too broken to parse falls back to — so it always gets you in to *those*. What
-it will not get you into is a box whose file still parses and names a
-passphrase you have forgotten. That one needs a card reader, which is the one
-thing this page exists to avoid.
+too broken to parse falls back to — so it always gets you in to *those*.
+
+If you forget one you have set, the way back is the serial console that setup
+mode runs alongside the page: send `setup pw off` to put the card back to the
+published passphrase, or `setup pw` and a new one to change it. Either rewrites
+that one line of `CONFIG.TXT`, leaves every other line exactly as you wrote it,
+and restarts the box. So a forgotten passphrase costs a USB serial cable rather
+than a card reader.
 
 ### The indicator says more
 

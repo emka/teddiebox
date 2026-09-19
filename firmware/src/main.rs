@@ -4763,6 +4763,14 @@ async fn main(spawner: Spawner) {
                 Some(Command::Stop) => {
                     audio::STOP.store(true, Ordering::Relaxed);
                 }
+                // Setup mode's console acts on this; this one does not. Here
+                // the card is a file away on a laptop, and the access point it
+                // changes is not up — so the command has nothing to fix and
+                // one more way to write the card is one more way to get it
+                // wrong.
+                Some(Command::SetupPassword(_)) => esp_println::println!(
+                    "teddiebox: setup pw only works in setup mode — hold both ears at switch-on"
+                ),
                 Some(Command::Storage) => {
                     // The rail comes up here because this loop owns the pins.
                     // It stays up afterwards: the walk is a bench action, and a
