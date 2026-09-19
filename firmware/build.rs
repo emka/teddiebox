@@ -12,6 +12,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=TEDDIEBOX_LANGUAGE");
     println!("cargo:rerun-if-env-changed=TEDDIEBOX_SLIX_PASSWORD");
+    println!("cargo:rerun-if-env-changed=TEDDIEBOX_RELEASE");
 
     // The version an update is decided against. `git describe --always
     // --dirty` gives a tag when there is one, a short hash when there is not,

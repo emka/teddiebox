@@ -1738,14 +1738,36 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
 /// refusal says which build the box is running rather than looking like a
 /// parse failure.
 ///
+/// Whether this image carries the console commands that exist to take a box
+/// apart rather than to run one.
+///
+/// On unless `TEDDIEBOX_RELEASE` asks otherwise, so an ordinary `just
+/// firmware` or `just flash` builds what a bench session wants and nothing
+/// about a working day changes. The environment rather than a cargo feature
+/// because that is how this build already takes its other three decisions —
+/// the language, the SLIX password and the version — and `build.rs` already
+/// knows to rebuild when one of them changes.
+///
 /// A `const` read in each arm rather than a `#[cfg]` on it: the match over
 /// `Command` stays exhaustive, so a command added later still has to be wired
 /// up or the build fails, and the branch folds at compile time either way. A
 /// helper function returning the same answer does not fold — it is called from
 /// eleven places, so it stays out of line and every gated arm stays in the
 /// image. Measured: that spelling made the release build *larger* than the
-/// bench one; this one makes it 1,900 bytes smaller.
-const BENCH: bool = cfg!(feature = "bench");
+/// bench one; this one made it 3,928 bytes smaller on the day it was written.
+const BENCH: bool = !release_requested();
+
+/// Reads `TEDDIEBOX_RELEASE` the way `CONFIG.TXT` reads its one boolean.
+///
+/// `TEDDIEBOX_RELEASE=0` meaning "yes, release" is the trap a plain presence
+/// check walks into, and an environment variable set to `0` is a thing people
+/// write when they mean off.
+const fn release_requested() -> bool {
+    match option_env!("TEDDIEBOX_RELEASE") {
+        None => false,
+        Some(value) => !matches!(value.as_bytes(), b"" | b"0" | b"no" | b"false"),
+    }
+}
 
 /// Says why a command did nothing, so a release box does not look like it
 /// failed to parse the line.

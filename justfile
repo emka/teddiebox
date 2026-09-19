@@ -74,16 +74,17 @@ fixtures:
 firmware: vendor
     cd firmware && cargo build --release
 
-# The `bench` feature is on by default, so `just firmware` and `just flash`
-# build the image a bench session wants. This is the other half of that gate:
-# without it the console commands that exist to take a box apart — the codec
-# register pokes, `otaboot`, `sleep`, `mem`, and the three that carry the SLIX
-# password — are not in the image at all. It is a CI gate as well as a recipe,
-# because a configuration nothing builds is one that rots.
+# `TEDDIEBOX_RELEASE` is off unless set, so `just firmware` and `just flash`
+# build the image a bench session wants. Setting it drops the console commands
+# that exist to take a box apart — the codec register pokes, `otaboot`,
+# `sleep`, `mem`, and the three that carry the SLIX password — from the image
+# entirely. It works on any recipe that builds firmware, so a release flash is
+# `TEDDIEBOX_RELEASE=1 just flash`; this recipe exists so CI builds that
+# configuration too, because one nothing builds is one that rots.
 
 # the same image without the bench console commands
 firmware-release: vendor
-    cd firmware && cargo build --release --no-default-features
+    cd firmware && TEDDIEBOX_RELEASE=1 cargo build --release
 
 # firmware/Cargo.toml patches both mbedtls crates to copies of the published
 # ones — `mbedtls-rs-sys` for a widened version bound and a define it will not
