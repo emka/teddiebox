@@ -127,3 +127,49 @@ the single RGB light to say what it is doing:
 
 It is steady rather than breathing, and deliberately dim: this sits in a
 child's room.
+
+## What goes in `CONFIG.TXT`
+
+One `key = value` per line, `#` starts a comment, blank lines are ignored.
+Unknown keys are skipped, so a card written for a newer firmware still boots an
+older one — but a key the box *does* know, given a value it cannot use, is
+refused out loud rather than guessed at. `insecure = ture` is a typo about
+certificate checking, and the box saying so beats the box deciding for you.
+
+| key | | |
+|---|---|---|
+| `ssid` | required | your WiFi network |
+| `password` | | its passphrase. Everything after the `=` is the password, `#` included — so a passphrase with a hash in it needs no escaping. Leave it empty for an open network |
+| `server` | required | `host:port` of your teddyCloud |
+| `insecure` | `no` | accept the server's certificate without checking it |
+| `ears_skip` | `yes` | whether holding an ear changes the chapter |
+| `update_url` | | full `https://` URL of an update manifest. Absent means no updates, which is the safe default — there is no address it would be right to guess |
+| `setup_password` | | the box's own setup passphrase, 8 to 63 characters. See above |
+
+**`insecure` is worth understanding before you use it.** It stops the box
+checking who it is talking to; it does not stop the box identifying itself.
+The box's certificate and the figure's own token go out over the connection
+either way, so whatever answers at `server` can pass both on to the real
+teddyCloud. That is deliberate — a box that connected anonymously would check
+nothing *and* fetch nothing, since the server refuses a request without a token
+— but it means that while `insecure` is on, `server` is the line in this file
+carrying the weight. Point it somewhere you trust.
+
+## Building it
+
+`just check` runs every gate the pipeline runs, in the same order, and is what
+to run before committing. `just flash` puts the box into download mode, flashes
+it, and starts it again — the order in `scripts/flash.sh` is not arbitrary, and
+getting it wrong costs opening the case.
+
+The box carries a serial console on `/dev/ttyUSB0` at 115200 and prints its own
+command list at boot. Most of those commands exist to take a box apart rather
+than to run one — poking codec registers, arming the other firmware slot,
+reading a figure's memory — so a build meant to live on a shelf leaves them
+out:
+
+    TEDDIEBOX_RELEASE=1 just flash
+
+That image answers `dl`, which reboots it for flashing, and nothing else. It is
+also about 19 KB smaller. Everything the box does for the child it is for is
+unchanged; there is simply no longer a way to talk it into anything else.
