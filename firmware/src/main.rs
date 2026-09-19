@@ -4595,6 +4595,15 @@ async fn main(spawner: Spawner) {
                         "teddiebox: net certificates {} — takes effect on the next connection",
                         if insecure { "NOT checked" } else { "checked" }
                     );
+                    if insecure {
+                        // Said out loud because the word suggests the box is
+                        // only lowering its own guard, and it is not: the
+                        // identity and the token still go out. See
+                        // `tls::client_config`.
+                        esp_println::println!(
+                            "teddiebox: net the box still sends its certificate and the tag's token"
+                        );
+                    }
                 }
                 Some(Command::Get(ruid)) => {
                     // Read and written in the one critical section: whatever

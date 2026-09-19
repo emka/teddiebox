@@ -375,6 +375,25 @@ pub fn init(
 /// `min_version` is pinned to 1.2 rather than left at the default because this
 /// server offers nothing else; a build that quietly negotiated something else
 /// would be talking to a server this project has not measured.
+/// Builds the session configuration, checked or not.
+///
+/// **`insecure` turns off the checks this box makes of the server. It does not
+/// turn off what the box tells the server.** `creds` is whatever the caller
+/// passed — and both callers pass the box's `CLIENT.DER` and `PRIVATE.DER`
+/// either way — while the tag's 32-byte token rides the same session as an
+/// `Authorization: BD …` header. So anything that answers at `server` gets a
+/// client-certificate-authenticated session it can relay to the real
+/// teddyCloud, plus a token that authorises a cloud fetch for the figure on
+/// the plate. The private key itself never leaves the box; the ability to use
+/// it for the length of one handshake does.
+///
+/// Left that way deliberately, because withholding them would make `insecure`
+/// useless here rather than safer: it is on precisely so this box can talk to
+/// the teddyCloud on this LAN at all, and that server answers a request
+/// without a token with a `403`. A box that connected anonymously would verify
+/// nothing *and* fetch nothing. The cost is bounded by who can answer at
+/// `server`, which is a name the card gives — so the thing that actually
+/// protects this is keeping `CONFIG.TXT` right, not what is passed here.
 pub fn client_config<'a>(
     insecure: bool,
     creds: Option<Credentials<'a>>,

@@ -68,6 +68,15 @@ pub struct Config {
     /// 2004, and would refuse a good one. Until the box learns the time, this
     /// is what gets it talking.
     ///
+    /// **It stops the box checking the server. It does not stop the box
+    /// identifying itself to one.** The box's client certificate and the
+    /// placed figure's token go out over the session either way, so whatever
+    /// answers at `server` can relay both to the real teddyCloud. That is a
+    /// deliberate trade — this server refuses a tokenless request with a `403`,
+    /// so a box that connected anonymously would verify nothing and fetch
+    /// nothing — and it means `server` is the setting that carries the weight
+    /// when this one is on.
+    ///
     /// Defaults to `false`. A file that says nothing gets the checking.
     pub insecure: bool,
     /// Whether holding an ear skips a chapter.
