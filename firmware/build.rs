@@ -14,6 +14,26 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TEDDIEBOX_SLIX_PASSWORD");
     println!("cargo:rerun-if-env-changed=TEDDIEBOX_RELEASE");
 
+    // The bench console commands, as a `cfg` rather than a cargo feature.
+    //
+    // Cargo cannot turn a feature on from the environment — features come from
+    // the manifest or the command line and nothing else — but a build script
+    // can read the environment and emit a `cfg`, which is the same compile-time
+    // switch by a different name. It buys what `option_env!` could not: `#[cfg(
+    // bench)]` on whole items, not just a `const` that folds a branch.
+    //
+    // Read the way `CONFIG.TXT` reads its one boolean. `TEDDIEBOX_RELEASE=0`
+    // meaning "yes, release" is the trap a plain presence check walks into, and
+    // an environment variable set to `0` is what people write when they mean
+    // off.
+    println!("cargo:rustc-check-cfg=cfg(bench)");
+    let release = std::env::var("TEDDIEBOX_RELEASE")
+        .map(|v| !matches!(v.as_str(), "" | "0" | "no" | "false"))
+        .unwrap_or(false);
+    if !release {
+        println!("cargo:rustc-cfg=bench");
+    }
+
     // The version an update is decided against. `git describe --always
     // --dirty` gives a tag when there is one, a short hash when there is not,
     // and a `-dirty` suffix for an uncommitted tree — so a box flashed from a
