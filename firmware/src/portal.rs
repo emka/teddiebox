@@ -23,7 +23,7 @@ use embassy_net::{Ipv4Address, Stack};
 use embassy_time::{Duration, Timer};
 use esp_hal::peripherals::{GPIO44, UART0, WIFI};
 use esp_hal::uart::{Config as UartConfig, ConfigError, UartRx};
-use teddiebox_core::console::{Command, CommandWatch};
+use teddiebox_console::{Command, CommandWatch};
 use teddiebox_core::LedState;
 use teddiebox_portal::{dhcp, form, http, page, MAX_BODY, MAX_CONFIG};
 

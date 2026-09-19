@@ -1,6 +1,8 @@
 //! The shared vocabulary of the reducer.
 
 /// Milliseconds since boot. Supplied by the caller; the core never reads a clock.
+pub use teddiebox_board::Side;
+
 pub type Millis = u64;
 
 /// The unique identifier of an ISO 15693 tag, as read from the figure.
@@ -69,12 +71,6 @@ pub enum Ear {
     Larger = 0,
     /// GPIO21, the box's left.
     Smaller = 1,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Side {
-    Left,
-    Right,
 }
 
 /// Volume step. Zero is silent.

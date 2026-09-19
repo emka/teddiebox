@@ -10,7 +10,7 @@
 //! slap lasts a few: the part detects the click itself at its own rate and
 //! latches it, which is the only reading that survives that poll interval.
 //! What stays out of here is *policy* — which side of the box an axis means is
-//! `teddiebox_core::board`'s business, and this crate still only moves bytes.
+//! `teddiebox_board`'s business, and this crate still only moves bytes.
 
 pub mod regs;
 

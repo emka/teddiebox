@@ -1,7 +1,17 @@
+#![no_std]
+
 //! The bench console: commands the box accepts on UART0.
 //!
 //! Line matching only, so it can be tested on the host. What a command *does*
 //! belongs to the firmware, which owns the hardware to do it with.
+//!
+//! Its own crate rather than a module of `teddiebox-core`: a line parser has
+//! nothing to do with the reducer, and keeping it apart means a change to what
+//! the box accepts on a wire cannot reach what the box decides. `hex` comes
+//! with it, because the only two things that parse a hex password are a
+//! command typed here and the build that bakes one in.
+
+pub mod hex;
 
 use heapless::String;
 

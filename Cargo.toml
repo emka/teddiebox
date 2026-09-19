@@ -3,8 +3,10 @@ resolver = "2"
 members = [
     "crates/lis3dh",
     "crates/teddiebox-audio",
+    "crates/teddiebox-board",
     "crates/teddiebox-cloud",
     "crates/teddiebox-config",
+    "crates/teddiebox-console",
     "crates/teddiebox-core",
     "crates/teddiebox-download",
     "crates/teddiebox-opus-sys",

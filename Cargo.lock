@@ -1099,6 +1099,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-board"
+version = "0.1.0"
+
+[[package]]
 name = "teddiebox-cloud"
 version = "0.1.0"
 dependencies = [
@@ -1116,10 +1120,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-console"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+]
+
+[[package]]
 name = "teddiebox-core"
 version = "0.1.0"
 dependencies = [
  "heapless 0.8.0",
+ "teddiebox-board",
 ]
 
 [[package]]

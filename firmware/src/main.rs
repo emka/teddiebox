@@ -27,7 +27,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use heapless::String;
 use teddiebox_config::{Config, Settings};
-use teddiebox_core::console::{MAX_PASSPHRASE, MAX_SSID};
+use teddiebox_console::{MAX_PASSPHRASE, MAX_SSID};
 
 use esp_backtrace as _;
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
@@ -42,8 +42,8 @@ use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
 use lis3dh::{clamped_threshold, regs as lis, ClickAxes, ClickAxis, ClickConfig, Lis3dh};
-use teddiebox_core::board::{self, Gates, Rail};
-use teddiebox_core::console::{Command, CommandWatch};
+use teddiebox_board::{self as board, Gates, Rail};
+use teddiebox_console::{Command, CommandWatch};
 use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::pipe::Pipe;
@@ -1882,7 +1882,7 @@ const BUILT_IN_PASSWORD: u32 = match option_env!("TEDDIEBOX_SLIX_PASSWORD") {
         if text.is_empty() {
             0
         } else {
-            match teddiebox_core::hex::u32_from_hex(text.as_bytes()) {
+            match teddiebox_console::hex::u32_from_hex(text.as_bytes()) {
                 Some(value) => value,
                 // A build is the right place to find this out. The bench's
                 // way of finding out is a tag that says nothing at all.

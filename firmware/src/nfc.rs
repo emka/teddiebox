@@ -15,7 +15,7 @@ use esp_hal::delay::Delay;
 use esp_hal::gpio::{Input, Output};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
-use teddiebox_core::console::MAX_MEMORY_BLOCKS;
+use teddiebox_console::MAX_MEMORY_BLOCKS;
 use trf7962a::{Trf7962a, INIT_SEQUENCE};
 
 /// The reader takes up to 2 Mbit/s (SLOS757C §5.12). Half that is plenty for

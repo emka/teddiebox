@@ -1,11 +1,8 @@
 #![no_std]
 
 mod battery;
-pub mod board;
 pub mod checksum;
-pub mod console;
 pub mod cushion;
-pub mod hex;
 pub mod i2c;
 pub mod input;
 mod led;
@@ -679,7 +676,7 @@ mod tests {
     }
 
     /// The larger ear is on the box's right, and right goes forward — the same
-    /// direction a slap on that side means. See `board::side_for_click`.
+    /// direction a slap on that side means. See `teddiebox_board::side_for_click`.
     #[test]
     fn a_long_press_on_the_right_ear_skips_forward() {
         let mut c = core();

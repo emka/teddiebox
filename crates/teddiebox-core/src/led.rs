@@ -4,8 +4,8 @@
 //! ordering here is a priority decision, not a lookup: the user needs to see
 //! the condition that requires action.
 
-use crate::board::Colour;
 use crate::{BatteryLevel, LedState};
+use teddiebox_board::Colour;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackKind {
@@ -77,7 +77,7 @@ pub const fn colour_for(state: LedState) -> Colour {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::Colour;
+    use teddiebox_board::Colour;
 
     /// The five colours asked for, in one place, because the mapping is the
     /// whole of what anybody looking at the box can see.

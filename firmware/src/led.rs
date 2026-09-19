@@ -9,7 +9,7 @@
 //! Design §5 always specified LEDC for this. Hardware holds the waveform with
 //! no processor involvement, so the main loop only has to say how bright.
 //!
-//! Which channels are lit remains [`teddiebox_core::board`]'s decision — this
+//! Which channels are lit remains [`teddiebox_board`]'s decision — this
 //! turns that decision into a duty cycle, and knows nothing about why.
 
 use esp_hal::gpio::interconnect::PeripheralOutput;
@@ -17,7 +17,7 @@ use esp_hal::ledc::channel::{self, Channel, ChannelIFace};
 use esp_hal::ledc::timer::{self, TimerIFace};
 use esp_hal::ledc::{LSGlobalClkSource, Ledc, LowSpeed};
 use esp_hal::time::Rate;
-use teddiebox_core::board::{self, PinLevel};
+use teddiebox_board::{self as board, PinLevel};
 
 /// Fast enough that no eye or camera sees steps, slow enough to be nowhere
 /// near the peripheral's limits at eight bits of resolution.

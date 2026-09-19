@@ -1,10 +1,10 @@
 //! The only place that knows a GPIO number is a physical pin.
 //!
-//! `teddiebox_core::board` decides which pin goes to which level; this turns
+//! `teddiebox_board` decides which pin goes to which level; this turns
 //! those decisions into writes. It contains no policy of its own.
 
 use esp_hal::gpio::{Level, Output, OutputConfig};
-use teddiebox_core::board::{self, PinLevel};
+use teddiebox_board::{self as board, PinLevel};
 
 /// The gates. The LEDs are driven by the LEDC peripheral rather than as plain
 /// outputs, so they are not here — see [`crate::led`].

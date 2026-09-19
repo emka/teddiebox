@@ -1,10 +1,22 @@
+#![no_std]
+
 //! Board power policy: which pin, at which level, in which order.
 //!
 //! Pure logic with no HAL types, so the decisions can be tested on the host.
 //! The firmware owns the pins and applies what this decides; it decides
 //! nothing itself.
+//!
+//! Its own crate rather than a module of `teddiebox-core`, because it has
+//! nothing to do with the reducer that crate exists for: nothing here knows
+//! what a story is. What it does own is the vocabulary for the box as a
+//! physical object — which side, which colour — so the reducer depends on
+//! this and not the other way round.
 
-use crate::types::Side;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
 
 /// Power gate 2: the accelerometer, the codec and the LED. High enables.
 ///
