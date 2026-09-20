@@ -265,17 +265,21 @@ pub enum Command {
     Speaker(bool),
     /// Whether the reader polls the plate on its own.
     ///
-    /// Off at boot, deliberately: a poller that unlocks tags by itself would
-    /// contaminate any bench measurement that involves a figure, and the
+    /// **On at boot**, because a box that ignores every figure until somebody
+    /// types at it is not a box — and a release image, which answers no
+    /// command but `dl`, could never be told otherwise.
+    ///
+    /// `plate off` is what a measurement asks for: a poller that unlocks tags
+    /// by itself contaminates any bench run involving a figure, and the
     /// download tests are exactly that.
     Plate(bool),
     /// Hold the idle timeout off, or let it run again.
     ///
     /// A bench session is hours of deliberate waiting — a discharge curve, a
     /// download, a person listening for one sound — during which the box is
-    /// doing exactly what the idle timeout was written to end. Off at boot,
-    /// like [`Command::Plate`]: a box that stays awake because a previous
-    /// session said so is a box measuring the wrong thing.
+    /// doing exactly what the idle timeout was written to end. Off at boot: a
+    /// box that stays awake because a previous session said so is a box
+    /// measuring the wrong thing.
     StayAwake(bool),
     /// Enter deep sleep now, wakeable by the ear line.
     ///
@@ -294,8 +298,8 @@ pub enum Command {
     Revalidate,
     /// Whether the box may end a session in deep sleep rather than parking.
     ///
-    /// Off at boot and lost on every reset, like [`Command::Plate`] and
-    /// [`Command::StayAwake`]. Until sleep current and the state of the gate
+    /// Off at boot and lost on every reset, like [`Command::StayAwake`].
+    /// Until sleep current and the state of the gate
     /// pins have been measured, a box that switches itself all the way off is
     /// a box that cannot be asked what it did — so the automatic ending is
     /// something a bench arms deliberately, for one session at a time.

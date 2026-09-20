@@ -1906,12 +1906,26 @@ static NFC_PASSWORD: AtomicU32 = AtomicU32::new(BUILT_IN_PASSWORD);
 /// observe a first block from one command beside a count from the next.
 static NFC_MEM_RANGE: AtomicU32 = AtomicU32::new(0);
 
-/// Whether the reader polls the plate on its own. Off at boot.
+/// Whether the reader polls the plate on its own. On at boot.
 ///
-/// A poller that unlocks tags by itself would contaminate any bench
-/// measurement that involves a figure, so this stays off until `plate on`
-/// asks for it in a session that is watching.
-static PLATE_POLLING: AtomicBool = AtomicBool::new(false);
+/// **The default is what a child's box does**, because a box that ignores
+/// every figure until somebody types at it is not a box. It used to be off,
+/// to keep a poller that unlocks tags by itself from contaminating a bench
+/// measurement — and `plate off` still buys exactly that, for the session
+/// that asks. What made the old default untenable is that a release image
+/// answers no command but `dl`, so this was the one setting a finished box
+/// could never reach: it played its jingle and then ignored every figure for
+/// ever.
+///
+/// Switching it on by default was gated on a measurement. Polling an *empty*
+/// plate cost 49 DMA restarts in 70 s against 0 with the poller off — worse
+/// than the radio — and the bench note of 2026-09-07 said not to change this
+/// default until that path was made cheap. It was, the same day: 49 -> 5, and
+/// 0 with a figure present. The remaining 5 belong to an empty plate, and
+/// lifting a figure now pauses the story (`Playback::on_tag_absent`), so an
+/// empty plate no longer coincides with anything playing — which is the only
+/// condition under which a restart can be heard.
+static PLATE_POLLING: AtomicBool = AtomicBool::new(true);
 /// Asks the reader task to print the slowest reply it has seen. Set when
 /// polling is switched off, because that is when a run is over.
 static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
@@ -2073,9 +2087,10 @@ static PARKED: AtomicBool = AtomicBool::new(false);
 /// veto a park would be a second thing to reason about when one of them
 /// gets it wrong.
 ///
-/// Off at boot and lost on every reset, exactly like `PLATE_POLLING` — a box
-/// that stays awake because a previous session said so is measuring the
-/// wrong thing.
+/// Off at boot and lost on every reset — a box that stays awake because a
+/// previous session said so is measuring the wrong thing. Unlike
+/// `PLATE_POLLING`, whose default is what a child's box does, there is no
+/// child's box that wants this on.
 static STAY_AWAKE: AtomicBool = AtomicBool::new(false);
 
 /// The most recent pack reading, in millivolts, and how many have been taken.
