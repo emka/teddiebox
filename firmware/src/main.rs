@@ -603,6 +603,14 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     esp_println::println!("teddiebox: LIS3DH at {address:#04x}");
     let mut accel = Lis3dh::new(bus, address);
     let mut since_report = ACCEL_REPORT_EVERY;
+    let mut since_detect: u32 = 0;
+    // Starts in agreement with `HEADPHONES_IN`, so a box that boots with
+    // nothing plugged in raises no event at all. Kept here rather than read
+    // back from the static because `hp 1` writes that one, and a forced
+    // routing must survive every poll that reads the same register value it
+    // read before — which is the whole escape hatch if this jack turns out
+    // not to reach the codec's detect pin.
+    let mut last_detect = false;
     // `armed_threshold` always tracks the last value a write was *attempted*
     // with; `armed` is only set by a write that actually succeeded. Guarding
     // the re-arm below on `armed` — not just on the threshold changing — is
@@ -899,6 +907,33 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 Err(_) => esp_println::println!("teddiebox: LIS3DH read failed"),
             }
         }
+        since_detect += 1;
+        if since_detect >= HEADSET_DETECT_EVERY {
+            since_detect = 0;
+            // The bus goes back to the accelerometer before anything is
+            // decided, so a full input queue cannot leave the codec holding it.
+            let bus = accel.release();
+            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+            let reading = dac.headphones_connected();
+            let bus = dac.release();
+            accel = Lis3dh::new(bus, address);
+            match reading {
+                Ok(now) if now != last_detect => {
+                    last_detect = now;
+                    HEADPHONES_IN.store(now, Ordering::Relaxed);
+                    esp_println::println!(
+                        "teddiebox: headphones {}",
+                        if now { "in" } else { "out" }
+                    );
+                    if INPUT_EVENTS.try_send(Event::Headphones(now)).is_err() {
+                        esp_println::println!("teddiebox: input queue full, jack change dropped");
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => esp_println::println!("teddiebox: headset detect unreadable"),
+            }
+        }
+
         since_report += 1;
         Timer::after(Duration::from_millis(ACCEL_POLL_MS)).await;
     }
@@ -2286,6 +2321,26 @@ static CODEC_REINIT: AtomicBool = AtomicBool::new(false);
 
 /// Ask the motion task to run the codec's power-down, and nothing else.
 static CODEC_POWER_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// What is plugged into the headphone jack, as far as the box knows.
+///
+/// **The only place the firmware records this.** The detect poll in `motion`
+/// writes it, `hp 1` / `hp 0` overwrite it, and the codec bring-up reads it.
+/// `Action::SetOutput` deliberately does not: that action drives
+/// `SPEAKER_REQUEST` and nothing else, because two statics that can disagree
+/// about one fact is the shape the 2026-09-18 review objected to once.
+static HEADPHONES_IN: AtomicBool = AtomicBool::new(false);
+
+/// Full passes of the `motion` loop between headset-detect reads.
+///
+/// The loop naps `ACCEL_POLL_MS`, so three passes is about 600 ms; plug to
+/// silence is that plus the codec's 128 ms debounce. Full passes, not
+/// iterations: the request handlers above `continue`, which skips the timer,
+/// so counting every iteration would poll far faster than this says.
+///
+/// Not worth making faster. Polling harder is the wrong reflex on this box —
+/// an empty plate's polling already costs more than the radio does.
+const HEADSET_DETECT_EVERY: u32 = 3;
 
 /// A pending speaker mute change: 0 nothing, 1 mute, 2 unmute.
 static SPEAKER_REQUEST: AtomicU8 = AtomicU8::new(0);
