@@ -708,7 +708,7 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
             let up = request == OUTPUT_UP;
             let outcome = if up {
-                dac.start_output(&mut dac_delay)
+                dac.start_output(&mut dac_delay, true)
             } else {
                 dac.stop_output()
             };
