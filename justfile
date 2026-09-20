@@ -35,6 +35,7 @@ test:
 scripts:
     python3 scripts/battery-run.py --self-test
     python3 scripts/sleep-check.py --self-test
+    python3 scripts/console.py --self-test
 
 # Proves the library crates are genuinely no_std, against the target the
 # firmware actually runs on. rustc ships no prebuilt core for xtensa.
@@ -108,6 +109,16 @@ vendor:
 # something to retype.
 flash: firmware
     ./scripts/flash.sh
+
+# `scripts/bench-console.py` sends one line and captures until a marker, which
+# is what a scripted step wants. This is for the steps with a person in them —
+# plugging headphones in between `t` and `stop`. The port takes one owner, so
+# this refuses to start while a capture is running, and `just flash` refuses
+# while this is.
+
+# an interactive console on the box, for what a capture cannot do
+console:
+    ./scripts/console.py
 
 # format the tree rather than checking it
 fix:

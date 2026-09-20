@@ -37,8 +37,15 @@ die() {
 [ -f "$TABLE" ] || die "no partition table at $TABLE — run this from the repository root"
 [ -e "$PORT" ] || die "no $PORT — is the box plugged in?"
 
-if pgrep -f "bench-console.*$PORT" >/dev/null 2>&1; then
-    die "something is already reading $PORT; the port takes one owner — stop it first"
+# Who holds the port is console.py's question to answer, from /proc. The guard
+# this replaces matched `bench-console.*$PORT`, and neither script names the
+# port on its command line when it is the default one — so it never fired for
+# the capture it was written to catch.
+if holder=$(python3 scripts/console.py --check-owner --port "$PORT"); then
+    :
+else
+    die "something is already reading $PORT; the port takes one owner — stop it first:
+  $holder"
 fi
 
 # A box already sitting in download mode is silent, and asking it for `dl`
