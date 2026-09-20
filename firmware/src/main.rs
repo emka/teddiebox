@@ -3778,19 +3778,6 @@ async fn nfc_reader(
         Timer::after(Duration::from_millis(100)).await;
     }
 
-    // Not while the box is still saying hello. An exchange blocks the
-    // executor for up to a poll window, the jingle is already sharing the
-    // boot with the radio associating, and three of those at once is what
-    // makes the jingle break up — heard on the box, 2026-09-20. Nothing is
-    // lost by waiting: a figure cannot start a story while an announcement
-    // is playing anyway, so the delay is one the child would not have heard
-    // the end of. A console request skips it, because a bench asking for the
-    // reader is not the boot.
-    while NFC_REQUEST.load(Ordering::Relaxed) == REQUEST_NONE && ANNOUNCING.load(Ordering::Relaxed)
-    {
-        Timer::after(Duration::from_millis(100)).await;
-    }
-
     // The rail was raised by the console loop; give it the same settling time
     // the card and the I2C devices get.
     Timer::after(Duration::from_millis(50)).await;
