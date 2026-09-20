@@ -30,5 +30,9 @@ license = "MIT OR Apache-2.0"
 heapless = { version = "0.8", default-features = false }
 embedded-hal = "1.0"
 embedded-hal-mock = { version = "0.11", features = ["eh1"] }
+# A `block_on` for the driver tests: the reader's exchanges are async so that
+# an empty plate cannot block the executor, and a host test still has to drive
+# one to completion. no_std, one file, no executor.
+embassy-futures = "0.1"
 embedded-io = "0.7"
 embedded-io-async = "0.7"

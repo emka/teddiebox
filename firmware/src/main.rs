@@ -3810,7 +3810,7 @@ async fn nfc_reader(
 
         match NFC_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
             NFC_INVENTORY => {
-                reader.inventory();
+                reader.inventory().await;
 
                 // Is the antenna even connected? With our own field off, the
                 // RSSI register reports RF arriving from outside, so an
@@ -3843,7 +3843,7 @@ async fn nfc_reader(
                 if password == 0 {
                     esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
                 } else {
-                    reader.unlock(password);
+                    reader.unlock(password).await;
                 }
             }
             NFC_FORCE_UNLOCK => {
@@ -3851,7 +3851,7 @@ async fn nfc_reader(
                 if password == 0 {
                     esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
                 } else {
-                    reader.force_unlock(password);
+                    reader.force_unlock(password).await;
                 }
             }
             NFC_LOCK => {
@@ -3859,14 +3859,14 @@ async fn nfc_reader(
                 if password == 0 {
                     esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
                 } else {
-                    reader.lock(password);
+                    reader.lock(password).await;
                 }
             }
             NFC_READ_MEMORY => {
                 let range = NFC_MEM_RANGE.load(Ordering::Relaxed);
-                reader.dump_memory((range >> 8) as u8, range as u8);
+                reader.dump_memory((range >> 8) as u8, range as u8).await;
             }
-            NFC_READ_TOKEN => match reader.read_token() {
+            NFC_READ_TOKEN => match reader.read_token().await {
                 Some(token) => {
                     critical_section::with(|cs| *TAG_TOKEN.borrow_ref_mut(cs) = Some(token));
                     // The length, never the value.
@@ -3885,11 +3885,10 @@ async fn nfc_reader(
         // Read out when polling stops, so a whole run is summarised by its
         // worst reply rather than by whichever poll happened to print last.
         if PLATE_REPORT.swap(false, Ordering::Relaxed) {
-            let (polls, micros) = reader.slowest_reply();
+            let micros = reader.slowest_reply();
             esp_println::println!(
-                "teddiebox: plate slowest reply {polls} polls (~{micros} us) \
-                 of {} attempts allowed",
-                trf7962a::IRQ_POLL_ATTEMPTS
+                "teddiebox: plate slowest reply {micros} us of {} us allowed",
+                trf7962a::REPLY_WINDOW_US
             );
         }
 
@@ -3926,17 +3925,17 @@ async fn nfc_reader(
                 // poller that always asked the full question cost 49 DMA
                 // restarts in 70 s of playback against 0 with polling off,
                 // because every unanswered exchange blocks this task for the
-                // whole `IRQ_POLL_ATTEMPTS` window.
+                // whole `REPLY_WINDOW_US` window.
                 let seen = if believed_present {
                     // A figure identified once stays out of privacy mode until
                     // its field is cycled, so a plain inventory answers on the
                     // first try. It also re-reads the UID, which is what
                     // notices one figure being swapped for another.
-                    reader.identify()
-                } else if reader.tag_present() {
+                    reader.identify().await
+                } else if reader.tag_present().await {
                     // Something is there but has not been identified yet. This
                     // is the only poll that pays for the password exchange.
-                    reader.inventory_unlocked(password)
+                    reader.inventory_unlocked(password).await
                 } else {
                     // The state the box sits in almost all the time: one
                     // unanswered exchange and nothing else.
@@ -3988,7 +3987,7 @@ async fn nfc_reader(
                             // is on the plate and unlocked, and it is needed
                             // when teddyCloud has to go upstream for the
                             // story.
-                            let token = reader.read_token();
+                            let token = reader.read_token().await;
                             PLATE_TAG.signal(PlateState::Present { uid, token });
                         }
                         TagEvent::Left => PLATE_TAG.signal(PlateState::Absent),

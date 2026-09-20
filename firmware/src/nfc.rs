@@ -10,13 +10,14 @@
 //! turns "no tag" into a statement about the plate rather than about the
 //! wiring.
 
+use embassy_time::{with_timeout, Duration, Instant};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{Input, Output};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use teddiebox_console::MAX_MEMORY_BLOCKS;
-use trf7962a::{Trf7962a, INIT_SEQUENCE};
+use trf7962a::{ResponseWait, SlowestReply, Trf7962a, INIT_SEQUENCE, REPLY_WINDOW_US};
 
 /// The reader takes up to 2 Mbit/s (SLOS757C §5.12). Half that is plenty for
 /// register pokes and a twelve-byte FIFO, and leaves margin on a bench wire.
@@ -30,8 +31,51 @@ pub fn bus_config() -> SpiConfig {
     SpiConfig::default().with_frequency(Rate::from_khz(BUS_RATE_KHZ))
 }
 
+/// The reader's interrupt line, awaited rather than polled.
+///
+/// The driver used to spin on a blocking delay for the whole window — 50
+/// polls of 200 µs — which blocked the executor for 10 ms on every poll of an
+/// empty plate. That is the load under which ear taps go missing, because the
+/// task that reads them cannot run while this waits.
+///
+/// **The timeout is what makes the await safe.** On an empty plate no
+/// interrupt ever arrives: `En_irq_noresp` (register 0x0D bit 0) defaults to 0
+/// and nothing turns it on, so a bare `wait_for_high()` would never return on
+/// the commonest case there is.
+struct IrqLine {
+    irq: Input<'static>,
+    slowest: SlowestReply,
+}
+
+impl ResponseWait for IrqLine {
+    async fn wait(&mut self) -> bool {
+        // Already asserted: an exchange whose interrupt landed before we got
+        // here must not wait for an edge that has been and gone.
+        if self.irq.is_high() {
+            return true;
+        }
+        let started = Instant::now();
+        let window = Duration::from_micros(u64::from(REPLY_WINDOW_US));
+        if with_timeout(window, self.irq.wait_for_high())
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        // Only answered waits are recorded: an elapsed window says how long
+        // the window is, not what a reply needs.
+        self.slowest
+            .record(started.elapsed().as_micros().min(u64::from(u32::MAX)) as u32);
+        true
+    }
+
+    fn asserted(&mut self) -> bool {
+        self.irq.is_high()
+    }
+}
+
 pub struct Reader {
-    trf: Trf7962a<Device, Delay, Input<'static>>,
+    trf: Trf7962a<Device, Delay, IrqLine>,
 }
 
 impl Reader {
@@ -47,7 +91,14 @@ impl Reader {
     ) -> Result<Self, &'static str> {
         let device =
             ExclusiveDevice::new(spi, cs, delay).map_err(|_| "chip select would not drive")?;
-        let mut trf = Trf7962a::new(device, delay, irq);
+        let mut trf = Trf7962a::new(
+            device,
+            delay,
+            IrqLine {
+                irq,
+                slowest: SlowestReply::new(),
+            },
+        );
 
         trf.init_iso15693()
             .map_err(|_| "the reader would not configure")?;
@@ -87,8 +138,8 @@ impl Reader {
     }
 
     /// Bench step 10a: whatever is on the plate, if it answers unlocked.
-    pub fn inventory(&mut self) {
-        match self.trf.inventory() {
+    pub async fn inventory(&mut self) {
+        match self.trf.inventory().await {
             Ok(Some(uid)) => report_uid("tag", &uid),
             Ok(None) => {
                 esp_println::println!("teddiebox: nfc no answer");
@@ -172,10 +223,10 @@ impl Reader {
         // The line, separately from the register. They disagree in the one
         // case worth naming: an interrupt the reader latched and the wiring
         // never delivered, which is a wrong GPIO rather than a dead reader.
-        match self.trf.irq_asserted() {
-            Ok(true) => esp_println::println!("teddiebox: nfc   irq line high"),
-            Ok(false) => esp_println::println!("teddiebox: nfc   irq line low"),
-            Err(_) => esp_println::println!("teddiebox: nfc   irq line unreadable"),
+        if self.trf.irq_asserted() {
+            esp_println::println!("teddiebox: nfc   irq line high");
+        } else {
+            esp_println::println!("teddiebox: nfc   irq line low");
         }
 
         // 0x0F is the RSSI register (SLOS757C §6.14.1.3.3); the driver has no
@@ -209,8 +260,8 @@ impl Reader {
     ///
     /// The random number it spends is not the one the unlock uses; the driver
     /// fetches its own, immediately before masking the password with it.
-    pub fn unlock(&mut self, password: u32) {
-        match self.trf.get_random_number() {
+    pub async fn unlock(&mut self, password: u32) {
+        match self.trf.get_random_number().await {
             Ok(random) => esp_println::println!(
                 "teddiebox: nfc tag answered GET RANDOM NUMBER ({random:#06x}) — present and SLIX"
             ),
@@ -228,7 +279,7 @@ impl Reader {
             }
         }
 
-        match self.trf.inventory_unlocked(&passwords(password)) {
+        match self.trf.inventory_unlocked(&passwords(password)).await {
             Ok(Some(uid)) => report_uid("unlocked tag", &uid),
             Ok(None) => esp_println::println!(
                 "teddiebox: nfc still silent after unlock — wrong password, or still locked"
@@ -258,9 +309,8 @@ impl Reader {
     /// when polling stops rather than printed as it changes, because a figure
     /// on the plate is polled several times a second and the interesting value
     /// is the worst one across a whole run.
-    pub fn slowest_reply(&self) -> (u32, u32) {
-        let polls = self.trf.slowest_reply_polls();
-        (polls, polls * trf7962a::IRQ_POLL_INTERVAL_US)
+    pub fn slowest_reply(&self) -> u32 {
+        self.trf.wait_ref().slowest.slowest_us()
     }
 
     /// Whether anything is on the plate, without unlocking it.
@@ -273,8 +323,8 @@ impl Reader {
     /// A bus fault reads as "nothing there", which is the same answer the
     /// poller would reach anyway and keeps this off the error path of a loop
     /// that runs several times a second.
-    pub fn tag_present(&mut self) -> bool {
-        self.trf.tag_present().unwrap_or(false)
+    pub async fn tag_present(&mut self) -> bool {
+        self.trf.tag_present().await.unwrap_or(false)
     }
 
     /// The UID of a tag that is already out of privacy mode, quietly.
@@ -284,12 +334,15 @@ impl Reader {
     /// first try with no password exchange at all. Re-reading the UID rather
     /// than remembering it is what lets one figure being swapped for another
     /// be noticed.
-    pub fn identify(&mut self) -> Option<[u8; 8]> {
-        self.trf.inventory().ok()?
+    pub async fn identify(&mut self) -> Option<[u8; 8]> {
+        self.trf.inventory().await.ok()?
     }
 
-    pub fn inventory_unlocked(&mut self, password: u32) -> Option<[u8; 8]> {
-        self.trf.inventory_unlocked(&passwords(password)).ok()?
+    pub async fn inventory_unlocked(&mut self, password: u32) -> Option<[u8; 8]> {
+        self.trf
+            .inventory_unlocked(&passwords(password))
+            .await
+            .ok()?
     }
 
     /// Bench instrument: put SET PASSWORD on the air whatever the tag's state.
@@ -304,14 +357,14 @@ impl Reader {
     /// The registers are read out afterwards whatever happens, because the
     /// question this exists to answer is what state a refused exchange leaves
     /// the reader in.
-    pub fn force_unlock(&mut self, password: u32) {
+    pub async fn force_unlock(&mut self, password: u32) {
         // The two exchanges are run separately rather than through
         // `unlock_privacy`, because silence from each means something quite
         // different — a tag that will not give a random number is not
         // answering at all, while one that gives a random number and then
         // ignores the password is answering selectively — and the bundled
         // call reports both as the same timeout.
-        let random = match self.trf.get_random_number() {
+        let random = match self.trf.get_random_number().await {
             Ok(random) => random,
             Err(trf7962a::Error::ReceiveError(flags)) => {
                 report_receive_error(flags);
@@ -328,7 +381,7 @@ impl Reader {
         // Nothing is printed between the two exchanges. A console line is
         // milliseconds at 115200, and putting one here is a delay disguised
         // as a diagnostic — the exact variable under test.
-        let outcome = self.trf.set_password(password, random);
+        let outcome = self.trf.set_password(password, random).await;
         esp_println::println!("teddiebox: nfc   GET RANDOM NUMBER -> {random:#06x}");
         match outcome {
             Ok(()) => esp_println::println!("teddiebox: nfc   SET PASSWORD -> accepted"),
@@ -358,14 +411,14 @@ impl Reader {
     /// reading, so this is what restores a bench tag to a realistic state.
     /// It is also the only command here that makes a tag harder to read, so
     /// it reports the UID it is about to lock away.
-    pub fn lock(&mut self, password: u32) {
-        match self.trf.enable_privacy(password) {
+    pub async fn lock(&mut self, password: u32) {
+        match self.trf.enable_privacy(password).await {
             Ok(()) => {
                 esp_println::println!("teddiebox: nfc tag is in privacy mode again");
                 // Proof rather than assertion: a locked tag stops answering
                 // inventory, so the same command that reads it also confirms
                 // the lock took.
-                match self.trf.inventory() {
+                match self.trf.inventory().await {
                     Ok(Some(uid)) => report_uid("still readable — lock did NOT take", &uid),
                     Ok(None) => {
                         esp_println::println!("teddiebox: nfc   silent to inventory — locked")
@@ -418,23 +471,23 @@ impl Reader {
     /// `pw` and `slix` come first, exactly as for `mem`.
     ///
     /// **What this returns is a credential.** It is deliberately not printed.
-    pub fn read_token(&mut self) -> Option<[u8; 32]> {
+    pub async fn read_token(&mut self) -> Option<[u8; 32]> {
         let mut token = [0u8; 32];
         for block in 0..8u8 {
-            let data = self.trf.read_block(block).ok()?;
+            let data = self.trf.read_block(block).await.ok()?;
             token[block as usize * 4..][..4].copy_from_slice(&data);
         }
         Some(token)
     }
 
-    pub fn dump_memory(&mut self, first: u8, count: u8) {
+    pub async fn dump_memory(&mut self, first: u8, count: u8) {
         let mut whole = [0u8; 4 * MAX_MEMORY_BLOCKS as usize];
         let mut read = 0usize;
         let mut complete = true;
 
         for index in 0..count {
             let block = first.wrapping_add(index);
-            match self.trf.read_block(block) {
+            match self.trf.read_block(block).await {
                 Ok(data) => {
                     esp_println::println!(
                         "teddiebox: nfc mem {:02X} {:02X}{:02X}{:02X}{:02X}",
