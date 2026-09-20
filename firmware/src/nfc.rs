@@ -23,6 +23,19 @@ use trf7962a::{ResponseWait, SlowestReply, Trf7962a, INIT_SEQUENCE, REPLY_WINDOW
 /// register pokes and a twelve-byte FIFO, and leaves margin on a bench wire.
 const BUS_RATE_KHZ: u32 = 1_000;
 
+/// How many times the link is configured and read back before giving up.
+///
+/// **Measured on this board: it answers on the second attempt**, every boot.
+/// The first one lands while the rail this shares with the card has only just
+/// been raised. Twenty is a second, which is ample, and bounded rather than
+/// endless because a genuinely miswired reader must still reach the message
+/// that says so rather than hanging the task that would print it.
+const LINK_ATTEMPTS: u8 = 20;
+/// How long between those attempts. Twenty of these is a second, which is far
+/// longer than any settling this part is documented to need and still short
+/// enough that a real fault is reported while somebody is still watching.
+const LINK_RETRY_MS: u32 = 50;
+
 type Blocking = esp_hal::Blocking;
 type Device = ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, Delay>;
 
@@ -83,7 +96,7 @@ impl Reader {
     ///
     /// The storage rail must already be on: gate 47 feeds the reader as well
     /// as the card, and powering it is the console loop's business.
-    pub fn open(
+    pub async fn open(
         spi: Spi<'static, Blocking>,
         cs: Output<'static>,
         irq: Input<'static>,
@@ -100,38 +113,65 @@ impl Reader {
             },
         );
 
-        trf.init_iso15693()
-            .map_err(|_| "the reader would not configure")?;
+        // Configure, then read back what was written, and keep trying until
+        // the two agree. This is the reader's equivalent of the codec's
+        // power-flags register: it separates "asked wrongly" from "not
+        // listening", and it is the only check here that does not depend on a
+        // tag being present.
+        //
+        // **Retried because the answer changes with time.** The reader shares
+        // gate 47 with the card, and a box that polls the plate from boot
+        // opens it as soon as that rail is raised — where every register
+        // reads back 0x00 and the readback reports "suspect SPI" against a
+        // part that is merely still coming up. The same reader answers
+        // perfectly a few seconds later. A fixed settling delay would only be
+        // a guess at a number nobody has measured; this waits for the thing
+        // that actually matters, and stops as soon as it is true.
+        let mut agreed = false;
+        let mut attempts = 0;
+        while attempts < LINK_ATTEMPTS && !agreed {
+            attempts += 1;
+            if attempts > 1 {
+                embassy_time::Timer::after(Duration::from_millis(u64::from(LINK_RETRY_MS))).await;
+            }
+            trf.init_iso15693()
+                .map_err(|_| "the reader would not configure")?;
+            agreed = INIT_SEQUENCE
+                .iter()
+                .all(|&(register, expected)| trf.read_register(register) == Ok(expected));
+            if !agreed && attempts % 10 == 0 {
+                esp_println::println!(
+                    "teddiebox: nfc still silent after {} ms",
+                    u32::from(attempts) * LINK_RETRY_MS
+                );
+            }
+        }
 
-        // Read back what init just wrote. This is the reader's equivalent of
-        // the codec's power-flags register: it separates "asked wrongly" from
-        // "not listening", and it is the only check here that does not depend
-        // on a tag being present.
-        let mut agreed = true;
+        // Printed once the outcome is settled, so a box that takes three
+        // attempts does not fill the console with the two that failed.
         for &(register, expected) in INIT_SEQUENCE {
             match trf.read_register(register) {
                 Ok(actual) if actual == expected => {
                     esp_println::println!("teddiebox: nfc reg {register:#04x} = {actual:#04x}")
                 }
-                Ok(actual) => {
-                    agreed = false;
-                    esp_println::println!(
-                        "teddiebox: nfc reg {register:#04x} reads {actual:#04x}, wrote {expected:#04x}"
-                    );
-                }
+                Ok(actual) => esp_println::println!(
+                    "teddiebox: nfc reg {register:#04x} reads {actual:#04x}, wrote {expected:#04x}"
+                ),
                 Err(_) => {
-                    agreed = false;
-                    esp_println::println!("teddiebox: nfc reg {register:#04x} unreadable");
+                    esp_println::println!("teddiebox: nfc reg {register:#04x} unreadable")
                 }
             }
         }
 
-        if !agreed {
+        if agreed {
+            esp_println::println!("teddiebox: nfc reader answers, field on ({attempts} attempts)");
+        } else {
             // Not fatal: the bench should still be allowed to try a tag, and
             // seeing both results is more useful than refusing to continue.
-            esp_println::println!("teddiebox: nfc link is not answering as written — suspect SPI");
-        } else {
-            esp_println::println!("teddiebox: nfc reader answers, field on");
+            esp_println::println!(
+                "teddiebox: nfc link is not answering as written after {attempts} attempts \
+                 — suspect SPI"
+            );
         }
 
         Ok(Self { trf })

@@ -3782,7 +3782,7 @@ async fn nfc_reader(
     // the card and the I2C devices get.
     Timer::after(Duration::from_millis(50)).await;
 
-    let mut reader = match nfc::Reader::open(spi, cs, irq, esp_hal::delay::Delay::new()) {
+    let mut reader = match nfc::Reader::open(spi, cs, irq, esp_hal::delay::Delay::new()).await {
         Ok(reader) => reader,
         Err(reason) => {
             esp_println::println!("teddiebox: nfc failed — {reason}");
@@ -4297,6 +4297,18 @@ async fn main(spawner: Spawner) {
                         .with_miso(p.GPIO3);
                     let nfc_cs = Output::new(p.GPIO1, Level::High, OutputConfig::default());
                     let nfc_irq = Input::new(p.GPIO13, InputConfig::default());
+                    // Gate 47 feeds the reader as well as the card, so a box
+                    // that polls the plate from boot has to raise it here.
+                    // `plate on` does exactly this before setting the flag;
+                    // until the default changed, that command was the only
+                    // way the reader was ever started, and the rail came with
+                    // it. Raised before the spawn rather than in the loop
+                    // below, because the task settles for 50 ms and then
+                    // talks — which is a race against a rail nobody has
+                    // raised, and it reads as "suspect SPI".
+                    if PLATE_POLLING.load(Ordering::Relaxed) {
+                        board.apply(gates.power(Rail::Storage, true));
+                    }
                     spawner.spawn(nfc_reader(nfc_spi, nfc_cs, nfc_irq).unwrap());
                 }
                 Err(_) => esp_println::println!("teddiebox: NFC SPI would not configure"),
