@@ -56,3 +56,10 @@ pub mod page1 {
     pub const HPR_DRIVER_GAIN: u8 = 0x29;
     pub const SPK_DRIVER_GAIN: u8 = 0x2A;
 }
+
+pub mod page3 {
+    /// The 1 MHz reference the headset-detection debounce counts on. D7
+    /// selects the clock source — set for an external MCLK, which is its
+    /// reset value and which this board does not wire — and D6-D0 divide it.
+    pub const TIMER_CLOCK: u8 = 0x10;
+}

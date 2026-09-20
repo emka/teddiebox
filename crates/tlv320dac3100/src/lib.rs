@@ -7,7 +7,7 @@ pub mod regs;
 
 use embedded_hal::delay::DelayNs;
 use embedded_hal::i2c::I2c;
-use regs::{page0, page1, REG_PAGE_SELECT};
+use regs::{page0, page1, page3, REG_PAGE_SELECT};
 
 /// Default 7-bit address with ADDR tied low.
 pub const DEFAULT_ADDRESS: u8 = 0x18;
@@ -277,6 +277,12 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // Interface: I2S, 16-bit, slave.
     (0, page0::CODEC_IF_CTRL1, 0x00),
     (0, page0::DAC_PROCESSING_BLOCK, 0x08),
+    // The debounce below counts on a clock this register chooses, and the
+    // reset choice is an external MCLK the board does not wire — see
+    // `the_headset_debounce_is_clocked_from_the_internal_oscillator`. Written
+    // before detection is enabled, because a debounce with no clock is the
+    // failure that looks exactly like an unwired jack.
+    (3, page3::TIMER_CLOCK, 0x01),
     // Headset detection is off after reset, so without this the jack reads as
     // permanently empty. 16 ms debounce, the reset default.
     (0, page0::HEADSET_DETECT, 0x80),
@@ -437,6 +443,9 @@ mod tests {
             w(vec![0x0E, 0x80]), // DOSR LSB = 128
             w(vec![0x1B, 0x00]), // interface: I2S, 16-bit, slave
             w(vec![0x3C, 0x08]), // DAC processing block
+            w(vec![0x00, 0x03]), // select page 3
+            w(vec![0x10, 0x01]), // debounce clocked from the internal oscillator
+            w(vec![0x00, 0x00]), // back to page 0
             w(vec![0x43, 0x80]), // headset detection on, 16 ms debounce
             w(vec![0x00, 0x01]), // select page 1
             w(vec![0x23, 0x44]), // DAC to output mixer routing
@@ -458,6 +467,29 @@ mod tests {
         dac.init(&mut delay).unwrap();
         dac.release().done();
         delay.done();
+    }
+
+    /// SLAS671C Table 6-79 note (1): the headset-detection debounce is clocked
+    /// from "the 1 MHz reference clock defined in Page 3 / Register 16", and
+    /// Table 6-118 gives that register's reset value as D7 = 1 — external
+    /// MCLK. This board wires no MCLK, only DIN, BCLK and WCLK, so the reset
+    /// value leaves the debounce with no clock at all and detection can fail
+    /// in a way indistinguishable from a jack that reaches no codec pin.
+    ///
+    /// `0x01` clears D7 to select the internal oscillator and leaves the
+    /// divider field at its reset value: exactly one bit changes.
+    #[test]
+    fn the_headset_debounce_is_clocked_from_the_internal_oscillator() {
+        let &(_, _, value) = INIT_ANALOG
+            .iter()
+            .find(|&&(p, r, _)| p == 3 && r == page3::TIMER_CLOCK)
+            .expect("the debounce has no clock until page 3 register 16 is written");
+        assert_eq!(
+            value & 0x80,
+            0x00,
+            "D7 set asks for an MCLK this board does not wire"
+        );
+        assert_eq!(value, 0x01);
     }
 
     /// SLAS671C §6.3.10.14 orders the analog block deliberately: (d) route the
