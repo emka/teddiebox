@@ -7,6 +7,7 @@ pub mod regs;
 pub mod slix;
 
 use embedded_hal::delay::DelayNs;
+use embedded_hal::digital::InputPin;
 use embedded_hal::spi::SpiDevice;
 
 /// Command word bits. Getting these wrong turns a register read into a direct
@@ -21,6 +22,8 @@ const ADDRESS_MASK: u8 = 0x1F;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error<E> {
     Bus(E),
+    /// The IRQ line could not be read.
+    Pin,
     /// The reader did not respond within the expected window.
     Timeout,
     /// A tag responded, but the response was not the expected shape.
@@ -131,55 +134,28 @@ const IRQ_RX_STARTED: u8 = 0x40;
 const IRQ_FIFO: u8 = 0x20;
 const IRQ_ERRORS: u8 = 0x1E;
 
-/// How long the reader may be given to signal that an exchange finished.
+/// How long the reader is given to signal that an exchange finished.
 ///
 /// An ISO 15693 exchange at high bit rate runs roughly 5–6 ms end to end:
 /// transmit, then t1 of about 320 µs, then the tag's reply at 26.48 kbit/s.
 /// Being too short makes a tag on the plate read as no tag — the one failure
 /// that cannot be told apart from a wiring fault — so the window keeps real
 /// headroom over what a reply needs.
+pub const IRQ_POLL_INTERVAL_US: u32 = 200;
+/// Poll count, giving a 10 ms window at the interval above.
 ///
 /// **Measured, 2026-09-07:** the slowest reply a real Tonie produced across a
-/// run of the plate poller was about **4 ms**. This leaves two and a half
-/// times that, and is still well above the 5–6 ms an exchange is supposed to
-/// take. Re-measure before cutting it; one figure on one board over one run is
-/// thin evidence for a tighter bound.
+/// run of the plate poller was **20 polls, about 4 ms** — see
+/// `slowest_reply_polls`, which exists to keep this number honest. 50 leaves
+/// two and a half times that, and is still well above the 5–6 ms an exchange
+/// is supposed to take.
 ///
-/// Stated here rather than imposed here: this crate has no clock, so it is
-/// [`ResponseWait`]'s implementation that applies it. The number lives with
-/// the datasheet reasoning that justifies it.
-pub const REPLY_WINDOW_US: u32 = 10_000;
-
-/// The longest answered wait seen so far, in microseconds.
-///
-/// Lives beside [`REPLY_WINDOW_US`] because the two are only honest together:
-/// a window is a guess until something keeps measuring what a reply actually
-/// needs. This driver cannot measure it — it has no clock — so a
-/// [`ResponseWait`] implementation records into this and the bench reads it
-/// out.
-///
-/// Unanswered waits are never recorded. They say what the window is, not what
-/// a reply needs, and mixing them in would make the window look justified by
-/// its own length.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct SlowestReply(u32);
-
-impl SlowestReply {
-    pub const fn new() -> Self {
-        Self(0)
-    }
-
-    /// Records one wait that was answered.
-    pub fn record(&mut self, us: u32) {
-        if us > self.0 {
-            self.0 = us;
-        }
-    }
-
-    pub fn slowest_us(&self) -> u32 {
-        self.0
-    }
-}
+/// It was 100 until that measurement. Halving it matters because an empty
+/// plate pays the whole window on every poll and the reader task blocks while
+/// it does: at 100 the poller cost 49 audible DMA restarts in 70 s of
+/// playback. Re-measure before cutting further; one figure on one board over
+/// one run is thin evidence for a tighter bound.
+pub const IRQ_POLL_ATTEMPTS: u32 = 50;
 
 /// Quiet time the air is left after a tag has answered, before the next
 /// request may go out — ISO 15693-3 §9.1's t2, 4192 carrier periods at
@@ -219,70 +195,39 @@ pub const SOFT_INIT_SETTLE_MS: u32 = 1;
 /// like an empty plate and is the reason this is worth spending.
 pub const FIELD_SETTLE_MS: u32 = 10;
 
-/// Waits for the reader to answer an exchange this driver started.
-///
-/// The driver has no clock and no opinion about how long a reply may take;
-/// the platform it runs on has both. Injecting the wait keeps a time source
-/// out of a crate the `cross` gate compiles for the bare target, and puts the
-/// window in the one place that can measure what a reply actually needs.
-///
-/// It is also what stops an empty plate blocking the executor. The wait this
-/// replaced spun on a blocking delay for 10 ms per poll, which is the load
-/// that makes ear taps go missing.
-// `async_fn_in_trait` warns that callers cannot add a `Send` bound. Nothing
-// here crosses a thread — this drives one reader from one task — and the
-// alternative costs a boxed future and an allocator the firmware does not
-// give this crate.
-#[allow(async_fn_in_trait)]
-pub trait ResponseWait {
-    /// Resolves `true` once the interrupt line is asserted, `false` if it did
-    /// not arrive in time.
-    ///
-    /// **An implementation must impose a timeout.** On an empty plate no
-    /// interrupt ever arrives: `En_irq_noresp` (register 0x0D bit 0) defaults
-    /// to 0 and nothing turns it on. A wait without a timeout therefore never
-    /// returns, on the commonest case there is.
-    async fn wait(&mut self) -> bool;
-
-    /// The line's level right now, without waiting.
-    ///
-    /// Separate from `wait` because the level and the interrupt status
-    /// register can disagree, and the case where they do is worth naming: an
-    /// interrupt the reader latched that the wiring never delivered.
-    fn asserted(&mut self) -> bool;
-}
-
-pub struct Trf7962a<SPI, D, W> {
+pub struct Trf7962a<SPI, D, IRQ> {
     spi: SPI,
     delay: D,
-    wait: W,
+    irq: IRQ,
+    /// The most interrupt polls any answered exchange has needed, so the reply
+    /// window can be sized against what this board actually does rather than
+    /// against arithmetic. See `slowest_reply_polls`.
+    slowest_reply_polls: u32,
 }
 
-impl<SPI, D, W, E> Trf7962a<SPI, D, W>
+impl<SPI, D, IRQ, E> Trf7962a<SPI, D, IRQ>
 where
     SPI: SpiDevice<Error = E>,
     D: DelayNs,
-    W: ResponseWait,
+    IRQ: InputPin,
 {
-    /// `wait` answers for the reader's interrupt line, GPIO13 on the Toniebox.
+    /// `irq` is the reader's interrupt line, GPIO13 on the Toniebox.
     ///
     /// The reader needs several milliseconds to complete an exchange, so a
-    /// driver that cannot wait for that line cannot tell "no tag" from "not
-    /// finished yet" — it always reads too early and reports an empty plate.
-    pub fn new(spi: SPI, delay: D, wait: W) -> Self {
-        Self { spi, delay, wait }
+    /// driver without a clock and an interrupt line cannot tell "no tag" from
+    /// "not finished yet" — it always reads too early and reports an empty
+    /// plate.
+    pub fn new(spi: SPI, delay: D, irq: IRQ) -> Self {
+        Self {
+            spi,
+            delay,
+            irq,
+            slowest_reply_polls: 0,
+        }
     }
 
-    pub fn release(self) -> (SPI, D, W) {
-        (self.spi, self.delay, self.wait)
-    }
-
-    /// The waiter, for whatever it has measured along the way.
-    ///
-    /// The driver has no clock, so anything worth knowing about how long
-    /// replies took is the waiter's — see [`SlowestReply`].
-    pub fn wait_ref(&self) -> &W {
-        &self.wait
+    pub fn release(self) -> (SPI, D, IRQ) {
+        (self.spi, self.delay, self.irq)
     }
 
     /// Writes one register.
@@ -374,17 +319,40 @@ where
     /// where they do is the one worth naming: the reader latched an interrupt
     /// that the wiring never delivered. Separating those needs the level on
     /// its own, outside an exchange.
-    pub fn irq_asserted(&mut self) -> bool {
-        self.wait.asserted()
+    pub fn irq_asserted(&mut self) -> Result<bool, Error<E>> {
+        self.irq.is_high().map_err(|_| Error::Pin)
     }
 
     /// Waits for the reader to raise its interrupt line.
     ///
-    /// `false` means the window elapsed with no assertion, which is the
+    /// `Ok(false)` means the window elapsed with no assertion, which is the
     /// ordinary "nothing on the plate" case rather than a fault — the firmware
     /// polls an empty plate continuously, so that must not be an error.
-    async fn wait_for_response(&mut self) -> bool {
-        self.wait.wait().await
+    fn wait_for_response(&mut self) -> Result<bool, Error<E>> {
+        for polled in 0..IRQ_POLL_ATTEMPTS {
+            if self.irq.is_high().map_err(|_| Error::Pin)? {
+                if polled > self.slowest_reply_polls {
+                    self.slowest_reply_polls = polled;
+                }
+                return Ok(true);
+            }
+            self.delay.delay_us(IRQ_POLL_INTERVAL_US);
+        }
+        Ok(false)
+    }
+
+    /// The most interrupt polls any answered exchange has needed so far.
+    ///
+    /// Multiplied by `IRQ_POLL_INTERVAL_US` this is how long the slowest reply
+    /// actually took on this board, which is the only honest input to sizing
+    /// `IRQ_POLL_ATTEMPTS`. Unanswered exchanges are excluded on purpose: they
+    /// tell you what the window is, not what a reply needs.
+    ///
+    /// A window cut below this figure makes a tag on the plate read as no tag,
+    /// which cannot be told apart from a disconnected antenna — so leave real
+    /// headroom above whatever the bench reports.
+    pub fn slowest_reply_polls(&self) -> u32 {
+        self.slowest_reply_polls
     }
 
     /// Puts `request` on the air, as one slave-select window.
@@ -434,11 +402,7 @@ where
 
     /// Sends `request` and collects the tag's reply. Returns the number of
     /// bytes received, which is zero when no tag answered.
-    pub async fn transceive(
-        &mut self,
-        request: &[u8],
-        response: &mut [u8],
-    ) -> Result<usize, Error<E>> {
+    pub fn transceive(&mut self, request: &[u8], response: &mut [u8]) -> Result<usize, Error<E>> {
         // Checked before any bus traffic: a rejected request must leave the
         // reader exactly as it was found.
         if request.len() > MAX_REQUEST {
@@ -459,7 +423,7 @@ where
         // and because three-byte requests never reach the threshold this
         // looked exactly like a password being refused.
         let mut status = loop {
-            if !self.wait_for_response().await {
+            if !self.wait_for_response()? {
                 return Ok(0);
             }
             let status = self.read_irq_status()?;
@@ -476,7 +440,7 @@ where
         // two, so the reception starts from an empty one.
         if status & IRQ_TX != 0 {
             self.send_command(regs::cmd::RESET_FIFO)?;
-            if !self.wait_for_response().await {
+            if !self.wait_for_response()? {
                 return Ok(0);
             }
             status = self.read_irq_status()?;
@@ -525,7 +489,7 @@ where
                 self.delay.delay_us(T2_QUIET_US);
                 return Ok(received);
             }
-            if !self.wait_for_response().await {
+            if !self.wait_for_response()? {
                 self.delay.delay_us(T2_QUIET_US);
                 return Ok(received);
             }
@@ -535,10 +499,10 @@ where
 
     /// Runs a single-slot inventory. `Ok(None)` means nothing answered, which
     /// includes the case of a tag held in privacy mode.
-    pub async fn inventory(&mut self) -> Result<Option<[u8; 8]>, Error<E>> {
+    pub fn inventory(&mut self) -> Result<Option<[u8; 8]>, Error<E>> {
         const REQUEST: [u8; 3] = [0x26, 0x01, 0x00];
         let mut buf = [0u8; MAX_RESPONSE];
-        let n = self.transceive(&REQUEST, &mut buf).await?;
+        let n = self.transceive(&REQUEST, &mut buf)?;
         if n == 0 {
             return Ok(None);
         }
@@ -556,11 +520,9 @@ where
     }
 
     /// Fetches the tag's random number, needed to mask the password.
-    pub async fn get_random_number(&mut self) -> Result<u16, Error<E>> {
+    pub fn get_random_number(&mut self) -> Result<u16, Error<E>> {
         let mut buf = [0u8; MAX_RESPONSE];
-        let n = self
-            .transceive(&slix::get_random_number_request(), &mut buf)
-            .await?;
+        let n = self.transceive(&slix::get_random_number_request(), &mut buf)?;
         if n == 0 {
             return Err(Error::Timeout);
         }
@@ -573,11 +535,9 @@ where
     }
 
     /// Sends the privacy password, masked with `random`.
-    pub async fn set_password(&mut self, password: u32, random: u16) -> Result<(), Error<E>> {
+    pub fn set_password(&mut self, password: u32, random: u16) -> Result<(), Error<E>> {
         let mut buf = [0u8; MAX_RESPONSE];
-        let n = self
-            .transceive(&slix::set_password_request(password, random), &mut buf)
-            .await?;
+        let n = self.transceive(&slix::set_password_request(password, random), &mut buf)?;
         if n == 0 {
             return Err(Error::Timeout);
         }
@@ -585,9 +545,9 @@ where
     }
 
     /// Takes a tag out of privacy mode so it will answer inventory.
-    pub async fn unlock_privacy(&mut self, password: u32) -> Result<(), Error<E>> {
-        let random = self.get_random_number().await?;
-        self.set_password(password, random).await
+    pub fn unlock_privacy(&mut self, password: u32) -> Result<(), Error<E>> {
+        let random = self.get_random_number()?;
+        self.set_password(password, random)
     }
 
     /// Puts a tag back into privacy mode, where it answers nothing but GET
@@ -596,12 +556,10 @@ where
     /// The way back out is `unlock_privacy` with the same password
     /// (SL2S2602 §9.5.3.9), so this is reversible — but only by whoever knows
     /// the password, which is the entire point of it.
-    pub async fn enable_privacy(&mut self, password: u32) -> Result<(), Error<E>> {
-        let random = self.get_random_number().await?;
+    pub fn enable_privacy(&mut self, password: u32) -> Result<(), Error<E>> {
+        let random = self.get_random_number()?;
         let mut buf = [0u8; MAX_RESPONSE];
-        let n = self
-            .transceive(&slix::enable_privacy_request(password, random), &mut buf)
-            .await?;
+        let n = self.transceive(&slix::enable_privacy_request(password, random), &mut buf)?;
         if n == 0 {
             return Err(Error::Timeout);
         }
@@ -620,7 +578,7 @@ where
     /// except the command GET RANDOM NUMBER, until it next receives the correct
     /// Privacy password". That makes this the only question a locked Tonie will
     /// answer, and the cheapest one there is — a tag replies in about 6 ms
-    /// where silence costs the full `REPLY_WINDOW_US` window.
+    /// where silence costs the full `IRQ_POLL_ATTEMPTS` window.
     ///
     /// It says *something is there*, never *what*: the reply is a fresh random
     /// number, so two different figures are indistinguishable by it. Identity
@@ -630,23 +588,20 @@ where
     /// A tag that is **not** in privacy mode answers this too — it is the first
     /// half of the password exchange, not a privacy-only command — so a caller
     /// does not have to know which state the tag is in before asking.
-    pub async fn tag_present(&mut self) -> Result<bool, Error<E>> {
-        match self.get_random_number().await {
+    pub fn tag_present(&mut self) -> Result<bool, Error<E>> {
+        match self.get_random_number() {
             Ok(_) => Ok(true),
             Err(Error::Timeout) => Ok(false),
             Err(e) => Err(e),
         }
     }
 
-    pub async fn inventory_unlocked(
-        &mut self,
-        passwords: &[u32],
-    ) -> Result<Option<[u8; 8]>, Error<E>> {
+    pub fn inventory_unlocked(&mut self, passwords: &[u32]) -> Result<Option<[u8; 8]>, Error<E>> {
         // A tag already out of privacy mode answers inventory directly, so try
         // that first and only pay for the unlock exchange when it is needed.
         // A locked tag is silent, and a tag mid-exchange can answer garbled —
         // both mean "try unlocking", so neither aborts the operation.
-        match self.inventory().await {
+        match self.inventory() {
             Ok(Some(uid)) => return Ok(Some(uid)),
             Ok(None)
             | Err(Error::BadResponse)
@@ -660,13 +615,13 @@ where
             // this command open. Silence here is an empty plate rather than a
             // wrong password, and trying the rest would cost a field reset
             // per password for a tag that is not there.
-            let random = match self.get_random_number().await {
+            let random = match self.get_random_number() {
                 Ok(random) => random,
                 Err(Error::Timeout) => return Ok(None),
                 Err(e) => return Err(e),
             };
-            match self.set_password(password, random).await {
-                Ok(()) => return self.inventory().await,
+            match self.set_password(password, random) {
+                Ok(()) => return self.inventory(),
                 // A password the tag does not hold is answered with silence,
                 // and leaves it deaf to everything until its supply has been
                 // interrupted. The next password would be shouted at a tag
@@ -691,10 +646,10 @@ where
     /// memory with no such convention — reversing it here, the way
     /// `inventory` reverses its eight bytes, would silently corrupt every
     /// block read this way.
-    pub async fn read_block(&mut self, block: u8) -> Result<[u8; 4], Error<E>> {
+    pub fn read_block(&mut self, block: u8) -> Result<[u8; 4], Error<E>> {
         let request = [FLAGS, CMD_READ_SINGLE_BLOCK, block];
         let mut buf = [0u8; MAX_RESPONSE];
-        let n = self.transceive(&request, &mut buf).await?;
+        let n = self.transceive(&request, &mut buf)?;
         if n == 0 {
             return Err(Error::Timeout);
         }
@@ -746,7 +701,7 @@ where
     /// error response ("block not available", code `0x03`) that would tell
     /// them apart. Anything walking memory to discover its size will read an
     /// absent or locked tag as a zero-length one.
-    pub async fn read_memory(&mut self, first: u8, out: &mut [u8]) -> Result<(), Error<E>> {
+    pub fn read_memory(&mut self, first: u8, out: &mut [u8]) -> Result<(), Error<E>> {
         // Checked before any bus traffic, matching `transceive`'s own length
         // check: a rejected call must leave the reader exactly as it was
         // found.
@@ -755,7 +710,7 @@ where
         }
         for (i, chunk) in out.chunks_mut(4).enumerate() {
             let block = first.wrapping_add(i as u8);
-            chunk.copy_from_slice(&self.read_block(block).await?);
+            chunk.copy_from_slice(&self.read_block(block)?);
         }
         Ok(())
     }
