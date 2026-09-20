@@ -72,6 +72,12 @@ pub enum Event {
     /// The box was struck on one side. Detected and latched by the
     /// accelerometer, so this arrives once per slap however long it waited.
     Slap(Side),
+    /// A jack went into the headphone socket, or came out of it.
+    ///
+    /// Raised by whoever polls the codec's detect register, because nothing
+    /// else can know: this jack has no switch the ESP32 can see, and the
+    /// codec does not interrupt for it on a pin this board has proved.
+    Headphones(bool),
 }
 
 /// Everything the firmware may be asked to do.
@@ -86,7 +92,23 @@ pub enum Action {
     SeekTo(Position),
     NextTrack,
     PrevTrack,
-    SetVolume(Volume),
+    /// Where the sound should go. The firmware mutes or unmutes the speaker on
+    /// this and touches nothing else — in particular not its own record of
+    /// what is plugged in, which has exactly one writer.
+    SetOutput(Output),
+    /// The level to play at, as both the step the ears moved and the dB the
+    /// codec takes.
+    ///
+    /// Both, deliberately. The ladder is this crate's policy and the
+    /// firmware's job is only to say it in the codec's units; if this carried
+    /// the step alone the firmware would have to know which output is current,
+    /// which means a second copy of state that can disagree with the
+    /// reducer's. The step comes along because it is what the console line
+    /// says and what a reducer test asserts.
+    SetVolume {
+        step: Volume,
+        db: i8,
+    },
     SetLed(LedState),
     SavePosition {
         tag: TagUid,
@@ -127,7 +149,11 @@ impl Default for CoreConfig {
 #[derive(Debug)]
 pub struct Core {
     config: CoreConfig,
-    volume: VolumeModel,
+    /// One per [`Output`], indexed by it. Each keeps its own place on its own
+    /// ladder, so a plug pulled out does not bring back a speaker that was
+    /// turned down for an ear.
+    volumes: [VolumeModel; 2],
+    output: Output,
     battery: BatteryModel,
     playback: Playback,
     charging: bool,
@@ -164,7 +190,8 @@ impl Core {
     pub fn new(config: CoreConfig) -> Self {
         Self {
             config,
-            volume: VolumeModel::new(config.volume_limit),
+            volumes: [VolumeModel::new(config.volume_limit); 2],
+            output: Output::Speaker,
             battery: BatteryModel::new(config.battery),
             playback: Playback::new(),
             charging: false,
@@ -181,7 +208,11 @@ impl Core {
     }
 
     pub fn volume(&self) -> Volume {
-        self.volume.current()
+        self.volumes[self.output as usize].current()
+    }
+
+    pub fn output(&self) -> Output {
+        self.output
     }
 
     /// Records how far the story has got, so lifting the figure can save it.
@@ -218,13 +249,18 @@ impl Core {
     /// whether skipping is on, and a ceiling that prompted from one path and
     /// not the other would be a silence nobody could explain.
     fn step_volume(&mut self, ear: Ear, actions: &mut Actions) {
+        let output = self.output;
+        let model = &mut self.volumes[output as usize];
         let changed = match ear {
-            Ear::Larger => self.volume.up(),
-            Ear::Smaller => self.volume.down(),
+            Ear::Larger => model.up(),
+            Ear::Smaller => model.down(),
         };
         match changed {
-            Some(v) => {
-                let _ = actions.push(Action::SetVolume(v));
+            Some(step) => {
+                let _ = actions.push(Action::SetVolume {
+                    step,
+                    db: db_for(output, step),
+                });
             }
             None => {
                 let _ = actions.push(Action::PlayPrompt(Prompt::VolumeLimit));
@@ -280,7 +316,9 @@ impl Core {
             | Event::Revalidated(..)
             | Event::ContentMissing(..)
             | Event::PlaybackEnded
-            | Event::Slap(_) => {
+            | Event::Slap(_)
+            // A jack does not move on its own: somebody put it there.
+            | Event::Headphones(_) => {
                 self.last_activity = self.last_tick;
             }
             Event::Battery { .. } | Event::Charger(_) | Event::TrackFinished => {}
@@ -430,6 +468,23 @@ impl Core {
                     Side::Right => Action::NextTrack,
                 });
             }
+
+            // Routing and level together, and nothing else. The story carries
+            // on: a child who yanks a plug should not lose their place or
+            // have to do anything to get the story back.
+            Event::Headphones(plugged) => {
+                self.output = if plugged {
+                    Output::Headphones
+                } else {
+                    Output::Speaker
+                };
+                let _ = actions.push(Action::SetOutput(self.output));
+                let step = self.volumes[self.output as usize].current();
+                let _ = actions.push(Action::SetVolume {
+                    step,
+                    db: db_for(self.output, step),
+                });
+            }
         }
 
         self.refresh_led(&mut actions);
@@ -537,7 +592,13 @@ mod tests {
         c.handle(Event::EarDown(Ear::Larger, 0), &Index);
         let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
         assert!(c.volume() > before);
-        assert!(contains(&actions, Action::SetVolume(c.volume())));
+        assert!(contains(
+            &actions,
+            Action::SetVolume {
+                step: c.volume(),
+                db: db_for(c.output(), c.volume())
+            }
+        ));
     }
 
     #[test]
@@ -560,7 +621,13 @@ mod tests {
         let before = c.volume();
         let actions = c.handle(Event::EarDown(Ear::Larger, 0), &Index);
         assert!(c.volume() > before);
-        assert!(contains(&actions, Action::SetVolume(c.volume())));
+        assert!(contains(
+            &actions,
+            Action::SetVolume {
+                step: c.volume(),
+                db: db_for(c.output(), c.volume())
+            }
+        ));
     }
 
     #[test]
@@ -584,7 +651,9 @@ mod tests {
         let actions = c.handle(Event::EarDown(Ear::Larger, 0), &Index);
         assert_eq!(c.volume(), before);
         assert!(
-            !actions.iter().any(|a| matches!(a, Action::SetVolume(_))),
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::SetVolume { .. })),
             "{actions:?}"
         );
     }
@@ -651,7 +720,13 @@ mod tests {
         c.handle(Event::EarDown(Ear::Larger, 0), &Index);
         let actions = c.handle(Event::EarUp(Ear::Larger, 10_000), &Index);
         assert!(c.volume() > before);
-        assert!(contains(&actions, Action::SetVolume(c.volume())));
+        assert!(contains(
+            &actions,
+            Action::SetVolume {
+                step: c.volume(),
+                db: db_for(c.output(), c.volume())
+            }
+        ));
         assert!(!contains(&actions, Action::NextTrack));
     }
 
@@ -683,7 +758,13 @@ mod tests {
         c.handle(Event::EarDown(Ear::Larger, 0), &Index);
         let actions = c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
         assert!(contains(&actions, Action::NextTrack));
-        assert!(!contains(&actions, Action::SetVolume(c.volume())));
+        assert!(!contains(
+            &actions,
+            Action::SetVolume {
+                step: c.volume(),
+                db: db_for(c.output(), c.volume())
+            }
+        ));
     }
 
     #[test]
@@ -1072,5 +1153,113 @@ mod tests {
         let mut c = core();
         let actions = c.handle(Event::Slap(Side::Left), &Index);
         assert!(contains(&actions, Action::PrevTrack));
+    }
+
+    /// The bench established on 2026-09-20 that this jack does not switch the
+    /// speaker off: with the tone running, plugging headphones in left the
+    /// speaker playing. So the box has to do it, and this is the decision.
+    #[test]
+    fn a_jack_going_in_moves_the_sound_to_the_headphones() {
+        let mut c = core();
+        let actions = c.handle(Event::Headphones(true), &Index);
+        assert!(contains(&actions, Action::SetOutput(Output::Headphones)));
+        assert_eq!(c.output(), Output::Headphones);
+    }
+
+    /// Stock behaviour, chosen deliberately: a child who yanks a plug should
+    /// not lose their place or have to do anything to get the story back.
+    /// Nothing here pauses, stops or seeks.
+    #[test]
+    fn a_jack_coming_out_brings_the_speaker_back_without_touching_playback() {
+        let mut c = core();
+        c.handle(Event::Headphones(true), &Index);
+        let actions = c.handle(Event::Headphones(false), &Index);
+        assert!(contains(&actions, Action::SetOutput(Output::Speaker)));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::Pause | Action::Stop | Action::SeekTo(_))),
+            "{actions:?}"
+        );
+    }
+
+    /// The level has to move with the routing, or the first moment in the
+    /// headphones is the speaker's level in somebody's ear.
+    #[test]
+    fn plugging_in_asks_for_the_headphone_ladders_level() {
+        let mut c = core();
+        let step = c.volume();
+        let actions = c.handle(Event::Headphones(true), &Index);
+        assert!(contains(
+            &actions,
+            Action::SetVolume {
+                step,
+                db: db_for(Output::Headphones, step)
+            }
+        ));
+    }
+
+    /// Each output keeps its own place on the ladder. Turning the headphones
+    /// down must not leave the speaker quiet when the plug comes out, and a
+    /// speaker turned up must not be waiting in an ear.
+    #[test]
+    fn each_output_remembers_its_own_step_across_a_plug_and_an_unplug() {
+        let mut c = core();
+        let speaker_step = c.volume();
+
+        c.handle(Event::Headphones(true), &Index);
+        c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
+        c.handle(Event::EarUp(Ear::Smaller, 100), &Index);
+        let headphone_step = c.volume();
+        assert!(headphone_step < speaker_step);
+
+        let back = c.handle(Event::Headphones(false), &Index);
+        assert_eq!(c.volume(), speaker_step, "the speaker kept its own step");
+        assert!(contains(
+            &back,
+            Action::SetVolume {
+                step: speaker_step,
+                db: db_for(Output::Speaker, speaker_step)
+            }
+        ));
+
+        let again = c.handle(Event::Headphones(true), &Index);
+        assert_eq!(c.volume(), headphone_step, "and so did the headphones");
+        assert!(contains(
+            &again,
+            Action::SetVolume {
+                step: headphone_step,
+                db: db_for(Output::Headphones, headphone_step)
+            }
+        ));
+    }
+
+    /// The ears keep meaning what they mean; they simply move a different
+    /// ladder. A tap with headphones in must ask for a headphone level.
+    #[test]
+    fn an_ear_steps_the_ladder_of_whatever_is_plugged_in() {
+        let mut c = core();
+        c.handle(Event::Headphones(true), &Index);
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
+        assert!(contains(
+            &actions,
+            Action::SetVolume {
+                step: c.volume(),
+                db: db_for(Output::Headphones, c.volume())
+            }
+        ));
+    }
+
+    /// Inserting a jack is a deliberate human act, so it counts as use. A box
+    /// that parked itself a moment after somebody plugged headphones in would
+    /// look broken.
+    #[test]
+    fn plugging_headphones_in_restarts_the_idle_countdown() {
+        let mut c = core();
+        c.handle(Event::Tick(4 * 60 * 1_000), &Index);
+        c.handle(Event::Headphones(true), &Index);
+        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 }

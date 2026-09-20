@@ -2567,12 +2567,34 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             audio::STOP.store(true, Ordering::Relaxed);
         }
 
-        // The parental ceiling and the stepping are already the reducer's;
-        // all that is left here is saying it in the codec's units.
-        Action::SetVolume(volume) => {
-            let db = db_for(AudioOutput::Speaker, volume);
-            esp_println::println!("teddiebox: volume step {} — {db} dB", volume.0);
+        // The parental ceiling, the stepping and which ladder a step is on are
+        // all the reducer's; the dB arrives already said in the codec's units.
+        Action::SetVolume { step, db } => {
+            esp_println::println!("teddiebox: volume step {} — {db} dB", step.0);
             VOLUME_REQUEST.store(db, Ordering::Relaxed);
+        }
+
+        // Muting the class-D driver, and nothing else. In particular not
+        // `HEADPHONES_IN`: what is plugged in has one writer, and two statics
+        // that can disagree about one fact is the shape the 2026-09-18 review
+        // objected to. Muted rather than powered down because powering an
+        // output stage is what clicks, measured by ear, whether or not the
+        // driver in front of it is muted.
+        Action::SetOutput(output) => {
+            esp_println::println!(
+                "teddiebox: output {}",
+                match output {
+                    AudioOutput::Speaker => "speaker",
+                    AudioOutput::Headphones => "headphones",
+                }
+            );
+            SPEAKER_REQUEST.store(
+                match output {
+                    AudioOutput::Speaker => SPEAKER_UNMUTE,
+                    AudioOutput::Headphones => SPEAKER_MUTE,
+                },
+                Ordering::Relaxed,
+            );
         }
 
         // Which chapter is playing, and what the ends of the story mean, are

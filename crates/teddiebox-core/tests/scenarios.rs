@@ -47,7 +47,7 @@ fn a_child_plays_a_story_adjusts_the_volume_and_lifts_the_figure() {
 
     core.handle(Event::EarDown(Ear::Larger, 1_000), &library);
     let louder = core.handle(Event::EarUp(Ear::Larger, 1_100), &library);
-    assert!(louder.iter().any(|a| matches!(a, Action::SetVolume(_))));
+    assert!(louder.iter().any(|a| matches!(a, Action::SetVolume { .. })));
 
     let slap = core.handle(Event::Slap(Side::Right), &library);
     assert!(has(&slap, Action::NextTrack));
