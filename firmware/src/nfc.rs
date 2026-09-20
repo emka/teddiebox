@@ -31,6 +31,13 @@ const BUS_RATE_KHZ: u32 = 1_000;
 /// endless because a genuinely miswired reader must still reach the message
 /// that says so rather than hanging the task that would print it.
 const LINK_ATTEMPTS: u8 = 20;
+/// Room for the readback of every register `INIT_SEQUENCE` writes.
+const MAX_INIT_REGISTERS: usize = 4;
+const _: () = assert!(
+    INIT_SEQUENCE.len() <= MAX_INIT_REGISTERS,
+    "INIT_SEQUENCE has outgrown the readback buffer, and zip would drop the rest in silence"
+);
+
 /// How long between those attempts. Twenty of these is a second, which is far
 /// longer than any settling this part is documented to need and still short
 /// enough that a real fault is reported while somebody is still watching.
@@ -79,6 +86,11 @@ impl Reader {
         // that actually matters, and stops as soon as it is true.
         let mut agreed = false;
         let mut attempts = 0;
+        // What the last attempt actually read. The outcome is printed from
+        // these rather than from a second round of reads, so what the console
+        // shows is what the decision was made on — and so a register is read
+        // once per attempt instead of twice.
+        let mut seen = [None; MAX_INIT_REGISTERS];
         while attempts < LINK_ATTEMPTS && !agreed {
             attempts += 1;
             if attempts > 1 {
@@ -86,9 +98,12 @@ impl Reader {
             }
             trf.init_iso15693()
                 .map_err(|_| "the reader would not configure")?;
-            agreed = INIT_SEQUENCE
-                .iter()
-                .all(|&(register, expected)| trf.read_register(register) == Ok(expected));
+            agreed = true;
+            for (slot, &(register, expected)) in seen.iter_mut().zip(INIT_SEQUENCE) {
+                let actual = trf.read_register(register).ok();
+                *slot = actual;
+                agreed &= actual == Some(expected);
+            }
             if !agreed && attempts % 10 == 0 {
                 esp_println::println!(
                     "teddiebox: nfc still silent after {} ms",
@@ -99,17 +114,15 @@ impl Reader {
 
         // Printed once the outcome is settled, so a box that takes three
         // attempts does not fill the console with the two that failed.
-        for &(register, expected) in INIT_SEQUENCE {
-            match trf.read_register(register) {
-                Ok(actual) if actual == expected => {
+        for (slot, &(register, expected)) in seen.iter().zip(INIT_SEQUENCE) {
+            match slot {
+                Some(actual) if *actual == expected => {
                     esp_println::println!("teddiebox: nfc reg {register:#04x} = {actual:#04x}")
                 }
-                Ok(actual) => esp_println::println!(
+                Some(actual) => esp_println::println!(
                     "teddiebox: nfc reg {register:#04x} reads {actual:#04x}, wrote {expected:#04x}"
                 ),
-                Err(_) => {
-                    esp_println::println!("teddiebox: nfc reg {register:#04x} unreadable")
-                }
+                None => esp_println::println!("teddiebox: nfc reg {register:#04x} unreadable"),
             }
         }
 
