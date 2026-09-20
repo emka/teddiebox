@@ -80,6 +80,23 @@ pub struct Volume(pub u8);
 /// Stock-equivalent number of steps above silence.
 pub const MAX_VOLUME: u8 = 5;
 
+/// Where the sound is going.
+///
+/// The jack on this board does not switch the speaker off — measured by ear
+/// on 2026-09-20, plugging headphones in left the speaker playing — so which
+/// output is live is something the box decides and not something the hardware
+/// does for it.
+///
+/// The discriminants are explicit because the reducer indexes one
+/// [`crate::VolumeModel`] per output by this, the way it already indexes ear
+/// presses by [`Ear`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum Output {
+    Speaker = 0,
+    Headphones = 1,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedState {
     Off,

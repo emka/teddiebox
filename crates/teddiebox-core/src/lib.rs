@@ -23,7 +23,7 @@ pub use battery::{BatteryConfig, BatteryLevel, BatteryModel};
 pub use led::{colour_for, led_for, PlaybackKind};
 pub use playback::{ContentIndex, Freshness, Playback, Unavailable};
 pub use types::*;
-pub use volume::{db_for, VolumeModel};
+pub use volume::{db_for, VolumeModel, HEADPHONE_OFFSET_DB};
 
 use heapless::Vec;
 

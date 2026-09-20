@@ -56,7 +56,7 @@ use teddiebox_core::tone;
 
 use teddiebox_core::{
     colour_for, db_for, Action, BatteryConfig, Core, CoreConfig, Ear, Event, Freshness, LedState,
-    Position, PowerOffReason, TagUid, Unavailable, Volume, MAX_VOLUME,
+    Output as AudioOutput, Position, PowerOffReason, TagUid, Unavailable, Volume, MAX_VOLUME,
 };
 use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
 use tlv320dac3100::Tlv320Dac3100;
@@ -975,7 +975,7 @@ static SLAP_TIME_LIMIT: AtomicU8 = AtomicU8::new(4);
 /// It is still deliberately quiet — see `teddiebox_core::db_for` for what the
 /// ladder is anchored on, which is the same listening that set the -35 dB this
 /// replaces.
-const BOOT_VOLUME_DB: i8 = db_for(Volume(MAX_VOLUME / 2));
+const BOOT_VOLUME_DB: i8 = db_for(AudioOutput::Speaker, Volume(MAX_VOLUME / 2));
 
 /// What the console has asked the media task to do.
 ///
@@ -2570,7 +2570,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         // The parental ceiling and the stepping are already the reducer's;
         // all that is left here is saying it in the codec's units.
         Action::SetVolume(volume) => {
-            let db = db_for(volume);
+            let db = db_for(AudioOutput::Speaker, volume);
             esp_println::println!("teddiebox: volume step {} — {db} dB", volume.0);
             VOLUME_REQUEST.store(db, Ordering::Relaxed);
         }
