@@ -284,8 +284,10 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // failure that looks exactly like an unwired jack.
     (3, page3::TIMER_CLOCK, 0x01),
     // Headset detection is off after reset, so without this the jack reads as
-    // permanently empty. 16 ms debounce, the reset default.
-    (0, page0::HEADSET_DETECT, 0x80),
+    // permanently empty. 128 ms debounce rather than the reset 16 ms: a plug
+    // pushed in slowly makes and breaks the switch, and at 16 ms the flaps
+    // land in different polls and cross the speaker between them.
+    (0, page0::HEADSET_DETECT, 0x8C),
     // Analog, in the order SLAS671C §6.3.10.14 gives: route the DAC to the
     // output amplifier (d), unmute and set the gain of the output drivers
     // (e), and only then power the drivers up (f). Powering a driver first —
@@ -446,7 +448,7 @@ mod tests {
             w(vec![0x00, 0x03]), // select page 3
             w(vec![0x10, 0x01]), // debounce clocked from the internal oscillator
             w(vec![0x00, 0x00]), // back to page 0
-            w(vec![0x43, 0x80]), // headset detection on, 16 ms debounce
+            w(vec![0x43, 0x8C]), // headset detection on, 128 ms debounce
             w(vec![0x00, 0x01]), // select page 1
             w(vec![0x23, 0x44]), // DAC to output mixer routing
             w(vec![0x24, 0x80]), // left analog volume to HPL: routed, 0 dB
@@ -490,6 +492,22 @@ mod tests {
             "D7 set asks for an MCLK this board does not wire"
         );
         assert_eq!(value, 0x01);
+    }
+
+    /// D7 enables detection and D4-D2 set the debounce, whose reset `000` is
+    /// 16 ms. A jack is not pushed in cleanly — a slow plug makes and breaks
+    /// the switch several times — and at 16 ms each of those can land in a
+    /// different poll, which would cross the speaker and back between them.
+    /// `011` is 128 ms, comfortably longer than a hand.
+    #[test]
+    fn detection_debounces_for_longer_than_a_slow_hand() {
+        let &(_, _, value) = INIT_ANALOG
+            .iter()
+            .find(|&&(p, r, _)| p == 0 && r == page0::HEADSET_DETECT)
+            .expect("the sequence must enable headset detection");
+        assert_eq!(value & 0x80, 0x80, "D7 clear leaves detection off");
+        assert_eq!(value & 0x1C, 0x0C, "D4-D2 = 011 is the 128 ms debounce");
+        assert_eq!(value, 0x8C);
     }
 
     /// SLAS671C §6.3.10.14 orders the analog block deliberately: (d) route the
