@@ -1029,8 +1029,10 @@ mod tests {
 
     /// Page 3 holds the headset-detect debounce clock, and whether that
     /// register is the reason detection does not work is a question the bench
-    /// must be able to ask both ways without a reflash. Pages 2 and above
-    /// stay refused: a mistyped page writes to a quite different register.
+    /// must be able to ask both ways without a reflash. Page 0 and page 1 are
+    /// the pages the start-up sequence itself writes and stayed reachable when
+    /// page 3 was added. Everything else stays refused: a mistyped page writes
+    /// to a quite different register.
     #[test]
     fn cset_reaches_the_headset_debounce_clock_and_no_further() {
         let mut watch = CommandWatch::new();
@@ -1051,7 +1053,21 @@ mod tests {
             }),
             "the reset value must be reachable, to answer the question both ways"
         );
+        assert_eq!(
+            feed_all(&mut watch, b"cset 0 43 8c\r"),
+            Some(Command::CodecSet {
+                page: 0,
+                register: 0x43,
+                value: 0x8C
+            }),
+            "page 0 carries headset detection itself and must stay reachable"
+        );
         assert_eq!(feed_all(&mut watch, b"cset 2 21 be\r"), None, "no page 2");
+        assert_eq!(feed_all(&mut watch, b"cset 4 21 be\r"), None, "no page 4");
+        assert_eq!(feed_all(&mut watch, b"cset 5 21 be\r"), None, "no page 5");
+        assert_eq!(feed_all(&mut watch, b"cset 6 21 be\r"), None, "no page 6");
+        assert_eq!(feed_all(&mut watch, b"cset 7 21 be\r"), None, "no page 7");
+        assert_eq!(feed_all(&mut watch, b"cset 8 21 be\r"), None, "no page 8");
     }
 
     #[test]
