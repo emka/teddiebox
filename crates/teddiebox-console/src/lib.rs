@@ -263,6 +263,21 @@ pub enum Command {
     /// runs when it has a clock — which it does not have until audio is
     /// playing. Separating the two needs the mute reachable at any moment.
     Speaker(bool),
+    /// Say what the codec's headset-detect register reads, and what the box is
+    /// routing to.
+    ///
+    /// The first bench question of M12 is whether detection works on this
+    /// board at all, and the register is the only thing that can answer it —
+    /// the box's own belief can have been forced by the command below.
+    HeadphoneStatus,
+    /// Force the routing, whatever detection says.
+    ///
+    /// Both the mute and the volume ladder, together: setting one without the
+    /// other is the confusing half-state where the speaker is silent and the
+    /// level belongs to the wrong output. This is also the escape hatch if the
+    /// jack's switch turns out not to reach the codec on this board — the box
+    /// stays usable by hand.
+    Headphones(bool),
     /// Whether the reader polls the plate on its own.
     ///
     /// **On at boot**, because a box that ignores every figure until somebody
@@ -383,6 +398,9 @@ impl CommandWatch {
                     b"out 0" => Some(Command::Output(false)),
                     b"spk 1" => Some(Command::Speaker(true)),
                     b"spk 0" => Some(Command::Speaker(false)),
+                    b"hp" => Some(Command::HeadphoneStatus),
+                    b"hp 1" => Some(Command::Headphones(true)),
+                    b"hp 0" => Some(Command::Headphones(false)),
                     b"net scan" => Some(Command::NetScan),
                     b"net up" => Some(Command::NetUp),
                     b"net tls" => Some(Command::NetTls),
@@ -574,11 +592,13 @@ fn hex_byte(digits: &[u8]) -> Option<u8> {
 fn parse_codec_set(line: &[u8]) -> Option<Command> {
     let rest = line.strip_prefix(b"cset ")?;
     let mut parts = rest.split(|&b| b == b' ');
-    // The codec has pages 0 and 1; nothing this firmware touches lives higher,
-    // and a mistyped page would write to a quite different register.
+    // The codec has pages 0, 1 and — for the headset-detect debounce clock —
+    // 3. Nothing this firmware touches lives anywhere else, and a mistyped
+    // page would write to a quite different register.
     let page = match parts.next()? {
         b"0" => 0,
         b"1" => 1,
+        b"3" => 3,
         _ => return None,
     };
     let register = hex_byte(parts.next()?)?;
@@ -987,6 +1007,51 @@ mod tests {
         );
         assert_eq!(feed_all(&mut watch, b"spk\r"), None, "no direction given");
         assert_eq!(feed_all(&mut watch, b"spk 2\r"), None, "not a direction");
+    }
+
+    #[test]
+    fn the_headphone_commands_ask_and_tell() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"hp\r"),
+            Some(Command::HeadphoneStatus)
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"hp 1\r"),
+            Some(Command::Headphones(true))
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"hp 0\r"),
+            Some(Command::Headphones(false))
+        );
+        assert_eq!(feed_all(&mut watch, b"hp 2\r"), None, "not a routing");
+    }
+
+    /// Page 3 holds the headset-detect debounce clock, and whether that
+    /// register is the reason detection does not work is a question the bench
+    /// must be able to ask both ways without a reflash. Pages 2 and above
+    /// stay refused: a mistyped page writes to a quite different register.
+    #[test]
+    fn cset_reaches_the_headset_debounce_clock_and_no_further() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"cset 3 10 01\r"),
+            Some(Command::CodecSet {
+                page: 3,
+                register: 0x10,
+                value: 0x01
+            })
+        );
+        assert_eq!(
+            feed_all(&mut watch, b"cset 3 10 81\r"),
+            Some(Command::CodecSet {
+                page: 3,
+                register: 0x10,
+                value: 0x81
+            }),
+            "the reset value must be reachable, to answer the question both ways"
+        );
+        assert_eq!(feed_all(&mut watch, b"cset 2 21 be\r"), None, "no page 2");
     }
 
     #[test]

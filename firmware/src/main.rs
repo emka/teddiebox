@@ -707,6 +707,29 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 continue;
             }
         }
+        if HEADPHONE_REPORT.swap(false, Ordering::Relaxed) {
+            let bus = accel.release();
+            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+            let reading = dac.headphones_connected();
+            let bus = dac.release();
+            accel = Lis3dh::new(bus, address);
+            match reading {
+                // The register and the box's belief are printed apart on
+                // purpose: `hp 1` can set the second without the first, and
+                // the first bench question is which of them is moving.
+                Ok(detected) => esp_println::println!(
+                    "teddiebox: headset detect says {}, routing to {}",
+                    if detected { "in" } else { "out" },
+                    if HEADPHONES_IN.load(Ordering::Relaxed) {
+                        "headphones"
+                    } else {
+                        "speaker"
+                    }
+                ),
+                Err(_) => esp_println::println!("teddiebox: headset detect unreadable"),
+            }
+            continue;
+        }
         let volume = VOLUME_REQUEST.swap(NO_VOLUME, Ordering::Relaxed);
         if volume != NO_VOLUME {
             let bus = accel.release();
@@ -2347,6 +2370,11 @@ static CODEC_POWER_DOWN: AtomicBool = AtomicBool::new(false);
 /// `SPEAKER_REQUEST` and nothing else, because two statics that can disagree
 /// about one fact is the shape the 2026-09-18 review objected to once.
 static HEADPHONES_IN: AtomicBool = AtomicBool::new(false);
+
+/// Ask the motion task to read the headset-detect register and say what it
+/// says. A request rather than a print here, because the codec is on the
+/// motion task's bus and nothing else may touch it.
+static HEADPHONE_REPORT: AtomicBool = AtomicBool::new(false);
 
 /// Full passes of the `motion` loop between headset-detect reads.
 ///
@@ -4655,6 +4683,23 @@ async fn main(spawner: Spawner) {
                         if on { SPEAKER_UNMUTE } else { SPEAKER_MUTE },
                         Ordering::Relaxed,
                     );
+                }
+                Some(Command::HeadphoneStatus) => {
+                    HEADPHONE_REPORT.store(true, Ordering::Relaxed);
+                }
+                // Both halves, always: the static the codec bring-up reads,
+                // and the event that moves the routing and the ladder
+                // together. Setting the static alone would mute the speaker
+                // and leave the level on the other output's ladder.
+                Some(Command::Headphones(on)) => {
+                    HEADPHONES_IN.store(on, Ordering::Relaxed);
+                    esp_println::println!(
+                        "teddiebox: headphones forced {}",
+                        if on { "in" } else { "out" }
+                    );
+                    if INPUT_EVENTS.try_send(Event::Headphones(on)).is_err() {
+                        esp_println::println!("teddiebox: input queue full, jack change dropped");
+                    }
                 }
                 Some(Command::NetScan) => {
                     NET_REQUEST.store(NET_SCAN, Ordering::Relaxed);
