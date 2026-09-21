@@ -603,7 +603,12 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     esp_println::println!("teddiebox: LIS3DH at {address:#04x}");
     let mut accel = Lis3dh::new(bus, address);
     let mut since_report = ACCEL_REPORT_EVERY;
-    let mut since_detect: u32 = 0;
+    // Starts full, not zero like `since_report`: the first pass should read
+    // the register rather than wait three, so a box that boots with a jack
+    // already in does not spend ~600 ms with `HEADPHONES_IN` still saying
+    // nothing is plugged in — the codec bring-up that follows this task reads
+    // that static.
+    let mut since_detect: u32 = HEADSET_DETECT_EVERY;
     // Starts in agreement with `HEADPHONES_IN`, so a box that boots with
     // nothing plugged in raises no event at all. Kept here rather than read
     // back from the static because `hp 1` writes that one, and a forced
@@ -611,6 +616,10 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     // read before — which is the whole escape hatch if this jack turns out
     // not to reach the codec's detect pin.
     let mut last_detect = false;
+    // Logged on transition, not on every poll, for the same reason the slap
+    // threshold below is: this console is the box's only user interface, and a
+    // codec that failed bring-up would otherwise bury everything else on it.
+    let mut detect_failed = false;
     // `armed_threshold` always tracks the last value a write was *attempted*
     // with; `armed` is only set by a write that actually succeeded. Guarding
     // the re-arm below on `armed` — not just on the threshold changing — is
@@ -920,6 +929,7 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             match reading {
                 Ok(now) if now != last_detect => {
                     last_detect = now;
+                    detect_failed = false;
                     HEADPHONES_IN.store(now, Ordering::Relaxed);
                     esp_println::println!(
                         "teddiebox: headphones {}",
@@ -929,8 +939,13 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                         esp_println::println!("teddiebox: input queue full, jack change dropped");
                     }
                 }
-                Ok(_) => {}
-                Err(_) => esp_println::println!("teddiebox: headset detect unreadable"),
+                Ok(_) => detect_failed = false,
+                Err(_) => {
+                    if !detect_failed {
+                        esp_println::println!("teddiebox: headset detect unreadable");
+                        detect_failed = true;
+                    }
+                }
             }
         }
 
