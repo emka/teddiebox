@@ -620,6 +620,10 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
     // threshold below is: this console is the box's only user interface, and a
     // codec that failed bring-up would otherwise bury everything else on it.
     let mut detect_failed = false;
+    // Same reason again: with no card mounted nothing drains `INPUT_EVENTS`,
+    // so once it fills the send below fails on every poll that has a change to
+    // deliver — and it keeps having one, because the retry is the point.
+    let mut detect_dropped = false;
     // `armed_threshold` always tracks the last value a write was *attempted*
     // with; `armed` is only set by a write that actually succeeded. Guarding
     // the re-arm below on `armed` — not just on the threshold changing — is
@@ -953,15 +957,31 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             accel = Lis3dh::new(bus, address);
             match reading {
                 Ok(now) if now != last_detect => {
-                    last_detect = now;
                     detect_failed = false;
+                    // The two halves of this advance at different moments on
+                    // purpose. `HEADPHONES_IN` is the routing the codec
+                    // bring-up reads, so it is stored the moment the register
+                    // moves and nothing downstream can lose it. `last_detect`
+                    // is what makes a change worth reporting at all, so it may
+                    // only move once the reducer has actually been told:
+                    // advancing it on a send that failed would leave the box
+                    // routed one way and the reducer playing the other, with
+                    // no later poll left to notice the disagreement.
                     HEADPHONES_IN.store(now, Ordering::Relaxed);
-                    esp_println::println!(
-                        "teddiebox: headphones {}",
-                        if now { "in" } else { "out" }
-                    );
                     if INPUT_EVENTS.try_send(Event::Headphones(now)).is_err() {
-                        esp_println::println!("teddiebox: input queue full, jack change dropped");
+                        if !detect_dropped {
+                            esp_println::println!(
+                                "teddiebox: input queue full, jack change dropped"
+                            );
+                            detect_dropped = true;
+                        }
+                    } else {
+                        last_detect = now;
+                        detect_dropped = false;
+                        esp_println::println!(
+                            "teddiebox: headphones {}",
+                            if now { "in" } else { "out" }
+                        );
                     }
                 }
                 Ok(_) => detect_failed = false,
