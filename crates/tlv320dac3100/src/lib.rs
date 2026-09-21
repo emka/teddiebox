@@ -250,6 +250,18 @@ where
         let v = self.read_reg(0, page0::HEADSET_DETECT)?;
         Ok(v & HEADSET_DETECTED != 0)
     }
+
+    /// The headset-detection register itself, unmasked.
+    ///
+    /// Exists because a decoded answer cannot tell an empty jack from
+    /// detection that was never enabled: the register reads a constant 00 in
+    /// both cases, so a codec that failed bring-up reports exactly what a box
+    /// with nothing plugged in reports. The byte separates them — D7 is the
+    /// enable `INIT_ANALOG` writes — and that is the first thing a bench
+    /// session needs to know.
+    pub fn headset_detect_raw(&mut self) -> Result<u8, Error<E>> {
+        self.read_reg(0, page0::HEADSET_DETECT)
+    }
 }
 
 /// Which output stages report themselves powered up.
@@ -399,7 +411,7 @@ const VOLUME_MAX_CODE: i16 = 48; //  +24 dB
 /// D6-D5 of the headset-detection register report what is plugged in: 00 for
 /// nothing, 01 for a headset without a microphone, 11 for one with. Anything
 /// non-zero is a jack, which is all this driver needs to know.
-const HEADSET_DETECTED: u8 = 0x60;
+pub const HEADSET_DETECTED: u8 = 0x60;
 
 #[cfg(test)]
 mod tests {
@@ -914,6 +926,20 @@ mod tests {
         dac.headphones_connected().unwrap();
         dac.invalidate_page();
         assert!(dac.headphones_connected().unwrap());
+        dac.release().done();
+    }
+
+    /// The decoded answer cannot tell an empty jack from detection that was
+    /// never switched on — both read 00 — so the raw byte is handed over
+    /// unmasked, enable bit and all.
+    #[test]
+    fn the_raw_headset_register_is_reported_byte_for_byte() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![0x00, 0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x43], vec![0x8C]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        assert_eq!(dac.headset_detect_raw(), Ok(0x8C));
         dac.release().done();
     }
 

@@ -714,16 +714,26 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         if HEADPHONE_REPORT.swap(false, Ordering::Relaxed) {
             let bus = accel.release();
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-            let reading = dac.headphones_connected();
+            let reading = dac.headset_detect_raw();
             let bus = dac.release();
             accel = Lis3dh::new(bus, address);
             match reading {
-                // The register and the box's belief are printed apart on
-                // purpose: `hp 1` can set the second without the first, and
-                // the first bench question is which of them is moving.
-                Ok(detected) => esp_println::println!(
-                    "teddiebox: headset detect says {}, routing to {}",
-                    if detected { "in" } else { "out" },
+                // Three separate facts, printed apart on purpose. The raw byte
+                // comes first because a decoded in/out reads 00 both for an
+                // empty jack and for detection that was never enabled — after
+                // a failed bring-up or a `cdown` those are the same answer,
+                // and telling them apart is what a session asks `hp` for. D7
+                // set is detection on; D6-D5 are the jack. The routing is the
+                // box's own belief, which `hp 1` can set without the register
+                // moving at all.
+                Ok(raw) => esp_println::println!(
+                    "teddiebox: headset detect {:#04x}, says {}, routing to {}",
+                    raw,
+                    if raw & tlv320dac3100::HEADSET_DETECTED != 0 {
+                        "in"
+                    } else {
+                        "out"
+                    },
                     if HEADPHONES_IN.load(Ordering::Relaxed) {
                         "headphones"
                     } else {
