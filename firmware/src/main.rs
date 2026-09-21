@@ -724,15 +724,17 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             let bus = accel.release();
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
             let up = request == OUTPUT_UP;
+            let speaker = !HEADPHONES_IN.load(Ordering::Relaxed);
             let outcome = if up {
-                dac.start_output(&mut dac_delay, true)
+                dac.start_output(&mut dac_delay, speaker)
             } else {
                 dac.stop_output()
             };
             match outcome {
                 Ok(()) => esp_println::println!(
-                    "teddiebox: codec output {}",
-                    if up { "up" } else { "down" }
+                    "teddiebox: codec output {}{}",
+                    if up { "up" } else { "down" },
+                    if up && !speaker { " (headphones)" } else { "" }
                 ),
                 Err(_) => esp_println::println!("teddiebox: codec output would not change"),
             }
