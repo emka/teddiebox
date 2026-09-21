@@ -146,28 +146,28 @@ where
     /// hear. The speaker is unmuted last, which is the one step in the whole
     /// sequence already measured to be silent.
     ///
-    /// `speaker` says whether the class-D output is wanted at all. With
-    /// headphones in it is not: the amplifier stays unpowered and the driver
-    /// stays as the mute left it, because powering an output stage is audible
-    /// whether or not the driver in front of it is muted. The muting at the
-    /// top is for the other direction — a jack pulled while nothing played
-    /// unmutes the driver, and this must not power the amplifier into that.
+    /// The whole output path comes up either way; `speaker` decides only
+    /// whether the class-D driver is unmuted at the end. With headphones in
+    /// the amplifier is still powered, and sits there muted: a jack pulled
+    /// mid-story has to be answerable with an unmute alone, or a story that
+    /// began with headphones in would stay silent on the speaker until the
+    /// figure was lifted and put back. The muting at the top covers the other
+    /// direction — a jack pulled while nothing played unmutes the driver, and
+    /// nothing may power the amplifier into that.
     pub fn start_output<D: DelayNs>(
         &mut self,
         delay: &mut D,
         speaker: bool,
     ) -> Result<(), Error<E>> {
-        if speaker {
-            self.mute_speaker()?;
-        }
+        self.mute_speaker()?;
         for &(page, reg, value) in INIT_DAC {
             self.write_reg(page, reg, value)?;
         }
-        if !speaker {
-            return Ok(());
-        }
         self.write_reg(1, page1::SPK_AMP, SPK_AMP_UP)?;
-        self.unmute_speaker(delay)
+        if speaker {
+            self.unmute_speaker(delay)?;
+        }
+        Ok(())
     }
 
     /// Powers the output path down again, muting before anything moves.
@@ -607,19 +607,26 @@ mod tests {
         delay.done();
     }
 
-    /// With headphones in, the speaker is not the output. Starting a story
-    /// must bring the DAC up and leave the class-D stage exactly as the mute
-    /// left it: unpowered and silent. Powering it and muting it afterwards is
-    /// not the same thing — powering an output stage is audible whether or
-    /// not the driver in front of it is muted.
+    /// With headphones in the speaker is not the output, but the amplifier
+    /// comes up anyway — powered and muted. That is what makes pulling the
+    /// plug mid-story something the box can answer: the unmute has a powered
+    /// stage to unmute into, so the speaker comes back and the story never
+    /// stops. Leaving it unpowered here would make a story that began with
+    /// headphones in silent for ever once the jack came out.
+    ///
+    /// So the class-D driver stays muted through this and nothing unmutes it.
     #[test]
-    fn starting_the_output_for_headphones_leaves_the_speaker_alone() {
+    fn starting_the_output_for_headphones_powers_the_speaker_but_leaves_it_muted() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let expected = [
+            w(vec![0x00, 0x01]), // page 1
+            w(vec![0x2A, 0x00]), // speaker muted before anything is powered
             w(vec![0x00, 0x00]), // page 0
             w(vec![0x3F, 0xD4]), // DAC on, both channels
             w(vec![0x40, 0x00]), // digital unmute
-                                 // Nothing on page 1: no amplifier, no unmute.
+            w(vec![0x00, 0x01]), // page 1
+            w(vec![0x20, 0x86]), // class-D amplifier powered, driver still muted
+                                 // No unmute: the speaker is not the output.
         ];
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
