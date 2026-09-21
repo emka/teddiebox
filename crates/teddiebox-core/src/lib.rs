@@ -596,7 +596,7 @@ mod tests {
             &actions,
             Action::SetVolume {
                 step: c.volume(),
-                db: db_for(c.output(), c.volume())
+                db: db_for(Output::Speaker, c.volume())
             }
         ));
     }
@@ -625,7 +625,7 @@ mod tests {
             &actions,
             Action::SetVolume {
                 step: c.volume(),
-                db: db_for(c.output(), c.volume())
+                db: db_for(Output::Speaker, c.volume())
             }
         ));
     }
@@ -724,7 +724,7 @@ mod tests {
             &actions,
             Action::SetVolume {
                 step: c.volume(),
-                db: db_for(c.output(), c.volume())
+                db: db_for(Output::Speaker, c.volume())
             }
         ));
         assert!(!contains(&actions, Action::NextTrack));
@@ -758,13 +758,12 @@ mod tests {
         c.handle(Event::EarDown(Ear::Larger, 0), &Index);
         let actions = c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
         assert!(contains(&actions, Action::NextTrack));
-        assert!(!contains(
-            &actions,
-            Action::SetVolume {
-                step: c.volume(),
-                db: db_for(c.output(), c.volume())
-            }
-        ));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::SetVolume { .. })),
+            "{actions:?}"
+        );
     }
 
     #[test]
