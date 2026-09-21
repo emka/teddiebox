@@ -163,11 +163,30 @@ where
         for &(page, reg, value) in INIT_DAC {
             self.write_reg(page, reg, value)?;
         }
-        self.write_reg(1, page1::SPK_AMP, SPK_AMP_UP)?;
-        if speaker {
-            self.unmute_speaker(delay)?;
+        if !speaker {
+            return Ok(());
         }
-        Ok(())
+        self.write_reg(1, page1::SPK_AMP, SPK_AMP_UP)?;
+        self.unmute_speaker(delay)
+    }
+
+    /// Brings the class-D stage back for a story that is already playing.
+    ///
+    /// The unplug path, and the only thing that powers the amplifier once a
+    /// story has started. `start_output` declines to power it when headphones
+    /// are in, because powering an output stage is audible on this box
+    /// whether or not the driver in front of it is muted — and a listener
+    /// wearing headphones should not hear a speaker they are not using click
+    /// at the start of every story. This moves that one click to the moment
+    /// the plug comes out, which the person doing the pulling has already
+    /// made a noise at.
+    ///
+    /// Safe on an amplifier that is already powered: writing `SPK_AMP_UP`
+    /// over itself is a register write, not a power transition, so a story
+    /// that began on the speaker pays one write and hears nothing.
+    pub fn resume_speaker<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
+        self.write_reg(1, page1::SPK_AMP, SPK_AMP_UP)?;
+        self.unmute_speaker(delay)
     }
 
     /// Powers the output path down again, muting before anything moves.
@@ -619,16 +638,17 @@ mod tests {
         delay.done();
     }
 
-    /// With headphones in the speaker is not the output, but the amplifier
-    /// comes up anyway — powered and muted. That is what makes pulling the
-    /// plug mid-story something the box can answer: the unmute has a powered
-    /// stage to unmute into, so the speaker comes back and the story never
-    /// stops. Leaving it unpowered here would make a story that began with
-    /// headphones in silent for ever once the jack came out.
+    /// With headphones in, the speaker is not the output and its amplifier
+    /// stays unpowered. Powering an output stage is audible on this box
+    /// whether or not the driver in front of it is muted, and a listener
+    /// wearing headphones would hear that click come out of a speaker they
+    /// are not using. `resume_speaker` is what powers it, at the moment the
+    /// plug comes out — see the test below.
     ///
-    /// So the class-D driver stays muted through this and nothing unmutes it.
+    /// The driver is still muted first, so what this leaves behind does not
+    /// depend on what an earlier unplug left unmuted.
     #[test]
-    fn starting_the_output_for_headphones_powers_the_speaker_but_leaves_it_muted() {
+    fn starting_the_output_for_headphones_leaves_the_speaker_unpowered() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let expected = [
             w(vec![0x00, 0x01]), // page 1
@@ -636,14 +656,43 @@ mod tests {
             w(vec![0x00, 0x00]), // page 0
             w(vec![0x3F, 0xD4]), // DAC on, both channels
             w(vec![0x40, 0x00]), // digital unmute
-            w(vec![0x00, 0x01]), // page 1
-            w(vec![0x20, 0x86]), // class-D amplifier powered, driver still muted
-                                 // No unmute: the speaker is not the output.
+                                 // Nothing more: no amplifier, no unmute.
         ];
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         let mut delay = CheckedDelay::new(&[]);
         assert_eq!(dac.start_output(&mut delay, false), Ok(()));
+        dac.release().done();
+        delay.done();
+    }
+
+    /// Pulling the plug mid-story is the one moment the speaker has to come
+    /// back, and it may have to be powered first: a story that began with
+    /// headphones in never powered the amplifier at all. Powering it is
+    /// audible, so it happens here — at a moment the listener has just made a
+    /// noise of their own — rather than at the silent start of every such
+    /// story.
+    ///
+    /// Power first, unmute second, which is the same order `start_output`
+    /// uses and the datasheet's: an unmuted driver in front of a stage that
+    /// is still coming up is what the box used to click on.
+    ///
+    /// Writing `SPK_AMP_UP` over an amplifier that is already powered is a
+    /// register write and not a power transition, so the ordinary case — a
+    /// story that began on the speaker — costs one write and stays silent.
+    #[test]
+    fn resuming_the_speaker_powers_the_amplifier_before_it_unmutes() {
+        let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
+        let expected = [
+            w(vec![0x00, 0x01]), // page 1
+            w(vec![0x20, 0x86]), // class-D amplifier powered
+            w(vec![0x2A, 0x04]), // and only then unmuted
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x2A], vec![0x05]),
+        ];
+
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        let mut delay = CheckedDelay::new(&[]);
+        assert_eq!(dac.resume_speaker(&mut delay), Ok(()));
         dac.release().done();
         delay.done();
     }

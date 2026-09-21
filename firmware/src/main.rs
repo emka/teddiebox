@@ -687,21 +687,21 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
 
         let speaker = SPEAKER_REQUEST.swap(0, Ordering::Relaxed);
         {
-            if let request @ (SPEAKER_MUTE | SPEAKER_UNMUTE) = speaker {
+            if let request @ (SPEAKER_MUTE | SPEAKER_UNMUTE | SPEAKER_RESUME) = speaker {
                 let bus = accel.release();
                 let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-                let outcome = if request == SPEAKER_UNMUTE {
-                    dac.unmute_speaker(&mut dac_delay)
-                } else {
-                    dac.mute_speaker()
+                let outcome = match request {
+                    SPEAKER_RESUME => dac.resume_speaker(&mut dac_delay),
+                    SPEAKER_UNMUTE => dac.unmute_speaker(&mut dac_delay),
+                    _ => dac.mute_speaker(),
                 };
                 match outcome {
                     Ok(()) => esp_println::println!(
                         "teddiebox: speaker {}",
-                        if request == SPEAKER_UNMUTE {
-                            "unmuted"
-                        } else {
-                            "muted"
+                        match request {
+                            SPEAKER_RESUME => "powered and unmuted",
+                            SPEAKER_UNMUTE => "unmuted",
+                            _ => "muted",
                         }
                     ),
                     Err(_) => esp_println::println!("teddiebox: speaker would not change"),
@@ -2417,10 +2417,20 @@ static HEADPHONE_REPORT: AtomicBool = AtomicBool::new(false);
 /// an empty plate's polling already costs more than the radio does.
 const HEADSET_DETECT_EVERY: u32 = 3;
 
-/// A pending speaker mute change: 0 nothing, 1 mute, 2 unmute.
+/// A pending speaker change: 0 nothing, 1 mute, 2 unmute, 3 resume.
 static SPEAKER_REQUEST: AtomicU8 = AtomicU8::new(0);
 const SPEAKER_MUTE: u8 = 1;
 const SPEAKER_UNMUTE: u8 = 2;
+/// Power the class-D amplifier if it is not already up, then unmute it.
+///
+/// Distinct from `SPEAKER_UNMUTE`, which moves only the driver's mute bit.
+/// A story that began with headphones in never powered the amplifier — that
+/// click is deliberately not paid at the start of such a story — so the
+/// unplug has to power it before there is anything to unmute into. Kept apart
+/// from the plain unmute because `spk 1` exists so a bench can hear powering
+/// and unmuting separately, and folding them together would take that
+/// instrument away.
+const SPEAKER_RESUME: u8 = 3;
 
 /// A pending output power change: 0 nothing, 1 down, 2 up.
 static OUTPUT_REQUEST: AtomicU8 = AtomicU8::new(0);
@@ -2718,9 +2728,14 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                     AudioOutput::Headphones => "headphones",
                 }
             );
+            // `SPEAKER_RESUME` rather than a plain unmute: a story that began
+            // with headphones in never powered the class-D amplifier, so the
+            // unmute would have nothing to unmute into. Powering it is
+            // audible, and this is the moment to pay for it — somebody has
+            // just pulled a plug out.
             SPEAKER_REQUEST.store(
                 match output {
-                    AudioOutput::Speaker => SPEAKER_UNMUTE,
+                    AudioOutput::Speaker => SPEAKER_RESUME,
                     AudioOutput::Headphones => SPEAKER_MUTE,
                 },
                 Ordering::Relaxed,
