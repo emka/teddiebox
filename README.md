@@ -75,8 +75,11 @@ plugged in, and each output remembers where it was left: turning the
 headphones down does not leave the speaker quiet when the plug comes out.
 
 That 12 dB is a starting point rather than a measurement — nobody has yet sat
-down with a pair of headphones and tuned it — so if it is wrong for yours, it
-is one constant in `crates/teddiebox-core/src/volume.rs`.
+down with a pair of headphones and tuned it. If it is wrong for yours, both
+ladders are written out step by step in `crates/teddiebox-core/src/volume.rs`:
+change the levels in the `HEADPHONES` table to what you want to hear, and the
+`HEADPHONE_OFFSET_DB` constant beside it to the distance you have just put
+between the two. A test checks that they still agree.
 
 ### Its settings can be fixed without a card reader
 
