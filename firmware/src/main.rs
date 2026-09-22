@@ -60,7 +60,9 @@ use teddiebox_core::{
     colour_for, db_for, Action, BatteryConfig, Core, CoreConfig, Ear, Event, Freshness, LedState,
     Output as AudioOutput, Position, PowerOffReason, TagUid, Unavailable, Volume, MAX_VOLUME,
 };
-use teddiebox_download::{Bytes, ContentSink, Landing, Pages, Placement, Throttle, Writer};
+use teddiebox_download::{
+    Bytes, CardSays, ContentSink, Handshake, Landing, Pages, Placement, Step, Throttle, Writer,
+};
 use tlv320dac3100::Tlv320Dac3100;
 
 use crate::index::CardIndex;
@@ -1292,18 +1294,22 @@ static DOWNLOAD_SENT: AtomicU32 = AtomicU32::new(0);
 static DOWNLOAD_DIR: AtomicU32 = AtomicU32::new(0);
 static DOWNLOAD_FILE: AtomicU32 = AtomicU32::new(0);
 
-/// Where this download starts, or [`NOTHING_TO_FETCH`] when the card has it all.
+/// How often the producer looks for an answer while a handshake is in
+/// progress.
+///
+/// Finer than [`teddiebox_download::RETRY_MS`] on purpose: this is how long a
+/// figure waits past the moment the card actually answers, and the card
+/// answering is the common case. The re-ask cadence and the deadline are the
+/// download crate's to decide.
+const HANDSHAKE_TICK_MS: u32 = 10;
+
+/// What the card said, as [`CardSays::as_offset`] encodes it.
 ///
 /// Written by the card's owner during [`DOWNLOAD_PREPARING`] and read by the
-/// producer, which cannot touch the card itself.
+/// producer, which cannot touch the card itself. Encoded and decoded by the
+/// download crate rather than here, so the sentinel and the reason it is safe
+/// sit next to the tests that hold them.
 static DOWNLOAD_FROM: AtomicU32 = AtomicU32::new(0);
-
-/// `DOWNLOAD_FROM`'s answer for "there is nothing to ask the server for".
-///
-/// A sentinel rather than another flag because it is the same question — where
-/// does this download start — and `u32::MAX` is not a plausible offset in a
-/// file the card could hold.
-const NOTHING_TO_FETCH: u32 = u32::MAX;
 
 /// What the sidecar says a resume should be validated against.
 static DOWNLOAD_RESUME_ETAG: CsMutex<RefCell<Option<teddiebox_cloud::ETag>>> =
@@ -1590,12 +1596,12 @@ const FLUSH_EVERY: u32 = 1 << 20;
 /// ask for. A box with no card plans a whole download: the failure then comes
 /// from the write, which says so, rather than from a resume against a file
 /// nobody could read.
-fn plan_download(card: Option<&storage::Mounted>) {
+fn plan_download(card: Option<&storage::Mounted>) -> CardSays {
     let dir = DOWNLOAD_DIR.load(Ordering::Relaxed);
     let file = DOWNLOAD_FILE.load(Ordering::Relaxed);
     critical_section::with(|cs| *DOWNLOAD_RESUME_ETAG.borrow_ref_mut(cs) = None);
 
-    let mut from = 0;
+    let mut says = CardSays::Nothing;
     let mut on_card = 0;
     let mut expected = 0;
 
@@ -1625,19 +1631,18 @@ fn plan_download(card: Option<&storage::Mounted>) {
             length_on_card,
         };
         match teddiebox_download::decide(&cached) {
-            teddiebox_download::Decision::Play => from = NOTHING_TO_FETCH,
+            teddiebox_download::Decision::Play => says = CardSays::HoldsAll,
             teddiebox_download::Decision::Fetch => {}
             teddiebox_download::Decision::Resume { from: at, etag } => {
-                from = at;
+                says = CardSays::Holds(at);
                 critical_section::with(|cs| *DOWNLOAD_RESUME_ETAG.borrow_ref_mut(cs) = etag);
             }
         }
     }
 
-    DOWNLOAD_FROM.store(from, Ordering::Relaxed);
     DOWNLOAD_ON_CARD.store(on_card, Ordering::Relaxed);
     DOWNLOAD_EXPECT.store(expected, Ordering::Relaxed);
-    DOWNLOAD_STATE.store(DOWNLOAD_PLANNED, Ordering::Relaxed);
+    says
 }
 
 /// Records how long the file beside it is meant to be.
@@ -1677,7 +1682,21 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         // producer, the other waits for a response head that has not arrived.
         // Reported as busy so the loop keeps its fast cadence across them.
         DOWNLOAD_PREPARING => {
-            plan_download(card);
+            let says = plan_download(card);
+            DOWNLOAD_FROM.store(says.as_offset(), Ordering::Relaxed);
+            // Only answers a question still being asked. Reading the card can
+            // take longer than the producer is prepared to wait, and an answer
+            // stored after it has given up would leave this state machine in
+            // `DOWNLOAD_PLANNED` with nobody left to move it on — the media
+            // loop then polls at its fast download cadence for ever. The same
+            // rule `Handshake::card_answered` applies at the other end, for
+            // the same reason.
+            let _ = DOWNLOAD_STATE.compare_exchange(
+                DOWNLOAD_PREPARING,
+                DOWNLOAD_PLANNED,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
             return true;
         }
         DOWNLOAD_PLANNED => return true,
@@ -3567,42 +3586,73 @@ async fn bring_up(
                                 // away with the story still not playing.
                                 DOWNLOAD_FROM.store(0, Ordering::Relaxed);
                                 DOWNLOAD_AT.store(0, Ordering::Relaxed);
-                                DOWNLOAD_STATE.store(DOWNLOAD_PREPARING, Ordering::Relaxed);
-                                // Bounded, because a media task that never answers must
-                                // not wedge the console. Timing out leaves DOWNLOAD_FROM
-                                // at zero, which fetches the whole file — slow, and
-                                // correct, which is the right way round for a fallback.
-                                //
-                                // It is reachable: the media task only runs
+
+                                // The conversation with the card's owner. Re-asking is
+                                // the point of it: the media task only runs
                                 // `service_download` between requests, and `attend` —
                                 // what it calls while a sound or a story is playing —
-                                // does not. Anything on the speaker lasting longer than
-                                // this wait therefore costs a resume. Said out loud
-                                // because the symptom otherwise is a quarter of an hour
-                                // of re-download with nothing to attribute it to.
-                                let mut waited = 0;
-                                while DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_PREPARING
-                                    && waited < 500
-                                {
-                                    Timer::after(Duration::from_millis(10)).await;
-                                    waited += 1;
-                                }
-                                if DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_PREPARING {
-                                    esp_println::println!(
-                                        "teddiebox: get the card did not answer in 5 s — asking for the whole file"
-                                    );
-                                }
+                                // does not, so the first ask lands unheard whenever a
+                                // figure is placed during a prompt, which is most of
+                                // the time.
+                                let mut handshake = Handshake::new();
+                                let mut step = handshake.requested();
+                                let settled = loop {
+                                    match step {
+                                        Step::AskCard => DOWNLOAD_STATE
+                                            .store(DOWNLOAD_PREPARING, Ordering::Relaxed),
+                                        Step::Wait => {}
+                                        settled => break settled,
+                                    }
+                                    Timer::after(Duration::from_millis(HANDSHAKE_TICK_MS as u64))
+                                        .await;
+                                    // The answer is looked for before the clock is
+                                    // advanced, so one that has already landed is never
+                                    // buried under a re-ask.
+                                    step = if DOWNLOAD_STATE.load(Ordering::Relaxed)
+                                        == DOWNLOAD_PLANNED
+                                    {
+                                        handshake.card_answered(CardSays::from_offset(
+                                            DOWNLOAD_FROM.load(Ordering::Relaxed),
+                                        ))
+                                    } else {
+                                        handshake.ticked(HANDSHAKE_TICK_MS)
+                                    };
+                                };
 
-                                let from = DOWNLOAD_FROM.load(Ordering::Relaxed);
-                                if from == NOTHING_TO_FETCH {
-                                    esp_println::println!(
-                                        "teddiebox: get the card already holds all of it"
-                                    );
-                                    // Nothing to fetch is still an answer, and it is
-                                    // the good one: whoever asked can play now.
-                                    fetch_ended(FETCH_COMPLETED);
-                                    DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
-                                } else {
+                                let from = match settled {
+                                    Step::Play => {
+                                        esp_println::println!(
+                                            "teddiebox: get the card already holds all of it"
+                                        );
+                                        // Nothing to fetch is still an answer, and it is
+                                        // the good one: whoever asked can play now.
+                                        fetch_ended(FETCH_COMPLETED);
+                                        DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
+                                        None
+                                    }
+                                    // **Not a fetch from zero.** That was the old
+                                    // fallback, and it truncates the partial file it
+                                    // lands on — so a card that was merely too busy to
+                                    // answer lost the quarter of an hour it had already
+                                    // spent downloading. Saying so and stopping leaves
+                                    // what is cached intact for the next attempt.
+                                    Step::GiveUp => {
+                                        esp_println::println!(
+                                            "teddiebox: get the card did not answer in {} s — \
+                                             leaving what is cached alone",
+                                            teddiebox_download::DEADLINE_MS / 1_000
+                                        );
+                                        fetch_ended_if_silent(FETCH_UNREACHABLE);
+                                        DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
+                                        None
+                                    }
+                                    Step::Fetch { from } => Some(from),
+                                    Step::Wait | Step::AskCard => {
+                                        unreachable!("the loop above breaks on nothing else")
+                                    }
+                                };
+
+                                if let Some(from) = from {
                                     if from > 0 {
                                         esp_println::println!(
                                             "teddiebox: get resuming from {from}"
