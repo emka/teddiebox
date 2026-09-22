@@ -358,6 +358,15 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // as this sequence did — brings it up against the reset state, no routing
     // and -78 dB, and then steps it to 0 dB once the gain arrives. The
     // speaker reproduces that step.
+    // The bias headset detection senses against (SLAS671C Figure 6-17), at
+    // 2 V, the lowest level on offer. Its reset value powers it down, and with
+    // it down the MICDET pin is undriven: measured on the box, it held the
+    // charge the last plug left on it and reported a headset on an empty jack
+    // for the rest of the session, across a reflash and a power cycle.
+    // Writing this one register made a removal visible within a second, every
+    // time. It is in the sequence rather than left inherited so `cset 1 2e
+    // <v>` can still reach it from the console.
+    (1, page1::MICBIAS, 0x01),
     (1, page1::OUTPUT_MIXER_ROUTING, 0x44),
     // Route each analog volume control to its driver at 0 dB. Without D7 the
     // mixer reaches no amplifier at all, and the reset gain is -78 dB.
@@ -514,6 +523,7 @@ mod tests {
             w(vec![0x00, 0x00]), // back to page 0
             w(vec![0x43, 0x8C]), // headset detection on, 128 ms debounce
             w(vec![0x00, 0x01]), // select page 1
+            w(vec![0x2E, 0x01]), // MICBIAS at 2 V: the bias detection senses against
             w(vec![0x23, 0x44]), // DAC to output mixer routing
             w(vec![0x24, 0x80]), // left analog volume to HPL: routed, 0 dB
             w(vec![0x25, 0x80]), // right analog volume to HPR: routed, 0 dB
@@ -767,6 +777,23 @@ mod tests {
         assert_eq!(dac.unmute_speaker(&mut delay), Ok(()));
         dac.release().done();
         delay.done();
+    }
+
+    /// Headset detection senses the MICDET pin against MICBIAS (SLAS671C
+    /// Figure 6-17). Page 1 register 46 holds that bias and its reset value
+    /// powers it down, so the pin is undriven and holds whatever charge the
+    /// last plug left on it — which is why removal was never detected on the
+    /// box. The register is written here at its reset value so that it is part
+    /// of the sequence and `cset` can reach it: a bias level can then be tried
+    /// from the console instead of costing a reflash each time.
+    #[test]
+    fn the_bias_the_detector_senses_against_is_part_of_the_sequence() {
+        assert!(
+            INIT_ANALOG
+                .iter()
+                .any(|&(p, r, _)| p == 1 && r == page1::MICBIAS),
+            "an override for a register the sequence never writes does nothing"
+        );
     }
 
     #[test]
