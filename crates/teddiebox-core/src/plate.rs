@@ -12,7 +12,7 @@
 //! beginning. Every transition here now costs several agreeing readings —
 //! arrival, departure by absence, and departure by replacement alike.
 
-use crate::TagUid;
+use crate::{Event, TagUid};
 
 /// Consecutive readings of the same tag before it counts as arrived.
 ///
@@ -348,5 +348,209 @@ mod tests {
         p.feed(Some(A)); // A begins arriving but hasn't confirmed
         assert_eq!(p.feed(Some(B)), None); // B displaces mid-arriving A
         assert_eq!(p.feed(Some(B)), Some(TagEvent::Arrived(B))); // B arrives on second reading
+    }
+}
+
+/// What the reader last said about the plate.
+///
+/// The token rides in the same variant as the uid rather than in a second
+/// message, for the reason [`Placed`] exists: two messages can be read in
+/// either order, and "this figure, that figure's token" would then have a
+/// representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seen {
+    Figure {
+        uid: [u8; 8],
+        token: Option<[u8; 32]>,
+    },
+    Nothing,
+}
+
+/// Whether an answer that names a figure is about the one on the plate.
+///
+/// Three outcomes rather than an `Option`, because "a different figure is
+/// here" and "the plate is empty" are not the same event to whoever asked:
+/// the first is worth saying out loud, and the second is the harmless case
+/// the identity check exists to guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answering {
+    TheFigure(TagUid),
+    AnotherFigure,
+    NoFigure,
+}
+
+/// The figure on the plate and the token that authorises fetching its story.
+///
+/// The two are one value because they are two halves of one identity, and
+/// letting them drift apart is a real defect rather than a hypothetical one: a
+/// token that outlives the figure it arrived with is a token available to
+/// authorise the *next* figure's fetch. Every write goes through
+/// [`Placed::observe`], so there is one place where they can disagree and it
+/// replaces both.
+///
+/// Held by whoever drains the reader's signal, and asked — rather than read —
+/// whenever a late answer has to be matched against what is here now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placed {
+    figure: Option<TagUid>,
+    token: Option<[u8; 32]>,
+}
+
+impl Default for Placed {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl Placed {
+    pub const fn empty() -> Self {
+        Self {
+            figure: None,
+            token: None,
+        }
+    }
+
+    /// Takes a reading and says what happened in the reducer's words.
+    ///
+    /// Total: every reading is a `TagPresent` or a `TagAbsent`, because the
+    /// caller only has a reading at all when the reader's own filter has
+    /// already decided something changed.
+    pub fn observe(&mut self, seen: Seen) -> Event {
+        match seen {
+            Seen::Figure { uid, token } => {
+                let tag = TagUid(uid);
+                self.figure = Some(tag);
+                self.token = token;
+                Event::TagPresent(tag)
+            }
+            Seen::Nothing => {
+                self.figure = None;
+                self.token = None;
+                Event::TagAbsent
+            }
+        }
+    }
+
+    pub fn figure(&self) -> Option<TagUid> {
+        self.figure
+    }
+
+    /// The token, for whoever is about to authorise a fetch with it.
+    pub fn token(&self) -> Option<[u8; 32]> {
+        self.token
+    }
+
+    /// Whether an answer naming `ruid` belongs to what is on the plate now.
+    ///
+    /// The reducer checks the same identity again before it acts on the event
+    /// this produces. That is not redundant: this decides whether the reducer
+    /// is told at all, which is what keeps one figure's answer from ever being
+    /// spoken about another.
+    pub fn answering(&self, ruid: u64) -> Answering {
+        match self.figure {
+            Some(tag) if tag.ruid() == ruid => Answering::TheFigure(tag),
+            Some(_) => Answering::AnotherFigure,
+            None => Answering::NoFigure,
+        }
+    }
+}
+
+#[cfg(test)]
+mod placed_tests {
+    use super::*;
+
+    const A: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
+    const B: TagUid = TagUid([9, 9, 9, 9, 9, 9, 9, 9]);
+
+    const TOKEN_A: [u8; 32] = [0xAA; 32];
+    const TOKEN_B: [u8; 32] = [0xBB; 32];
+
+    fn figure(tag: TagUid, token: Option<[u8; 32]>) -> Seen {
+        Seen::Figure { uid: tag.0, token }
+    }
+
+    #[test]
+    fn a_figure_arriving_is_announced_and_its_token_kept() {
+        let mut placed = Placed::empty();
+
+        assert_eq!(
+            placed.observe(figure(A, Some(TOKEN_A))),
+            Event::TagPresent(A)
+        );
+        assert_eq!(placed.figure(), Some(A));
+        assert_eq!(placed.token(), Some(TOKEN_A));
+    }
+
+    /// A figure whose token could not be read is still a figure. The box plays
+    /// what the card already holds; only a fetch needs the token.
+    #[test]
+    fn a_figure_whose_token_was_not_read_is_still_announced() {
+        let mut placed = Placed::empty();
+
+        assert_eq!(placed.observe(figure(A, None)), Event::TagPresent(A));
+        assert_eq!(placed.figure(), Some(A));
+        assert_eq!(placed.token(), None);
+    }
+
+    /// The pair is the point. A token outliving the figure it came with is a
+    /// token available to authorise the *next* figure's fetch.
+    #[test]
+    fn a_figure_leaving_takes_its_token_with_it() {
+        let mut placed = Placed::empty();
+        placed.observe(figure(A, Some(TOKEN_A)));
+
+        assert_eq!(placed.observe(Seen::Nothing), Event::TagAbsent);
+        assert_eq!(placed.figure(), None);
+        assert_eq!(placed.token(), None);
+    }
+
+    /// The same rule across a swap, which is where it is easiest to get wrong:
+    /// both halves move at once or neither does.
+    #[test]
+    fn a_replacing_figure_brings_its_own_token_and_not_the_last_one() {
+        let mut placed = Placed::empty();
+        placed.observe(figure(A, Some(TOKEN_A)));
+
+        assert_eq!(
+            placed.observe(figure(B, Some(TOKEN_B))),
+            Event::TagPresent(B)
+        );
+        assert_eq!(placed.figure(), Some(B));
+        assert_eq!(placed.token(), Some(TOKEN_B));
+    }
+
+    #[test]
+    fn a_figure_replacing_one_that_had_a_token_does_not_inherit_it() {
+        let mut placed = Placed::empty();
+        placed.observe(figure(A, Some(TOKEN_A)));
+
+        placed.observe(figure(B, None));
+        assert_eq!(placed.token(), None, "B has no token of its own");
+    }
+
+    #[test]
+    fn an_answer_naming_the_figure_on_the_plate_is_about_it() {
+        let mut placed = Placed::empty();
+        placed.observe(figure(A, Some(TOKEN_A)));
+
+        assert_eq!(placed.answering(A.ruid()), Answering::TheFigure(A));
+    }
+
+    /// A console `get` that finishes while something else sits on the plate.
+    /// Attributing it to whatever is there is the bug this identity exists to
+    /// prevent.
+    #[test]
+    fn an_answer_naming_a_different_figure_is_not_about_the_one_on_the_plate() {
+        let mut placed = Placed::empty();
+        placed.observe(figure(A, Some(TOKEN_A)));
+
+        assert_eq!(placed.answering(B.ruid()), Answering::AnotherFigure);
+    }
+
+    #[test]
+    fn an_answer_arriving_at_an_empty_plate_is_about_nothing() {
+        let placed = Placed::empty();
+
+        assert_eq!(placed.answering(A.ruid()), Answering::NoFigure);
     }
 }

@@ -48,7 +48,9 @@ use teddiebox_core::i2c as bus;
 use teddiebox_core::input::{self, Debounced, Edge};
 use teddiebox_core::pipe::Pipe;
 use teddiebox_core::place::PendingPlace;
-use teddiebox_core::plate::{Presence, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEAVE};
+use teddiebox_core::plate::{
+    Answering, Placed, Presence, Seen, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEAVE,
+};
 use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::power;
 use teddiebox_core::sounds::{Language, Sound};
@@ -1148,7 +1150,7 @@ const NET_GET: u8 = 6;
 
 /// A figure's identifier and the token that authorises fetching its story.
 ///
-/// The two travel together for the same reason [`PlateState::Present`] keeps
+/// The two travel together for the same reason [`Seen::Figure`] keeps
 /// its uid and token in one variant rather than two statics: sent as a pair,
 /// "this figure's fetch, that figure's token" has no representation. Split
 /// into a ruid static beside a token static, it would — a write to one
@@ -2049,7 +2051,7 @@ static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
 /// Holding the latest state instead is idempotent and cannot overflow; the
 /// cost is that a figure placed and lifted inside one media pass is invisible,
 /// which is the right answer anyway.
-static PLATE_TAG: Signal<CriticalSectionRawMutex, PlateState> = Signal::new();
+static PLATE_TAG: Signal<CriticalSectionRawMutex, Seen> = Signal::new();
 
 /// Set when the box is about to stop being able to write the card.
 ///
@@ -2073,17 +2075,6 @@ static PENDING_PLACE: CsMutex<RefCell<PendingPlace>> =
 /// task when it opens the file. Taken rather than read: a story the console
 /// starts after one a figure started must not inherit the figure's place.
 static PLAY_FROM: CsMutex<RefCell<Position>> = CsMutex::new(RefCell::new(Position::Start));
-
-/// The token travels with the UID it was read from. As two separate statics
-/// it would be possible to send one figure's token for another's story.
-#[derive(Debug, Clone, Copy)]
-enum PlateState {
-    Present {
-        uid: [u8; 8],
-        token: Option<[u8; 32]>,
-    },
-    Absent,
-}
 
 /// How often the reader looks, when it is looking at all — counted in the
 /// `nfc_reader` loop's existing 100 ms ticks, so five is half a second.
@@ -2857,30 +2848,19 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
     }
 }
 
-/// Reads what is on the plate right now, if it has changed since the last
-/// read, and says what happened in the reducer's words.
+/// Drains the reader's signal into what the media task believes is on the
+/// plate.
 ///
-/// The figure and the token it arrived with are updated together, here and
-/// nowhere else. They are two halves of one identity, and letting them drift
-/// apart is the bug [`FetchRequest`] exists to make unrepresentable.
+/// All that is left here is the signal, which is the part a host test cannot
+/// have; the figure and its token are replaced together by [`Placed::observe`]
+/// where a test can drive it. They are two halves of one identity, and letting
+/// them drift apart is the bug [`FetchRequest`] exists to make unrepresentable.
 ///
 /// Called from two places — once per pass of the media loop, and once per
 /// frame while a story plays — because a loop pass is a whole story long and a
 /// figure lifted during one must not wait for it to end.
-fn take_plate_event(on_plate: &mut Option<TagUid>, token: &mut Option<[u8; 32]>) -> Option<Event> {
-    Some(match PLATE_TAG.try_take()? {
-        PlateState::Present { uid, token: read } => {
-            let tag = TagUid(uid);
-            *on_plate = Some(tag);
-            *token = read;
-            Event::TagPresent(tag)
-        }
-        PlateState::Absent => {
-            *on_plate = None;
-            *token = None;
-            Event::TagAbsent
-        }
-    })
+fn take_plate_event(placed: &mut Placed) -> Option<Event> {
+    Some(placed.observe(PLATE_TAG.try_take()?))
 }
 
 /// Hands the reducer every ear edge that has settled since it was last asked.
@@ -3000,13 +2980,12 @@ async fn media(
     // an event about a particular story. `None` is also the test for "nobody
     // is waiting any more", which is what makes a fetch that finishes after
     // the figure was lifted harmless.
-    let mut on_plate: Option<TagUid> = None;
-    // The token that came with the figure now on the plate. Kept here rather
-    // than in a shared static: it is read exactly once, when the reducer
-    // actually asks for a fetch, and bundled with that figure's ruid into one
+    // The token it arrived with is held in the same value rather than in a
+    // shared static: it is read exactly once, when the reducer actually asks
+    // for a fetch, and bundled with that figure's ruid into one
     // `FetchRequest` write — so nothing typed at the console between now and
     // then can attach itself to this figure's fetch.
-    let mut on_plate_token: Option<[u8; 32]> = None;
+    let mut placed = Placed::empty();
     // The last millisecond a `Tick` was fed to the reducer, so `feed_tick` can
     // rate-limit itself across both call sites — the top of this loop and the
     // per-frame `attend` closure inside a playing story.
@@ -3030,18 +3009,18 @@ async fn media(
             }
         }
 
-        events[0] = take_plate_event(&mut on_plate, &mut on_plate_token);
+        events[0] = take_plate_event(&mut placed);
 
         // A download has ended somewhere this task cannot see. Read every pass
         // so a stale answer cannot arrive later attached to a different figure.
         let (outcome, outcome_ruid) = take_fetch_outcome();
         if outcome != FETCH_NOTHING {
-            match on_plate {
+            match placed.answering(outcome_ruid) {
                 // The figure this outcome was for is still on the plate: the
                 // reducer's guard checks the same identity again before
                 // acting, but the event it sees is at least about the right
                 // figure.
-                Some(tag) if tag.ruid() == outcome_ruid => {
+                Answering::TheFigure(tag) => {
                     events[1] = match outcome {
                         FETCH_COMPLETED => Some(Event::ContentReady(tag)),
                         FETCH_UNREACHABLE => {
@@ -3059,13 +3038,13 @@ async fn media(
                 // something else sits here. Attributing it to the figure on
                 // the plate is exactly the bug this identity exists to
                 // prevent, so the reducer never sees it.
-                Some(_) => esp_println::println!(
+                Answering::AnotherFigure => esp_println::println!(
                     "teddiebox: plate ignoring a fetch outcome for {outcome_ruid:016X} — \
                      not the figure on the plate"
                 ),
                 // Nobody is waiting. Already the harmless case this read
                 // exists to guarantee.
-                None => {}
+                Answering::NoFigure => {}
             }
         }
 
@@ -3096,8 +3075,8 @@ async fn media(
         if probed != PROBED_NOTHING {
             ASKED_AT_MS.store(0, Ordering::Relaxed);
             let probed_ruid = PROBED_RUID.load(Ordering::Relaxed);
-            match on_plate {
-                Some(tag) if tag.ruid() == probed_ruid => {
+            match placed.answering(probed_ruid) {
+                Answering::TheFigure(tag) => {
                     // Remembered whatever the answer was. A server that was
                     // unreachable a moment ago is unreachable for the rest of
                     // a five-minute session, and asking it again on the next
@@ -3108,18 +3087,18 @@ async fn media(
                         freshness_of(probed, tag, card.as_ref()),
                     ));
                 }
-                Some(_) => esp_println::println!(
+                Answering::AnotherFigure => esp_println::println!(
                     "teddiebox: plate ignoring an answer about {probed_ruid:016X} — \
                      not the figure on the plate"
                 ),
-                None => {}
+                Answering::NoFigure => {}
             }
         }
 
         // Every pass, not only when a figure moved: a tap has nothing to do
         // with the plate and must not wait for one.
         if let Some(mounted) = card.as_ref() {
-            apply_ear_events(&mut reducer, mounted, on_plate_token);
+            apply_ear_events(&mut reducer, mounted, placed.token());
         }
 
         // The core's only clock. Withheld until now because `Core` emits
@@ -3132,14 +3111,14 @@ async fn media(
         // long as half an hour. `feed_tick` is called again from inside that
         // call's `attend` closure for exactly that reason.
         if let Some(mounted) = card.as_ref() {
-            feed_tick(&mut reducer, mounted, on_plate_token, &mut last_tick_fed);
+            feed_tick(&mut reducer, mounted, placed.token(), &mut last_tick_fed);
         }
 
         if events.iter().any(Option::is_some) {
             match card.as_ref() {
                 Some(mounted) => {
                     for event in events.into_iter().flatten() {
-                        apply(&mut reducer, mounted, event, on_plate_token);
+                        apply(&mut reducer, mounted, event, placed.token());
                     }
                 }
                 // A figure answered with nothing at all is the failure this
@@ -3327,11 +3306,11 @@ async fn media(
                         _ => Position::Start,
                     };
                     let mut attend = || {
-                        if let Some(event) = take_plate_event(&mut on_plate, &mut on_plate_token) {
-                            apply(&mut reducer, card, event, on_plate_token);
+                        if let Some(event) = take_plate_event(&mut placed) {
+                            apply(&mut reducer, card, event, placed.token());
                         }
-                        apply_ear_events(&mut reducer, card, on_plate_token);
-                        feed_tick(&mut reducer, card, on_plate_token, &mut last_tick_fed);
+                        apply_ear_events(&mut reducer, card, placed.token());
+                        feed_tick(&mut reducer, card, placed.token(), &mut last_tick_fed);
 
                         // Free, and the only thing keeping the reducer's idea
                         // of the position true: it is what gets written when
@@ -3367,7 +3346,7 @@ async fn media(
                         // lifted. Fed for every ended story, identified or
                         // not — a console `play` running out must leave the
                         // reducer idle too, not just a story tied to a figure.
-                        apply(&mut reducer, card, Event::PlaybackEnded, on_plate_token);
+                        apply(&mut reducer, card, Event::PlaybackEnded, placed.token());
                     }
                     // Cleared only by the playback the flag names, and
                     // whatever the outcome: a failed announcement that left it
@@ -4163,9 +4142,9 @@ async fn nfc_reader(
                             // when teddyCloud has to go upstream for the
                             // story.
                             let token = reader.read_token();
-                            PLATE_TAG.signal(PlateState::Present { uid, token });
+                            PLATE_TAG.signal(Seen::Figure { uid, token });
                         }
-                        TagEvent::Left => PLATE_TAG.signal(PlateState::Absent),
+                        TagEvent::Left => PLATE_TAG.signal(Seen::Nothing),
                     }
                 }
             }
