@@ -121,5 +121,11 @@ console:
     ./scripts/console.py
 
 # format the tree rather than checking it
+#
+# Both workspaces, for the same reason `fmt` checks both: a `fix` that reaches
+# only the root leaves `just check` failing on firmware/ with the tree already
+# "formatted", which reads as a rustfmt disagreement rather than a recipe that
+# did not go there.
 fix:
     cargo fmt --all
+    cd firmware && cargo fmt --all
