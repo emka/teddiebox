@@ -39,6 +39,43 @@ pub enum CardSays {
     HoldsAll,
 }
 
+impl CardSays {
+    /// What [`CardSays::as_offset`] returns for "there is nothing to ask the
+    /// server for".
+    ///
+    /// A sentinel rather than a second flag beside the number, because it is
+    /// one answer to one question — where does this download start — and
+    /// `u32::MAX` is not a plausible offset in a file a card could hold.
+    pub const NOTHING_TO_FETCH: u32 = u32::MAX;
+
+    /// The answer as one number, for a transport that can carry only one.
+    ///
+    /// On the box this crosses between the task that owns the card and the
+    /// task that fetches, which share nothing they can pass a value through
+    /// but an atomic.
+    pub const fn as_offset(self) -> u32 {
+        match self {
+            CardSays::Nothing => 0,
+            CardSays::Holds(from) => from,
+            CardSays::HoldsAll => Self::NOTHING_TO_FETCH,
+        }
+    }
+
+    /// The number read back.
+    ///
+    /// `Nothing` and `Holds(0)` share the representation `0`, because they are
+    /// the same instruction — fetch from the beginning — and
+    /// [`Handshake::card_answered`] turns both into the same step. The round
+    /// trip is therefore faithful in meaning rather than in variant.
+    pub const fn from_offset(offset: u32) -> Self {
+        match offset {
+            Self::NOTHING_TO_FETCH => CardSays::HoldsAll,
+            0 => CardSays::Nothing,
+            from => CardSays::Holds(from),
+        }
+    }
+}
+
 /// What the caller should do about the conversation now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -257,5 +294,48 @@ mod tests {
     fn ticks_with_nothing_asked_do_nothing() {
         let mut h = Handshake::new();
         assert_eq!(h.ticked(DEADLINE_MS * 2), Step::Wait);
+    }
+
+    /// The transport carries meaning, not variants: whatever the card said
+    /// must come back as the same instruction on the other side.
+    #[test]
+    fn every_answer_survives_the_trip_between_the_two_tasks() {
+        for says in [
+            CardSays::Nothing,
+            CardSays::Holds(1),
+            CardSays::Holds(4_194_304),
+            CardSays::HoldsAll,
+        ] {
+            let there_and_back = CardSays::from_offset(says.as_offset());
+            let mut direct = Handshake::new();
+            direct.requested();
+            let mut round_tripped = Handshake::new();
+            round_tripped.requested();
+
+            assert_eq!(
+                direct.card_answered(says),
+                round_tripped.card_answered(there_and_back),
+                "{says:?} arrived as {there_and_back:?} and meant something else",
+            );
+        }
+    }
+
+    /// The one that would be silent if it were wrong. A sentinel read as an
+    /// offset asks the server to resume after four gigabytes; an offset read
+    /// as the sentinel plays a file that is only partly there.
+    #[test]
+    fn a_full_card_is_not_confusable_with_an_offset() {
+        assert_eq!(
+            CardSays::from_offset(CardSays::HoldsAll.as_offset()),
+            CardSays::HoldsAll
+        );
+        assert_ne!(
+            CardSays::Holds(1).as_offset(),
+            CardSays::HoldsAll.as_offset()
+        );
+        assert_ne!(
+            CardSays::Nothing.as_offset(),
+            CardSays::HoldsAll.as_offset()
+        );
     }
 }
