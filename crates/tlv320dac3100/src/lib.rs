@@ -364,9 +364,19 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // charge the last plug left on it and reported a headset on an empty jack
     // for the rest of the session, across a reflash and a power cycle.
     // Writing this one register made a removal visible within a second, every
-    // time. It is in the sequence rather than left inherited so `cset 1 2e
-    // <v>` can still reach it from the console.
-    (1, page1::MICBIAS, 0x01),
+    // time.
+    //
+    // D3 is why the value is 0x09 rather than 0x01. Clear, the bias comes up
+    // only once a headset has been *deemed* inserted, which is a
+    // chicken-and-egg at start-up: for about 1.7 s after the codec is
+    // configured the box believed headphones were in, and a boot sound started
+    // in them. Set, the bias is up against an empty jack too, the first
+    // measurement is valid, and that transient is gone — measured both ways on
+    // the box. An empty jack draws nothing from it.
+    //
+    // It is in the sequence rather than left inherited so `cset 1 2e <v>` can
+    // still reach it from the console.
+    (1, page1::MICBIAS, 0x09),
     (1, page1::OUTPUT_MIXER_ROUTING, 0x44),
     // Route each analog volume control to its driver at 0 dB. Without D7 the
     // mixer reaches no amplifier at all, and the reset gain is -78 dB.
@@ -523,7 +533,7 @@ mod tests {
             w(vec![0x00, 0x00]), // back to page 0
             w(vec![0x43, 0x8C]), // headset detection on, 128 ms debounce
             w(vec![0x00, 0x01]), // select page 1
-            w(vec![0x2E, 0x01]), // MICBIAS at 2 V: the bias detection senses against
+            w(vec![0x2E, 0x09]), // MICBIAS at 2 V, up even on an empty jack
             w(vec![0x23, 0x44]), // DAC to output mixer routing
             w(vec![0x24, 0x80]), // left analog volume to HPL: routed, 0 dB
             w(vec![0x25, 0x80]), // right analog volume to HPR: routed, 0 dB
