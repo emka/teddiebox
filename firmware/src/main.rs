@@ -714,22 +714,29 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         if HEADPHONE_REPORT.swap(false, Ordering::Relaxed) {
             let bus = accel.release();
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-            let reading = dac.headset_detect_raw();
+            let reading = dac
+                .headset_detect_raw()
+                .and_then(|detect| Ok((detect, dac.headset_status_raw()?)));
             let bus = dac.release();
             accel = Lis3dh::new(bus, address);
             match reading {
-                // Three separate facts, printed apart on purpose. The raw byte
-                // comes first because a decoded in/out reads 00 both for an
-                // empty jack and for detection that was never enabled — after
-                // a failed bring-up or a `cdown` those are the same answer,
-                // and telling them apart is what a session asks `hp` for. D7
-                // set is detection on; D6-D5 are the jack. The routing is the
-                // box's own belief, which `hp 1` can set without the register
-                // moving at all.
-                Ok(raw) => esp_println::println!(
-                    "teddiebox: headset detect {:#04x}, says {}, routing to {}",
-                    raw,
-                    if raw & tlv320dac3100::HEADSET_DETECTED != 0 {
+                // Four separate facts, printed apart on purpose. `detect` is
+                // register 67: D7 set is detection switched on, and D6-D5 name
+                // the last headset it saw — which it keeps naming long after
+                // that headset is gone, so it cannot answer "is one in now".
+                // `status` is register 46, whose D4 is the jack itself, and
+                // that is what the box reads. They are printed side by side
+                // because their disagreement is the normal case and reading
+                // only one of them is how a removal went missing on
+                // 2026-09-22. Detection off makes both a constant 00, which
+                // is also what an empty jack looks like — D7 in `detect` is
+                // what separates them. The routing is the box's own belief,
+                // which `hp 1` can set without either register moving.
+                Ok((detect, status)) => esp_println::println!(
+                    "teddiebox: headset detect {:#04x} status {:#04x}, says {}, routing to {}",
+                    detect,
+                    status,
+                    if status & tlv320dac3100::HEADSET_INSERTED != 0 {
                         "in"
                     } else {
                         "out"

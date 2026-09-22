@@ -23,6 +23,10 @@ pub mod page0 {
     /// asked for: D7 left DAC, D5 HPL driver, D4 left class-D, D3 right DAC,
     /// D0 right class-D.
     pub const DAC_FLAGS: u8 = 0x25;
+    /// Read-only live status. D4 is the jack itself: 0 after a removal, 1
+    /// after an insertion. This, not `HEADSET_DETECT`, is what "are
+    /// headphones in?" means — see `headphones_connected`.
+    pub const INTERRUPT_FLAGS_DAC: u8 = 0x2E;
     pub const DAC_PROCESSING_BLOCK: u8 = 0x3C;
     pub const DAC_DATA_PATH: u8 = 0x3F;
     pub const DAC_MUTE_CTRL: u8 = 0x40;

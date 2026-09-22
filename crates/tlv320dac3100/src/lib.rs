@@ -263,11 +263,17 @@ where
 
     /// True while a jack is inserted. The firmware mutes the speaker on this.
     ///
-    /// Detection only reports anything once `INIT_SEQUENCE` has enabled it;
-    /// the reset state of the register is disabled, reading a constant 00.
+    /// Read from the live status flag, not from `HEADSET_DETECT`'s type
+    /// field. The type field answers "what was the last headset plugged in?"
+    /// and keeps that answer for ever: on the box it held `01` for the whole
+    /// 35 s after the plug came out, so a removal was invisible. SLAS671C
+    /// Table 6-63 gives D4 here as the insertion-or-removal state itself.
+    ///
+    /// Detection only reports anything once `INIT_SEQUENCE` has enabled it in
+    /// `HEADSET_DETECT`; with it disabled this flag never moves.
     pub fn headphones_connected(&mut self) -> Result<bool, Error<E>> {
-        let v = self.read_reg(0, page0::HEADSET_DETECT)?;
-        Ok(v & HEADSET_DETECTED != 0)
+        let v = self.read_reg(0, page0::INTERRUPT_FLAGS_DAC)?;
+        Ok(v & HEADSET_INSERTED != 0)
     }
 
     /// The headset-detection register itself, unmasked.
@@ -280,6 +286,16 @@ where
     /// session needs to know.
     pub fn headset_detect_raw(&mut self) -> Result<u8, Error<E>> {
         self.read_reg(0, page0::HEADSET_DETECT)
+    }
+
+    /// The live status register itself, unmasked.
+    ///
+    /// The companion to `headset_detect_raw`, and the one that answers the
+    /// question the firmware actually asks. Printed beside it because the two
+    /// disagree whenever a plug has been pulled: 67 keeps naming the headset
+    /// it last saw, 46's D4 has already gone back to 0.
+    pub fn headset_status_raw(&mut self) -> Result<u8, Error<E>> {
+        self.read_reg(0, page0::INTERRUPT_FLAGS_DAC)
     }
 }
 
@@ -430,7 +446,7 @@ const VOLUME_MAX_CODE: i16 = 48; //  +24 dB
 /// D6-D5 of the headset-detection register report what is plugged in: 00 for
 /// nothing, 01 for a headset without a microphone, 11 for one with. Anything
 /// non-zero is a jack, which is all this driver needs to know.
-pub const HEADSET_DETECTED: u8 = 0x60;
+pub const HEADSET_INSERTED: u8 = 0x10;
 
 #[cfg(test)]
 mod tests {
@@ -950,13 +966,44 @@ mod tests {
     }
 
     #[test]
-    fn a_headset_without_a_microphone_counts_as_connected() {
+    fn an_inserted_jack_reads_as_connected() {
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
-            Transaction::write_read(DEFAULT_ADDRESS, vec![page0::HEADSET_DETECT], vec![0x20]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x10]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         assert!(dac.headphones_connected().unwrap());
+        dac.release().done();
+    }
+
+    /// Register 67's type field names the last headset the codec saw and does
+    /// not return to "none" when the plug comes out: measured on the box on
+    /// 2026-09-22, where it read 0xAC for 35 s after the jack was empty, and
+    /// 0xEC after a re-init with nothing plugged in at all. Presence has to
+    /// come from register 46's live status bit instead, which SLAS671C
+    /// Table 6-63 defines as 0 for removal and 1 for insertion.
+    /// The two registers disagree in normal use, so a bench session has to be
+    /// able to see both: 67 says what kind of headset was last detected, 46
+    /// says whether one is in the socket now.
+    #[test]
+    fn the_live_status_register_is_reported_byte_for_byte() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![0x00, 0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x10]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        assert_eq!(dac.headset_status_raw(), Ok(0x10));
+        dac.release().done();
+    }
+
+    #[test]
+    fn a_pulled_plug_reads_as_absent() {
+        let expected = [
+            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x00]),
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        assert!(!dac.headphones_connected().unwrap());
         dac.release().done();
     }
 
@@ -964,11 +1011,11 @@ mod tests {
     fn invalidating_the_page_makes_the_next_access_select_it_again() {
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
-            Transaction::write_read(DEFAULT_ADDRESS, vec![page0::HEADSET_DETECT], vec![0x00]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x00]),
             // The caller has since driven the RESET line, or the board's power
             // gate cycled, so the codec is back on page 0 and the cache lies.
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
-            Transaction::write_read(DEFAULT_ADDRESS, vec![page0::HEADSET_DETECT], vec![0x20]),
+            Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x10]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
 
@@ -989,17 +1036,6 @@ mod tests {
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         assert_eq!(dac.headset_detect_raw(), Ok(0x8C));
-        dac.release().done();
-    }
-
-    #[test]
-    fn headphone_detect_reports_absence_when_the_flag_is_clear() {
-        let expected = [
-            Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
-            Transaction::write_read(DEFAULT_ADDRESS, vec![page0::HEADSET_DETECT], vec![0x00]),
-        ];
-        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
-        assert!(!dac.headphones_connected().unwrap());
         dac.release().done();
     }
 
