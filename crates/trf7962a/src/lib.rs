@@ -100,13 +100,17 @@ pub const MAX_REQUEST: usize = 12;
 
 /// Non-addressed request flags for a plain ISO 15693-3 command.
 ///
-/// Same value as `slix::FLAGS`, for the same reason: ISO 15693-3 §7.3.1 puts
-/// the Address flag in bit 6, and setting it would require carrying the
-/// tag's eight-byte UID, which a read by block number has no cause to know.
-/// Re-expressed here, rather than imported, because READ SINGLE BLOCK is a
-/// standard ISO 15693-3 command rather than one of NXP's custom ones, so it
-/// has no business living in `slix`.
-const FLAGS: u8 = slix::FLAGS;
+/// ISO 15693-3 §7.3.1 puts the Address flag in bit 6, and setting it would
+/// require carrying the tag's eight-byte UID, which a read by block number
+/// has no cause to know.
+///
+/// The same value as `slix::FLAGS` and deliberately not the same constant:
+/// READ SINGLE BLOCK is a standard ISO 15693-3 command rather than one of
+/// NXP's custom ones, so what it sends must not be decided by the module that
+/// speaks NXP's dialect. The two agree today because §7.3.1 binds both; were
+/// `slix` ever to need a different flags byte, the standard command should not
+/// follow it there.
+const FLAGS: u8 = 0x02;
 
 /// READ SINGLE BLOCK: ISO 15693-3's command code for reading four bytes of
 /// tag memory by block number.
