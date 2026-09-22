@@ -25,7 +25,8 @@ use esp_hal::peripherals::{GPIO44, UART0, WIFI};
 use esp_hal::uart::{Config as UartConfig, ConfigError, UartRx};
 use teddiebox_console::{Command, CommandWatch};
 use teddiebox_core::LedState;
-use teddiebox_portal::{dhcp, form, http, page, MAX_BODY, MAX_CONFIG};
+use teddiebox_portal::submission::{examine, Submission};
+use teddiebox_portal::{dhcp, http, page, MAX_BODY, MAX_CONFIG};
 
 use crate::net;
 use crate::stack;
@@ -616,34 +617,16 @@ async fn show(socket: &mut TcpSocket<'_>, card: Option<&Mounted>) {
 }
 
 /// `POST /save` — decode, validate, write, reset.
+///
+/// What the submission *means* is [`examine`]'s, on the host, where the
+/// validate-before-write rule can be tested. What is left here is the card and
+/// the socket.
 async fn save(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, body: &[u8]) {
-    // One arm per variant here too: `TooLong` is the only one of the three
-    // that is about the *file* rather than about the request carrying it, and
-    // it is the one somebody can do something about. Saying "did not arrive
-    // intact" to a config that is simply too big sends them looking at their
-    // phone instead of at their file.
-    let submitted: heapless::Vec<u8, MAX_CONFIG> = match form::field(body, "config") {
-        Ok(bytes) => bytes,
-        Err(form::FormError::TooLong) => {
-            return respond_error(socket, "that config is longer than the box will hold").await
-        }
-        Err(form::FormError::NotFound) | Err(form::FormError::BadEscape) => {
-            return respond_error(socket, "that form did not arrive intact").await
-        }
+    let submitted = match examine(body) {
+        Submission::Refuse(why) => return respond_error(socket, why).await,
+        Submission::HandBack(bytes, why) => return respond_page(socket, &bytes, Some(why)).await,
+        Submission::Write(bytes) => bytes,
     };
-
-    // Validate before writing, never after. A file the box will refuse at its
-    // next boot must not reach the card: the person who would find out is
-    // whoever picks up a box that no longer works, with no clue why.
-    let text = match core::str::from_utf8(&submitted) {
-        Ok(text) => text,
-        Err(_) => return respond_error(socket, "that is not text").await,
-    };
-    if let Err(trouble) = teddiebox_config::Config::parse(text) {
-        // The submitted bytes go back into the textarea, so a typo costs a
-        // correction rather than a retype.
-        return respond_page(socket, &submitted, Some(describe(trouble))).await;
-    }
 
     // Checked here rather than on the way in, so that a config typed against
     // a card that is not there is still decoded, still validated, and still
@@ -668,24 +651,6 @@ async fn save(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, body: &[u8]) {
             esp_hal::system::software_reset();
         }
         Err(why) => respond_page(socket, &submitted, Some(why)).await,
-    }
-}
-
-/// Says what went wrong in words somebody can act on.
-///
-/// One arm per variant and no catch-all, so a new [`teddiebox_config::ConfigError`]
-/// makes this fail to compile rather than quietly telling everybody "invalid".
-fn describe(trouble: teddiebox_config::ConfigError) -> &'static str {
-    use teddiebox_config::ConfigError::*;
-    match trouble {
-        MissingSsid => "no ssid line — the box needs a network name",
-        MissingServer => "no server line — the box needs somewhere to fetch from",
-        ValueTooLong => "one of those values is too long for the box to hold",
-        MalformedLine => "a line without an = on it",
-        MalformedValue => "a key was given a value it does not accept",
-        Truncated => "that config is longer than the box will read",
-        NotText => "that is not text",
-        EmptyUpdateUrl => "update_url is there but empty — give it a URL or remove it",
     }
 }
 

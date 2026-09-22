@@ -1159,6 +1159,7 @@ name = "teddiebox-portal"
 version = "0.1.0"
 dependencies = [
  "heapless 0.8.0",
+ "teddiebox-config",
 ]
 
 [[package]]

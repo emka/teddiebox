@@ -8,12 +8,15 @@
 //! `firmware/src/portal.rs` and not here.
 
 #[cfg(test)]
+extern crate alloc;
+#[cfg(test)]
 extern crate std;
 
 pub mod dhcp;
 pub mod form;
 pub mod http;
 pub mod page;
+pub mod submission;
 
 /// The largest `CONFIG.TXT` this box will read or write.
 ///
