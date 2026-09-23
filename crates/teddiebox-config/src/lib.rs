@@ -62,11 +62,17 @@ pub struct Config {
     /// signed by its own root and hands that root over in the chain, so the
     /// ordinary answer is to trust that root and check against it.
     ///
-    /// What this exists for is the box's missing clock. Validity dates cannot
-    /// be checked without one, and the box's time starts at boot: a box that
-    /// believes it is 1970 is *before* the window of a certificate issued in
-    /// 2004, and would refuse a good one. Until the box learns the time, this
-    /// is what gets it talking.
+    /// **Nothing here needs it.** On 2026-09-23 a box running straight off the
+    /// card — which says nothing about this key, so it gets the checking —
+    /// completed a handshake against teddycloud.local and resumed a 45 MB download
+    /// at the usual rate. So this is an escape hatch for a server this project
+    /// has not met, not the thing that gets the box talking.
+    ///
+    /// The clock is not the obstacle it was once written up as. This build
+    /// compiles mbedtls without `MBEDTLS_HAVE_TIME_DATE`, so `notBefore` and
+    /// `notAfter` are never examined: a box that believes it is 1970 verifies a
+    /// chain perfectly well, and simply cannot notice an expired certificate.
+    /// `firmware/src/tls.rs`'s `client_config` carries the rest of that account.
     ///
     /// **It stops the box checking the server. It does not stop the box
     /// identifying itself to one.** The box's client certificate and the
