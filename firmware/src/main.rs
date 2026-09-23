@@ -4421,6 +4421,11 @@ async fn main(spawner: Spawner) {
     // it out of that memory — pulling it back up there garbles the line
     // again. `ota::flash()` lends one handle at a time: this takes it and
     // gives it back inside the call.
+    //
+    // It also sits below the both-ears-held branch above, which diverges
+    // with `-> !` and never reaches here: setup mode never loads the
+    // identity. Inert today — the portal makes no outbound TLS connection —
+    // but it is a real narrowing, and this is the only place it is recorded.
     identity::load();
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
