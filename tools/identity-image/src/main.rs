@@ -9,10 +9,32 @@
 //! console follows for the tag token and the SLIX password.
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use teddiebox_identity::{render, HEADER, MAX_BODY};
+
+/// Reads `dir/upper`, falling back to `dir/upper.to_lowercase()`.
+///
+/// The files this tool reads come straight off the box's SD card, and a
+/// Linux `vfat` mount presents 8.3 short names lowercased by default — so
+/// the natural `cp /mnt/card/CERT/*.der $TEDDIEBOX_IDENTITY_DIR/` produces
+/// `client.der`, not `CLIENT.DER`. Trying the documented spelling first and
+/// the lowercase one second means that copy just works; naming both
+/// spellings in the error means it is obvious why when it does not.
+fn read_der(dir: &Path, upper: &str) -> Result<Vec<u8>, String> {
+    let lower = upper.to_lowercase();
+    if let Ok(bytes) = fs::read(dir.join(upper)) {
+        return Ok(bytes);
+    }
+    match fs::read(dir.join(&lower)) {
+        Ok(bytes) => Ok(bytes),
+        Err(trouble) => Err(format!(
+            "neither {upper} nor {lower} found in {} — {trouble}",
+            dir.display()
+        )),
+    }
+}
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -31,17 +53,17 @@ fn main() -> ExitCode {
     };
     let dir = PathBuf::from(dir);
 
-    let certificate = match fs::read(dir.join("CLIENT.DER")) {
+    let certificate = match read_der(&dir, "CLIENT.DER") {
         Ok(bytes) => bytes,
         Err(trouble) => {
-            eprintln!("identity-image: cannot read CLIENT.DER — {trouble}");
+            eprintln!("identity-image: cannot read the certificate — {trouble}");
             return ExitCode::FAILURE;
         }
     };
-    let key = match fs::read(dir.join("PRIVATE.DER")) {
+    let key = match read_der(&dir, "PRIVATE.DER") {
         Ok(bytes) => bytes,
         Err(trouble) => {
-            eprintln!("identity-image: cannot read PRIVATE.DER — {trouble}");
+            eprintln!("identity-image: cannot read the key — {trouble}");
             return ExitCode::FAILURE;
         }
     };
