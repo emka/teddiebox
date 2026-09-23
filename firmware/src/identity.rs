@@ -78,7 +78,11 @@ pub fn load() -> bool {
         }
         Err(trouble) => {
             esp_println::println!(
-                "teddiebox: identity unusable — {trouble:?}; run `just identity`"
+                "teddiebox: identity unusable — `{LABEL}` holds something this firmware \
+                 does not recognise ({trouble:?}). If `just identity` has never been run \
+                 on this box, that is what this means: the partition still holds whatever \
+                 was there before this firmware — the common case on a box built from a \
+                 stock Toniebox. Run `just identity`."
             );
             return false;
         }
