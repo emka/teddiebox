@@ -10,6 +10,8 @@
 //! needs the whole image in one buffer — the partition is 16 KB and the box's
 //! stack is not.
 
+use teddiebox_core::checksum::Crc32;
+
 /// Marks the partition as holding an identity this firmware wrote.
 pub const MAGIC: [u8; 4] = *b"TBID";
 
@@ -18,7 +20,12 @@ pub const MAGIC: [u8; 4] = *b"TBID";
 /// Bumped when the header or the body order changes. A firmware that does not
 /// know a version refuses the image rather than guessing at it — the whole
 /// reason the field is here.
-pub const VERSION: u16 = 1;
+///
+/// **2 added the body checksum.** Version 1 had six reserved bytes where the
+/// CRC now sits, so a v1 image in a v2 firmware would read as a valid header
+/// over unchecked bodies. Refusing it outright is what the field is for, and
+/// the remedy — one `just identity` run — is the same one the message names.
+pub const VERSION: u16 = 2;
 
 /// Bytes before the first body.
 pub const HEADER: usize = 16;
@@ -45,6 +52,13 @@ pub enum IdentityError {
     Empty,
     /// A body longer than the buffers it has to land in.
     TooLong,
+    /// The bodies do not match the checksum the header carries.
+    ///
+    /// What this catches is a torn write: `espflash write-bin` is not atomic —
+    /// flash pages are 256 bytes — so a USB pull mid-write leaves a perfectly
+    /// valid header over bodies that are still erased. Without this the box
+    /// prints the line that means success and fails every handshake after.
+    Corrupt,
     /// The image claims more than the partition or the buffer holds.
     Truncated,
 }
@@ -54,6 +68,12 @@ pub enum IdentityError {
 pub struct Header {
     pub certificate_len: usize,
     pub key_len: usize,
+    /// CRC-32 of the certificate followed by the key, as the header claims it.
+    ///
+    /// Checked by [`verify`] rather than here, because a header is read before
+    /// the bodies are — that two-step read is the whole reason this crate
+    /// splits parsing from verifying.
+    pub crc: u32,
 }
 
 impl Header {
@@ -68,6 +88,25 @@ impl Header {
     pub const fn total_len(&self) -> usize {
         HEADER + self.certificate_len + self.key_len
     }
+}
+
+/// Checks the bodies against the checksum the header carried.
+///
+/// Separate from [`parse_header`] because the firmware reads the header first
+/// to learn where the bodies are, and only then reads them — so nothing can
+/// check both at once without holding the whole image in memory, which is the
+/// thing the two-step read exists to avoid.
+pub fn verify(header: &Header, certificate: &[u8], key: &[u8]) -> Result<(), IdentityError> {
+    if certificate.len() != header.certificate_len || key.len() != header.key_len {
+        return Err(IdentityError::Corrupt);
+    }
+    let mut crc = Crc32::new();
+    crc.update(certificate);
+    crc.update(key);
+    if crc.finish() != header.crc {
+        return Err(IdentityError::Corrupt);
+    }
+    Ok(())
 }
 
 /// Reads the header and nothing else.
@@ -105,6 +144,7 @@ pub fn parse_header(raw: &[u8], capacity: usize) -> Result<Header, IdentityError
     let held = Header {
         certificate_len,
         key_len,
+        crc: u32::from_le_bytes([header[10], header[11], header[12], header[13]]),
     };
     if held.total_len() > capacity {
         return Err(IdentityError::Truncated);
@@ -134,7 +174,11 @@ pub fn render(certificate: &[u8], key: &[u8], out: &mut [u8]) -> Result<usize, I
     out[4..6].copy_from_slice(&VERSION.to_le_bytes());
     out[6..8].copy_from_slice(&(certificate.len() as u16).to_le_bytes());
     out[8..10].copy_from_slice(&(key.len() as u16).to_le_bytes());
-    out[10..HEADER].fill(0);
+    let mut crc = Crc32::new();
+    crc.update(certificate);
+    crc.update(key);
+    out[10..14].copy_from_slice(&crc.finish().to_le_bytes());
+    out[14..HEADER].fill(0);
     out[HEADER..HEADER + certificate.len()].copy_from_slice(certificate);
     out[HEADER + certificate.len()..total].copy_from_slice(key);
     Ok(total)
@@ -168,6 +212,49 @@ mod tests {
         assert_eq!(
             &image[header.key_offset()..header.key_offset() + header.key_len],
             KEY
+        );
+    }
+
+    /// The failure this exists for: `espflash write-bin` is not atomic — flash
+    /// pages are 256 bytes — so a USB pull mid-write can leave a header that
+    /// parses perfectly over bodies that never arrived. Without a checksum the
+    /// box prints the line that means success and then fails every handshake.
+    #[test]
+    fn a_body_that_does_not_match_its_checksum_is_refused() {
+        let mut image = [0u8; 64];
+        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        let header = parse_header(&image, len).unwrap();
+
+        let mut torn = image;
+        torn[HEADER] ^= 0xFF;
+        let certificate = &torn[header.certificate_offset()..header.key_offset()];
+        let key = &torn[header.key_offset()..header.total_len()];
+        assert_eq!(
+            verify(&header, certificate, key),
+            Err(IdentityError::Corrupt)
+        );
+    }
+
+    #[test]
+    fn an_intact_image_verifies() {
+        let mut image = [0u8; 64];
+        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        let header = parse_header(&image, len).unwrap();
+        let certificate = &image[header.certificate_offset()..header.key_offset()];
+        let key = &image[header.key_offset()..header.total_len()];
+        assert_eq!(verify(&header, certificate, key), Ok(()));
+    }
+
+    /// The version field earning its keep: an image written before the
+    /// checksum existed is refused rather than read as if it had one.
+    #[test]
+    fn an_image_from_the_version_before_the_checksum_is_refused() {
+        let mut image = [0u8; 64];
+        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        image[4..6].copy_from_slice(&1u16.to_le_bytes());
+        assert_eq!(
+            parse_header(&image[..len], len),
+            Err(IdentityError::Version)
         );
     }
 
@@ -237,14 +324,20 @@ mod tests {
         let expected: [u8; 42] = [
             // 0x00-0x03: magic "TBID"
             0x54, 0x42, 0x49, 0x44,
-            // 0x04-0x05: version 1, little-endian
-            0x01, 0x00,
+            // 0x04-0x05: version 2, little-endian
+            0x02, 0x00,
             // 0x06-0x07: certificate length 17, little-endian
             0x11, 0x00,
             // 0x08-0x09: key length 9, little-endian
             0x09, 0x00,
-            // 0x0a-0x0f: reserved
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // 0x0a-0x0d: CRC-32 of the two bodies, little-endian. Written out
+            // rather than computed here: a test that recomputed the checksum
+            // with the same `Crc32` the code uses would agree with a broken
+            // one. This is the IEEE CRC-32 of `not-a-certificatenot-a-key`,
+            // which any host confirms in one line.
+            0x6D, 0x4B, 0x39, 0x36,
+            // 0x0e-0x0f: reserved
+            0x00, 0x00,
             // certificate: "not-a-certificate"
             b'n', b'o', b't', b'-', b'a', b'-', b'c', b'e', b'r', b't', b'i',
             b'f', b'i', b'c', b'a', b't', b'e',

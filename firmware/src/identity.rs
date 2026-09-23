@@ -10,7 +10,7 @@
 //! a network command — so an identity read from it happened at a time nothing
 //! chose. This runs before the card is involved at all.
 use esp_bootloader_esp_idf::partitions::{self, PARTITION_TABLE_MAX_LEN};
-use teddiebox_identity::{parse_header, IdentityError, HEADER};
+use teddiebox_identity::{parse_header, verify, IdentityError, HEADER};
 
 use crate::flash;
 use crate::tls;
@@ -99,6 +99,23 @@ pub fn load() {
     }
     if let Err(trouble) = region.read(held.key_offset() as u32, &mut key[..held.key_len]) {
         esp_println::println!("teddiebox: identity key would not read — {trouble:?}");
+        return;
+    }
+
+    // Before publishing anything: a torn write leaves a header that parses
+    // perfectly over bodies that never arrived, and publishing those would
+    // print the line that means success and then fail every handshake with
+    // nothing tying the two together.
+    if let Err(trouble) = verify(
+        &held,
+        &certificate[..held.certificate_len],
+        &key[..held.key_len],
+    ) {
+        esp_println::println!(
+            "teddiebox: identity unusable — {trouble:?}; the `cert` partition's contents do not \
+             match the checksum written with them, which is what an interrupted \
+             `just identity` leaves behind. Run it again."
+        );
         return;
     }
 

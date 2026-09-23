@@ -1153,6 +1153,9 @@ dependencies = [
 [[package]]
 name = "teddiebox-identity"
 version = "0.1.0"
+dependencies = [
+ "teddiebox-core",
+]
 
 [[package]]
 name = "teddiebox-opus-sys"
