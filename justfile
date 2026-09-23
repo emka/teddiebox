@@ -125,7 +125,14 @@ identity:
     out="$(mktemp -d)"
     trap 'rm -rf "$out"' EXIT
     cargo run -q -p identity-image -- "$out/identity.bin"
-    BIN_FILE="$out/identity.bin" BIN_ADDR=0x610000 ./scripts/flash.sh
+    # Read out of the table rather than repeated here. Written twice, the two
+    # drift the day somebody moves the partition: `just flash` would write the
+    # new table, this would write a private key to the old address, and both
+    # would report success while the box said it had no identity.
+    addr="$(awk -F', *' '/^cert,/ { print $4 }' partitions.csv)"
+    [ -n "$addr" ] || { echo "just identity: no cert partition in partitions.csv" >&2; exit 1; }
+    echo "identity: writing to $addr, per partitions.csv"
+    BIN_FILE="$out/identity.bin" BIN_ADDR="$addr" ./scripts/flash.sh
 
 # `scripts/bench-console.py` sends one line and captures until a marker, which
 # is what a scripted step wants. This is for the steps with a person in them —
