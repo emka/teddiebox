@@ -177,7 +177,11 @@ key does not belong on a medium that comes out of the box and goes into other
 machines. A box that has not been provisioned plays everything on its card and
 cannot fetch; it says so at boot.
 
-`CERT/` on the card holds `TCCA.DER` alone.
+`CERT/` on the card holds `TCCA.DER` alone. On a box that carried its identity
+on the card before this change, `CLIENT.DER` and `PRIVATE.DER` are still
+sitting in `CERT/` after the upgrade — the firmware no longer reads them.
+Once `just identity` has been run and the box boots reporting its identity
+from flash, delete both files from the card.
 
 ## Building it
 
