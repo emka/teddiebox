@@ -1185,27 +1185,30 @@ struct FetchRequest {
 /// raising the request, never touching the other's fields separately.
 static FETCH_REQUEST: CsMutex<RefCell<Option<FetchRequest>>> = CsMutex::new(RefCell::new(None));
 
-/// Nothing has been probed.
-const PROBED_NOTHING: u8 = 0;
-/// The server stated a length, and [`PROBED_TOTAL`] carries it.
-const PROBED_LENGTH: u8 = 1;
-/// The server was asked and said nothing usable — it has no story for this
-/// figure, or it answered without a length, or it could not be reached at all.
+/// The net task's answer to a probe, and the figure it is about, as one value.
 ///
-/// One code for all three on purpose: the box does the same thing with each of
-/// them, which is to play what is on the card. The console keeps the
-/// difference; the reducer has no use for it.
-const PROBED_NO_ANSWER: u8 = 2;
-static PROBED: AtomicU8 = AtomicU8::new(PROBED_NOTHING);
-static PROBED_TOTAL: AtomicU32 = AtomicU32::new(0);
+/// One value rather than a flag, a length and a ruid in three atomics, so a
+/// reader can never see an answer without knowing whose it is, or a length
+/// from one answer beside the flag of another. The figure is carried for the
+/// same reason the fetch outcome carries one: an answer that arrives after the
+/// figure was lifted or swapped belongs to nobody.
+static PROBE_ANSWER: CsMutex<RefCell<Option<(u64, teddiebox_download::Answer)>>> =
+    CsMutex::new(RefCell::new(None));
 
-/// Which figure [`PROBED`] belongs to.
-///
-/// The same guard the fetch outcome has, for the same reason: an answer that
-/// arrives after the figure was lifted or swapped belongs to nobody, and
-/// attributing it to whatever is on the plate now is the bug the identity
-/// exists to prevent.
-static PROBED_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+/// Publishes a probe's answer, replacing any not yet read.
+fn post_answer(ruid: u64, answer: teddiebox_download::Answer) {
+    critical_section::with(|cs| *PROBE_ANSWER.borrow_ref_mut(cs) = Some((ruid, answer)));
+}
+
+/// Takes the waiting answer, if there is one.
+fn take_answer() -> Option<(u64, teddiebox_download::Answer)> {
+    critical_section::with(|cs| PROBE_ANSWER.borrow_ref_mut(cs).take())
+}
+
+/// Whether an answer is waiting to be read.
+fn answer_waiting() -> bool {
+    critical_section::with(|cs| PROBE_ANSWER.borrow_ref(cs).is_some())
+}
 
 /// A cached file the server has contradicted, as `CACHE/<dir>/<file>`.
 ///
@@ -1463,8 +1466,7 @@ fn take_fetch_outcome() -> (u8, u64) {
 /// harmless: the media task takes the answer, so the second store finds
 /// nothing waiting.
 fn probe_ended(ruid: u64) {
-    PROBED_RUID.store(ruid, Ordering::Relaxed);
-    PROBED.store(PROBED_NO_ANSWER, Ordering::Relaxed);
+    post_answer(ruid, teddiebox_download::Answer::Nothing);
 }
 
 /// Which of the reducer's two words a failed fetch deserves.
@@ -1497,10 +1499,14 @@ fn why_unavailable(error: &tls::Error) -> Unavailable {
 /// stated a different length" answers `Current`, because none of them is
 /// evidence against a file that is sitting on the card and plays — and
 /// revalidation may never make a working box worse than it was offline.
-fn freshness_of(probed: u8, tag: TagUid, card: Option<&storage::Mounted>) -> Freshness {
-    if probed != PROBED_LENGTH {
+fn freshness_of(
+    answer: teddiebox_download::Answer,
+    tag: TagUid,
+    card: Option<&storage::Mounted>,
+) -> Freshness {
+    let teddiebox_download::Answer::Length(total) = answer else {
         return Freshness::Current;
-    }
+    };
     let Some(card) = card else {
         // No card is not a judgement about the file; it is the reason this
         // question cannot be answered at all.
@@ -1509,7 +1515,6 @@ fn freshness_of(probed: u8, tag: TagUid, card: Option<&storage::Mounted>) -> Fre
     let Some(sidecar) = CardIndex::new(card).sidecar(tag) else {
         return Freshness::Current;
     };
-    let total = PROBED_TOTAL.load(Ordering::Relaxed);
     if teddiebox_download::is_stale(&sidecar, teddiebox_cloud::Probed::Length(total)) {
         esp_println::println!(
             "teddiebox: plate {:016X} is {} bytes here and {total} there — fetching it again",
@@ -3052,7 +3057,7 @@ async fn media(
         // happen is the slowest failure the box has.
         let asked_at = ASKED_AT_MS.load(Ordering::Relaxed);
         if asked_at != 0
-            && PROBED.load(Ordering::Relaxed) == PROBED_NOTHING
+            && !answer_waiting()
             && Instant::now().as_millis().saturating_sub(asked_at) > PROBE_PATIENCE_MS
         {
             let waited = ASKED_RUID.load(Ordering::Relaxed);
@@ -3065,10 +3070,8 @@ async fn media(
             probe_ended(waited);
         }
 
-        let probed = PROBED.swap(PROBED_NOTHING, Ordering::Relaxed);
-        if probed != PROBED_NOTHING {
+        if let Some((probed_ruid, answer)) = take_answer() {
             ASKED_AT_MS.store(0, Ordering::Relaxed);
-            let probed_ruid = PROBED_RUID.load(Ordering::Relaxed);
             match placed.answering(probed_ruid) {
                 Answering::TheFigure(tag) => {
                     // Remembered whatever the answer was. A server that was
@@ -3078,7 +3081,7 @@ async fn media(
                     critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
                     events[2] = Some(Event::Revalidated(
                         tag,
-                        freshness_of(probed, tag, card.as_ref()),
+                        freshness_of(answer, tag, card.as_ref()),
                     ));
                 }
                 Answering::AnotherFigure => esp_println::println!(
@@ -3500,17 +3503,15 @@ async fn bring_up(
                                     etag: None,
                                 };
                                 let answer = tls::length(tls, &stack, &wanted).await;
-                                // Attributed before it is published, so a
-                                // reader can never see an answer without
-                                // knowing whose it is.
-                                PROBED_RUID.store(requested, Ordering::Relaxed);
                                 match answer {
                                     Ok(teddiebox_cloud::Probed::Length(total)) => {
                                         esp_println::println!(
                                             "teddiebox: ask {requested:016X} is {total} bytes"
                                         );
-                                        PROBED_TOTAL.store(total, Ordering::Relaxed);
-                                        PROBED.store(PROBED_LENGTH, Ordering::Relaxed);
+                                        post_answer(
+                                            requested,
+                                            teddiebox_download::Answer::Length(total),
+                                        );
                                     }
                                     // Every remaining case plays what is on the
                                     // card. They are told apart here, where a
@@ -3519,13 +3520,13 @@ async fn bring_up(
                                         esp_println::println!(
                                             "teddiebox: ask {requested:016X} learned nothing — {other:?}"
                                         );
-                                        PROBED.store(PROBED_NO_ANSWER, Ordering::Relaxed);
+                                        post_answer(requested, teddiebox_download::Answer::Nothing);
                                     }
                                     Err(e) => {
                                         esp_println::println!(
                                             "teddiebox: ask {requested:016X} failed — {e:?}"
                                         );
-                                        PROBED.store(PROBED_NO_ANSWER, Ordering::Relaxed);
+                                        post_answer(requested, teddiebox_download::Answer::Nothing);
                                     }
                                 }
                             }
@@ -3909,7 +3910,7 @@ async fn net(
                     // until it hears back, and a radio that would not come up
                     // is not a reason to refuse a story that is on the card.
                     if probe {
-                        if PROBED.load(Ordering::Relaxed) == PROBED_NOTHING {
+                        if !answer_waiting() {
                             esp_println::println!(
                                 "teddiebox: net would not come up to ask — playing what is here"
                             );
