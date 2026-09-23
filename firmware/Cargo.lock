@@ -2900,12 +2900,17 @@ dependencies = [
  "teddiebox-console",
  "teddiebox-core",
  "teddiebox-download",
+ "teddiebox-identity",
  "teddiebox-ota",
  "teddiebox-portal",
  "teddiebox-taf",
  "tlv320dac3100",
  "trf7962a",
 ]
+
+[[package]]
+name = "teddiebox-identity"
+version = "0.1.0"
 
 [[package]]
 name = "teddiebox-opus-sys"

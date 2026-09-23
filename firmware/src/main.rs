@@ -2,6 +2,7 @@
 #![no_main]
 
 mod audio;
+mod identity;
 mod index;
 mod led;
 mod libc_shim;
@@ -2182,6 +2183,12 @@ static CODEC_READY: AtomicBool = AtomicBool::new(false);
 /// already an emergency recovery path.
 static CARD_MOUNTED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the identity came from flash, so the card read can stand down.
+///
+/// Temporary: it exists only while both sources are wired up at once, and
+/// goes when the card path does.
+static IDENTITY_FROM_FLASH: AtomicBool = AtomicBool::new(false);
+
 /// Set when the box has said it is turning off, and must therefore do it.
 ///
 /// `BatteryCritical` is not a warning, it is an announcement — "battery is
@@ -2550,6 +2557,10 @@ fn read_identity(card: &storage::Mounted) {
             "teddiebox: identity no CA — {reason}; the server cannot be verified, \
              so every download will fail until TCCA.DER is on the card"
         ),
+    }
+
+    if IDENTITY_FROM_FLASH.load(Ordering::Relaxed) {
+        return;
     }
 
     let read = card
@@ -4219,6 +4230,12 @@ async fn main(spawner: Spawner) {
     // on the attempt that is being judged, so nothing above it can be the
     // thing that failed last time.
     ota::confirm_boot_or_revert();
+
+    // After the OTA check because that one can reboot, and before anything
+    // else because nothing here depends on the card. `ota::flash()` lends one
+    // handle at a time: this takes it and gives it back inside the call.
+    let identity_from_flash = identity::load();
+    IDENTITY_FROM_FLASH.store(identity_from_flash, Ordering::Relaxed);
 
     // esp-radio allocates. The rest of this firmware does not, and libopus in
     // particular must not — its hardening path is the only thing that ever

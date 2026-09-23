@@ -290,7 +290,7 @@ static mut FLASH: Option<FlashStorage<'static>> = None;
 static LENT: AtomicBool = AtomicBool::new(false);
 
 /// The one flash handle, borrowed. Returns itself on drop.
-pub struct Flash(&'static mut FlashStorage<'static>);
+pub(crate) struct Flash(&'static mut FlashStorage<'static>);
 
 impl Drop for Flash {
     fn drop(&mut self) {
@@ -318,7 +318,8 @@ impl core::ops::DerefMut for Flash {
 /// loop's confirmation check ([`mark_valid`]), and the console's OTA commands
 /// ([`status`], [`write_probe`], [`arm_boot`]) — all in the same task, each
 /// finishing with the handle before the next asks for it.
-fn flash() -> Flash {
+/// … and [`crate::identity::load`], once at boot, before anything else asks.
+pub(crate) fn flash() -> Flash {
     assert!(
         !LENT.swap(true, Ordering::Acquire),
         "the flash handle is already lent out"
