@@ -221,6 +221,41 @@ mod tests {
         );
     }
 
+    /// The other tests build input with `render` and read it back with
+    /// `parse_header` — both defined in this file, so a layout bug that
+    /// moves a field the same way in both (a reviewer once swapped
+    /// `certificate_len` and `key_len` in both functions) passes every one
+    /// of them. This pins the actual bytes `render` writes, hand-written
+    /// rather than assembled from the code's own field constants, so the
+    /// layout cannot move without this failing for the right reason.
+    #[test]
+    fn a_rendered_image_matches_the_documented_byte_layout() {
+        let mut image = [0u8; 64];
+        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+
+        #[rustfmt::skip]
+        let expected: [u8; 42] = [
+            // 0x00-0x03: magic "TBID"
+            0x54, 0x42, 0x49, 0x44,
+            // 0x04-0x05: version 1, little-endian
+            0x01, 0x00,
+            // 0x06-0x07: certificate length 17, little-endian
+            0x11, 0x00,
+            // 0x08-0x09: key length 9, little-endian
+            0x09, 0x00,
+            // 0x0a-0x0f: reserved
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // certificate: "not-a-certificate"
+            b'n', b'o', b't', b'-', b'a', b'-', b'c', b'e', b'r', b't', b'i',
+            b'f', b'i', b'c', b'a', b't', b'e',
+            // key: "not-a-key"
+            b'n', b'o', b't', b'-', b'a', b'-', b'k', b'e', b'y',
+        ];
+
+        assert_eq!(len, expected.len());
+        assert_eq!(&image[..len], &expected[..]);
+    }
+
     #[test]
     fn a_zero_length_body_is_refused() {
         let mut image = [0u8; 64];
