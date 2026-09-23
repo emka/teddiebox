@@ -4231,12 +4231,6 @@ async fn main(spawner: Spawner) {
     // thing that failed last time.
     ota::confirm_boot_or_revert();
 
-    // After the OTA check because that one can reboot, and before anything
-    // else because nothing here depends on the card. `ota::flash()` lends one
-    // handle at a time: this takes it and gives it back inside the call.
-    let identity_from_flash = identity::load();
-    IDENTITY_FROM_FLASH.store(identity_from_flash, Ordering::Relaxed);
-
     // esp-radio allocates. The rest of this firmware does not, and libopus in
     // particular must not — its hardening path is the only thing that ever
     // reaches libc, and it panics rather than allocating. This heap belongs to
@@ -4456,6 +4450,17 @@ async fn main(spawner: Spawner) {
     esp_println::println!(
         "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off | reval"
     );
+
+    // Deliberately not up by `ota::confirm_boot_or_revert()`, where nothing
+    // else depends on it: `stack::paint()` fills every unused byte of stack
+    // with a pattern, including whatever a print from just before it hadn't
+    // finished draining out the UART yet, and that print was the corpse.
+    // Moving this below both the paint and the console banner is what keeps
+    // it out of that memory — pulling it back up there garbles the line
+    // again. `ota::flash()` lends one handle at a time: this takes it and
+    // gives it back inside the call.
+    let identity_from_flash = identity::load();
+    IDENTITY_FROM_FLASH.store(identity_from_flash, Ordering::Relaxed);
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
     // was configured for. The SD card is SPI2 on CLK 35, MOSI 38, MISO 36 with
