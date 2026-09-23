@@ -171,6 +171,14 @@ without it — but it also identifies itself to whatever it reaches, sending its
 own certificate and the placed figure's token, so that a request can be
 relayed to the real teddyCloud. Point `server` somewhere you trust.
 
+The box's own certificate and key are **not** on the card. They live in the
+`cert` flash partition, written once per box with `just identity` — a private
+key does not belong on a medium that comes out of the box and goes into other
+machines. A box that has not been provisioned plays everything on its card and
+cannot fetch; it says so at boot.
+
+`CERT/` on the card holds `TCCA.DER` alone.
+
 ## Building it
 
 `just check` runs every gate the pipeline runs, in the same order, and is what

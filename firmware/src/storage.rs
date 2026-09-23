@@ -107,13 +107,11 @@ const TONIE_CONTENT_DIR: &str = "CONTENT";
 /// conventions later.
 const CACHE_DIR: &str = "CACHE";
 
-/// Where the box's own certificates live, mirroring the `cert/` directory the
-/// stock firmware keeps them in on flash.
+/// Where the card's copy of the certificate authority lives.
 ///
-/// The same three files a teddyCloud setup extracts: `CLIENT.DER` identifies
-/// this box to the server, `PRIVATE.DER` proves it, `CA.DER` is Boxine's own
-/// authority. All three are 8.3 names already, so `open_file_in_dir` reaches
-/// them directly.
+/// Holds `TCCA.DER` alone: the box's own certificate and key are not on the
+/// card, they live in the `cert` flash partition. An 8.3 name already, so
+/// `open_file_in_dir` reaches it directly.
 const CERT_DIR: &str = "CERT";
 
 /// Why the card's configuration could not be used.
@@ -1034,16 +1032,12 @@ impl Mounted {
             .map_err(|_| "the flush failed")
     }
 
-    /// Reads one of the box's certificates off the card.
+    /// Reads a certificate off the card, by name — in practice, `TCCA.DER`,
+    /// the authority the server is verified against.
     ///
     /// Returns how many bytes were read. A read that fills the buffer is
     /// refused rather than truncated: half a DER structure is not a smaller
     /// certificate, it is a parse failure several layers away from here.
-    ///
-    /// **`PRIVATE.DER` is the key that identifies this box to the tonies
-    /// cloud.** It is read into memory and never printed, and the card it sits
-    /// on is readable by anything with a card reader — which is a property of
-    /// where the stock firmware keeps it too, but worth knowing.
     pub fn read_certificate(&self, name: &str, buffer: &mut [u8]) -> Result<usize, &'static str> {
         let dir = self
             .volumes

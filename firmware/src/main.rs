@@ -2183,12 +2183,6 @@ static CODEC_READY: AtomicBool = AtomicBool::new(false);
 /// already an emergency recovery path.
 static CARD_MOUNTED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the identity came from flash, so the card read can stand down.
-///
-/// Temporary: it exists only while both sources are wired up at once, and
-/// goes when the card path does.
-static IDENTITY_FROM_FLASH: AtomicBool = AtomicBool::new(false);
-
 /// Set when the box has said it is turning off, and must therefore do it.
 ///
 /// `BatteryCritical` is not a warning, it is an announcement — "battery is
@@ -2533,21 +2527,14 @@ async fn quieten_codec() {
 /// they configured.
 const CONFIG_BUFFER: usize = 2048;
 
-/// Reads the box's certificate and private key off the card, if they are there.
+/// Reads the card's copy of the certificate authority, so the server can be
+/// verified even on a box whose identity is missing or invalid.
 ///
-/// Optional by design: without them the box can still fetch anything the server
-/// already holds, which is most of what a bench does. They are what let
-/// teddyCloud tell *which* box is asking, and so what lets it fetch a figure it
-/// has no copy of.
-///
-/// Nothing about the key is printed but its length.
-fn read_identity(card: &storage::Mounted) {
+/// The box's own certificate and key are not read here, or anywhere off the
+/// card: they come from flash, read once at boot in [`identity::load`].
+fn read_anchor(card: &storage::Mounted) {
     let mut certificate = [0u8; tls::CERT_BYTES];
-    let mut key = [0u8; tls::CERT_BYTES];
 
-    // The authority first, and separately: verifying the server is useful even
-    // on a box that cannot prove who it is, and the two failures want different
-    // words.
     match card.read_certificate("TCCA.DER", &mut certificate) {
         Ok(n) if tls::set_anchor(&certificate[..n]) => {
             esp_println::println!("teddiebox: identity server verified against a {n} byte CA")
@@ -2556,31 +2543,6 @@ fn read_identity(card: &storage::Mounted) {
         Err(reason) => esp_println::println!(
             "teddiebox: identity no CA — {reason}; the server cannot be verified, \
              so every download will fail until TCCA.DER is on the card"
-        ),
-    }
-
-    if IDENTITY_FROM_FLASH.load(Ordering::Relaxed) {
-        return;
-    }
-
-    let read = card
-        .read_certificate("CLIENT.DER", &mut certificate)
-        .and_then(|c| {
-            card.read_certificate("PRIVATE.DER", &mut key)
-                .map(|k| (c, k))
-        });
-
-    match read {
-        Ok((c, k)) => {
-            if tls::set_identity(&certificate[..c], &key[..k]) {
-                // The certificate's length, never the key's contents.
-                esp_println::println!("teddiebox: identity {c} byte certificate, {k} byte key");
-            } else {
-                esp_println::println!("teddiebox: identity already set");
-            }
-        }
-        Err(reason) => esp_println::println!(
-            "teddiebox: identity none — {reason}; the server will not know which box is asking"
         ),
     }
 }
@@ -2602,7 +2564,7 @@ fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
     }
     *done = true;
 
-    read_identity(card);
+    read_anchor(card);
 
     let mut buffer = [0u8; CONFIG_BUFFER];
     match card.read_config(&mut buffer) {
@@ -4459,8 +4421,7 @@ async fn main(spawner: Spawner) {
     // it out of that memory — pulling it back up there garbles the line
     // again. `ota::flash()` lends one handle at a time: this takes it and
     // gives it back inside the call.
-    let identity_from_flash = identity::load();
-    IDENTITY_FROM_FLASH.store(identity_from_flash, Ordering::Relaxed);
+    identity::load();
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
     // was configured for. The SD card is SPI2 on CLK 35, MOSI 38, MISO 36 with

@@ -381,12 +381,13 @@ pub fn init(
 ///
 /// **Checking the server is not optional, but identifying the box to it is not
 /// conditional either.** `creds` is whatever the caller passed — and the fetch
-/// passes the box's `CLIENT.DER` and `PRIVATE.DER` — while the tag's 32-byte
-/// token rides the same session as an `Authorization: BD …` header. So whatever
-/// answers at `server` gets a client-certificate-authenticated session it can
-/// relay to the real teddyCloud, plus a token that authorises a cloud fetch for
-/// the figure on the plate. The private key itself never leaves the box; the
-/// ability to use it for the length of one handshake does.
+/// passes the box's own certificate and key, read from flash at boot — while
+/// the tag's 32-byte token rides the same session as an `Authorization: BD …`
+/// header. So whatever answers at `server` gets a client-certificate-
+/// authenticated session it can relay to the real teddyCloud, plus a token
+/// that authorises a cloud fetch for the figure on the plate. The private key
+/// itself never leaves the box; the ability to use it for the length of one
+/// handshake does.
 ///
 /// Verifying the chain narrows who that can be to whoever holds a certificate
 /// the card's CA signed — but `server` is still a name the card gives, and
