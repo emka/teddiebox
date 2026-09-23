@@ -18,6 +18,7 @@ members = [
     "crates/trf7962a",
     "tools/fat-assumptions",
     "tools/fixturegen",
+    "tools/identity-image",
     "tools/taf2wav",
 ]
 # Device-only, and its own workspace: see its Cargo.toml.
