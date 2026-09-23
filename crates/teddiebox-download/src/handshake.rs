@@ -95,7 +95,7 @@ pub enum Step {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Idle,
-    Asking { waited: u32, since_ask: u32 },
+    Asking { started_ms: u64, asked_ms: u64 },
 }
 
 /// Tracks one download handshake.
@@ -115,35 +115,44 @@ impl Handshake {
         Self { state: State::Idle }
     }
 
-    /// A fetch has been asked for. Starts the conversation.
-    pub fn requested(&mut self) -> Step {
+    /// A fetch has been asked for. Starts the conversation, at `now_ms`.
+    pub fn requested(&mut self, now_ms: u64) -> Step {
         self.state = State::Asking {
-            waited: 0,
-            since_ask: 0,
+            started_ms: now_ms,
+            asked_ms: now_ms,
         };
         Step::AskCard
     }
 
-    /// Time has passed with no answer.
+    /// The clock has been read again with no answer yet.
     ///
     /// Re-asks every [`RETRY_MS`], and abandons the conversation at
     /// [`DEADLINE_MS`]. **Never falls back to fetching from zero**, which is
     /// what it used to do: a fresh download truncates the partial file it lands
     /// on, so a card that was merely slow to answer loses everything it had
     /// cached and starts the quarter of an hour again.
-    pub fn ticked(&mut self, ms: u32) -> Step {
-        let State::Asking { waited, since_ask } = &mut self.state else {
+    ///
+    /// Takes the reading rather than the interval since the last one, because
+    /// the caller is a task that cannot know how long its own `await` took.
+    /// The net task polls on a 10 ms timer and, while a story plays, gets it
+    /// back every ~106 ms — so a caller reporting the interval it *asked* for
+    /// stretched this deadline to 158.6 s on the box, and only ever under the
+    /// load the deadline exists for. A clock cannot be got wrong that way.
+    pub fn polled(&mut self, now_ms: u64) -> Step {
+        let State::Asking {
+            started_ms,
+            asked_ms,
+        } = &mut self.state
+        else {
             return Step::Wait;
         };
-        *waited = waited.saturating_add(ms);
-        *since_ask = since_ask.saturating_add(ms);
 
-        if *waited >= DEADLINE_MS {
+        if now_ms.saturating_sub(*started_ms) >= u64::from(DEADLINE_MS) {
             self.state = State::Idle;
             return Step::GiveUp;
         }
-        if *since_ask >= RETRY_MS {
-            *since_ask = 0;
+        if now_ms.saturating_sub(*asked_ms) >= u64::from(RETRY_MS) {
+            *asked_ms = now_ms;
             return Step::AskCard;
         }
         Step::Wait
@@ -176,18 +185,20 @@ impl Handshake {
 mod tests {
     use super::*;
 
-    /// Ticks until the conversation is abandoned, and refuses to do so for
-    /// ever.
+    /// Polls a clock forward until the conversation is abandoned, and refuses
+    /// to do so for ever.
     ///
-    /// The bound is not decoration. Written as `while h.ticked(100) !=
+    /// The bound is not decoration. Written as `while h.polled(now) !=
     /// GiveUp {}` this hung outright the moment the implementation stopped
     /// giving up — which is exactly the change it is here to catch, so the
     /// test that should have failed in a millisecond took a test run down
     /// with it instead. Anything that returns `Fetch { from: 0 }` on the way
     /// fails here too: that is the truncation this type exists to prevent.
-    fn tick_until_it_gives_up(h: &mut Handshake) -> Step {
+    fn poll_until_it_gives_up(h: &mut Handshake) -> Step {
+        let mut now = 0;
         for _ in 0..(DEADLINE_MS / 100 + 10) {
-            let step = h.ticked(100);
+            now += 100;
+            let step = h.polled(now);
             assert_ne!(step, Step::Fetch { from: 0 }, "truncated the cache");
             if step == Step::GiveUp {
                 return step;
@@ -199,14 +210,14 @@ mod tests {
     #[test]
     fn a_request_asks_the_card_first() {
         let mut h = Handshake::new();
-        assert_eq!(h.requested(), Step::AskCard);
+        assert_eq!(h.requested(0), Step::AskCard);
         assert!(h.is_asking());
     }
 
     #[test]
     fn an_answer_that_names_cached_bytes_resumes_after_them() {
         let mut h = Handshake::new();
-        h.requested();
+        h.requested(0);
         assert_eq!(
             h.card_answered(CardSays::Holds(27_841_285)),
             Step::Fetch { from: 27_841_285 }
@@ -217,14 +228,14 @@ mod tests {
     #[test]
     fn an_answer_of_nothing_cached_fetches_from_the_beginning() {
         let mut h = Handshake::new();
-        h.requested();
+        h.requested(0);
         assert_eq!(h.card_answered(CardSays::Nothing), Step::Fetch { from: 0 });
     }
 
     #[test]
     fn a_file_already_whole_plays_instead_of_fetching() {
         let mut h = Handshake::new();
-        h.requested();
+        h.requested(0);
         assert_eq!(h.card_answered(CardSays::HoldsAll), Step::Play);
     }
 
@@ -233,9 +244,9 @@ mod tests {
     #[test]
     fn a_silent_card_is_asked_again() {
         let mut h = Handshake::new();
-        h.requested();
-        assert_eq!(h.ticked(RETRY_MS - 1), Step::Wait);
-        assert_eq!(h.ticked(1), Step::AskCard);
+        h.requested(0);
+        assert_eq!(h.polled(u64::from(RETRY_MS) - 1), Step::Wait);
+        assert_eq!(h.polled(u64::from(RETRY_MS)), Step::AskCard);
     }
 
     /// The bug this whole type exists for. A story or a prompt on the speaker
@@ -245,22 +256,27 @@ mod tests {
     #[test]
     fn a_card_that_never_answers_never_turns_into_a_fetch_from_zero() {
         let mut h = Handshake::new();
-        h.requested();
+        h.requested(0);
 
-        assert_eq!(tick_until_it_gives_up(&mut h), Step::GiveUp);
+        assert_eq!(poll_until_it_gives_up(&mut h), Step::GiveUp);
     }
 
-    /// Ticked the way the net loop ticks it, 100 ms at a time, because the
-    /// size of a tick decides how often the question is put again — a single
-    /// tick the length of the whole deadline is a re-ask, not a wait.
+    /// Polled the way the net loop polls it, 100 ms at a time, because the
+    /// gap between two readings decides how often the question is put again —
+    /// a single reading the length of the whole deadline is a re-ask, not a
+    /// wait.
     #[test]
     fn the_conversation_is_abandoned_at_the_deadline() {
         let mut h = Handshake::new();
-        h.requested();
-        for _ in 0..(DEADLINE_MS / 100 - 1) {
-            assert_ne!(h.ticked(100), Step::GiveUp, "gave up early");
+        h.requested(0);
+        for tick in 1..(DEADLINE_MS / 100) {
+            assert_ne!(
+                h.polled(u64::from(tick) * 100),
+                Step::GiveUp,
+                "gave up early"
+            );
         }
-        assert_eq!(h.ticked(100), Step::GiveUp);
+        assert_eq!(h.polled(u64::from(DEADLINE_MS)), Step::GiveUp);
         assert!(!h.is_asking());
     }
 
@@ -269,10 +285,8 @@ mod tests {
     #[test]
     fn an_answer_just_before_the_deadline_still_fetches() {
         let mut h = Handshake::new();
-        h.requested();
-        for _ in 0..(DEADLINE_MS / 100 - 1) {
-            h.ticked(100);
-        }
+        h.requested(0);
+        h.polled(u64::from(DEADLINE_MS) - 1);
         assert_eq!(
             h.card_answered(CardSays::Holds(42)),
             Step::Fetch { from: 42 }
@@ -285,15 +299,53 @@ mod tests {
     #[test]
     fn an_answer_after_giving_up_is_ignored() {
         let mut h = Handshake::new();
-        h.requested();
-        assert_eq!(tick_until_it_gives_up(&mut h), Step::GiveUp);
+        h.requested(0);
+        assert_eq!(poll_until_it_gives_up(&mut h), Step::GiveUp);
         assert_eq!(h.card_answered(CardSays::Holds(42)), Step::Wait);
     }
 
     #[test]
-    fn ticks_with_nothing_asked_do_nothing() {
+    fn polls_with_nothing_asked_do_nothing() {
         let mut h = Handshake::new();
-        assert_eq!(h.ticked(DEADLINE_MS * 2), Step::Wait);
+        assert_eq!(h.polled(u64::from(DEADLINE_MS) * 2), Step::Wait);
+    }
+
+    /// The deadline is fifteen seconds of wall clock, however slowly the
+    /// caller gets round to asking.
+    ///
+    /// Measured on the box on 2026-09-23, and the reason this takes a clock
+    /// rather than a duration. The net task polls on a 10 ms timer, but while
+    /// a story plays the media task blocks the executor and the timer only
+    /// comes back every ~106 ms. Told "10 ms" each time, the conversation
+    /// reached its deadline after **158.6 seconds** — so the load the deadline
+    /// exists for is precisely the load that inflates it, by ten times, with
+    /// the box still printing "15 s".
+    #[test]
+    fn the_deadline_is_wall_clock_however_slowly_the_caller_polls() {
+        let mut h = Handshake::new();
+        h.requested(0);
+
+        // What the box actually measured: a poll that asked for 10 ms and got
+        // 106.
+        const GAP_MS: u64 = 106;
+
+        let mut now = 0;
+        loop {
+            let step = h.polled(now);
+            assert_ne!(step, Step::Fetch { from: 0 }, "truncated the cache");
+            if step == Step::GiveUp {
+                break;
+            }
+            now += GAP_MS;
+            // One gap of slack, and no more: giving up can only be *seen* on
+            // the reading after the clock passes the deadline. The bug this
+            // test is here for overshot by ten times that.
+            assert!(
+                now <= u64::from(DEADLINE_MS) + GAP_MS,
+                "still asking after {now} ms of wall clock"
+            );
+        }
+        assert!(now >= u64::from(DEADLINE_MS), "gave up early, at {now} ms");
     }
 
     /// The transport carries meaning, not variants: whatever the card said
@@ -308,9 +360,9 @@ mod tests {
         ] {
             let there_and_back = CardSays::from_offset(says.as_offset());
             let mut direct = Handshake::new();
-            direct.requested();
+            direct.requested(0);
             let mut round_tripped = Handshake::new();
-            round_tripped.requested();
+            round_tripped.requested(0);
 
             assert_eq!(
                 direct.card_answered(says),

@@ -1301,7 +1301,12 @@ static DOWNLOAD_FILE: AtomicU32 = AtomicU32::new(0);
 /// figure waits past the moment the card actually answers, and the card
 /// answering is the common case. The re-ask cadence and the deadline are the
 /// download crate's to decide.
-const HANDSHAKE_TICK_MS: u32 = 10;
+///
+/// **A floor, not a period.** While a story plays the media task blocks the
+/// executor for hundreds of milliseconds at a time, so this timer comes back
+/// every ~106 ms — measured on the box on 2026-09-23. That is why the
+/// handshake is handed [`Instant::now`] rather than this number.
+const HANDSHAKE_POLL_MS: u64 = 10;
 
 /// What the card said, as [`CardSays::as_offset`] encodes it.
 ///
@@ -3595,7 +3600,7 @@ async fn bring_up(
                                 // figure is placed during a prompt, which is most of
                                 // the time.
                                 let mut handshake = Handshake::new();
-                                let mut step = handshake.requested();
+                                let mut step = handshake.requested(Instant::now().as_millis());
                                 let settled = loop {
                                     match step {
                                         Step::AskCard => DOWNLOAD_STATE
@@ -3603,10 +3608,9 @@ async fn bring_up(
                                         Step::Wait => {}
                                         settled => break settled,
                                     }
-                                    Timer::after(Duration::from_millis(HANDSHAKE_TICK_MS as u64))
-                                        .await;
+                                    Timer::after(Duration::from_millis(HANDSHAKE_POLL_MS)).await;
                                     // The answer is looked for before the clock is
-                                    // advanced, so one that has already landed is never
+                                    // read, so one that has already landed is never
                                     // buried under a re-ask.
                                     step = if DOWNLOAD_STATE.load(Ordering::Relaxed)
                                         == DOWNLOAD_PLANNED
@@ -3615,7 +3619,7 @@ async fn bring_up(
                                             DOWNLOAD_FROM.load(Ordering::Relaxed),
                                         ))
                                     } else {
-                                        handshake.ticked(HANDSHAKE_TICK_MS)
+                                        handshake.polled(Instant::now().as_millis())
                                     };
                                 };
 
