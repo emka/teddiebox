@@ -189,14 +189,6 @@ pub enum Command {
     /// boots the panicking image for ever and the way out is J100. That is
     /// the finding, not a mishap, but it is why the slot is typed out.
     OtaBoot { slot: u8 },
-    /// Check the server's certificate, or don't.
-    ///
-    /// A bench override of the card's `insecure` key, the way
-    /// [`Command::NetSsid`] overrides its `ssid`. It exists because the card
-    /// lives inside the box and the bench does not, and because whether
-    /// certificates are checked is the setting most worth being able to flip
-    /// without a screwdriver.
-    NetInsecure(bool),
     /// Whether a held ear skips a chapter, for this session.
     ///
     /// The card's `ears_skip` is the box's real answer; this is how a bench
@@ -408,8 +400,6 @@ impl CommandWatch {
                     b"stack" => Some(Command::StackReport),
                     b"otas" => Some(Command::OtaStatus),
                     b"otaw" => Some(Command::OtaWriteProbe),
-                    b"net insecure yes" | b"net insecure true" => Some(Command::NetInsecure(true)),
-                    b"net insecure no" | b"net insecure false" => Some(Command::NetInsecure(false)),
                     b"net down" => Some(Command::NetDown),
                     b"net status" => Some(Command::NetStatus),
                     b"ears skip on" => Some(Command::EarsSkip(true)),
@@ -1312,32 +1302,6 @@ mod tests {
             feed_all(&mut watch, b"ears skip on\n"),
             Some(Command::EarsSkip(true))
         );
-    }
-
-    #[test]
-    fn net_insecure_takes_the_same_words_the_config_file_takes() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"net insecure yes\n"),
-            Some(Command::NetInsecure(true))
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"net insecure no\n"),
-            Some(Command::NetInsecure(false))
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"net insecure true\n"),
-            Some(Command::NetInsecure(true))
-        );
-    }
-
-    /// A word nobody recognises must not resolve to "off" quietly, for the
-    /// same reason the config file refuses one: this line decides whether
-    /// certificates are checked.
-    #[test]
-    fn an_unrecognised_insecure_word_is_not_a_command() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"net insecure maybe\n"), None);
     }
 
     #[test]

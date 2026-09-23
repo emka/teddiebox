@@ -15,7 +15,7 @@
 //!
 //! Unknown keys are ignored, so a card written for a newer firmware still boots
 //! an older one. A *known* key given a value it does not accept is refused —
-//! `insecure = ture` is a typo about certificate checking, and the box saying so
+//! `ears_skip = ture` is a typo about what the ears do, and the box saying so
 //! beats the box guessing.
 
 use heapless::String;
@@ -56,35 +56,6 @@ pub struct Config {
     pub password: String<MAX_PASSWORD>,
     /// `host:port` of the teddyCloud server.
     pub server: String<MAX_SERVER>,
-    /// Accept the server's certificate without checking it.
-    ///
-    /// **An escape hatch, not the plan.** teddyCloud serves a certificate
-    /// signed by its own root and hands that root over in the chain, so the
-    /// ordinary answer is to trust that root and check against it.
-    ///
-    /// **Nothing here needs it.** On 2026-09-23 a box running straight off the
-    /// card — which says nothing about this key, so it gets the checking —
-    /// completed a handshake against teddycloud.local and resumed a 45 MB download
-    /// at the usual rate. So this is an escape hatch for a server this project
-    /// has not met, not the thing that gets the box talking.
-    ///
-    /// The clock is not the obstacle it was once written up as. This build
-    /// compiles mbedtls without `MBEDTLS_HAVE_TIME_DATE`, so `notBefore` and
-    /// `notAfter` are never examined: a box that believes it is 1970 verifies a
-    /// chain perfectly well, and simply cannot notice an expired certificate.
-    /// `firmware/src/tls.rs`'s `client_config` carries the rest of that account.
-    ///
-    /// **It stops the box checking the server. It does not stop the box
-    /// identifying itself to one.** The box's client certificate and the
-    /// placed figure's token go out over the session either way, so whatever
-    /// answers at `server` can relay both to the real teddyCloud. That is a
-    /// deliberate trade — this server refuses a tokenless request with a `403`,
-    /// so a box that connected anonymously would verify nothing and fetch
-    /// nothing — and it means `server` is the setting that carries the weight
-    /// when this one is on.
-    ///
-    /// Defaults to `false`. A file that says nothing gets the checking.
-    pub insecure: bool,
     /// Whether holding an ear skips a chapter.
     ///
     /// A stock box's ears do volume and nothing else; skipping on a held ear
@@ -211,7 +182,7 @@ const WPA2_PASSPHRASE: core::ops::RangeInclusive<usize> = 8..=63;
 ///
 /// Refusing rather than repairing: a `server` that is not a host is a typo, and
 /// the box saying so beats the box guessing -- the same argument `parse_bool`
-/// makes for `insecure = ture`.
+/// makes for `ears_skip = ture`.
 ///
 /// An empty value passes, so that `server =` keeps saying `MissingServer`:
 /// a key left blank is a different mistake from a key filled in wrong, and the
@@ -250,7 +221,6 @@ impl Settings {
                 ssid: String::new(),
                 password: String::new(),
                 server: String::new(),
-                insecure: false,
                 ears_skip: true,
                 update_url: None,
                 setup_password: None,
@@ -259,7 +229,6 @@ impl Settings {
                 ssid: false,
                 password: false,
                 server: false,
-                insecure: false,
                 ears_skip: false,
                 update_url: false,
                 setup_password: false,
@@ -289,11 +258,6 @@ impl Settings {
     pub fn set_password(&mut self, value: String<MAX_PASSWORD>) {
         self.held.password = value;
         self.overridden.password = true;
-    }
-
-    pub fn set_insecure(&mut self, value: bool) {
-        self.held.insecure = value;
-        self.overridden.insecure = true;
     }
 
     pub fn set_ears_skip(&mut self, value: bool) {
@@ -365,14 +329,14 @@ fn parse_bool(value: &str) -> Result<bool, ConfigError> {
 /// first needs the card, and on this box that is often a network command. So
 /// "the card is read at boot, the console overrides it afterwards" is not true
 /// in the order it happens, and replacing the whole config on a card read
-/// silently undid the override. That cost an hour at the bench: certificates
-/// were checked immediately after the box confirmed it would not check them.
+/// silently undid the override. That cost an hour at the bench, on a setting
+/// since retired: the box confirmed it would stop checking the server's
+/// certificate, and then checked it anyway at the next mount.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Overridden {
     pub ssid: bool,
     pub password: bool,
     pub server: bool,
-    pub insecure: bool,
     pub ears_skip: bool,
     pub update_url: bool,
     pub setup_password: bool,
@@ -399,11 +363,6 @@ impl Overridden {
                 held.server.clone()
             } else {
                 card.server
-            },
-            insecure: if self.insecure {
-                held.insecure
-            } else {
-                card.insecure
             },
             ears_skip: if self.ears_skip {
                 held.ears_skip
@@ -446,7 +405,6 @@ impl Config {
         let mut ssid: Option<String<MAX_SSID>> = None;
         let mut password: String<MAX_PASSWORD> = String::new();
         let mut server: Option<String<MAX_SERVER>> = None;
-        let mut insecure = false;
         let mut ears_skip = true;
         let mut update_url: Option<String<MAX_UPDATE_URL>> = None;
         let mut setup_password: Option<String<MAX_PASSWORD>> = None;
@@ -478,9 +436,6 @@ impl Config {
                         return Err(ConfigError::MalformedValue);
                     }
                     server = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
-                }
-                "insecure" => {
-                    insecure = parse_bool(strip_comment(value))?;
                 }
                 "ears_skip" => {
                     ears_skip = parse_bool(strip_comment(value))?;
@@ -518,7 +473,6 @@ impl Config {
             server: server
                 .filter(|s| !s.is_empty())
                 .ok_or(ConfigError::MissingServer)?,
-            insecure,
             ears_skip,
             update_url,
             setup_password,
@@ -703,9 +657,9 @@ mod tests {
         }
     }
 
-    /// A typo about the ears is refused rather than guessed, the same way
-    /// `insecure = ture` is. Silently taking it as `false` would leave a
-    /// parent believing they had switched something on.
+    /// A typo about the ears is refused rather than guessed. Silently taking
+    /// it as `false` would leave a parent believing they had switched
+    /// something on.
     #[test]
     fn a_misspelled_ears_skip_value_is_refused() {
         assert_eq!(
@@ -732,75 +686,6 @@ mod tests {
         assert!(!c.ears_skip);
     }
 
-    #[test]
-    fn a_missing_insecure_key_leaves_certificate_checking_on() {
-        let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
-        assert!(!c.insecure);
-    }
-
-    #[test]
-    fn insecure_yes_turns_certificate_checking_off() {
-        let c = Config::parse("ssid = A\nserver = s:1\ninsecure = yes\n").unwrap();
-        assert!(c.insecure);
-    }
-
-    #[test]
-    fn insecure_no_leaves_certificate_checking_on() {
-        let c = Config::parse("ssid = A\nserver = s:1\ninsecure = no\n").unwrap();
-        assert!(!c.insecure);
-    }
-
-    /// `true`/`false` as well as `yes`/`no`, because both are what people type,
-    /// and case is not a thing worth failing a box over.
-    #[test]
-    fn insecure_accepts_true_and_false_in_any_case() {
-        assert!(
-            Config::parse("ssid = A\nserver = s:1\ninsecure = TRUE\n")
-                .unwrap()
-                .insecure
-        );
-        assert!(
-            !Config::parse("ssid = A\nserver = s:1\ninsecure = False\n")
-                .unwrap()
-                .insecure
-        );
-        assert!(
-            Config::parse("ssid = A\nserver = s:1\ninsecure = Yes\n")
-                .unwrap()
-                .insecure
-        );
-    }
-
-    /// The dangerous direction is a typo that reads as "off". Refusing the
-    /// value outright means the parent is told, at the box, that the line did
-    /// not do what they meant — rather than the box silently checking
-    /// certificates they believed it was not, or not checking ones they
-    /// believed it was.
-    #[test]
-    fn an_unrecognised_insecure_value_is_refused_rather_than_guessed() {
-        assert_eq!(
-            Config::parse("ssid = A\nserver = s:1\ninsecure = ture\n"),
-            Err(ConfigError::MalformedValue)
-        );
-    }
-
-    /// An empty value is the same mistake as a misspelt one, and it is the
-    /// likelier typo: a line left half-written.
-    #[test]
-    fn an_empty_insecure_value_is_refused() {
-        assert_eq!(
-            Config::parse("ssid = A\nserver = s:1\ninsecure =\n"),
-            Err(ConfigError::MalformedValue)
-        );
-    }
-
-    /// It is comment-stripped, unlike `password`: there is no boolean that
-    /// needs a `#` in it.
-    #[test]
-    fn a_trailing_comment_is_not_part_of_the_insecure_value() {
-        let c = Config::parse("ssid = A\nserver = s:1\ninsecure = yes # bench only\n").unwrap();
-        assert!(c.insecure);
-    }
     /// A read that exactly filled the buffer is indistinguishable from one
     /// that ran out of room, so it is refused. The failure it prevents is the
     /// quiet one: a file cut mid-line still parses, and `server = teddycloud.l`
@@ -833,25 +718,25 @@ mod tests {
         );
     }
     fn card() -> Config {
-        Config::parse("ssid = FromCard\npassword = cardpw\nserver = card:1\ninsecure = no\n")
+        Config::parse("ssid = FromCard\npassword = cardpw\nserver = card:1\nears_skip = no\n")
             .unwrap()
     }
 
     /// The bug this exists to prevent, caught on the bench: the card is read
     /// lazily, at the first mount, which can be *after* somebody has typed an
     /// override. Replacing the whole struct then silently undid it, and the box
-    /// checked certificates the bench had just told it not to.
+    /// went back to the card's answer the bench had just typed over.
     #[test]
     fn a_later_card_read_does_not_undo_what_the_bench_set() {
         let mut held = card();
-        held.insecure = true;
+        held.ears_skip = true;
         let overridden = Overridden {
-            insecure: true,
+            ears_skip: true,
             ..Overridden::default()
         };
 
         let merged = overridden.merge(card(), &held);
-        assert!(merged.insecure, "the card undid the override");
+        assert!(merged.ears_skip, "the card undid the override");
         assert_eq!(
             merged.ssid.as_str(),
             "FromCard",
@@ -867,7 +752,7 @@ mod tests {
         let merged = Overridden::default().merge(card(), &held);
         assert_eq!(merged.ssid.as_str(), "FromCard");
         assert_eq!(merged.server.as_str(), "card:1");
-        assert!(!merged.insecure);
+        assert!(!merged.ears_skip);
     }
 
     /// Each field is independent: overriding the passphrase must not pin the
@@ -983,12 +868,12 @@ mod tests {
     fn a_typed_value_wins_over_a_card_read_after_it() {
         let mut settings = Settings::new();
         settings.set_ssid(String::try_from("Typed").unwrap());
-        settings.set_insecure(true);
+        settings.set_ears_skip(true);
 
         settings.take_card(card());
 
         assert_eq!(settings.config().ssid.as_str(), "Typed");
-        assert!(settings.config().insecure);
+        assert!(settings.config().ears_skip);
         assert_eq!(settings.config().server.as_str(), "card:1");
     }
 
@@ -1129,7 +1014,7 @@ mod tests {
         );
     }
 
-    /// The bug this exists to prevent: overriding `insecure` at the console
+    /// The bug this exists to prevent: overriding one setting at the console
     /// must not throw away an `update_url` typed at the same session.
     #[test]
     fn overridden_update_url_survives_a_later_card_read() {

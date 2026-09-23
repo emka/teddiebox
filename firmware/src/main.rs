@@ -1926,10 +1926,6 @@ fn set_password(value: String<MAX_PASSPHRASE>) {
     critical_section::with(|cs| SETTINGS.borrow_ref_mut(cs).set_password(value));
 }
 
-fn set_insecure(value: bool) {
-    critical_section::with(|cs| SETTINGS.borrow_ref_mut(cs).set_insecure(value));
-}
-
 /// Publishes what the card said.
 ///
 /// The media task owns the card and calls this once at boot; the console
@@ -2552,7 +2548,7 @@ fn read_identity(card: &storage::Mounted) {
         Ok(_) => esp_println::println!("teddiebox: identity CA already set"),
         Err(reason) => esp_println::println!(
             "teddiebox: identity no CA — {reason}; the server cannot be verified, \
-             so `insecure = yes` is the only way it will connect"
+             so every download will fail until TCCA.DER is on the card"
         ),
     }
 
@@ -2603,15 +2599,10 @@ fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
             // The passphrase is not printed, here or anywhere. Its length is
             // enough to tell a truncated card from a wrong one.
             esp_println::println!(
-                "teddiebox: config ssid {}, server {}, passphrase {} chars{}",
+                "teddiebox: config ssid {}, server {}, passphrase {} chars",
                 config.ssid,
                 config.server,
-                config.password.len(),
-                if config.insecure {
-                    ", certificates NOT checked"
-                } else {
-                    ""
-                }
+                config.password.len()
             );
             set_configuration(config);
         }
@@ -3524,7 +3515,6 @@ async fn bring_up(
                             }) => {
                                 let wanted = tls::Wanted {
                                     server: &config.server,
-                                    insecure: config.insecure,
                                     ruid: requested.to_be_bytes(),
                                     token: token.as_ref(),
                                     from: None,
@@ -3698,7 +3688,6 @@ async fn bring_up(
                                     });
                                     let wanted = tls::Wanted {
                                         server: &config.server,
-                                        insecure: config.insecure,
                                         ruid,
                                         token: token.as_ref(),
                                         from: (from > 0).then_some(from),
@@ -3779,12 +3768,10 @@ async fn bring_up(
                     None => esp_println::println!(
                         "teddiebox: tls context unavailable — mbedtls would not start"
                     ),
-                    Some(tls) => {
-                        match tls::probe(tls, &stack, &config.server, config.insecure).await {
-                            Ok(()) => esp_println::println!("teddiebox: tls ok"),
-                            Err(e) => esp_println::println!("teddiebox: tls failed — {e:?}"),
-                        }
-                    }
+                    Some(tls) => match tls::probe(tls, &stack, &config.server).await {
+                        Ok(()) => esp_println::println!("teddiebox: tls ok"),
+                        Err(e) => esp_println::println!("teddiebox: tls failed — {e:?}"),
+                    },
                 },
                 _ => {}
             }
@@ -4450,7 +4437,7 @@ async fn main(spawner: Spawner) {
     // on whichever request happens to need it first.
     let mut boot_confirmed = false;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> insecure yes|no up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off | reval"
+        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off | reval"
     );
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
@@ -4803,22 +4790,6 @@ async fn main(spawner: Spawner) {
                 }
                 Some(Command::NetDown) => {
                     NET_REQUEST.store(NET_DOWN, Ordering::Relaxed);
-                }
-                Some(Command::NetInsecure(insecure)) => {
-                    set_insecure(insecure);
-                    esp_println::println!(
-                        "teddiebox: net certificates {} — takes effect on the next connection",
-                        if insecure { "NOT checked" } else { "checked" }
-                    );
-                    if insecure {
-                        // Said out loud because the word suggests the box is
-                        // only lowering its own guard, and it is not: the
-                        // identity and the token still go out. See
-                        // `tls::client_config`.
-                        esp_println::println!(
-                            "teddiebox: net the box still sends its certificate and the tag's token"
-                        );
-                    }
                 }
                 Some(Command::Get(ruid)) => {
                     // Read and written in the one critical section: whatever

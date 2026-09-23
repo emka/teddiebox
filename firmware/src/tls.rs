@@ -351,9 +351,11 @@ pub fn init(
 /// `x509_crt.c` and are simply absent. A box that has no idea what year it is
 /// can still verify a chain; it just cannot notice an expired certificate.
 ///
-/// So with the CA on the card the server *is* verified: the chain is checked
-/// against `CN=TeddyCloud CA Root Certificate`, and `insecure = yes` is now a
-/// deliberate escape hatch rather than the only thing that works.
+/// So the server *is* verified, on every connection and with no way to ask for
+/// less: the chain is checked against `CN=TeddyCloud CA Root Certificate`,
+/// which the card supplies as `TCCA.DER`. A card without it cannot download —
+/// there is no anchor to check against, and that is the intended failure rather
+/// than a reason to skip the check.
 ///
 /// **The name checked is the server's identity, not its address.** teddyCloud's
 /// certificate carries no `subjectAltName` and a common name of "TeddyCloud
@@ -375,45 +377,28 @@ pub fn init(
 /// `min_version` is pinned to 1.2 rather than left at the default because this
 /// server offers nothing else; a build that quietly negotiated something else
 /// would be talking to a server this project has not measured.
-/// Builds the session configuration, checked or not.
+/// Builds the session configuration for a checked connection.
 ///
-/// **`insecure` turns off the checks this box makes of the server. It does not
-/// turn off what the box tells the server.** `creds` is whatever the caller
-/// passed — and both callers pass the box's `CLIENT.DER` and `PRIVATE.DER`
-/// either way — while the tag's 32-byte token rides the same session as an
-/// `Authorization: BD …` header. So anything that answers at `server` gets a
-/// client-certificate-authenticated session it can relay to the real
-/// teddyCloud, plus a token that authorises a cloud fetch for the figure on
-/// the plate. The private key itself never leaves the box; the ability to use
-/// it for the length of one handshake does.
+/// **Checking the server is not optional, but identifying the box to it is not
+/// conditional either.** `creds` is whatever the caller passed — and the fetch
+/// passes the box's `CLIENT.DER` and `PRIVATE.DER` — while the tag's 32-byte
+/// token rides the same session as an `Authorization: BD …` header. So whatever
+/// answers at `server` gets a client-certificate-authenticated session it can
+/// relay to the real teddyCloud, plus a token that authorises a cloud fetch for
+/// the figure on the plate. The private key itself never leaves the box; the
+/// ability to use it for the length of one handshake does.
 ///
-/// Left that way deliberately, because withholding them would make `insecure`
-/// useless here rather than safer: it is on precisely so this box can talk to
-/// the teddyCloud on this LAN at all, and that server answers a request
-/// without a token with a `403`. A box that connected anonymously would verify
-/// nothing *and* fetch nothing. The cost is bounded by who can answer at
-/// `server`, which is a name the card gives — so the thing that actually
-/// protects this is keeping `CONFIG.TXT` right, not what is passed here.
-pub fn client_config<'a>(
-    insecure: bool,
-    creds: Option<Credentials<'a>>,
-) -> ClientSessionConfig<'a> {
-    let ca_chain = if insecure { None } else { anchor() };
+/// Verifying the chain narrows who that can be to whoever holds a certificate
+/// the card's CA signed — but `server` is still a name the card gives, and
+/// keeping `CONFIG.TXT` right is still what protects this.
+pub fn client_config<'a>(creds: Option<Credentials<'a>>) -> ClientSessionConfig<'a> {
     ClientSessionConfig {
         creds,
-        ca_chain,
+        ca_chain: anchor(),
         // Names the entity to verify, and — because this build carries no
         // SNI — nothing else. See [`SERVER_IDENTITY`].
-        server_name: if insecure {
-            None
-        } else {
-            Some(SERVER_IDENTITY)
-        },
-        auth_mode: if insecure {
-            AuthMode::None
-        } else {
-            AuthMode::Required
-        },
+        server_name: Some(SERVER_IDENTITY),
+        auth_mode: AuthMode::Required,
         min_version: TlsVersion::Tls1_2,
         ..ClientSessionConfig::new()
     }
@@ -494,18 +479,10 @@ async fn connect<'a>(
 /// **Run against hardware on 2026-09-23**, with certificates checked: the
 /// server answered `404` to the `HEAD`, which is the answer that proves the
 /// handshake rather than a fault.
-pub async fn probe(
-    tls: TlsReference<'_>,
-    stack: &Stack<'_>,
-    server: &str,
-    insecure: bool,
-) -> Result<(), Error> {
+pub async fn probe(tls: TlsReference<'_>, stack: &Stack<'_>, server: &str) -> Result<(), Error> {
     let mut name = [0u8; MAX_NAME];
     let (host, address, port) = resolve(stack, server, &mut name).await?;
-    esp_println::println!(
-        "teddiebox: tls {host}:{port} is {address}, certificates {}",
-        if insecure { "NOT checked" } else { "checked" }
-    );
+    esp_println::println!("teddiebox: tls {host}:{port} is {address}, certificates checked");
 
     let mut rx = [0u8; TCP_BUFFER];
     let mut tx = [0u8; TCP_BUFFER];
@@ -522,12 +499,8 @@ pub async fn probe(
         esp_alloc::HEAP.free()
     );
 
-    let mut session = Session::new(
-        tls,
-        socket,
-        &SessionConfig::Client(client_config(insecure, None)),
-    )
-    .map_err(Error::Handshake)?;
+    let mut session = Session::new(tls, socket, &SessionConfig::Client(client_config(None)))
+        .map_err(Error::Handshake)?;
 
     use mbedtls_rs::io::Write;
     session
@@ -573,7 +546,6 @@ pub async fn length(
 ) -> Result<Probed, Error> {
     let Wanted {
         server,
-        insecure,
         ruid,
         token,
         ..
@@ -589,7 +561,7 @@ pub async fn length(
     let mut session = Session::new(
         tls,
         socket,
-        &SessionConfig::Client(client_config(insecure, credentials())),
+        &SessionConfig::Client(client_config(credentials())),
     )
     .map_err(Error::Handshake)?;
 
@@ -642,15 +614,13 @@ pub async fn length(
 /// this server.
 /// What to fetch, and what to prove it with.
 ///
-/// A struct rather than four more parameters because they belong together and
-/// travel together: the server, whether to check its certificate, which figure,
-/// and the token that authorises it. Passing them separately is also how a
+/// A struct rather than three more parameters because they belong together and
+/// travel together: the server, which figure, and the token that authorises
+/// it. Passing them separately is also how a
 /// caller silently transposes two of them.
 pub struct Wanted<'a> {
     /// `host:port` of the teddyCloud server.
     pub server: &'a str,
-    /// Accept the server's certificate without checking it.
-    pub insecure: bool,
     /// The identifier as it appears in the URL.
     pub ruid: [u8; 8],
     /// The tag's own memory, or `None` for content the server already holds.
@@ -699,7 +669,6 @@ pub async fn fetch(
 ) -> Result<Fetched, Error> {
     let Wanted {
         server,
-        insecure,
         ruid,
         token,
         from,
@@ -719,7 +688,7 @@ pub async fn fetch(
     let mut session = Session::new(
         tls,
         socket,
-        &SessionConfig::Client(client_config(insecure, credentials())),
+        &SessionConfig::Client(client_config(credentials())),
     )
     .map_err(Error::Handshake)?;
 

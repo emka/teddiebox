@@ -153,27 +153,23 @@ child's room.
 One `key = value` per line, `#` starts a comment, blank lines are ignored.
 Unknown keys are skipped, so a card written for a newer firmware still boots an
 older one — but a key the box *does* know, given a value it cannot use, is
-refused out loud rather than guessed at. `insecure = ture` is a typo about
-certificate checking, and the box saying so beats the box deciding for you.
+refused out loud rather than guessed at. `ears_skip = ture` is a typo about
+what the ears do, and the box saying so beats the box deciding for you.
 
 | key | | |
 |---|---|---|
 | `ssid` | required | your WiFi network |
 | `password` | | its passphrase. Everything after the `=` is the password, `#` included — so a passphrase with a hash in it needs no escaping. Leave it empty for an open network |
 | `server` | required | `host:port` of your teddyCloud |
-| `insecure` | `no` | accept the server's certificate without checking it |
 | `ears_skip` | `yes` | whether holding an ear changes the chapter |
 | `update_url` | | full `https://` URL of an update manifest. Absent means no updates, which is the safe default — there is no address it would be right to guess |
 | `setup_password` | | the box's own setup passphrase, 8 to 63 characters. See above |
 
-**`insecure` is worth understanding before you use it.** It stops the box
-checking who it is talking to; it does not stop the box identifying itself.
-The box's certificate and the figure's own token go out over the connection
-either way, so whatever answers at `server` can pass both on to the real
-teddyCloud. That is deliberate — a box that connected anonymously would check
-nothing *and* fetch nothing, since the server refuses a request without a token
-— but it means that while `insecure` is on, `server` is the line in this file
-carrying the weight. Point it somewhere you trust.
+**`server` is the line in this file carrying the weight.** The box checks the
+server's certificate against `TCCA.DER` on the card and will not connect
+without it — but it also identifies itself to whatever it reaches, sending its
+own certificate and the placed figure's token, so that a request can be
+relayed to the real teddyCloud. Point `server` somewhere you trust.
 
 ## Building it
 
