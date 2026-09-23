@@ -2536,13 +2536,18 @@ const CONFIG_BUFFER: usize = 2048;
 fn read_anchor(card: &storage::Mounted) {
     let mut certificate = [0u8; tls::CERT_BYTES];
 
+    // `ca`, not `identity`: the box's own certificate and key come from flash
+    // and report under `identity`, and these two used to be one function. A
+    // console whose worth is that every line means something should not use
+    // one word for both the box proving who it is and the box checking who it
+    // is talking to.
     match card.read_certificate("TCCA.DER", &mut certificate) {
         Ok(n) if tls::set_anchor(&certificate[..n]) => {
-            esp_println::println!("teddiebox: identity server verified against a {n} byte CA")
+            esp_println::println!("teddiebox: ca {n} bytes — the server is checked against it")
         }
-        Ok(_) => esp_println::println!("teddiebox: identity CA already set"),
+        Ok(_) => esp_println::println!("teddiebox: ca already set"),
         Err(reason) => esp_println::println!(
-            "teddiebox: identity no CA — {reason}; the server cannot be verified, \
+            "teddiebox: ca none — {reason}; the server cannot be verified, \
              so every download will fail until TCCA.DER is on the card"
         ),
     }
