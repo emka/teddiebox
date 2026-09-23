@@ -1236,23 +1236,14 @@ fn take_stale(dir: u32, file: u32) -> bool {
     true
 }
 
-/// How long a figure waits on the server before the box plays what it has.
+/// The question the box is waiting on the server for, if any.
 ///
-/// The question costs an association, and an association that is *not* going
-/// to happen costs the longest: a box carried out of range of its network
-/// still tries, and the DHCP wait alone is 20 s. A child holding a figure whose
-/// story is already on the card must not be made to wait that out — the rule
-/// this whole feature rests on is that revalidation may never make a working
-/// box worse than it was offline.
-///
-/// Ten seconds is a guess bounded by the bad case, not a measurement of the
-/// good one. **Nobody has yet timed a successful probe on this box**; when
-/// somebody has, this should be a little over that number.
-const PROBE_PATIENCE_MS: u64 = 10_000;
-
-/// The question now outstanding, and when it was asked. Zero for none.
-static ASKED_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
-static ASKED_AT_MS: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+/// Touched only by the media task — `perform` asks, the loop settles — so it
+/// has one writer. It is a static rather than a loop local for the same reason
+/// `ASKED` is: `perform` is reached through `apply` from eight places, and
+/// threading it through all of them buys nothing.
+static REVALIDATION: CsMutex<RefCell<teddiebox_download::Revalidation>> =
+    CsMutex::new(RefCell::new(teddiebox_download::Revalidation::new()));
 
 /// Which figures have been asked about since the box booted.
 ///
@@ -1462,9 +1453,9 @@ fn take_fetch_outcome() -> (u8, u64) {
 /// placed figure without playing anything until it hears back, so a probe that
 /// ends without publishing leaves the box quiet with a story sitting on its
 /// card — which is exactly the failure revalidation was not allowed to cause.
-/// Every path that can end a probe calls this, and calling it twice is
-/// harmless: the media task takes the answer, so the second store finds
-/// nothing waiting.
+/// Every net-task path that can end a probe without an answer calls this. A
+/// `Nothing` about a question that has already settled is dropped by
+/// [`teddiebox_download::Revalidation`], so calling it twice is harmless.
 fn probe_ended(ruid: u64) {
     post_answer(ruid, teddiebox_download::Answer::Nothing);
 }
@@ -2775,8 +2766,11 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         Action::Revalidate(tag) => {
             let ruid = tag.ruid();
             esp_println::println!("teddiebox: plate asking the server about {ruid:016X}");
-            ASKED_RUID.store(ruid, Ordering::Relaxed);
-            ASKED_AT_MS.store(Instant::now().as_millis(), Ordering::Relaxed);
+            critical_section::with(|cs| {
+                REVALIDATION
+                    .borrow_ref_mut(cs)
+                    .asked(ruid, Instant::now().as_millis())
+            });
             critical_section::with(|cs| {
                 *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest {
                     ruid,
@@ -3051,27 +3045,39 @@ async fn media(
         // pass, and guarded by identity for the same reason the fetch outcome
         // is: an answer that arrives after the figure was lifted or swapped
         // belongs to nobody.
-        // A question nobody is going to answer must not keep a story waiting.
-        // The net task answers every path it reaches; what it cannot bound is
-        // how long it takes to *get* there — an association that will not
-        // happen is the slowest failure the box has.
-        let asked_at = ASKED_AT_MS.load(Ordering::Relaxed);
-        if asked_at != 0
-            && !answer_waiting()
-            && Instant::now().as_millis().saturating_sub(asked_at) > PROBE_PATIENCE_MS
-        {
-            let waited = ASKED_RUID.load(Ordering::Relaxed);
-            esp_println::println!(
-                "teddiebox: plate {waited:016X} — no answer in {} s, playing what is here",
-                PROBE_PATIENCE_MS / 1_000
-            );
-            // A real answer that arrives afterwards is about a figure the
-            // reducer is no longer waiting on, and its own guard drops it.
-            probe_ended(waited);
+        // Each call into the machine is its own short critical section, and
+        // nothing prints inside one: a console line at 115200 baud is
+        // milliseconds with interrupts off.
+        let mut settled = None;
+        if let Some((ruid, answer)) = take_answer() {
+            settled =
+                critical_section::with(|cs| REVALIDATION.borrow_ref_mut(cs).answered(ruid, answer));
+            if settled.is_none() {
+                // An answer to a question that is already over — the patience
+                // ran out, or an earlier answer settled it. Acting on it is
+                // what once armed the stale flag for a figure playing its card
+                // copy, so it goes no further than the console.
+                esp_println::println!("teddiebox: plate ignoring a late answer about {ruid:016X}");
+            }
         }
-
-        if let Some((probed_ruid, answer)) = take_answer() {
-            ASKED_AT_MS.store(0, Ordering::Relaxed);
+        if settled.is_none() {
+            settled = critical_section::with(|cs| {
+                REVALIDATION
+                    .borrow_ref_mut(cs)
+                    .polled(Instant::now().as_millis())
+            });
+            if let Some(teddiebox_download::Settled { ruid, .. }) = settled {
+                esp_println::println!(
+                    "teddiebox: plate {ruid:016X} — no answer in {} s, playing what is here",
+                    teddiebox_download::PATIENCE_MS / 1_000
+                );
+            }
+        }
+        if let Some(teddiebox_download::Settled {
+            ruid: probed_ruid,
+            answer,
+        }) = settled
+        {
             match placed.answering(probed_ruid) {
                 Answering::TheFigure(tag) => {
                     // Remembered whatever the answer was. A server that was
