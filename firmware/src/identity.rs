@@ -30,12 +30,12 @@ const _: () = assert!(
 /// `Undefined`, which any future one would match too.
 const LABEL: &str = "cert";
 
-/// Reads the identity out of flash and publishes it. `true` if it did.
+/// Reads the identity out of flash and publishes it.
 ///
 /// Every failure is reported and none is fatal: a box with no identity plays
 /// everything on its card and cannot fetch, which is the same shape as a box
 /// with no CA.
-pub fn load() -> bool {
+pub fn load() {
     let mut flash = ota::flash();
     let mut table_buffer = [0u8; PARTITION_TABLE_MAX_LEN];
     let table = match partitions::read_partition_table(&mut flash, &mut table_buffer) {
@@ -44,7 +44,7 @@ pub fn load() -> bool {
             esp_println::println!(
                 "teddiebox: identity cannot read the partition table — {trouble:?}"
             );
-            return false;
+            return;
         }
     };
 
@@ -53,7 +53,7 @@ pub fn load() -> bool {
             "teddiebox: identity no `{LABEL}` partition — this box was flashed with an older \
              partition table; `just flash` writes the current one"
         );
-        return false;
+        return;
     };
 
     let capacity = entry.len() as usize;
@@ -64,7 +64,7 @@ pub fn load() -> bool {
         esp_println::println!(
             "teddiebox: identity cannot read the `{LABEL}` partition — {trouble:?}"
         );
-        return false;
+        return;
     }
 
     let held = match parse_header(&header, capacity) {
@@ -74,7 +74,7 @@ pub fn load() -> bool {
                 "teddiebox: identity none — nothing has been written to `{LABEL}`; \
                  run `just identity`"
             );
-            return false;
+            return;
         }
         Err(trouble) => {
             esp_println::println!(
@@ -84,7 +84,7 @@ pub fn load() -> bool {
                  was there before this firmware — the common case on a box built from a \
                  stock Toniebox. Run `just identity`."
             );
-            return false;
+            return;
         }
     };
 
@@ -95,11 +95,11 @@ pub fn load() -> bool {
         &mut certificate[..held.certificate_len],
     ) {
         esp_println::println!("teddiebox: identity certificate would not read — {trouble:?}");
-        return false;
+        return;
     }
     if let Err(trouble) = region.read(held.key_offset() as u32, &mut key[..held.key_len]) {
         esp_println::println!("teddiebox: identity key would not read — {trouble:?}");
-        return false;
+        return;
     }
 
     // The certificate's length and the key's length. Never the key.
@@ -109,9 +109,7 @@ pub fn load() -> bool {
             held.certificate_len,
             held.key_len
         );
-        true
     } else {
         esp_println::println!("teddiebox: identity already set");
-        false
     }
 }
