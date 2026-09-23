@@ -45,7 +45,7 @@ cross:
     #!/usr/bin/env bash
     set -euo pipefail
     for crate in teddiebox-taf teddiebox-core teddiebox-config teddiebox-cloud \
-                 teddiebox-download teddiebox-ota teddiebox-portal \
+                 teddiebox-download teddiebox-identity teddiebox-ota teddiebox-portal \
                  teddiebox-board teddiebox-console \
                  tlv320dac3100 trf7962a lis3dh; do
         echo "--- $crate"
