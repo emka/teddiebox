@@ -24,14 +24,28 @@ use teddiebox_identity::{render, HEADER, MAX_BODY};
 /// spellings in the error means it is obvious why when it does not.
 fn read_der(dir: &Path, upper: &str) -> Result<Vec<u8>, String> {
     let lower = upper.to_lowercase();
-    if let Ok(bytes) = fs::read(dir.join(upper)) {
-        return Ok(bytes);
-    }
-    match fs::read(dir.join(&lower)) {
-        Ok(bytes) => Ok(bytes),
-        Err(trouble) => Err(format!(
-            "neither {upper} nor {lower} found in {} — {trouble}",
-            dir.display()
+    let bytes = match fs::read(dir.join(upper)) {
+        Ok(bytes) => bytes,
+        Err(_) => fs::read(dir.join(&lower)).map_err(|trouble| {
+            format!(
+                "neither {upper} nor {lower} found in {} — {trouble}",
+                dir.display()
+            )
+        })?,
+    };
+
+    // Every DER object here is a SEQUENCE, so its first byte is 0x30. One byte
+    // of checking catches the mistakes that otherwise reach flash and only
+    // surface as a failed handshake at the box: a PEM copied instead of a DER,
+    // a text file, a truncation at the head, a wrong directory. Say which file
+    // and how long it was — the operator is at a laptop and can act on both.
+    match bytes.first() {
+        None => Err(format!("{upper} is empty")),
+        Some(0x30) => Ok(bytes),
+        Some(first) => Err(format!(
+            "{upper} does not look like DER — it starts {first:#04x}, not 0x30 (SEQUENCE), \
+             and is {} bytes. A PEM file starts with `-----BEGIN` (0x2d).",
+            bytes.len()
         )),
     }
 }
