@@ -206,8 +206,9 @@ static IDENTITY: CsMutex<RefCell<Option<&'static Identity>>> = CsMutex::new(RefC
 
 /// Publishes the box's identity, once.
 ///
-/// Called by whoever owns the card. Returns whether it took: a second call is
-/// refused rather than replacing credentials a session may be holding.
+/// Called by [`crate::identity::load`], once at boot, reading flash. Returns
+/// whether it took: a second call is refused rather than replacing
+/// credentials a session may be holding.
 pub fn set_identity(certificate: &[u8], key: &[u8]) -> bool {
     if certificate.len() > CERT_BYTES || key.len() > CERT_BYTES {
         return false;
@@ -891,7 +892,7 @@ async fn hand_over(bytes: &[u8], sink: &mut dyn FnMut(&[u8]) -> usize) {
     }
 }
 
-/// The box's credentials, if the card carried them.
+/// The box's credentials, read from flash at boot by [`crate::identity::load`].
 ///
 /// `None` is not a failure: without them the box can still fetch anything the
 /// server already holds. They are what let teddyCloud tell *which* box is
