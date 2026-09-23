@@ -491,8 +491,9 @@ async fn connect<'a>(
 /// in each direction — enough to prove the handshake, the cipher suite and the
 /// record layer without pulling a body through a buffer sized for headers.
 ///
-/// **Not yet run against hardware.** It compiles and links, which is the whole
-/// of what is known about it.
+/// **Run against hardware on 2026-09-23**, with certificates checked: the
+/// server answered `404` to the `HEAD`, which is the answer that proves the
+/// handshake rather than a fault.
 pub async fn probe(
     tls: TlsReference<'_>,
     stack: &Stack<'_>,
