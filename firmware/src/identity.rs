@@ -12,7 +12,7 @@
 use esp_bootloader_esp_idf::partitions::{self, PARTITION_TABLE_MAX_LEN};
 use teddiebox_identity::{parse_header, IdentityError, HEADER};
 
-use crate::ota;
+use crate::flash;
 use crate::tls;
 
 /// The format's cap and the buffers it lands in must be the same number.
@@ -36,7 +36,7 @@ const LABEL: &str = "cert";
 /// everything on its card and cannot fetch, which is the same shape as a box
 /// with no CA.
 pub fn load() {
-    let mut flash = ota::flash();
+    let mut flash = flash::flash();
     let mut table_buffer = [0u8; PARTITION_TABLE_MAX_LEN];
     let table = match partitions::read_partition_table(&mut flash, &mut table_buffer) {
         Ok(table) => table,

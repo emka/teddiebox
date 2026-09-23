@@ -2,6 +2,7 @@
 #![no_main]
 
 mod audio;
+mod flash;
 mod identity;
 mod index;
 mod led;
@@ -4419,7 +4420,7 @@ async fn main(spawner: Spawner) {
     // finished draining out the UART yet, and that print was the corpse.
     // Moving this below both the paint and the console banner is what keeps
     // it out of that memory — pulling it back up there garbles the line
-    // again. `ota::flash()` lends one handle at a time: this takes it and
+    // again. `flash::flash()` lends one handle at a time: this takes it and
     // gives it back inside the call.
     //
     // It also sits below the both-ears-held branch above, which diverges
