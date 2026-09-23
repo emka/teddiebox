@@ -110,6 +110,23 @@ vendor:
 flash: firmware
     ./scripts/flash.sh
 
+# writes the box's TLS identity into the `cert` partition
+#
+# Separate from `just flash` deliberately: an app write never touches a data
+# partition, so this is run once per box and survives every later firmware
+# flash. The cost of that choice is that a fresh box plays cards and cannot
+# fetch until this is run, which the boot line says out loud.
+#
+# Needs TEDDIEBOX_IDENTITY_DIR, set in .envrc.local. The offset must match
+# `cert` in partitions.csv.
+identity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="$(mktemp -d)"
+    trap 'rm -rf "$out"' EXIT
+    cargo run -q -p identity-image -- "$out/identity.bin"
+    BIN_FILE="$out/identity.bin" BIN_ADDR=0x610000 ./scripts/flash.sh
+
 # `scripts/bench-console.py` sends one line and captures until a marker, which
 # is what a scripted step wants. This is for the steps with a person in them —
 # plugging headphones in between `t` and `stop`. The port takes one owner, so

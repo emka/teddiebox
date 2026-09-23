@@ -28,12 +28,23 @@ PORT="${PORT:-/dev/ttyUSB0}"
 ELF="${ELF:-firmware/target/xtensa-esp32s3-none-elf/release/teddiebox-firmware}"
 TABLE="${TABLE:-partitions.csv}"
 
+# Writing a binary at an offset instead of the firmware: same port rules, same
+# download-mode entry, same "esptool only after espflash succeeded" ordering.
+# `just identity` is the only caller.
+BIN_FILE="${BIN_FILE:-}"
+BIN_ADDR="${BIN_ADDR:-}"
+
 die() {
     echo "flash: $*" >&2
     exit 1
 }
 
-[ -f "$ELF" ] || die "no firmware at $ELF — run 'just firmware' first"
+if [ -n "$BIN_FILE" ]; then
+    [ -n "$BIN_ADDR" ] || die "BIN_FILE needs BIN_ADDR"
+    [ -f "$BIN_FILE" ] || die "no binary at $BIN_FILE"
+else
+    [ -f "$ELF" ] || die "no firmware at $ELF — run 'just firmware' first"
+fi
 [ -f "$TABLE" ] || die "no partition table at $TABLE — run this from the repository root"
 [ -e "$PORT" ] || die "no $PORT — is the box plugged in?"
 
@@ -85,14 +96,23 @@ fi
 
 fi
 
-echo "flash: writing $ELF"
-# espflash first, and its status captured directly rather than through a pipe.
-if ! espflash flash --port "$PORT" --before no-reset --after no-reset \
-    --flash-size 8mb --partition-table "$TABLE" \
-    -B 921600 --non-interactive "$ELF"; then
-    die "espflash failed.
+if [ -n "$BIN_FILE" ]; then
+    echo "flash: writing $BIN_FILE at $BIN_ADDR"
+    if ! espflash write-bin --port "$PORT" --before no-reset --after no-reset \
+        -B 921600 --non-interactive "$BIN_ADDR" "$BIN_FILE"; then
+        die "espflash failed.
+     NOT running esptool — after a failed write it leaves the box needing a
+     J100 cold boot. Put the box back in download mode and try again."
+    fi
+else
+    echo "flash: writing $ELF"
+    if ! espflash flash --port "$PORT" --before no-reset --after no-reset \
+        --flash-size 8mb --partition-table "$TABLE" \
+        -B 921600 --non-interactive "$ELF"; then
+        die "espflash failed.
      NOT running esptool — after a failed flash it leaves the box needing a
      J100 cold boot. Put the box back in download mode and try again."
+    fi
 fi
 
 echo "flash: starting the firmware"

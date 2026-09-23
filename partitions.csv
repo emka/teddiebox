@@ -28,9 +28,26 @@
 # It is not there because every reference table in ESP-IDF puts it at 0xd000,
 # and the boot path is the wrong place to be the first to try something else.
 #
+# `cert` holds the box's own TLS certificate and private key. It sits above
+# both app slots, so adding it moved nothing: every offset above was already
+# what it is. 16 KB is four sectors for about 2.2 KB of identity, and the 8 MB
+# chip has ~1.9 MB spare beyond it.
+#
+# An app write never touches a data partition, so the identity survives every
+# firmware flash and is written once per box with `just identity`.
+#
+# The subtype is spelled `undefined` because espflash refuses an empty one.
+# There is deliberately no flags column: espflash writes `readonly` as flags
+# bit 1, `esp-bootloader-esp-idf` 0.6.0 reads bit 0 for read-only and bit 1 for
+# encrypted, so the flag would buy no write protection and would, the day flash
+# encryption is ever enabled, send every read of this partition through
+# `flash_read_encrypted`. The firmware not writing here is a property of the
+# firmware, not of this line.
+#
 # Name,     Type, SubType, Offset,   Size
 nvs,        data, nvs,     0x9000,   0x4000
 otadata,    data, ota,     0xd000,   0x2000
 phy_init,   data, phy,     0xf000,   0x1000
 ota_0,      app,  ota_0,   0x10000,  0x300000
 ota_1,      app,  ota_1,   0x310000, 0x300000
+cert,       data, undefined, 0x610000, 0x4000
