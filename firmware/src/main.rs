@@ -4404,6 +4404,18 @@ async fn main(spawner: Spawner) {
     spawner.spawn(inputs(Input::new(p.GPIO7, up)).unwrap());
 
     // UART0's receive half. esp-println keeps the transmit half.
+    // Let the console drain before UART0 is reconfigured below.
+    //
+    // Every boot line printed since reset is still queued in UART0's transmit
+    // FIFO at this point, and `UartRx::new` reprograms the peripheral out from
+    // under it — so the last line or two arrives truncated and spliced into
+    // whatever prints next. That is the corruption in front of the command
+    // list that every boot has shown for months: `teddieb 0x1teddiebox: dl rb`
+    // is `stack painted` being cut off mid-word. At 115200 the queue is a few
+    // hundred microseconds, and `drain_console` already waits exactly this way
+    // for exactly this reason on the way out of a reboot.
+    drain_console();
+
     let mut console = UartRx::new(p.UART0, UartConfig::default().with_baudrate(115200))
         .expect("UART0 receive")
         .with_rx(p.GPIO44);
