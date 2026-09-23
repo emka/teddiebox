@@ -2853,7 +2853,14 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
 /// frame while a story plays — because a loop pass is a whole story long and a
 /// figure lifted during one must not wait for it to end.
 fn take_plate_event(placed: &mut Placed) -> Option<Event> {
-    Some(placed.observe(PLATE_TAG.try_take()?))
+    let event = placed.observe(PLATE_TAG.try_take()?);
+    // A lift ends any question about the figure, here where the lift is first
+    // seen. Settled later in the same pass, an answer would be judged against
+    // a figure already put back — before the reducer has heard it is back.
+    if event == Event::TagAbsent {
+        critical_section::with(|cs| REVALIDATION.borrow_ref_mut(cs).withdrawn());
+    }
+    Some(event)
 }
 
 /// Hands the reducer every ear edge that has settled since it was last asked.

@@ -171,6 +171,14 @@ impl Revalidation {
         };
     }
 
+    /// The figure being asked about has left the plate. Ends the question
+    /// without settling it: nobody is waiting for the answer any more, and one
+    /// that arrives afterwards is late — even if the same figure is back by
+    /// then, because it will be asked about afresh.
+    pub fn withdrawn(&mut self) {
+        self.state = State::Idle;
+    }
+
     /// The clock has been read with no answer yet.
     ///
     /// Takes the reading rather than an interval, for the reason
@@ -381,6 +389,31 @@ mod tests {
                 answer: Answer::Nothing
             })
         );
+    }
+
+    /// Found in review, 2026-09-23. A figure lifted and put back within one
+    /// pass of the media loop, as its answer arrives: the answer was settled
+    /// against the figure already back on the plate, remembered and judged —
+    /// arming the stale flag — before the reducer had even heard it was back.
+    /// The reducer then played the card copy straight away, because the figure
+    /// now counted as asked. A lift ends the question, so that answer is late.
+    #[test]
+    fn an_answer_after_the_figure_was_lifted_is_ignored() {
+        let mut r = Revalidation::new();
+        r.asked(FIGURE, 0);
+        r.withdrawn();
+        assert_eq!(r.answered(FIGURE, Answer::Length(1_024)), None);
+    }
+
+    /// Nobody is waiting for a lifted figure, so its patience running out is
+    /// not news — and printing it sent a bench reader looking at a figure that
+    /// was no longer there.
+    #[test]
+    fn a_lifted_figure_never_runs_out_of_patience() {
+        let mut r = Revalidation::new();
+        r.asked(FIGURE, 0);
+        r.withdrawn();
+        assert_eq!(r.polled(10_000), None);
     }
 
     #[test]
