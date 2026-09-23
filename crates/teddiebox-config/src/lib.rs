@@ -714,6 +714,24 @@ mod tests {
         );
     }
 
+    /// An empty value is the same mistake as a misspelt one, and it is the
+    /// likelier typo: a line left half-written.
+    #[test]
+    fn an_empty_ears_skip_value_is_refused() {
+        assert_eq!(
+            Config::parse("ssid = A\nserver = s:1\nears_skip =\n"),
+            Err(ConfigError::MalformedValue)
+        );
+    }
+
+    /// Booleans are comment-stripped, unlike `password`: there is no boolean
+    /// that needs a `#` in it.
+    #[test]
+    fn a_trailing_comment_is_not_part_of_a_boolean_value() {
+        let c = Config::parse("ssid = A\nserver = s:1\nears_skip = no # volume only\n").unwrap();
+        assert!(!c.ears_skip);
+    }
+
     #[test]
     fn a_missing_insecure_key_leaves_certificate_checking_on() {
         let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
