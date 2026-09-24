@@ -322,11 +322,7 @@ impl rand_core::TryCryptoRng for HardwareRng {}
 ///
 /// Returns `None` if it has already been called, because the statics behind it
 /// can only be filled once and a second caller would otherwise panic.
-pub fn init(
-    sha: SHA<'static>,
-    rsa: RSA<'static>,
-    aes: AES<'static>,
-) -> Option<TlsReference<'static>> {
+pub fn init(sha: SHA<'static>, rsa: RSA<'static>, aes: AES<'static>) -> Option<Client> {
     let accel = ACCEL.try_init(EspAccel::new().with_sha(sha).with_rsa(rsa).with_aes(aes))?;
     let queues: &'static EspAccelQueue<'static, 'static> = QUEUES.try_init(accel.start())?;
 
@@ -341,7 +337,43 @@ pub fn init(
 
     let rng = RNG.try_init(HardwareRng(esp_hal::rng::Rng::new()))?;
     let tls = Tls::new(rng).ok()?;
-    Some(TLS.try_init(tls)?.reference())
+    Some(Client {
+        tls: TLS.try_init(tls)?.reference(),
+        credentials: RefCell::new(None),
+    })
+}
+
+/// What every connection needs and none of them should rebuild: the mbedtls
+/// context, and the box's identity parsed once.
+///
+/// **The parse is the expensive part, and not for the reason it looks.**
+/// Parsing takes 2-3 ms. But mbedtls blinds every RSA private operation, and
+/// the first one on a freshly parsed key sets that blinding up with a
+/// constant-time modular inverse in software: measured on the box at 1.36 s,
+/// inside a handshake call that does not yield. Parsed per session, every
+/// handshake paid it; parsed once, only the first after boot does — 2.68 s
+/// against 1.27-1.36 s for the ones after.
+///
+/// Owned by the net task and lent to each connection, rather than held in a
+/// static: the parsed key's reference count is not atomic, and one owner is
+/// the whole of what keeps that sound.
+pub struct Client {
+    tls: TlsReference<'static>,
+    /// Filled on first use, not at [`init`]: the net task can build this
+    /// before `identity::load` has run, and a key that was not there yet must
+    /// not be remembered as absent.
+    credentials: RefCell<Option<Credentials<'static>>>,
+}
+
+impl Client {
+    /// The box's credentials, sharing one parsed key across every session.
+    fn credentials(&self) -> Option<Credentials<'static>> {
+        let mut held = self.credentials.borrow_mut();
+        if held.is_none() {
+            *held = parse_credentials();
+        }
+        held.clone()
+    }
 }
 
 /// The client configuration for one connection.
@@ -481,7 +513,7 @@ async fn connect<'a>(
 /// **Run against hardware on 2026-09-23**, with certificates checked: the
 /// server answered `404` to the `HEAD`, which is the answer that proves the
 /// handshake rather than a fault.
-pub async fn probe(tls: TlsReference<'_>, stack: &Stack<'_>, server: &str) -> Result<(), Error> {
+pub async fn probe(client: &Client, stack: &Stack<'_>, server: &str) -> Result<(), Error> {
     let mut name = [0u8; MAX_NAME];
     let (host, address, port) = resolve(stack, server, &mut name).await?;
     esp_println::println!("teddiebox: tls {host}:{port} is {address}, certificates checked");
@@ -501,8 +533,12 @@ pub async fn probe(tls: TlsReference<'_>, stack: &Stack<'_>, server: &str) -> Re
         esp_alloc::HEAP.free()
     );
 
-    let mut session = Session::new(tls, socket, &SessionConfig::Client(client_config(None)))
-        .map_err(Error::Handshake)?;
+    let mut session = Session::new(
+        client.tls,
+        socket,
+        &SessionConfig::Client(client_config(None)),
+    )
+    .map_err(Error::Handshake)?;
 
     use mbedtls_rs::io::Write;
     session
@@ -542,7 +578,7 @@ pub async fn probe(tls: TlsReference<'_>, stack: &Stack<'_>, server: &str) -> Re
 /// A probe and a fetch must name the same file the same way, which is why one
 /// writer builds both requests.
 pub async fn length(
-    tls: TlsReference<'_>,
+    client: &Client,
     stack: &Stack<'_>,
     wanted: &Wanted<'_>,
 ) -> Result<Probed, Error> {
@@ -561,9 +597,9 @@ pub async fn length(
     socket.set_timeout(Some(IDLE_TIMEOUT));
 
     let mut session = Session::new(
-        tls,
+        client.tls,
         socket,
-        &SessionConfig::Client(client_config(credentials())),
+        &SessionConfig::Client(client_config(client.credentials())),
     )
     .map_err(Error::Handshake)?;
 
@@ -662,7 +698,7 @@ pub struct Head<'a> {
 }
 
 pub async fn fetch(
-    tls: TlsReference<'_>,
+    client: &Client,
     stack: &Stack<'_>,
     wanted: &Wanted<'_>,
     on_head: &mut dyn FnMut(Head<'_>),
@@ -688,9 +724,9 @@ pub async fn fetch(
     socket.set_timeout(Some(IDLE_TIMEOUT));
 
     let mut session = Session::new(
-        tls,
+        client.tls,
         socket,
-        &SessionConfig::Client(client_config(credentials())),
+        &SessionConfig::Client(client_config(client.credentials())),
     )
     .map_err(Error::Handshake)?;
 
@@ -892,12 +928,13 @@ async fn hand_over(bytes: &[u8], sink: &mut dyn FnMut(&[u8]) -> usize) {
     }
 }
 
-/// The box's credentials, read from flash at boot by [`crate::identity::load`].
+/// Parses the box's credentials, read from flash at boot by
+/// [`crate::identity::load`]. Called once per boot, by [`Client::credentials`].
 ///
 /// `None` is not a failure: without them the box can still fetch anything the
 /// server already holds. They are what let teddyCloud tell *which* box is
 /// asking, and so what lets it fetch a figure it has no copy of.
-fn credentials() -> Option<Credentials<'static>> {
+fn parse_credentials() -> Option<Credentials<'static>> {
     let held = identity()?;
     Some(Credentials {
         // Borrowed rather than copied, which is why the identity is a static:

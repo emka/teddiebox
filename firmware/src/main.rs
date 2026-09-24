@@ -3398,7 +3398,7 @@ async fn media(
 /// here, ending only when the console asks for it to end.
 async fn bring_up(
     radio: &mut net::Radio<'_>,
-    tls: Option<mbedtls_rs::TlsReference<'_>>,
+    tls: Option<&tls::Client>,
     stay_up: bool,
 ) -> Option<Unavailable> {
     let Some(config) = credentials() else {
@@ -3872,7 +3872,7 @@ async fn net(
             // reason is printed inside, and there is no figure waiting to be
             // told anything.
             NET_UP => {
-                let _ = bring_up(&mut radio, tls, true).await;
+                let _ = bring_up(&mut radio, tls.as_ref(), true).await;
             }
             // `net status` and `net down` are answered inside `bring_up` while
             // it is running. Reaching them here means it is not.
@@ -3904,7 +3904,7 @@ async fn net(
                     // taken out of the request by the read at the top of this
                     // one, and it is the whole reason for associating.
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);
-                    let gave_up = bring_up(&mut radio, tls, false).await;
+                    let gave_up = bring_up(&mut radio, tls.as_ref(), false).await;
                     // The pre-arm above is only ever consumed by `bring_up`'s
                     // own inner loop, reached after a successful association —
                     // every early return happens before that loop starts. Left
