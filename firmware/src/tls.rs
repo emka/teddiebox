@@ -650,6 +650,30 @@ pub async fn probe(client: &Client, stack: &Stack<'_>, server: &str) -> Result<(
     Ok(())
 }
 
+/// Opens a session with the box's identity and closes it again, so that the
+/// next connection can resume it.
+///
+/// The first ask after boot is the slow one: it scans for the network, sets
+/// up the key and runs a full handshake, 5.1 s from placement to playing
+/// against about 2.3 s for the asks after it. Doing that work once at boot,
+/// before any figure is placed, gives the first figure the fast path.
+pub async fn prime(client: &Client, stack: &Stack<'_>, server: &str) -> Result<(), Error> {
+    let mut name = [0u8; MAX_NAME];
+    let (_host, address, port) = resolve(stack, server, &mut name).await?;
+    let mut rx = [0u8; TCP_BUFFER];
+    let mut tx = [0u8; TCP_BUFFER];
+    let socket = connect(stack, address, port, &mut rx, &mut tx).await?;
+    let mut session = Session::new(
+        client.tls,
+        socket,
+        &SessionConfig::Client(client_config(client.credentials())),
+    )
+    .map_err(Error::Handshake)?;
+    client.handshake(&mut session).await?;
+    let _ = session.close().await;
+    Ok(())
+}
+
 /// Asks how long a figure's story is on the server now, and downloads none of
 /// it.
 ///

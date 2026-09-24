@@ -1151,6 +1151,10 @@ const NET_DOWN: u8 = 3;
 const NET_STATUS: u8 = 4;
 const NET_TLS: u8 = 5;
 const NET_GET: u8 = 6;
+/// Join and open one TLS session with nobody waiting on it, once per boot, so
+/// the first figure placed finds a remembered access point, a set-up key and a
+/// session to resume. See [`tls::prime`].
+const NET_PRIME: u8 = 7;
 
 /// A figure's identifier and the token that authorises fetching its story.
 ///
@@ -2136,6 +2140,11 @@ const NO_SOUND: u32 = u32::MAX;
 /// reaches the cutoff while playing far more often than while idle.
 static ANNOUNCING: AtomicBool = AtomicBool::new(false);
 
+/// Set once the power-on jingle has been asked for. With [`ANNOUNCING`] clear
+/// again afterwards, it means the jingle is over — the earliest the radio may
+/// come up without competing with the speaker.
+static STARTUP_SOUNDED: AtomicBool = AtomicBool::new(false);
+
 /// Which `CONTENT/<dir>/<file>` [`ANNOUNCING`] is about, so the playback that
 /// ends can say whether it is the announcement.
 static ANNOUNCING_DIRECTORY: AtomicU32 = AtomicU32::new(0);
@@ -2220,6 +2229,15 @@ static STAY_AWAKE: AtomicBool = AtomicBool::new(false);
 /// same as a flat pack and must not be read as one.
 static PACK_MV: AtomicU32 = AtomicU32::new(0);
 static PACK_SAMPLES: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the pack is too low to spend radio time nobody asked for.
+///
+/// No reading yet is not a low pack: the sense task samples every two seconds
+/// and has long answered by the time the jingle is over.
+fn pack_too_low_to_prime() -> bool {
+    PACK_SAMPLES.load(Ordering::Relaxed) > 0
+        && PACK_MV.load(Ordering::Relaxed) < u32::from(BatteryConfig::default().low_mv)
+}
 
 /// Waits for fresh pack readings and answers whether they agree it is empty.
 ///
@@ -2990,6 +3008,9 @@ async fn media(
     // rate-limit itself across both call sites — the top of this loop and the
     // per-frame `attend` closure inside a playing story.
     let mut last_tick_fed: u64 = 0;
+    // Whether this boot has asked the net task to prime the connection; see
+    // `NET_PRIME`. Once per boot, whatever came of it.
+    let mut primed = false;
 
     loop {
         // Nothing to do for the rest of this power-on: see `PARKED`.
@@ -3102,6 +3123,33 @@ async fn media(
                      not the figure on the plate"
                 ),
                 Answering::NoFigure => {}
+            }
+        }
+
+        // Once the jingle is over, with nothing on the plate, the first ask's
+        // slow work is done ahead of it. A figure already on the plate has
+        // its own ask doing the same work, and one placed while this runs is
+        // served on the same association.
+        if !primed
+            && configured
+            && placed.figure().is_none()
+            && STARTUP_SOUNDED.load(Ordering::Relaxed)
+            && !ANNOUNCING.load(Ordering::Relaxed)
+            && !PLAYING.load(Ordering::Relaxed)
+        {
+            primed = true;
+            if pack_too_low_to_prime() {
+                esp_println::println!("teddiebox: net not priming — the pack is low");
+            } else if NET_REQUEST
+                .compare_exchange(
+                    REQUEST_NONE,
+                    NET_PRIME,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                esp_println::println!("teddiebox: net priming the connection for the first figure");
             }
         }
 
@@ -3779,6 +3827,26 @@ async fn bring_up(
                     }
                 }
 
+                NET_PRIME => {
+                    if let Some(tls) = tls {
+                        let started = Instant::now();
+                        match tls::prime(tls, &stack, &config.server).await {
+                            Ok(()) => esp_println::println!(
+                                "teddiebox: net primed in {} ms",
+                                started.elapsed().as_millis()
+                            ),
+                            Err(e) => {
+                                esp_println::println!("teddiebox: net could not prime — {e:?}")
+                            }
+                        }
+                    }
+                    // A figure placed while this ran is served on this
+                    // association rather than a new one.
+                    if !stay_up && NET_REQUEST.load(Ordering::Relaxed) != NET_GET {
+                        break;
+                    }
+                }
+
                 NET_TLS => match tls {
                     None => esp_println::println!(
                         "teddiebox: tls context unavailable — mbedtls would not start"
@@ -3898,6 +3966,22 @@ async fn net(
             }
             // `net status` and `net down` are answered inside `bring_up` while
             // it is running. Reaching them here means it is not.
+            NET_PRIME => {
+                esp_println::println!("teddiebox: net coming up to prime the first ask");
+                // Put back for the association's own loop, as a fetch is.
+                NET_REQUEST.store(NET_PRIME, Ordering::Relaxed);
+                if bring_up(&mut radio, tls.as_ref(), false).await.is_some() {
+                    // It never reached the loop that takes the request. Only
+                    // the prime is dropped: a figure's ask that replaced it
+                    // while the radio tried stays queued and is answered next.
+                    let _ = NET_REQUEST.compare_exchange(
+                        NET_PRIME,
+                        REQUEST_NONE,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
             NET_STATUS | NET_DOWN | NET_TLS => {
                 esp_println::println!("teddiebox: net is down")
             }
@@ -4637,6 +4721,7 @@ async fn main(spawner: Spawner) {
         if startup_pending && CODEC_READY.load(Ordering::Relaxed) {
             startup_pending = false;
             SOUND_REQUEST.store(Sound::Startup.file(), Ordering::Relaxed);
+            STARTUP_SOUNDED.store(true, Ordering::Relaxed);
         }
 
         if !boot_confirmed
