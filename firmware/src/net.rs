@@ -407,24 +407,25 @@ impl<'d> Session<'d> {
     /// slow join and is then replaced by the one that worked. The driver
     /// sometimes finds the network despite a wrong channel (3.15 s).
     ///
-    /// A stored key the access point refuses is tried again as the
-    /// passphrase — the router may have been re-keyed with the card edited to
-    /// match, or not at all — so a stale key costs one refused join, never
-    /// the network.
+    /// A join with the stored key that fails for any reason is tried again
+    /// with the passphrase — the router may have been re-keyed with the card
+    /// edited to match, or not at all — so a stale key costs one failed join,
+    /// never the network. Any reason, not only [`refused_credentials`]: that
+    /// one is the refusal *this* router gives, and an access point that
+    /// refuses a raw key differently, or cannot take one at all, must not
+    /// leave a box with a correct passphrase off its network.
     pub async fn connect(&mut self) -> Result<JoinedWith, ConnectionError> {
         let mut with = JoinedWith::GivenKey;
         let mut result = self.join().await;
         if let (Err(error), Some(passphrase)) = (&result, self.passphrase.take()) {
-            if refused_credentials(error) {
-                esp_println::println!(
-                    "teddiebox: net the stored key was refused — trying the passphrase"
-                );
-                self.controller
-                    .set_config(&WifiConfig::Station(passphrase.first))?;
-                self.unhinted = passphrase.unhinted;
-                with = JoinedWith::Passphrase;
-                result = self.join().await;
-            }
+            esp_println::println!(
+                "teddiebox: net the stored key did not join — {error:?} — trying the passphrase"
+            );
+            self.controller
+                .set_config(&WifiConfig::Station(passphrase.first))?;
+            self.unhinted = passphrase.unhinted;
+            with = JoinedWith::Passphrase;
+            result = self.join().await;
         }
         let info = result?;
         *self.joined.borrow_mut() = Some(Joined {
