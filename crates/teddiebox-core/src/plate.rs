@@ -29,18 +29,24 @@ pub const ARRIVALS_TO_AGREE: u8 = 2;
 /// slightly late.
 pub const MISSES_TO_LEAVE: u8 = 4;
 
-/// How often the plate is read, empty or holding a figure.
+/// How often an empty plate is read.
 ///
-/// Four misses at this cadence is how long a lift takes to pause a story:
-/// 800 ms, chosen at the bench. The reader's field is on for the
-/// whole boot, so a faster cadence costs executor time rather than field
-/// time — about 12 ms per empty poll and 7 ms per occupied one, measured the
-/// same day.
+/// Half of how long a placement takes to be noticed. The reader's field is on
+/// for the whole boot, so a faster cadence costs executor time rather than
+/// field time — about 12 ms per empty poll, measured 2026-09-24.
 ///
 /// Not a free parameter even so: every poll transmits into the field, this
 /// pack has no protection circuit, and the one unexplained brownout in this
 /// project happened while transmitting into a coupled tag.
-pub const POLL_MS: u32 = 200;
+pub const EMPTY_POLL_MS: u32 = 200;
+
+/// How often a plate holding a figure is read.
+///
+/// Slower than an empty one because a figure on the plate is almost always a
+/// story playing: on 2026-09-24 a 200 ms cadence here cost 12 audible DMA
+/// restarts in 49 s of playback, against 4 in 47 s at this one. Four misses at this cadence is how long a
+/// lift takes to pause a story, about two seconds.
+pub const OCCUPIED_POLL_MS: u32 = 500;
 
 /// How soon a first reading of a figure is read again.
 ///
@@ -199,13 +205,15 @@ impl Presence {
 
     /// How long the reader should wait before its next reading.
     ///
-    /// Only a figure arriving on an empty plate is confirmed at once; every
-    /// other state is looked at on the ordinary cadence, which with
-    /// `misses_to_leave` also sets how long a lift takes to be noticed.
+    /// A figure arriving on an empty plate is confirmed at once. A plate
+    /// holding one — including one that may be being swapped — is read on
+    /// the occupied cadence, which with `misses_to_leave` also sets how long
+    /// a lift takes to be noticed.
     pub fn poll_again_in_ms(&self) -> u32 {
         match self.state {
             State::Arriving { seen, .. } if seen > 0 => CONFIRM_POLL_MS,
-            _ => POLL_MS,
+            State::Empty | State::Arriving { .. } => EMPTY_POLL_MS,
+            State::Present { .. } | State::Swapping { .. } => OCCUPIED_POLL_MS,
         }
     }
 
@@ -389,12 +397,15 @@ mod tests {
         assert_eq!(p.poll_again_in_ms(), 20);
     }
 
+    /// A figure on the plate is almost always a story playing, and on
+    /// 2026-09-24 reading it every 200 ms cost 12 audible DMA restarts in 49 s
+    /// of playback, against 4 in 47 s at 500 ms.
     #[test]
-    fn a_figure_on_the_plate_is_looked_at_every_200_ms() {
+    fn a_figure_on_the_plate_is_looked_at_every_500_ms() {
         let mut p = Presence::new(2, 4);
         p.feed(Some(A));
         p.feed(Some(A));
-        assert_eq!(p.poll_again_in_ms(), 200);
+        assert_eq!(p.poll_again_in_ms(), 500);
     }
 
     /// A swap is where a corrupt reading was measured, under radio traffic,
@@ -406,13 +417,13 @@ mod tests {
         p.feed(Some(A));
         p.feed(Some(A));
         p.feed(Some(B));
-        assert_eq!(p.poll_again_in_ms(), 200);
+        assert_eq!(p.poll_again_in_ms(), 500);
     }
 
     /// Lifting a figure pauses its story, so this is how long a child waits
     /// for the box to react to a lift.
     #[test]
-    fn a_lifted_figure_is_gone_after_800_ms_of_silence() {
+    fn a_lifted_figure_is_gone_after_2000_ms_of_silence() {
         let mut p = Presence::new(2, 4);
         p.feed(Some(A));
         p.feed(Some(A));
@@ -424,7 +435,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(silent_ms, 800);
+        assert_eq!(silent_ms, 2000);
     }
 
     /// A figure that displaces another mid-Arriving counts the displacing
