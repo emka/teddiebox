@@ -14,6 +14,7 @@ members = [
     "crates/teddiebox-ota",
     "crates/teddiebox-portal",
     "crates/teddiebox-taf",
+    "crates/teddiebox-wifikey",
     "crates/tlv320dac3100",
     "crates/trf7962a",
     "tools/fat-assumptions",

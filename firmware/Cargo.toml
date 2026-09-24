@@ -13,6 +13,7 @@ teddiebox-core = { path = "../crates/teddiebox-core" }
 teddiebox-board = { path = "../crates/teddiebox-board" }
 teddiebox-console = { path = "../crates/teddiebox-console" }
 teddiebox-identity = { path = "../crates/teddiebox-identity" }
+teddiebox-wifikey = { path = "../crates/teddiebox-wifikey" }
 lis3dh = { path = "../crates/lis3dh" }
 tlv320dac3100 = { path = "../crates/tlv320dac3100" }
 esp-hal = { version = "1.2.0-rc.0", features = ["esp32s3", "unstable", "rt"] }
