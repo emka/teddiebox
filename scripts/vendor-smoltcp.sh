@@ -31,7 +31,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 patch_file="$root/scripts/smoltcp-per-address-arp.patch"
 dest="$root/firmware/vendor/smoltcp"
 stamp="$dest/.teddiebox-vendor-stamp"
-want="$VERSION $CKSUM $(sha256sum "$patch_file" | cut -d' ' -f1) standalone"
+want="$VERSION $CKSUM $(sha256sum "$patch_file" | cut -d' ' -f1) standalone quiet"
 
 # Idempotent: every build runs this, and only the first one after the patch
 # changes does any work.
@@ -65,6 +65,13 @@ patch --quiet --forward -p1 -d "$work/smoltcp-$VERSION" < "$patch_file"
 # a package that is not their member. As a path dependency of the firmware it
 # is unaffected — cargo ignores a dependency's `[workspace]` table.
 printf '\n[workspace]\n' >> "$work/smoltcp-$VERSION/Cargo.toml"
+
+# A path dependency is built as local code, so its lints are no longer capped
+# the way a registry crate's are, and every firmware build would print the
+# thirteen warnings this feature set leaves in smoltcp (unused imports and
+# variables behind features the box does not enable). They are upstream's,
+# not ours to act on.
+printf '\n[lints.rust]\nwarnings = "allow"\n' >> "$work/smoltcp-$VERSION/Cargo.toml"
 
 rm -rf "$dest"
 mkdir -p "$(dirname "$dest")"
