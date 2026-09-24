@@ -3440,14 +3440,28 @@ async fn bring_up(
 
     let seed = net::seed();
 
-    let (mut session, mut link) = match radio.acquire(&config, seed) {
+    let stored = wifikey::key_for(&config.ssid, &config.password);
+    let key = match &stored {
+        Some(hex) => core::str::from_utf8(hex).expect("hex is ASCII"),
+        None => config.password.as_str(),
+    };
+
+    let (mut session, mut link) = match radio.acquire(&config, key, seed) {
         Ok(pair) => pair,
         Err(e) => {
             esp_println::println!("teddiebox: net could not power the radio — {e:?}");
             return Some(Unavailable::Unreachable);
         }
     };
-    esp_println::println!("teddiebox: net associating with {}", config.ssid);
+    esp_println::println!(
+        "teddiebox: net associating with {}{}",
+        config.ssid,
+        if stored.is_some() {
+            " using the stored key"
+        } else {
+            ""
+        }
+    );
 
     // Association is mostly waiting on the access point, so the key's one-off
     // setup runs inside it rather than inside the first handshake — once the
@@ -3491,7 +3505,9 @@ async fn bring_up(
                 Unavailable::Unreachable
             });
         }
-        Either::Second(Ok(())) => wifikey::passphrase_joined(),
+        // Only a join that used the passphrase proves it worth keeping.
+        Either::Second(Ok(())) if stored.is_none() => wifikey::passphrase_joined(),
+        Either::Second(Ok(())) => {}
     }
     esp_println::println!("teddiebox: net associated — asking for an address");
 

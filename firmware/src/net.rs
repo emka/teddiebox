@@ -229,9 +229,15 @@ impl<'d> Radio<'d> {
     /// `seed` must differ between boots — it seeds the stack's port and
     /// transaction identifiers — and comes from the caller because this module
     /// does not own an entropy source.
+    ///
+    /// `key` is either `config`'s passphrase or the key derived from it, as
+    /// 64 hex characters, which the driver takes as the key itself: a join
+    /// took 64–72 ms with it against 1.81 s with the passphrase, measured
+    /// 2026-09-24. Which one is the caller's business, like the credentials.
     pub fn acquire(
         &mut self,
         config: &Config,
+        key: &str,
         seed: u64,
     ) -> Result<(Session<'_>, Link<'_>), Error> {
         // WPA2-Personal is a *minimum* threshold rather than an exact mode, so
@@ -240,7 +246,7 @@ impl<'d> Radio<'d> {
         let station = StationConfig::default()
             .with_ssid(Ssid::try_from(config.ssid.as_str())?)
             .with_authentication(AuthenticationMethodConfig::Wpa2Personal(
-                Password::try_from(config.password.as_str())?,
+                Password::try_from(key)?,
             ));
         let hinted = self
             .joined
