@@ -16,6 +16,7 @@ mod sleep;
 mod stack;
 mod storage;
 mod tls;
+mod wifikey;
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU32, AtomicU8, Ordering};
@@ -4548,6 +4549,7 @@ async fn main(spawner: Spawner) {
     // identity. Inert today — the portal makes no outbound TLS connection —
     // but it is a real narrowing, and this is the only place it is recorded.
     identity::load();
+    wifikey::load();
 
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
     // was configured for. The SD card is SPI2 on CLK 35, MOSI 38, MISO 36 with

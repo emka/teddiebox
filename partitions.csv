@@ -44,6 +44,12 @@
 # `flash_read_encrypted`. The firmware not writing here is a property of the
 # firmware, not of this line.
 #
+# `wifi` holds the WPA2 key derived from the card's SSID and passphrase, so a
+# join skips the 1.75 s the driver spends deriving it (measured 2026-09-24:
+# 1.81 s a join with the passphrase, 64-72 ms with the key). Unlike `cert`,
+# the firmware writes this one, once per change of credentials. One sector,
+# above `cert`, so again nothing moved.
+#
 # Name,     Type, SubType, Offset,   Size
 nvs,        data, nvs,     0x9000,   0x4000
 otadata,    data, ota,     0xd000,   0x2000
@@ -51,3 +57,4 @@ phy_init,   data, phy,     0xf000,   0x1000
 ota_0,      app,  ota_0,   0x10000,  0x300000
 ota_1,      app,  ota_1,   0x310000, 0x300000
 cert,       data, undefined, 0x610000, 0x4000
+wifi,       data, undefined, 0x614000, 0x1000

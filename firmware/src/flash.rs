@@ -57,7 +57,8 @@ impl core::ops::DerefMut for Flash {
 /// Callers are the first line of `main` ([`crate::ota::confirm_boot_or_revert`]),
 /// the main loop's confirmation check ([`crate::ota::mark_valid`]), the
 /// console's OTA commands ([`crate::ota::status`], [`crate::ota::write_probe`],
-/// [`crate::ota::arm_boot`]), and [`crate::identity::load`] once at boot —
+/// [`crate::ota::arm_boot`]), [`crate::identity::load`] and
+/// [`crate::wifikey::load`] once at boot —
 /// all in the same task, each finishing with the handle before the next asks
 /// for it.
 pub(crate) fn flash() -> Flash {
