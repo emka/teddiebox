@@ -2067,16 +2067,6 @@ static PENDING_PLACE: CsMutex<RefCell<PendingPlace>> =
 /// starts after one a figure started must not inherit the figure's place.
 static PLAY_FROM: CsMutex<RefCell<Position>> = CsMutex::new(RefCell::new(Position::Start));
 
-/// How often the reader looks, when it is looking at all — counted in the
-/// `nfc_reader` loop's existing 100 ms ticks, so five is half a second.
-///
-/// Provisional and uncalibrated. Not a free parameter: every poll is a full
-/// transaction with the field up, this pack has no protection circuit, and the
-/// one unexplained brownout in this project happened while transmitting into a
-/// coupled tag. A poller is the first thing that transmits on a schedule
-/// rather than when a person asks.
-const PLATE_POLL_TICKS: u8 = 5;
-
 /// The language this box speaks, from `TEDDIEBOX_LANGUAGE` in `.envrc.local`.
 ///
 /// Chosen at build time rather than read off the card: it is a property of the
@@ -4056,7 +4046,9 @@ async fn nfc_reader(
     // Whether polling was on last time round, so switching it on can start
     // from a clean sheet. See where it is used.
     let mut was_polling = false;
-    let mut ticks_since_poll: u8 = 0;
+    // When the plate is next read. Held as a time rather than counted in
+    // passes of this loop, because a pass is only nominally 100 ms.
+    let mut next_poll = Instant::now();
     // Consecutive unanswered polls against a figure believed present.
     let mut misses: u16 = 0;
     // Whether the last poll found a figure. Chooses which question the next
@@ -4173,95 +4165,100 @@ async fn nfc_reader(
             presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
             believed_present = false;
             misses = 0;
+            next_poll = Instant::now();
         }
         was_polling = polling;
 
-        if polling {
-            ticks_since_poll = ticks_since_poll.saturating_add(1);
-            if ticks_since_poll >= PLATE_POLL_TICKS {
-                ticks_since_poll = 0;
+        if polling && Instant::now() >= next_poll {
+            let password = NFC_PASSWORD.load(Ordering::Relaxed);
 
-                let password = NFC_PASSWORD.load(Ordering::Relaxed);
-
-                // Which question is cheap depends on what was there last time,
-                // and the difference is not small: measured on 2026-09-07, a
-                // poller that always asked the full question cost 49 DMA
-                // restarts in 70 s of playback against 0 with polling off,
-                // because every unanswered exchange blocks this task for the
-                // whole `IRQ_POLL_ATTEMPTS` window.
-                let seen = if believed_present {
-                    // A figure identified once stays out of privacy mode until
-                    // its field is cycled, so a plain inventory answers on the
-                    // first try. It also re-reads the UID, which is what
-                    // notices one figure being swapped for another.
-                    reader.identify()
-                } else if reader.tag_present() {
-                    // Something is there but has not been identified yet. This
-                    // is the only poll that pays for the password exchange.
-                    reader.inventory_unlocked(password)
-                } else {
-                    // The state the box sits in almost all the time: one
-                    // unanswered exchange and nothing else.
-                    None
-                };
-                // How many polls in a row have found nothing. `MISSES_TO_LEAVE`
-                // turns four of these into a departure, and on 2026-09-07 the
-                // radio produced 23 false departures in ten minutes — so
-                // whether the misses come in ones and twos or in long runs
-                // decides whether tolerating more of them is a fix or a
-                // plaster.
-                //
-                // Counted on `seen` alone, deliberately. An earlier version of
-                // this gated the count on `believed_present`, which is the
-                // *previous* poll's answer and is already false by the second
-                // miss — so it could never count past one, which was the whole
-                // question. A miss is a poll that saw nothing, whatever the
-                // poller expected to see.
-                if seen.is_none() {
-                    misses = misses.saturating_add(1);
-                } else {
-                    if misses > 0 {
-                        esp_println::println!(
-                            "teddiebox: plate answered again after {misses} missed polls"
-                        );
-                    }
-                    misses = 0;
+            // Which question is cheap depends on what was there last time,
+            // and the difference is not small: measured on 2026-09-07, a
+            // poller that always asked the full question cost 49 DMA
+            // restarts in 70 s of playback against 0 with polling off,
+            // because every unanswered exchange blocks this task for the
+            // whole `IRQ_POLL_ATTEMPTS` window.
+            let seen = if believed_present {
+                // A figure identified once stays out of privacy mode until
+                // its field is cycled, so a plain inventory answers on the
+                // first try. It also re-reads the UID, which is what
+                // notices one figure being swapped for another.
+                reader.identify()
+            } else if reader.tag_present() {
+                // Something is there but has not been identified yet. This
+                // is the only poll that pays for the password exchange.
+                reader.inventory_unlocked(password)
+            } else {
+                // The state the box sits in almost all the time: one
+                // unanswered exchange and nothing else.
+                None
+            };
+            // How many polls in a row have found nothing. `MISSES_TO_LEAVE`
+            // turns four of these into a departure, and on 2026-09-07 the
+            // radio produced 23 false departures in ten minutes — so
+            // whether the misses come in ones and twos or in long runs
+            // decides whether tolerating more of them is a fix or a
+            // plaster.
+            //
+            // Counted on `seen` alone, deliberately. An earlier version of
+            // this gated the count on `believed_present`, which is the
+            // *previous* poll's answer and is already false by the second
+            // miss — so it could never count past one, which was the whole
+            // question. A miss is a poll that saw nothing, whatever the
+            // poller expected to see.
+            if seen.is_none() {
+                misses = misses.saturating_add(1);
+            } else {
+                if misses > 0 {
+                    esp_println::println!(
+                        "teddiebox: plate answered again after {misses} missed polls"
+                    );
                 }
-                believed_present = seen.is_some();
+                misses = 0;
+            }
+            believed_present = seen.is_some();
 
-                if let Some(event) = presence.feed(seen.map(TagUid)) {
-                    // The poller's own view of the plate, which until now was
-                    // visible only through whatever the reducer decided to do
-                    // about it: a tag lost while nothing was playing left no
-                    // trace at all.
-                    match event {
-                        TagEvent::Arrived(TagUid(uid)) => esp_println::println!(
-                            "teddiebox: plate tag arrived {:016X}",
-                            TagUid(uid).ruid()
-                        ),
-                        TagEvent::Left => esp_println::println!(
-                            "teddiebox: plate tag left after {misses} missed polls"
-                        ),
+            let event = presence.feed(seen.map(TagUid));
+            next_poll =
+                Instant::now() + Duration::from_millis(u64::from(presence.poll_again_in_ms()));
+            if let Some(event) = event {
+                // The poller's own view of the plate, which until now was
+                // visible only through whatever the reducer decided to do
+                // about it: a tag lost while nothing was playing left no
+                // trace at all.
+                match event {
+                    TagEvent::Arrived(TagUid(uid)) => esp_println::println!(
+                        "teddiebox: plate tag arrived {:016X}",
+                        TagUid(uid).ruid()
+                    ),
+                    TagEvent::Left => esp_println::println!(
+                        "teddiebox: plate tag left after {misses} missed polls"
+                    ),
+                }
+                match event {
+                    TagEvent::Arrived(TagUid(uid)) => {
+                        // Read the token in the same session that found
+                        // the tag: it is only readable while the figure
+                        // is on the plate and unlocked, and it is needed
+                        // when teddyCloud has to go upstream for the
+                        // story.
+                        let token = reader.read_token();
+                        PLATE_TAG.signal(Seen::Figure { uid, token });
                     }
-                    match event {
-                        TagEvent::Arrived(TagUid(uid)) => {
-                            // Read the token in the same session that found
-                            // the tag: it is only readable while the figure
-                            // is on the plate and unlocked, and it is needed
-                            // when teddyCloud has to go upstream for the
-                            // story.
-                            let token = reader.read_token();
-                            PLATE_TAG.signal(Seen::Figure { uid, token });
-                        }
-                        TagEvent::Left => PLATE_TAG.signal(Seen::Nothing),
-                    }
+                    TagEvent::Left => PLATE_TAG.signal(Seen::Nothing),
                 }
             }
-        } else {
-            ticks_since_poll = 0;
         }
 
-        Timer::after(Duration::from_millis(100)).await;
+        // Console requests are still answered within 100 ms; the plate is
+        // read when `presence` asked for it, which can be sooner.
+        let console_due = Instant::now() + Duration::from_millis(100);
+        Timer::at(if polling {
+            next_poll.min(console_due)
+        } else {
+            console_due
+        })
+        .await;
     }
 }
 

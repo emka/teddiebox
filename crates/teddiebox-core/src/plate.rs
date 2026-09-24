@@ -29,6 +29,20 @@ pub const ARRIVALS_TO_AGREE: u8 = 2;
 /// slightly late.
 pub const MISSES_TO_LEAVE: u8 = 4;
 
+/// How often the plate is read, empty or holding a figure.
+///
+/// Provisional and uncalibrated. Not a free parameter: every poll is a full
+/// transaction with the field up, this pack has no protection circuit, and the
+/// one unexplained brownout in this project happened while transmitting into a
+/// coupled tag.
+pub const POLL_MS: u32 = 500;
+
+/// How soon a first reading of a figure is read again.
+///
+/// The second reading is what guards against a corrupt one; waiting a whole
+/// poll for it guards against nothing and cost 507 ms per placement.
+pub const CONFIRM_POLL_MS: u32 = 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagEvent {
     Arrived(TagUid),
@@ -175,6 +189,18 @@ impl Presence {
                     None
                 }
             }
+        }
+    }
+
+    /// How long the reader should wait before its next reading.
+    ///
+    /// Only a figure arriving on an empty plate is confirmed at once; every
+    /// other state is looked at on the ordinary cadence, which with
+    /// `misses_to_leave` also sets how long a lift takes to be noticed.
+    pub fn poll_again_in_ms(&self) -> u32 {
+        match self.state {
+            State::Arriving { seen, .. } if seen > 0 => CONFIRM_POLL_MS,
+            _ => POLL_MS,
         }
     }
 
@@ -338,6 +364,62 @@ mod tests {
         assert_eq!(p.feed(None), None);
         assert_eq!(p.feed(None), None);
         assert_eq!(p.feed(None), None);
+    }
+
+    /// An empty plate is where every placement starts, so how often it is
+    /// looked at is half of how long a placement takes to be noticed.
+    #[test]
+    fn an_empty_plate_is_looked_at_every_500_ms() {
+        let p = Presence::new(2, 4);
+        assert_eq!(p.poll_again_in_ms(), 500);
+    }
+
+    /// Measured 2026-09-24: waiting a whole poll for the second reading was
+    /// 507 of the ~675 ms between first reading a figure and its story
+    /// starting. The second reading is the protection; the wait is not.
+    #[test]
+    fn a_first_reading_is_confirmed_at_once() {
+        let mut p = Presence::new(2, 4);
+        p.feed(Some(A));
+        assert_eq!(p.poll_again_in_ms(), 20);
+    }
+
+    #[test]
+    fn a_figure_on_the_plate_is_looked_at_every_500_ms() {
+        let mut p = Presence::new(2, 4);
+        p.feed(Some(A));
+        p.feed(Some(A));
+        assert_eq!(p.poll_again_in_ms(), 500);
+    }
+
+    /// A swap is where a corrupt reading was measured, under radio traffic,
+    /// so it is not hurried: a second reading taken at once is more likely to
+    /// share whatever corrupted the first.
+    #[test]
+    fn a_possible_swap_is_not_confirmed_at_once() {
+        let mut p = Presence::new(2, 4);
+        p.feed(Some(A));
+        p.feed(Some(A));
+        p.feed(Some(B));
+        assert_eq!(p.poll_again_in_ms(), 500);
+    }
+
+    /// Lifting a figure pauses its story, so this is how long a child waits
+    /// for the box to react to a lift.
+    #[test]
+    fn a_lifted_figure_is_gone_after_2000_ms_of_silence() {
+        let mut p = Presence::new(2, 4);
+        p.feed(Some(A));
+        p.feed(Some(A));
+
+        let mut silent_ms = 0;
+        loop {
+            silent_ms += p.poll_again_in_ms();
+            if p.feed(None) == Some(TagEvent::Left) {
+                break;
+            }
+        }
+        assert_eq!(silent_ms, 2000);
     }
 
     /// A figure that displaces another mid-Arriving counts the displacing
