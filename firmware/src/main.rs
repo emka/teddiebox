@@ -3422,9 +3422,31 @@ async fn bring_up(
     };
     esp_println::println!("teddiebox: net associating with {}", config.ssid);
 
+    // Association is mostly waiting on the access point, so the key's one-off
+    // setup runs inside it rather than inside the first handshake — once the
+    // request is out, which is what the yield is for. See `tls::Client::warm`.
+    //
+    // Not while audio plays: the setup holds this executor for up to 3.5 s
+    // while the radio competes for the CPU (measured), which the decoder
+    // cannot ride out. Skipped, the first handshake pays it as it always did.
+    let associate = async {
+        let (connected, ()) = embassy_futures::join::join(session.connect(), async {
+            embassy_futures::yield_now().await;
+            match tls {
+                Some(tls) if !PLAYING.load(Ordering::Relaxed) => tls.warm(),
+                Some(_) => {
+                    esp_println::println!("teddiebox: tls not warming the key during playback")
+                }
+                None => {}
+            }
+        })
+        .await;
+        connected
+    };
+
     // The runner has to be polled throughout, not awaited first: it never
     // returns, and nothing else here makes progress without it.
-    match select(link.run(), session.connect()).await {
+    match select(link.run(), associate).await {
         Either::First(_) => unreachable!("the runner never returns"),
         Either::Second(Err(e)) => {
             // The console keeps the driver's own reason; the reducer gets the

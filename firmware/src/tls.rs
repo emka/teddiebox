@@ -340,6 +340,7 @@ pub fn init(sha: SHA<'static>, rsa: RSA<'static>, aes: AES<'static>) -> Option<C
     Some(Client {
         tls: TLS.try_init(tls)?.reference(),
         credentials: RefCell::new(None),
+        warmed: core::cell::Cell::new(false),
     })
 }
 
@@ -363,6 +364,8 @@ pub struct Client {
     /// before `identity::load` has run, and a key that was not there yet must
     /// not be remembered as absent.
     credentials: RefCell<Option<Credentials<'static>>>,
+    /// Whether the parsed key has had its first private operation.
+    warmed: core::cell::Cell<bool>,
 }
 
 impl Client {
@@ -373,6 +376,35 @@ impl Client {
             *held = parse_credentials();
         }
         held.clone()
+    }
+
+    /// Does the first private-key operation now, so no handshake has to.
+    ///
+    /// That first operation sets up RSA blinding: 1.36 s of CPU on the box,
+    /// measured, which blocks everything else on this executor while it runs.
+    /// The net task calls this while the radio associates, which takes about
+    /// three seconds that it spends waiting anyway. Once per boot; a box with
+    /// no identity yet has nothing to warm and tries again next time.
+    pub fn warm(&self) {
+        if self.warmed.get() {
+            return;
+        }
+        let Some(credentials) = self.credentials() else {
+            return;
+        };
+        let started = Instant::now();
+        match credentials.private_key.warm(self.tls) {
+            Ok(()) => {
+                self.warmed.set(true);
+                esp_println::println!(
+                    "teddiebox: tls key warmed in {} ms",
+                    started.elapsed().as_millis()
+                );
+            }
+            // The handshake does the same work and reports its own failure,
+            // so this is only worth a line on the console.
+            Err(e) => esp_println::println!("teddiebox: tls could not warm the key — {e:?}"),
+        }
     }
 }
 

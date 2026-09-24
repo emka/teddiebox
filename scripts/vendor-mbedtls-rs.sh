@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Materialises `firmware/vendor/mbedtls-rs`: the published crate, with one
-# call added.
+# call added and one method (`PrivateKey::warm`, at the end of this script).
 #
 # `mbedtls-rs` 0.2.0 never calls `mbedtls_ssl_conf_max_frag_len`, and keeps the
 # `mbedtls_ssl_config` it builds private, so a downstream crate cannot reach it
@@ -42,7 +42,7 @@ CKSUM="7ffe70b1a677b6efabede0d8e762f6187e66bff5118814aee2dcbfefad187add"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="$root/firmware/vendor/mbedtls-rs"
 stamp="$dest/.teddiebox-vendor-stamp"
-want="$VERSION $CKSUM max-frag-len-2048"
+want="$VERSION $CKSUM max-frag-len-2048 warm"
 
 # Idempotent: every build runs this, and only the first one does any work.
 if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ]; then
@@ -100,6 +100,62 @@ added = anchor + """
         //
         // The constants are plain `#define`s the bindings do not re-export.
         merr!(unsafe { mbedtls_ssl_conf_max_frag_len(&mut *ssl_config, 3) })?;
+"""
+
+path.write_text(source.replace(anchor, added))
+PATCH
+
+# `PrivateKey::warm`: one private-key operation on a throwaway digest, so the
+# first handshake after boot does not pay for RSA blinding setup. mbedtls sets
+# that up on the first private operation of a freshly parsed key, with a
+# constant-time modular inverse in software — 1.36 s on the box, measured, in
+# a handshake call that does not yield. The firmware calls this while the
+# radio associates, which it spends waiting anyway. The crate keeps the parsed
+# key's context private, so the call has to be added here.
+python3 - "$work/mbedtls-rs-$VERSION/src/cert.rs" <<'PATCH'
+import sys, pathlib
+
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+
+anchor = """pub struct PrivateKey(pub(crate) MRc<mbedtls_pk_context>);
+
+impl PrivateKey {
+"""
+if source.count(anchor) != 1:
+    sys.exit(f"expected exactly one `impl PrivateKey` in src/cert.rs, found {source.count(anchor)}")
+
+added = anchor + """    /// teddiebox: performs one private-key operation and discards it.
+    ///
+    /// mbedtls sets up RSA blinding on the first private operation of a
+    /// freshly parsed key, and later operations on the same context only
+    /// update it. Calling this ahead of a handshake moves that setup out of
+    /// the handshake. The `TlsReference` is proof that the RNG this draws on
+    /// has been registered.
+    pub fn warm(&self, _tls: crate::TlsReference<'_>) -> Result<(), MbedtlsError> {
+        let digest = [0x5au8; 32];
+        let mut signature = [0u8; 512];
+        let mut written = 0usize;
+        // SAFETY: the context was parsed by `new` and is only read and
+        // updated (its blinding values) by mbedtls here; the buffers outlive
+        // the call. `mbedtls_rng` ignores its parameter and draws on the RNG
+        // `Tls::new` registered, which `_tls` proves exists.
+        merr!(unsafe {
+            mbedtls_pk_sign(
+                core::ptr::addr_of!(*self.0) as *mut mbedtls_pk_context,
+                mbedtls_md_type_t_MBEDTLS_MD_SHA256,
+                digest.as_ptr(),
+                digest.len(),
+                signature.as_mut_ptr(),
+                signature.len(),
+                &mut written,
+                Some(crate::mbedtls_rng),
+                core::ptr::null_mut(),
+            )
+        })?;
+        Ok(())
+    }
+
 """
 
 path.write_text(source.replace(anchor, added))
