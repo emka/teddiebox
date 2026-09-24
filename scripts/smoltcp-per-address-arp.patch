@@ -5,6 +5,10 @@ cache for a second after any ARP/NDP request, so resolving the gateway (for
 DNS) holds back resolving a server on the same link. On the box that was
 1.03 s of every first connection after association, measured 2026-09-24.
 
+Each recently asked address keeps its own second of silence, so asking about
+one neighbor never lifts another's. When more are pending than the cache has
+room for, every unknown neighbor waits, as upstream does for all of them.
+
 diff -ruN -x target -x Cargo.lock a/src/iface/interface/mod.rs b/src/iface/interface/mod.rs
 --- a/src/iface/interface/mod.rs
 +++ b/src/iface/interface/mod.rs
@@ -20,33 +24,41 @@ diff -ruN -x target -x Cargo.lock a/src/iface/interface/mod.rs b/src/iface/inter
 diff -ruN -x target -x Cargo.lock a/src/iface/neighbor.rs b/src/iface/neighbor.rs
 --- a/src/iface/neighbor.rs
 +++ b/src/iface/neighbor.rs
-@@ -45,7 +45,10 @@
+@@ -45,7 +45,13 @@
  #[derive(Debug)]
  pub struct Cache {
      storage: LinearMap<IpAddress, Neighbor, IFACE_NEIGHBOR_CACHE_COUNT>,
 -    silent_until: Instant,
-+    /// The neighbor most recently asked about, and until when it may not be
-+    /// asked about again. Per address, so that resolving one neighbor never
-+    /// holds back the resolution of another.
-+    silent: Option<(IpAddress, Instant)>,
++    /// Neighbors recently asked about, and until when each may not be asked
++    /// about again. Per address, so that resolving one neighbor never holds
++    /// back the resolution of another.
++    silent: LinearMap<IpAddress, Instant, IFACE_NEIGHBOR_CACHE_COUNT>,
++    /// Set when `silent` has no room left: until then every neighbor not in
++    /// the cache is rate-limited, as it would be without per-address silence.
++    silent_all_until: Instant,
  }
  
  impl Cache {
-@@ -59,7 +62,7 @@
+@@ -59,7 +65,8 @@
      pub fn new() -> Self {
          Self {
              storage: LinearMap::new(),
 -            silent_until: Instant::from_millis(0),
-+            silent: None,
++            silent: LinearMap::new(),
++            silent_all_until: Instant::from_millis(0),
          }
      }
  
-@@ -158,15 +161,15 @@
+@@ -158,15 +165,23 @@
              return Answer::Found(hardware_addr);
          }
  
 -        if timestamp < self.silent_until {
-+        if matches!(self.silent, Some((addr, until)) if addr == *protocol_addr && timestamp < until) {
++        let silenced = match self.silent.get(protocol_addr) {
++            Some(&until) => timestamp < until,
++            None => false,
++        };
++        if silenced || timestamp < self.silent_all_until {
              Answer::RateLimited
          } else {
              Answer::NotFound
@@ -56,11 +68,15 @@ diff -ruN -x target -x Cargo.lock a/src/iface/neighbor.rs b/src/iface/neighbor.r
 -    pub(crate) fn limit_rate(&mut self, timestamp: Instant) {
 -        self.silent_until = timestamp + Self::SILENT_TIME;
 +    pub(crate) fn limit_rate(&mut self, protocol_addr: IpAddress, timestamp: Instant) {
-+        self.silent = Some((protocol_addr, timestamp + Self::SILENT_TIME));
++        let until = timestamp + Self::SILENT_TIME;
++        self.silent.retain(|_, expires| timestamp < *expires);
++        if self.silent.insert(protocol_addr, until).is_err() {
++            self.silent_all_until = until;
++        }
      }
  
      pub(crate) fn flush(&mut self) {
-@@ -305,7 +308,7 @@
+@@ -305,7 +320,7 @@
              Answer::NotFound
          );
  
@@ -69,7 +85,7 @@ diff -ruN -x target -x Cargo.lock a/src/iface/neighbor.rs b/src/iface/neighbor.r
          assert_eq!(
              cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(100)),
              Answer::RateLimited
-@@ -315,6 +318,21 @@
+@@ -315,6 +330,57 @@
              Answer::NotFound
          );
      }
@@ -85,6 +101,42 @@ diff -ruN -x target -x Cargo.lock a/src/iface/neighbor.rs b/src/iface/neighbor.r
 +        cache.limit_rate(MOCK_IP_ADDR_1.into(), Instant::from_millis(0));
 +        assert_eq!(
 +            cache.lookup(&MOCK_IP_ADDR_2.into(), Instant::from_millis(100)),
++            Answer::NotFound
++        );
++    }
++
++    /// Asking about another neighbor must not lift the silence on the first:
++    /// alternating between two unresolved addresses would otherwise send a
++    /// request on every lookup.
++    #[test]
++    fn test_hush_outlives_asking_about_another() {
++        let mut cache = Cache::new();
++
++        cache.limit_rate(MOCK_IP_ADDR_1.into(), Instant::from_millis(0));
++        cache.limit_rate(MOCK_IP_ADDR_2.into(), Instant::from_millis(100));
++        assert_eq!(
++            cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(200)),
++            Answer::RateLimited
++        );
++    }
++
++    /// With more neighbors pending than there is room to remember, every
++    /// unknown neighbor waits, as it did before silence was per address.
++    #[cfg(feature = "proto-ipv4")]
++    #[test]
++    fn test_hush_everyone_when_full() {
++        use crate::wire::Ipv4Address;
++        let mut cache = Cache::new();
++
++        for i in 0..=IFACE_NEIGHBOR_CACHE_COUNT as u8 {
++            cache.limit_rate(Ipv4Address::new(10, 0, 0, i).into(), Instant::from_millis(0));
++        }
++        assert_eq!(
++            cache.lookup(&Ipv4Address::new(10, 0, 1, 1).into(), Instant::from_millis(100)),
++            Answer::RateLimited
++        );
++        assert_eq!(
++            cache.lookup(&Ipv4Address::new(10, 0, 1, 1).into(), Instant::from_millis(1000)),
 +            Answer::NotFound
 +        );
 +    }
