@@ -592,12 +592,10 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
 
     esp_println::println!("teddiebox: LIS3DH at {address:#04x}");
     let mut accel = Lis3dh::new(bus, address);
-    let mut since_report = ACCEL_REPORT_EVERY;
-    // Starts full, not zero like `since_report`: the first pass should read
-    // the register rather than wait three, so a box that boots with a jack
-    // already in does not spend ~600 ms with `HEADPHONES_IN` still saying
-    // nothing is plugged in — the codec bring-up that follows this task reads
-    // that static.
+    // Starts full: the first pass should read the register rather than wait
+    // three, so a box that boots with a jack already in does not spend ~600 ms
+    // with `HEADPHONES_IN` still saying nothing is plugged in — the codec
+    // bring-up that follows this task reads that static.
     let mut since_detect: u32 = HEADSET_DETECT_EVERY;
     // Starts in agreement with `HEADPHONES_IN`, so a box that boots with
     // nothing plugged in raises no event at all. Kept here rather than read
@@ -941,17 +939,6 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             }
         }
 
-        // Polled often so a shutdown or a re-init is not held up by an
-        // accelerometer nap, but printed rarely: this console is the only
-        // user interface the box has, and a reading every 200 ms buries
-        // everything else on it.
-        if since_report >= ACCEL_REPORT_EVERY {
-            since_report = 0;
-            match accel.acceleration() {
-                Ok([x, y, z]) => esp_println::println!("teddiebox: accel {x} {y} {z}"),
-                Err(_) => esp_println::println!("teddiebox: LIS3DH read failed"),
-            }
-        }
         since_detect += 1;
         if since_detect >= HEADSET_DETECT_EVERY {
             since_detect = 0;
@@ -1001,7 +988,6 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             }
         }
 
-        since_report += 1;
         Timer::after(Duration::from_millis(ACCEL_POLL_MS)).await;
     }
 }
@@ -1031,8 +1017,6 @@ where
 /// Short because this loop is also where a shutdown and a codec re-init are
 /// noticed, and a reboot waiting on a two-second nap feels broken.
 const ACCEL_POLL_MS: u64 = 200;
-/// One reading printed per ten polls, so the console stays legible.
-const ACCEL_REPORT_EVERY: u32 = 10;
 
 /// `CLICK_THS`, live so the bench can sweep it without a reflash.
 ///
