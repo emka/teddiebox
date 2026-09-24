@@ -8,3 +8,4 @@
 //! change.
 
 pub mod psk;
+pub mod record;
