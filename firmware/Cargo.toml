@@ -207,5 +207,12 @@ mbedtls-rs-sys = { path = "vendor/mbedtls-rs-sys" }
 # Drop this line once mbedtls-rs exposes the setting.
 mbedtls-rs = { path = "vendor/mbedtls-rs" }
 
+# smoltcp 0.13.1 silences its whole neighbor cache for a second after any ARP
+# request, so resolving the gateway for DNS held back resolving teddyCloud on
+# the same link: 1.03 s of every first connection. `scripts/vendor-smoltcp.sh`
+# applies `scripts/smoltcp-per-address-arp.patch`, which makes the silence per
+# address. Drop this line once upstream smoltcp does the same.
+smoltcp = { path = "vendor/smoltcp" }
+
 [profile.release]
 opt-level = "s"

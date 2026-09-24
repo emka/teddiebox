@@ -23,8 +23,11 @@ lint: vendor
     # There is nothing under cfg(test) in firmware/ to lint anyway.
     cd firmware && cargo clippy --workspace -- -D warnings
 
-test:
+test: vendor
     cargo test --workspace
+    # The one change carried in the vendored smoltcp, under smoltcp's own
+    # tests, so the patch cannot drift from what it claims.
+    cargo test --quiet --manifest-path firmware/vendor/smoltcp/Cargo.toml --target-dir target/vendor-smoltcp --lib iface::neighbor
 
 # The bench scripts' own self-tests
 #
@@ -99,6 +102,7 @@ firmware-release: vendor
 vendor:
     ./scripts/vendor-mbedtls-rs-sys.sh
     ./scripts/vendor-mbedtls-rs.sh
+    ./scripts/vendor-smoltcp.sh
 
 # put the box in download mode, flash it, and start it again
 #

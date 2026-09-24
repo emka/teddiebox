@@ -1,0 +1,93 @@
+smoltcp 0.13.1: rate-limit neighbor discovery per address, not cache-wide.
+
+Applied by scripts/vendor-smoltcp.sh. Upstream silences the whole neighbor
+cache for a second after any ARP/NDP request, so resolving the gateway (for
+DNS) holds back resolving a server on the same link. On the box that was
+1.03 s of every first connection after association, measured 2026-09-24.
+
+diff -ruN -x target -x Cargo.lock a/src/iface/interface/mod.rs b/src/iface/interface/mod.rs
+--- a/src/iface/interface/mod.rs
++++ b/src/iface/interface/mod.rs
+@@ -1181,7 +1181,7 @@
+         }
+ 
+         // The request got dispatched, limit the rate on the cache.
+-        self.neighbor_cache.limit_rate(self.now);
++        self.neighbor_cache.limit_rate(dst_addr, self.now);
+         Err(DispatchError::NeighborPending)
+     }
+ 
+diff -ruN -x target -x Cargo.lock a/src/iface/neighbor.rs b/src/iface/neighbor.rs
+--- a/src/iface/neighbor.rs
++++ b/src/iface/neighbor.rs
+@@ -45,7 +45,10 @@
+ #[derive(Debug)]
+ pub struct Cache {
+     storage: LinearMap<IpAddress, Neighbor, IFACE_NEIGHBOR_CACHE_COUNT>,
+-    silent_until: Instant,
++    /// The neighbor most recently asked about, and until when it may not be
++    /// asked about again. Per address, so that resolving one neighbor never
++    /// holds back the resolution of another.
++    silent: Option<(IpAddress, Instant)>,
+ }
+ 
+ impl Cache {
+@@ -59,7 +62,7 @@
+     pub fn new() -> Self {
+         Self {
+             storage: LinearMap::new(),
+-            silent_until: Instant::from_millis(0),
++            silent: None,
+         }
+     }
+ 
+@@ -158,15 +161,15 @@
+             return Answer::Found(hardware_addr);
+         }
+ 
+-        if timestamp < self.silent_until {
++        if matches!(self.silent, Some((addr, until)) if addr == *protocol_addr && timestamp < until) {
+             Answer::RateLimited
+         } else {
+             Answer::NotFound
+         }
+     }
+ 
+-    pub(crate) fn limit_rate(&mut self, timestamp: Instant) {
+-        self.silent_until = timestamp + Self::SILENT_TIME;
++    pub(crate) fn limit_rate(&mut self, protocol_addr: IpAddress, timestamp: Instant) {
++        self.silent = Some((protocol_addr, timestamp + Self::SILENT_TIME));
+     }
+ 
+     pub(crate) fn flush(&mut self) {
+@@ -305,7 +308,7 @@
+             Answer::NotFound
+         );
+ 
+-        cache.limit_rate(Instant::from_millis(0));
++        cache.limit_rate(MOCK_IP_ADDR_1.into(), Instant::from_millis(0));
+         assert_eq!(
+             cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(100)),
+             Answer::RateLimited
+@@ -315,6 +318,21 @@
+             Answer::NotFound
+         );
+     }
++
++    /// Silence after asking about one neighbour must not stop the stack asking
++    /// about another. With a cache-wide silence, a DNS lookup that has to
++    /// resolve the gateway holds back the resolution of a server on the same
++    /// link for a whole second.
++    #[test]
++    fn test_hush_is_per_address() {
++        let mut cache = Cache::new();
++
++        cache.limit_rate(MOCK_IP_ADDR_1.into(), Instant::from_millis(0));
++        assert_eq!(
++            cache.lookup(&MOCK_IP_ADDR_2.into(), Instant::from_millis(100)),
++            Answer::NotFound
++        );
++    }
+ 
+     #[test]
+     fn test_flush() {
