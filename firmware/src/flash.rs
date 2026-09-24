@@ -21,9 +21,10 @@ static mut FLASH: Option<FlashStorage<'static>> = None;
 
 /// Whether the one handle is currently lent out.
 ///
-/// What makes [`flash`] sound. Every caller runs in the same task and none
-/// holds the handle across an `.await`, which is true today and enforced by
-/// nothing — so this enforces it: a second borrow while the first is alive
+/// What makes [`flash`] sound. Every caller runs on the one executor and
+/// none holds the handle across an `.await` — every function that borrows it
+/// is synchronous — so no two borrows can overlap, whichever task each is in.
+/// That is true today and enforced by nothing but this: a second borrow while the first is alive
 /// panics where it happens instead of quietly producing two `&mut` to the same
 /// peripheral. It cannot fire while the invariant holds, and if the invariant
 /// stops holding, a panic names the moment it stopped.
@@ -58,9 +59,9 @@ impl core::ops::DerefMut for Flash {
 /// the main loop's confirmation check ([`crate::ota::mark_valid`]), the
 /// console's OTA commands ([`crate::ota::status`], [`crate::ota::write_probe`],
 /// [`crate::ota::arm_boot`]), [`crate::identity::load`] and
-/// [`crate::wifikey::load`] once at boot —
-/// all in the same task, each finishing with the handle before the next asks
-/// for it.
+/// [`crate::wifikey::load`] once at boot, and [`crate::wifikey`]'s store from
+/// the net task's idle pass — each synchronous, so each finishes with the
+/// handle before anything else on the executor can ask for it.
 pub(crate) fn flash() -> Flash {
     assert!(
         !LENT.swap(true, Ordering::Acquire),
