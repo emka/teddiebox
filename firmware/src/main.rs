@@ -388,7 +388,8 @@ async fn sense(
     // The LED reads the pack, so unplugging a charger should change the colour
     // while the hand is still on the cable.
     const SAMPLE_EVERY: Duration = Duration::from_secs(2);
-    // Printing stays where it was, purely so a bench capture is readable.
+    // Printed on a bench image only, where a capture is what reads it. A
+    // release image has nobody on the other end of the cable.
     const PRINT_EVERY: u8 = 5;
     let mut since_printed = 0u8;
     let mut batlog_ticks: u8 = 0;
@@ -446,7 +447,7 @@ async fn sense(
         }
 
         since_printed += 1;
-        if since_printed >= PRINT_EVERY {
+        if BENCH && since_printed >= PRINT_EVERY {
             since_printed = 0;
             esp_println::println!(
                 "teddiebox: pack {pack_mv} mV (raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
