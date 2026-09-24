@@ -379,7 +379,7 @@ impl<'d> Session<'d> {
         if let (Err(error), Some(unhinted)) = (&result, self.unhinted.take()) {
             if !refused_credentials(error) {
                 esp_println::println!(
-                    "teddiebox: net the last access point did not answer — scanning for it"
+                    "teddiebox: net the last access point did not answer — {error:?} — scanning for it"
                 );
                 *self.joined.borrow_mut() = None;
                 self.controller.set_config(&WifiConfig::Station(unhinted))?;
