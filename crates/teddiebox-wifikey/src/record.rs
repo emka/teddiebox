@@ -152,6 +152,21 @@ mod tests {
         assert_eq!(&raw[44..76], &[0x22; 32]);
     }
 
+    // Both from Python's zlib.crc32, not from this crate: a change to the CRC
+    // or its byte order would pass every round trip and quietly invalidate
+    // every record already in a box's flash.
+    #[test]
+    fn the_check_is_the_passphrase_crc32_little_endian() {
+        let raw = render(b"AB", b"pw", &Psk::from_bytes([0x22; 32])).unwrap();
+        assert_eq!(&raw[40..44], &[150, 143, 135, 160]);
+    }
+
+    #[test]
+    fn the_trailer_is_the_crc32_of_everything_before_it() {
+        let raw = render(b"AB", b"pw", &Psk::from_bytes([0x22; 32])).unwrap();
+        assert_eq!(&raw[76..80], &[111, 142, 177, 102]);
+    }
+
     #[test]
     fn erased_flash_is_blank() {
         assert_eq!(parse(&[0xff; RECORD]).err(), Some(RecordError::Blank));
