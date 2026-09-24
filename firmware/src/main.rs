@@ -3426,6 +3426,7 @@ async fn media(
 async fn bring_up(
     radio: &mut net::Radio<'_>,
     tls: Option<&tls::Client>,
+    schedule: &mut teddiebox_wifikey::schedule::Schedule,
     stay_up: bool,
 ) -> Option<Unavailable> {
     let Some(config) = credentials() else {
@@ -3518,7 +3519,7 @@ async fn bring_up(
             if stored.is_some() {
                 wifikey::forget();
             }
-            wifikey::passphrase_joined();
+            schedule.proved(config.ssid.as_bytes(), config.password.as_bytes());
         }
     }
     esp_println::println!("teddiebox: net associated — asking for an address");
@@ -3916,7 +3917,7 @@ async fn net(
     if tls.is_none() {
         esp_println::println!("teddiebox: tls could not be initialised");
     }
-    let mut deriver = wifikey::Deriver::new();
+    let mut schedule = teddiebox_wifikey::schedule::Schedule::new();
 
     loop {
         // One read of the request, dispatched once. Two reads would race: the
@@ -3970,7 +3971,7 @@ async fn net(
             // reason is printed inside, and there is no figure waiting to be
             // told anything.
             NET_UP => {
-                let _ = bring_up(&mut radio, tls.as_ref(), true).await;
+                let _ = bring_up(&mut radio, tls.as_ref(), &mut schedule, true).await;
             }
             // `net status` and `net down` are answered inside `bring_up` while
             // it is running. Reaching them here means it is not.
@@ -3978,7 +3979,10 @@ async fn net(
                 esp_println::println!("teddiebox: net coming up to prime the first ask");
                 // Put back for the association's own loop, as a fetch is.
                 NET_REQUEST.store(NET_PRIME, Ordering::Relaxed);
-                if bring_up(&mut radio, tls.as_ref(), false).await.is_some() {
+                if bring_up(&mut radio, tls.as_ref(), &mut schedule, false)
+                    .await
+                    .is_some()
+                {
                     // It never reached the loop that takes the request. Only
                     // the prime is dropped: a figure's ask that replaced it
                     // while the radio tried stays queued and is answered next.
@@ -4018,7 +4022,7 @@ async fn net(
                     // taken out of the request by the read at the top of this
                     // one, and it is the whole reason for associating.
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);
-                    let gave_up = bring_up(&mut radio, tls.as_ref(), false).await;
+                    let gave_up = bring_up(&mut radio, tls.as_ref(), &mut schedule, false).await;
                     // The pre-arm above is only ever consumed by `bring_up`'s
                     // own inner loop, reached after a successful association —
                     // every early return happens before that loop starts. Left
@@ -4062,7 +4066,7 @@ async fn net(
             },
             // Idle, radio down: the one time a derivation slice or a flash
             // write costs nobody a join.
-            _ => deriver.pass(credentials, PLAYING.load(Ordering::Relaxed)),
+            _ => wifikey::pass(&mut schedule, credentials, PLAYING.load(Ordering::Relaxed)),
         }
         Timer::after(Duration::from_millis(100)).await;
     }

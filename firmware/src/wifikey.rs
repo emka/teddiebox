@@ -9,15 +9,14 @@
 //! RAM alone, and why it is not on the card: the card already holds the
 //! passphrase this came from, and needs nothing more.
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use critical_section::Mutex as CsMutex;
 use embassy_time::Instant;
 use esp_bootloader_esp_idf::partitions::{self, FlashRegion, PARTITION_TABLE_MAX_LEN};
 use teddiebox_config::Config;
-use teddiebox_core::checksum::Crc32;
-use teddiebox_wifikey::psk::{Derivation, Psk};
+use teddiebox_wifikey::psk::Psk;
 use teddiebox_wifikey::record::{parse, render, RecordError, Stored, RECORD};
+use teddiebox_wifikey::schedule::{Pass, Schedule};
 
 use crate::flash;
 
@@ -35,13 +34,6 @@ const SECTOR: u32 = 0x1000;
 /// 5.0–8.2 ms, and a whole derivation is 171 passes, ~22 s in the background,
 /// once per change of credentials.
 const DERIVE_SLICE: u32 = 24;
-
-/// Whether a join this boot succeeded with the passphrase itself.
-///
-/// The derivation waits for it, so that a passphrase the router refuses is
-/// never kept — otherwise a wrong one on the card would rewrite a flash
-/// sector on every boot.
-static PASSPHRASE_JOINED: AtomicBool = AtomicBool::new(false);
 
 /// What the partition held at boot. `None` once [`forget`] has been called.
 static STORED: CsMutex<RefCell<Option<Stored>>> = CsMutex::new(RefCell::new(None));
@@ -166,92 +158,30 @@ pub fn key_for(ssid: &str, passphrase: &str) -> Option<[u8; 64]> {
     })
 }
 
-/// Says a join this boot succeeded with the passphrase, so it is worth keeping.
-pub fn passphrase_joined() {
-    PASSPHRASE_JOINED.store(true, Ordering::Relaxed);
-}
-
-/// Which credentials a derivation is for, without keeping the passphrase.
-fn fingerprint(config: &Config) -> u32 {
-    let mut crc = Crc32::new();
-    crc.update(config.ssid.as_bytes());
-    crc.update(&[0]);
-    crc.update(config.password.as_bytes());
-    crc.finish()
-}
-
-/// A derivation part-way through, and what it is for.
-struct InProgress {
-    derivation: Derivation,
-    credentials: u32,
-    passes: u32,
-    started: Instant,
-}
-
-/// Derives the key a slice at a time, owned by the net task.
-pub struct Deriver {
-    current: Option<InProgress>,
-}
-
-impl Deriver {
-    pub const fn new() -> Self {
-        Self { current: None }
-    }
-
-    /// Runs one slice, if there is a proved passphrase with no key and
-    /// nothing is playing.
-    ///
-    /// Playing pauses it rather than restarting it: the slices done so far
-    /// are kept, and the flash write at the end never lands under a story.
-    pub fn pass(&mut self, credentials: impl FnOnce() -> Option<Config>, playing: bool) {
-        if playing || !PASSPHRASE_JOINED.load(Ordering::Relaxed) {
-            return;
-        }
-        let Some(config) = credentials() else {
-            return self.stop();
-        };
-        if key_for(&config.ssid, &config.password).is_some() {
-            return self.stop();
-        }
-        // Changed since the join that proved them: the new ones are unproved.
-        let credentials = fingerprint(&config);
-        if self
-            .current
-            .as_ref()
-            .is_some_and(|job| job.credentials != credentials)
-        {
-            return self.stop();
-        }
-        let job = self.current.get_or_insert_with(|| InProgress {
-            derivation: Derivation::new(config.ssid.as_bytes(), config.password.as_bytes()),
-            credentials,
-            passes: 0,
-            started: Instant::now(),
-        });
-        job.passes += 1;
-        let Some(psk) = job.derivation.step(DERIVE_SLICE) else {
-            return;
-        };
-        esp_println::println!(
-            "teddiebox: wifikey derived in {} ms over {} passes",
-            job.started.elapsed().as_millis(),
-            job.passes
-        );
-        store(&config.ssid, &config.password, &psk);
-        self.stop();
-    }
-
-    /// Drops any derivation and waits for the next passphrase join.
-    fn stop(&mut self) {
-        self.current = None;
-        PASSPHRASE_JOINED.store(false, Ordering::Relaxed);
-    }
-}
-
 /// Stops using the stored key for the rest of this boot.
 ///
 /// For a key the access point refused. The record stays in flash until the
 /// passphrase join that follows proves a new one worth keeping.
 pub fn forget() {
     critical_section::with(|cs| *STORED.borrow_ref_mut(cs) = None);
+}
+
+/// One idle pass of the derivation, owned by the net task.
+///
+/// Runs a slice only for credentials a passphrase join proved, and never
+/// while audio plays: its slices and the sector erase at the end would land
+/// on the story. See `teddiebox_wifikey::schedule` for when a key is due.
+pub fn pass(schedule: &mut Schedule, credentials: impl FnOnce() -> Option<Config>, playing: bool) {
+    if playing {
+        return;
+    }
+    let Some(config) = credentials() else {
+        return;
+    };
+    let stored = key_for(&config.ssid, &config.password).is_some();
+    let current = (config.ssid.as_bytes(), config.password.as_bytes());
+    if let Pass::Done(psk) = schedule.pass(Some(current), stored, playing, DERIVE_SLICE) {
+        esp_println::println!("teddiebox: wifikey derived a key for {}", config.ssid);
+        store(&config.ssid, &config.password, &psk);
+    }
 }
