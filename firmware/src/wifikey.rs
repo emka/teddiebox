@@ -9,6 +9,7 @@
 //! RAM alone, and why it is not on the card: the card already holds the
 //! passphrase this came from, and needs nothing more.
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use critical_section::Mutex as CsMutex;
 use embassy_time::Instant;
@@ -34,6 +35,14 @@ const SECTOR: u32 = 0x1000;
 /// 5.0–8.2 ms, and a whole derivation is 171 passes, ~22 s in the background,
 /// once per change of credentials.
 const DERIVE_SLICE: u32 = 24;
+
+/// Whether a key derived now could be kept.
+///
+/// False until [`load`] has found and read the partition, and again after a
+/// write fails: a box flashed over the air never receives the new table, and
+/// without this it would derive a key after every passphrase join — ~20 s of
+/// slices — only to fail to write it.
+static WRITABLE: AtomicBool = AtomicBool::new(false);
 
 /// What the partition held at boot. `None` once [`forget`] has been called.
 static STORED: CsMutex<RefCell<Option<Stored>>> = CsMutex::new(RefCell::new(None));
@@ -84,6 +93,7 @@ pub fn load() {
             return;
         }
     };
+    WRITABLE.store(true, Ordering::Relaxed);
     match parse(&raw.0) {
         Ok(stored) => {
             // The SSID, never the key.
@@ -172,7 +182,7 @@ pub fn forget() {
 /// while audio plays: its slices and the sector erase at the end would land
 /// on the story. See `teddiebox_wifikey::schedule` for when a key is due.
 pub fn pass(schedule: &mut Schedule, credentials: impl FnOnce() -> Option<Config>, playing: bool) {
-    if playing {
+    if playing || !WRITABLE.load(Ordering::Relaxed) {
         return;
     }
     let Some(config) = credentials() else {
@@ -182,6 +192,9 @@ pub fn pass(schedule: &mut Schedule, credentials: impl FnOnce() -> Option<Config
     let current = (config.ssid.as_bytes(), config.password.as_bytes());
     if let Pass::Done(psk) = schedule.pass(Some(current), stored, playing, DERIVE_SLICE) {
         esp_println::println!("teddiebox: wifikey derived a key for {}", config.ssid);
-        store(&config.ssid, &config.password, &psk);
+        if !store(&config.ssid, &config.password, &psk) {
+            esp_println::println!("teddiebox: wifikey not deriving again this boot");
+            WRITABLE.store(false, Ordering::Relaxed);
+        }
     }
 }
