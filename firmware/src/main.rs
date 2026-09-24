@@ -3491,7 +3491,7 @@ async fn bring_up(
                 Unavailable::Unreachable
             });
         }
-        Either::Second(Ok(())) => {}
+        Either::Second(Ok(())) => wifikey::passphrase_joined(),
     }
     esp_println::println!("teddiebox: net associated — asking for an address");
 
@@ -3888,6 +3888,7 @@ async fn net(
     if tls.is_none() {
         esp_println::println!("teddiebox: tls could not be initialised");
     }
+    let mut deriver = wifikey::Deriver::new();
 
     loop {
         // One read of the request, dispatched once. Two reads would race: the
@@ -4031,7 +4032,9 @@ async fn net(
                     }
                 }
             },
-            _ => {}
+            // Idle, radio down: the one time a derivation slice or a flash
+            // write costs nobody a join.
+            _ => deriver.pass(credentials, PLAYING.load(Ordering::Relaxed)),
         }
         Timer::after(Duration::from_millis(100)).await;
     }
