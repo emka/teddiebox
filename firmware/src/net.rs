@@ -149,6 +149,26 @@ pub struct Session<'d> {
     /// The configuration without the hint, to fall back to. `None` when the
     /// join was not hinted and so has nothing to fall back from.
     unhinted: Option<StationConfig>,
+    /// The same join with the passphrase, for when the key it was given is
+    /// the stored one and the access point refuses it. `None` when the key
+    /// already is the passphrase.
+    passphrase: Option<Attempt>,
+}
+
+/// One set of credentials to join with: hinted first when there is a hint,
+/// and the same without it to fall back to.
+struct Attempt {
+    first: StationConfig,
+    unhinted: Option<StationConfig>,
+}
+
+/// Which key a join succeeded with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinedWith {
+    /// The key [`Radio::acquire`] was given.
+    GivenKey,
+    /// The passphrase, after the access point refused the given key.
+    Passphrase,
 }
 
 /// The half of a session that has to be polled.
@@ -240,25 +260,38 @@ impl<'d> Radio<'d> {
         key: &str,
         seed: u64,
     ) -> Result<(Session<'_>, Link<'_>), Error> {
-        // WPA2-Personal is a *minimum* threshold rather than an exact mode, so
-        // a WPA3 access point still associates; it is open and WEP networks
-        // this refuses, which is the refusal worth having.
-        let station = StationConfig::default()
-            .with_ssid(Ssid::try_from(config.ssid.as_str())?)
-            .with_authentication(AuthenticationMethodConfig::Wpa2Personal(
-                Password::try_from(key)?,
-            ));
-        let hinted = self
+        let hint = self
             .joined
             .borrow()
             .as_ref()
             .filter(|joined| joined.ssid == config.ssid)
-            .map(|joined| {
-                station
-                    .clone()
-                    .with_bssid(joined.bssid)
-                    .with_channel(joined.channel)
-            });
+            .map(|joined| (joined.bssid, joined.channel));
+        let attempt = |key: &str| -> Result<Attempt, Error> {
+            // WPA2-Personal is a *minimum* threshold rather than an exact
+            // mode, so a WPA3 access point still associates; it is open and
+            // WEP networks this refuses, which is the refusal worth having.
+            let station = StationConfig::default()
+                .with_ssid(Ssid::try_from(config.ssid.as_str())?)
+                .with_authentication(AuthenticationMethodConfig::Wpa2Personal(
+                    Password::try_from(key)?,
+                ));
+            Ok(match hint {
+                Some((bssid, channel)) => Attempt {
+                    first: station.clone().with_bssid(bssid).with_channel(channel),
+                    unhinted: Some(station),
+                },
+                None => Attempt {
+                    first: station,
+                    unhinted: None,
+                },
+            })
+        };
+        let given = attempt(key)?;
+        let passphrase = if key == config.password.as_str() {
+            None
+        } else {
+            Some(attempt(&config.password)?)
+        };
 
         // Taken before the controller so that a session refused for a
         // singleton already in use has not powered the modem on the way out.
@@ -266,16 +299,7 @@ impl<'d> Radio<'d> {
 
         let mut controller =
             WifiController::new(self.wifi.reborrow(), ControllerConfig::default())?;
-        let unhinted = match hinted {
-            Some(hinted) => {
-                controller.set_config(&WifiConfig::Station(hinted))?;
-                Some(station)
-            }
-            None => {
-                controller.set_config(&WifiConfig::Station(station))?;
-                None
-            }
-        };
+        controller.set_config(&WifiConfig::Station(given.first))?;
 
         let (stack, runner) = embassy_net::new(
             interface,
@@ -290,7 +314,8 @@ impl<'d> Radio<'d> {
                 stack,
                 joined: &self.joined,
                 ssid: config.ssid.clone(),
-                unhinted,
+                unhinted: given.unhinted,
+                passphrase,
             },
             Link { runner },
         ))
@@ -354,6 +379,7 @@ impl<'d> Radio<'d> {
                 joined: &self.joined,
                 ssid: heapless::String::new(),
                 unhinted: None,
+                passphrase: None,
             },
             Link { runner },
         ))
@@ -380,7 +406,38 @@ impl<'d> Session<'d> {
     /// after 1.6 s and the scan joined 3.0 s later, so a stale hint costs one
     /// slow join and is then replaced by the one that worked. The driver
     /// sometimes finds the network despite a wrong channel (3.15 s).
-    pub async fn connect(&mut self) -> Result<(), ConnectionError> {
+    ///
+    /// A stored key the access point refuses is tried again as the
+    /// passphrase — the router may have been re-keyed with the card edited to
+    /// match, or not at all — so a stale key costs one refused join, never
+    /// the network.
+    pub async fn connect(&mut self) -> Result<JoinedWith, ConnectionError> {
+        let mut with = JoinedWith::GivenKey;
+        let mut result = self.join().await;
+        if let (Err(error), Some(passphrase)) = (&result, self.passphrase.take()) {
+            if refused_credentials(error) {
+                esp_println::println!(
+                    "teddiebox: net the stored key was refused — trying the passphrase"
+                );
+                self.controller
+                    .set_config(&WifiConfig::Station(passphrase.first))?;
+                self.unhinted = passphrase.unhinted;
+                with = JoinedWith::Passphrase;
+                result = self.join().await;
+            }
+        }
+        let info = result?;
+        *self.joined.borrow_mut() = Some(Joined {
+            ssid: self.ssid.clone(),
+            bssid: info.bssid,
+            channel: info.channel,
+        });
+        Ok(with)
+    }
+
+    /// One join with the configuration set, falling back to a scan if a
+    /// hinted one fails for any reason but the key.
+    async fn join(&mut self) -> Result<esp_radio::wifi::sta::ConnectedInfo, ConnectionError> {
         let mut result = self.controller.connect_async().await;
         if let (Err(error), Some(unhinted)) = (&result, self.unhinted.take()) {
             if !refused_credentials(error) {
@@ -392,13 +449,7 @@ impl<'d> Session<'d> {
                 result = self.controller.connect_async().await;
             }
         }
-        let info = result?;
-        *self.joined.borrow_mut() = Some(Joined {
-            ssid: self.ssid.clone(),
-            bssid: info.bssid,
-            channel: info.channel,
-        });
-        Ok(())
+        result
     }
 
     /// The stack sockets are opened on.

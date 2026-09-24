@@ -3494,6 +3494,11 @@ async fn bring_up(
             // one word it can act on, and the two words send a person to
             // different places — the card, or the router.
             let refused = net::refused_credentials(&e);
+            // Refused on the passphrase too, so the stored key was refused
+            // first: it is not a key for this network either way.
+            if refused && stored.is_some() {
+                wifikey::forget();
+            }
             esp_println::println!(
                 "teddiebox: net association refused — {e:?}{}",
                 if refused { " — the passphrase" } else { "" }
@@ -3505,9 +3510,16 @@ async fn bring_up(
                 Unavailable::Unreachable
             });
         }
-        // Only a join that used the passphrase proves it worth keeping.
-        Either::Second(Ok(())) if stored.is_none() => wifikey::passphrase_joined(),
-        Either::Second(Ok(())) => {}
+        Either::Second(Ok(net::JoinedWith::GivenKey)) if stored.is_some() => {}
+        // Only a join that used the passphrase proves it worth keeping — and
+        // one that needed it after the stored key was refused also proves
+        // that key stale.
+        Either::Second(Ok(_)) => {
+            if stored.is_some() {
+                wifikey::forget();
+            }
+            wifikey::passphrase_joined();
+        }
     }
     esp_println::println!("teddiebox: net associated — asking for an address");
 

@@ -247,3 +247,11 @@ impl Deriver {
         PASSPHRASE_JOINED.store(false, Ordering::Relaxed);
     }
 }
+
+/// Stops using the stored key for the rest of this boot.
+///
+/// For a key the access point refused. The record stays in flash until the
+/// passphrase join that follows proves a new one worth keeping.
+pub fn forget() {
+    critical_section::with(|cs| *STORED.borrow_ref_mut(cs) = None);
+}
