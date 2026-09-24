@@ -421,9 +421,17 @@ impl<'d> Session<'d> {
             esp_println::println!(
                 "teddiebox: net the stored key did not join — {error:?} — trying the passphrase"
             );
-            self.controller
-                .set_config(&WifiConfig::Station(passphrase.first))?;
-            self.unhinted = passphrase.unhinted;
+            // A hinted attempt whose fallback is already spent went to the
+            // scan, so the hint was stale: aiming the passphrase at it again
+            // costs another ~1.6 s timeout before its own scan.
+            let first = match (self.unhinted.is_none(), passphrase.unhinted) {
+                (true, Some(unhinted)) => unhinted,
+                (_, unhinted) => {
+                    self.unhinted = unhinted;
+                    passphrase.first
+                }
+            };
+            self.controller.set_config(&WifiConfig::Station(first))?;
             with = JoinedWith::Passphrase;
             result = self.join().await;
         }
