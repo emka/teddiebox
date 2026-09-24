@@ -183,6 +183,15 @@ sitting in `CERT/` after the upgrade — the firmware no longer reads them.
 Once `just identity` has been run and the box boots reporting its identity
 from flash, delete both files from the card.
 
+The box also keeps the WiFi key it derives from `ssid` and `password`, in the
+`wifi` flash partition, so that joining the network takes a tenth of a second
+rather than two. Change either line and the box derives a new key by itself,
+after its first successful join with the new one. Whoever can read the box's
+flash can therefore join your network — but whoever holds the box holds the
+card, where the passphrase already sits in plain text. The partition arrives
+with `just flash`; an update over the air keeps the old partition table, and
+such a box simply joins the slower way.
+
 ## Building it
 
 `just check` runs every gate the pipeline runs, in the same order, and is what
