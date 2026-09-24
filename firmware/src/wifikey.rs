@@ -116,6 +116,10 @@ pub fn load() {
 /// (memory `teddiebox-flash-writes-need-critical-section`), so the caller
 /// must not reach here while audio plays. Read back and parsed before it is
 /// believed: a write that does not come back whole is not a key.
+///
+/// A record already in flash byte for byte is not written again. A correct
+/// key forgotten after one transient handshake timeout comes back here
+/// identical, and an erase would buy nothing but wear.
 fn store(ssid: &str, passphrase: &str, psk: &Psk) -> bool {
     let record = match render(ssid.as_bytes(), passphrase.as_bytes(), psk) {
         Ok(record) => Aligned(record),
@@ -126,16 +130,20 @@ fn store(ssid: &str, passphrase: &str, psk: &Psk) -> bool {
     };
     let started = Instant::now();
     let Some(written) = with_region(|region| {
-        region.erase(0, SECTOR)?;
-        region.write(0, &record.0)?;
         let mut back = Aligned([0; RECORD]);
         region.read(0, &mut back.0)?;
-        Ok::<_, partitions::Error>(back)
+        if back.0 == record.0 {
+            return Ok((back, false));
+        }
+        region.erase(0, SECTOR)?;
+        region.write(0, &record.0)?;
+        region.read(0, &mut back.0)?;
+        Ok::<_, partitions::Error>((back, true))
     }) else {
         return false;
     };
-    let back = match written {
-        Ok(back) => back,
+    let (back, erased) = match written {
+        Ok(written) => written,
         Err(trouble) => {
             esp_println::println!("teddiebox: wifikey could not write `{LABEL}` — {trouble:?}");
             return false;
@@ -144,7 +152,8 @@ fn store(ssid: &str, passphrase: &str, psk: &Psk) -> bool {
     match parse(&back.0) {
         Ok(stored) => {
             esp_println::println!(
-                "teddiebox: wifikey stored a key for {ssid} in {} ms",
+                "teddiebox: wifikey {} a key for {ssid} in {} ms",
+                if erased { "stored" } else { "already held" },
                 started.elapsed().as_millis()
             );
             critical_section::with(|cs| *STORED.borrow_ref_mut(cs) = Some(stored));
