@@ -14,6 +14,8 @@
 //! Nothing here has been run on hardware. It compiles and links, which is the
 //! whole of what is known about it.
 
+use core::cell::RefCell;
+
 use embassy_net::{Runner, Stack, StackResources};
 use esp_hal::peripherals::WIFI;
 use esp_hal::time::Duration as EspDuration;
@@ -114,6 +116,24 @@ impl From<WifiError> for Error {
 pub struct Radio<'d> {
     wifi: WIFI<'d>,
     resources: StackResources<SOCKETS>,
+    /// The access point the last join reached, so the next one can go
+    /// straight to it. See [`Joined`].
+    joined: RefCell<Option<Joined>>,
+}
+
+/// Where the last join ended up: which access point, on which channel.
+///
+/// Offered back as a hint, a join takes 1.8-1.9 s against 3.0-3.1 s for one
+/// that has to scan for the network first — measured on the box, with the
+/// access point on channel 11, which the driver's default scan reaches last
+/// of the ones it tries. RAM only: a boot is roughly a session, and a hint
+/// that outlived a move to another room or another router would cost a
+/// failed join before every scan.
+struct Joined {
+    /// The network it was for. A hint for another SSID is no hint.
+    ssid: heapless::String<{ teddiebox_config::MAX_SSID }>,
+    bssid: [u8; 6],
+    channel: u8,
 }
 
 /// A powered, configured radio.
@@ -123,6 +143,12 @@ pub struct Radio<'d> {
 pub struct Session<'d> {
     controller: WifiController<'d>,
     stack: Stack<'d>,
+    /// The radio's memory of the last join, updated by [`Session::connect`].
+    joined: &'d RefCell<Option<Joined>>,
+    ssid: heapless::String<{ teddiebox_config::MAX_SSID }>,
+    /// The configuration without the hint, to fall back to. `None` when the
+    /// join was not hinted and so has nothing to fall back from.
+    unhinted: Option<StationConfig>,
 }
 
 /// The half of a session that has to be polled.
@@ -140,6 +166,7 @@ impl<'d> Radio<'d> {
         Self {
             wifi,
             resources: StackResources::new(),
+            joined: RefCell::new(None),
         }
     }
 
@@ -215,6 +242,17 @@ impl<'d> Radio<'d> {
             .with_authentication(AuthenticationMethodConfig::Wpa2Personal(
                 Password::try_from(config.password.as_str())?,
             ));
+        let hinted = self
+            .joined
+            .borrow()
+            .as_ref()
+            .filter(|joined| joined.ssid == config.ssid)
+            .map(|joined| {
+                station
+                    .clone()
+                    .with_bssid(joined.bssid)
+                    .with_channel(joined.channel)
+            });
 
         // Taken before the controller so that a session refused for a
         // singleton already in use has not powered the modem on the way out.
@@ -222,7 +260,16 @@ impl<'d> Radio<'d> {
 
         let mut controller =
             WifiController::new(self.wifi.reborrow(), ControllerConfig::default())?;
-        controller.set_config(&WifiConfig::Station(station))?;
+        let unhinted = match hinted {
+            Some(hinted) => {
+                controller.set_config(&WifiConfig::Station(hinted))?;
+                Some(station)
+            }
+            None => {
+                controller.set_config(&WifiConfig::Station(station))?;
+                None
+            }
+        };
 
         let (stack, runner) = embassy_net::new(
             interface,
@@ -231,7 +278,16 @@ impl<'d> Radio<'d> {
             seed,
         );
 
-        Ok((Session { controller, stack }, Link { runner }))
+        Ok((
+            Session {
+                controller,
+                stack,
+                joined: &self.joined,
+                ssid: config.ssid.clone(),
+                unhinted,
+            },
+            Link { runner },
+        ))
     }
 
     /// Raises the box's own access point and builds a static stack on it.
@@ -283,7 +339,18 @@ impl<'d> Radio<'d> {
             seed,
         );
 
-        Ok((Session { controller, stack }, Link { runner }))
+        // An access point never joins anything, so there is nothing to hint
+        // and nothing to remember; `connect` is not called on it.
+        Ok((
+            Session {
+                controller,
+                stack,
+                joined: &self.joined,
+                ssid: heapless::String::new(),
+                unhinted: None,
+            },
+            Link { runner },
+        ))
     }
 }
 
@@ -297,8 +364,34 @@ impl<'d> Session<'d> {
     /// knows how long a box should sit with its radio on before giving up and
     /// going back to playing from the card. Racing this against a timer here
     /// would only guess that number a layer too low.
+    ///
+    /// A join hinted at the last access point that fails is tried once more
+    /// without the hint — the router may have changed channel, or the box may
+    /// have been carried to another access point of the same network — unless
+    /// it failed on the passphrase, which a scan would not change.
+    ///
+    /// Measured with a deliberately wrong channel: the hinted attempt gave up
+    /// after 1.6 s and the scan joined 3.0 s later, so a stale hint costs one
+    /// slow join and is then replaced by the one that worked. The driver
+    /// sometimes finds the network despite a wrong channel (3.15 s).
     pub async fn connect(&mut self) -> Result<(), ConnectionError> {
-        self.controller.connect_async().await?;
+        let mut result = self.controller.connect_async().await;
+        if let (Err(error), Some(unhinted)) = (&result, self.unhinted.take()) {
+            if !refused_credentials(error) {
+                esp_println::println!(
+                    "teddiebox: net the last access point did not answer — scanning for it"
+                );
+                *self.joined.borrow_mut() = None;
+                self.controller.set_config(&WifiConfig::Station(unhinted))?;
+                result = self.controller.connect_async().await;
+            }
+        }
+        let info = result?;
+        *self.joined.borrow_mut() = Some(Joined {
+            ssid: self.ssid.clone(),
+            bssid: info.bssid,
+            channel: info.channel,
+        });
         Ok(())
     }
 
