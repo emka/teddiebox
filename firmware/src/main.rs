@@ -989,7 +989,11 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             }
         }
 
-        Timer::after(Duration::from_millis(ACCEL_POLL_MS)).await;
+        select(
+            Timer::after(Duration::from_millis(ACCEL_POLL_MS)),
+            CODEC_WAKE.wait(),
+        )
+        .await;
     }
 }
 
@@ -2426,9 +2430,24 @@ const SPEAKER_UNMUTE: u8 = 2;
 const SPEAKER_RESUME: u8 = 3;
 
 /// A pending output power change: 0 nothing, 1 down, 2 up.
+///
+/// Written through [`request_output`] only, so the task that acts on it is
+/// woken rather than left to find it after its nap.
 static OUTPUT_REQUEST: AtomicU8 = AtomicU8::new(0);
 const OUTPUT_DOWN: u8 = 1;
 const OUTPUT_UP: u8 = 2;
+
+/// Ends the `motion` task's nap early.
+///
+/// Measured 2026-09-24: a story's output waited up to 132 ms for that nap to
+/// end, on the path from placing a figure to hearing it.
+static CODEC_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Asks for the codec's output to be powered up or down, now.
+fn request_output(request: u8) {
+    OUTPUT_REQUEST.store(request, Ordering::Relaxed);
+    CODEC_WAKE.signal(());
+}
 
 /// Register overrides applied to the codec's start-up sequence.
 ///
@@ -2661,7 +2680,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             // The storage rail is already up, or the card would not be mounted.
             // The codec's output stage is a different matter: `play <16 hex>`
             // leaves raising it to whoever typed it, and nobody typed this.
-            OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+            request_output(OUTPUT_UP);
             REQUEST.store(request, Ordering::Relaxed);
         }
 
@@ -3382,7 +3401,7 @@ async fn media(
                     // it. It also spares the stage a power cycle it would
                     // otherwise click through.
                     if REQUEST.load(Ordering::Relaxed) == REQUEST_NONE {
-                        OUTPUT_REQUEST.store(OUTPUT_DOWN, Ordering::Relaxed);
+                        request_output(OUTPUT_DOWN);
                     }
                 }
                 PLAYING.store(false, Ordering::Relaxed);
@@ -4702,7 +4721,7 @@ async fn main(spawner: Spawner) {
         let pending = SOUND_REQUEST.swap(NO_SOUND, Ordering::Relaxed);
         if pending != NO_SOUND {
             board.apply(gates.power(Rail::Storage, true));
-            OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+            request_output(OUTPUT_UP);
             CONTENT_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
             CONTENT_FILE.store(pending, Ordering::Relaxed);
             // Marked here rather than by the task that plays it, so there is
@@ -4794,12 +4813,12 @@ async fn main(spawner: Spawner) {
                     // The output path is unpowered until something plays, so
                     // every audio command has to ask for it first or it is
                     // heard by nobody.
-                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+                    request_output(OUTPUT_UP);
                     REQUEST.store(REQUEST_TONE, Ordering::Relaxed);
                 }
                 Some(Command::PlayWav) => {
                     board.apply(gates.power(Rail::Storage, true));
-                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+                    request_output(OUTPUT_UP);
                     REQUEST.store(REQUEST_WAV, Ordering::Relaxed);
                 }
                 Some(Command::Nfc) => {
@@ -4838,8 +4857,7 @@ async fn main(spawner: Spawner) {
                     CODEC_POWER_DOWN.store(true, Ordering::Relaxed);
                 }
                 Some(Command::Output(on)) => {
-                    OUTPUT_REQUEST
-                        .store(if on { OUTPUT_UP } else { OUTPUT_DOWN }, Ordering::Relaxed);
+                    request_output(if on { OUTPUT_UP } else { OUTPUT_DOWN });
                 }
                 Some(Command::Speaker(on)) => {
                     SPEAKER_REQUEST.store(
@@ -5002,19 +5020,19 @@ async fn main(spawner: Spawner) {
                 }
                 Some(Command::PlayTaf) => {
                     board.apply(gates.power(Rail::Storage, true));
-                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+                    request_output(OUTPUT_UP);
                     REQUEST.store(REQUEST_TAF, Ordering::Relaxed);
                 }
                 Some(Command::PlaySound { file }) => {
                     board.apply(gates.power(Rail::Storage, true));
-                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+                    request_output(OUTPUT_UP);
                     CONTENT_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
                     CONTENT_FILE.store(file, Ordering::Relaxed);
                     REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
                 }
                 Some(Command::PlayContent { directory, file }) => {
                     board.apply(gates.power(Rail::Storage, true));
-                    OUTPUT_REQUEST.store(OUTPUT_UP, Ordering::Relaxed);
+                    request_output(OUTPUT_UP);
                     CONTENT_DIRECTORY.store(directory, Ordering::Relaxed);
                     CONTENT_FILE.store(file, Ordering::Relaxed);
                     REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
