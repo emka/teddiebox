@@ -99,22 +99,6 @@ esp_bootloader_esp_idf::esp_app_desc!(
     esp_bootloader_esp_idf::SECURE_VERSION
 );
 
-/// Prints on UART0 so a bench session can tell a running box from a hung one.
-#[embassy_executor::task]
-async fn heartbeat() {
-    let mut ticks: u32 = 0;
-    loop {
-        // Nothing to do for the rest of this power-on: see `PARKED`.
-        if PARKED.load(Ordering::Relaxed) {
-            park_task().await;
-        }
-
-        esp_println::println!("teddiebox: alive {ticks}");
-        ticks = ticks.wrapping_add(1);
-        Timer::after(Duration::from_secs(1)).await;
-    }
-}
-
 /// Reboots into the ROM's UART download mode.
 ///
 /// The ROM checks a bit in the RTC's OPTION1 register as well as the GPIO0
@@ -4354,8 +4338,6 @@ async fn main(spawner: Spawner) {
     // it, so it is parked in an `Option` the way the other single-use
     // peripherals are rather than being taken at the point of use.
     let mut lpwr = Some(p.LPWR);
-
-    spawner.spawn(heartbeat().unwrap());
 
     // The LED is on this rail, so it has to come up before anything —
     // including the setup portal below — can paint it.

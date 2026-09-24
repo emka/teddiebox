@@ -340,7 +340,7 @@ const MAX_LINE: usize = 72;
 
 /// Watches a byte stream for a command line.
 ///
-/// Deliberately line-oriented: the box prints a heartbeat forever and a
+/// Deliberately line-oriented: the box prints status lines unprompted and a
 /// terminal may echo, so a command fires only on a complete line that matches
 /// exactly. `ddl` is a typo, not a request to reboot.
 #[derive(Debug)]
@@ -1142,8 +1142,8 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"pw\r"), None, "no value at all");
     }
 
-    /// A heartbeat prints once a second forever. None of it may look like a
-    /// command, including any prefix of it.
+    /// Status lines the box prints unprompted. None of them may look like a
+    /// command, including any prefix of one.
     #[test]
     fn ordinary_traffic_does_not_fire_anything() {
         let mut watch = CommandWatch::new();

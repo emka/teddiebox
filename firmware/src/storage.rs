@@ -68,7 +68,7 @@ const WALK_RATE_KHZ: u32 = 8_000;
 /// How often the file read hands the executor back.
 ///
 /// Every 16 blocks is 8 KiB, about 30 ms at the rate this bus sustains — often
-/// enough that the heartbeat keeps time and the console stays responsive,
+/// enough that the other tasks keep time and the console stays responsive,
 /// rarely enough that yielding is not what the walk spends its time on.
 const YIELD_EVERY_BLOCKS: u32 = 16;
 
