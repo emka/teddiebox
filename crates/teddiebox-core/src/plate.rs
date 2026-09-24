@@ -31,11 +31,16 @@ pub const MISSES_TO_LEAVE: u8 = 4;
 
 /// How often the plate is read, empty or holding a figure.
 ///
-/// Provisional and uncalibrated. Not a free parameter: every poll is a full
-/// transaction with the field up, this pack has no protection circuit, and the
-/// one unexplained brownout in this project happened while transmitting into a
-/// coupled tag.
-pub const POLL_MS: u32 = 500;
+/// Four misses at this cadence is how long a lift takes to pause a story:
+/// 800 ms, chosen at the bench. The reader's field is on for the
+/// whole boot, so a faster cadence costs executor time rather than field
+/// time — about 12 ms per empty poll and 7 ms per occupied one, measured the
+/// same day.
+///
+/// Not a free parameter even so: every poll transmits into the field, this
+/// pack has no protection circuit, and the one unexplained brownout in this
+/// project happened while transmitting into a coupled tag.
+pub const POLL_MS: u32 = 200;
 
 /// How soon a first reading of a figure is read again.
 ///
@@ -369,9 +374,9 @@ mod tests {
     /// An empty plate is where every placement starts, so how often it is
     /// looked at is half of how long a placement takes to be noticed.
     #[test]
-    fn an_empty_plate_is_looked_at_every_500_ms() {
+    fn an_empty_plate_is_looked_at_every_200_ms() {
         let p = Presence::new(2, 4);
-        assert_eq!(p.poll_again_in_ms(), 500);
+        assert_eq!(p.poll_again_in_ms(), 200);
     }
 
     /// Measured 2026-09-24: waiting a whole poll for the second reading was
@@ -385,11 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn a_figure_on_the_plate_is_looked_at_every_500_ms() {
+    fn a_figure_on_the_plate_is_looked_at_every_200_ms() {
         let mut p = Presence::new(2, 4);
         p.feed(Some(A));
         p.feed(Some(A));
-        assert_eq!(p.poll_again_in_ms(), 500);
+        assert_eq!(p.poll_again_in_ms(), 200);
     }
 
     /// A swap is where a corrupt reading was measured, under radio traffic,
@@ -401,13 +406,13 @@ mod tests {
         p.feed(Some(A));
         p.feed(Some(A));
         p.feed(Some(B));
-        assert_eq!(p.poll_again_in_ms(), 500);
+        assert_eq!(p.poll_again_in_ms(), 200);
     }
 
     /// Lifting a figure pauses its story, so this is how long a child waits
     /// for the box to react to a lift.
     #[test]
-    fn a_lifted_figure_is_gone_after_2000_ms_of_silence() {
+    fn a_lifted_figure_is_gone_after_800_ms_of_silence() {
         let mut p = Presence::new(2, 4);
         p.feed(Some(A));
         p.feed(Some(A));
@@ -419,7 +424,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(silent_ms, 2000);
+        assert_eq!(silent_ms, 800);
     }
 
     /// A figure that displaces another mid-Arriving counts the displacing
