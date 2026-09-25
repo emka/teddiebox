@@ -16,7 +16,7 @@ use crate::{ears_skip, park_task, PARKED};
 
 /// Input events (ear presses and slaps) waiting for the reducer.
 ///
-/// A channel rather than a `Signal` like [`crate::PLATE_TAG`], because these
+/// A channel rather than a `Signal` like [`crate::nfc::PLATE_TAG`], because these
 /// are events, not a state, and none may be lost: `Core` pairs each
 /// `EarDown` with its `EarUp`. A signal keeps only the last value.
 ///
