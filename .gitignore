@@ -3,13 +3,13 @@
 /firmware/target
 /.direnv
 
-# The published `mbedtls-rs-sys`, with one version bound widened. Fetched and
-# patched by scripts/vendor-mbedtls-rs-sys.sh rather than committed; see the
-# comment beside the `[patch.crates-io]` entry in firmware/Cargo.toml.
+# Patched copies of published crates (mbedtls-rs, mbedtls-rs-sys, smoltcp).
+# Fetched and patched by the scripts/vendor-*.sh scripts rather than
+# committed; see the `[patch.crates-io]` entries in firmware/Cargo.toml.
 /firmware/vendor/
 
-# Bench credentials. `.envrc` is tracked; this is where the SLIX privacy
-# password lives so it stays out of the history.
+# Local settings and secrets, such as the SLIX privacy password. `.envrc` is
+# tracked; this file keeps them out of the history.
 /.envrc.local
 
 # `nix build` output symlinks.

@@ -49,8 +49,8 @@ jobs:
       - name: Test
         run: nix develop --command just test
 
-      # The bench scripts parse what the firmware prints, so a reworded line
-      # can break a measurement without breaking a build.
+      # The helper scripts parse what the firmware prints, so a reworded line
+      # can break them without breaking a build.
       - name: Bench script self-tests
         run: nix develop --command just scripts
 
@@ -67,17 +67,16 @@ jobs:
 
       # The password is baked in at build time (see firmware/src/main.rs), from
       # a secret rather than the repository. A fork or a PR without the secret
-      # gets an empty value, which builds exactly as it always did: no password
-      # until somebody types `pw`. Never echo it — a workflow log is public.
+      # gets an empty value, which builds an image with no password: nothing
+      # is unlocked until somebody types `pw`. Never echo it; workflow logs
+      # are public.
       - name: Firmware builds and links
         env:
           TEDDIEBOX_SLIX_PASSWORD: ${{ secrets.TEDDIEBOX_SLIX_PASSWORD }}
         run: nix develop --command just firmware
 
-      # The image without the `bench` console commands. Nobody flashes this
-      # yet, and that is exactly why it is here: an unbuilt configuration stops
-      # compiling silently, and the one time it is wanted is the worst time to
-      # find out.
+      # The image without the `bench` console commands. Built here so this
+      # configuration cannot stop compiling without anyone noticing.
       - name: Firmware builds without the bench commands
         env:
           TEDDIEBOX_SLIX_PASSWORD: ${{ secrets.TEDDIEBOX_SLIX_PASSWORD }}

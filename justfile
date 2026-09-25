@@ -31,10 +31,8 @@ test: vendor
 
 # The bench scripts' own self-tests
 #
-# These scripts decide what a bench session records, and two of them parse the
-# firmware's output. A parser nothing exercises is a parser that quietly stops
-# matching after a print statement is reworded — and the session that finds out
-# is one somebody drove to the bench for.
+# Two of these scripts parse the firmware's output. Without tests, a parser
+# quietly stops matching when a print statement is reworded.
 scripts:
     python3 scripts/battery-run.py --self-test
     python3 scripts/sleep-check.py --self-test
@@ -80,25 +78,24 @@ firmware: vendor
     cd firmware && cargo build --release
 
 # `TEDDIEBOX_RELEASE` is off unless set, so `just firmware` and `just flash`
-# build the image a bench session wants. Setting it leaves `dl` as the only
-# console command in the image — enough to flash a bench build back on, and
-# nothing else — which is 18,848 bytes smaller. It works on any recipe that
-# builds firmware, so a release flash is `TEDDIEBOX_RELEASE=1 just flash`; this
-# recipe exists so CI builds that configuration too, because one nothing builds
-# is one that rots.
+# build a development image. Setting it leaves `dl` as the only console
+# command (enough to flash a development build back on), which makes the image
+# 18,848 bytes smaller. It works on any recipe that builds firmware, so a
+# release flash is `TEDDIEBOX_RELEASE=1 just flash`; this recipe exists so CI
+# builds that configuration too.
 
 # the same image without the bench console commands
 firmware-release: vendor
     cd firmware && TEDDIEBOX_RELEASE=1 cargo build --release
 
-# firmware/Cargo.toml patches both mbedtls crates to copies of the published
-# ones — `mbedtls-rs-sys` for a widened version bound and a define it will not
-# let go of, `mbedtls-rs` for a call it never makes — and cargo cannot even
-# parse the manifest until those copies exist. Every recipe that builds
-# firmware/ depends on this; it is a no-op once they are there. The why is
-# beside each patch entry in firmware/Cargo.toml and at the head of each script.
+# firmware/Cargo.toml replaces three crates with patched copies of the
+# published ones (`mbedtls-rs-sys`, `mbedtls-rs` and `smoltcp`), and cargo
+# cannot parse the manifest until those copies exist. Every recipe that
+# builds firmware/ depends on this; it does nothing once they exist. The
+# reasons are beside each patch entry in firmware/Cargo.toml and at the top
+# of each script.
 
-# fetch and patch the vendored mbedtls crates
+# fetch and patch the vendored crates
 vendor:
     ./scripts/vendor-mbedtls-rs-sys.sh
     ./scripts/vendor-mbedtls-rs.sh
@@ -108,9 +105,8 @@ vendor:
 #
 # The order in scripts/flash.sh is not arbitrary: this board has no wired
 # reset, espflash must touch the port before esptool ever does, and esptool
-# must not run at all if espflash failed. Getting any of those wrong costs a
-# J100 cold boot with the case open, which is why it is a recipe and not
-# something to retype.
+# must not run at all if espflash failed. Getting any of those wrong means
+# opening the case to short J100 and cold-boot the box.
 flash: firmware
     ./scripts/flash.sh
 
@@ -118,8 +114,8 @@ flash: firmware
 #
 # Separate from `just flash` deliberately: an app write never touches a data
 # partition, so this is run once per box and survives every later firmware
-# flash. The cost of that choice is that a fresh box plays cards and cannot
-# fetch until this is run, which the boot line says out loud.
+# flash. So a fresh box can play its card but cannot download until this is
+# run, which it reports at boot.
 #
 # Needs TEDDIEBOX_IDENTITY_DIR, set in .envrc.local. The offset must match
 # `cert` in partitions.csv.
@@ -129,20 +125,17 @@ identity:
     out="$(mktemp -d)"
     trap 'rm -rf "$out"' EXIT
     cargo run -q -p identity-image -- "$out/identity.bin"
-    # Read out of the table rather than repeated here. Written twice, the two
-    # drift the day somebody moves the partition: `just flash` would write the
-    # new table, this would write a private key to the old address, and both
-    # would report success while the box said it had no identity.
+    # Read from the table rather than repeated here, so moving the partition
+    # cannot leave this writing the private key to the old address.
     addr="$(awk -F', *' '/^cert,/ { print $4 }' partitions.csv)"
     [ -n "$addr" ] || { echo "just identity: no cert partition in partitions.csv" >&2; exit 1; }
     echo "identity: writing to $addr, per partitions.csv"
     BIN_FILE="$out/identity.bin" BIN_ADDR="$addr" ./scripts/flash.sh
 
-# `scripts/bench-console.py` sends one line and captures until a marker, which
-# is what a scripted step wants. This is for the steps with a person in them —
-# plugging headphones in between `t` and `stop`. The port takes one owner, so
-# this refuses to start while a capture is running, and `just flash` refuses
-# while this is.
+# `scripts/bench-console.py` sends one line and captures until a marker, for
+# scripts. This is for interactive use, such as plugging in headphones between
+# `t` and `stop`. Only one program may use the port, so this refuses to start
+# while a capture is running, and `just flash` refuses while this is.
 
 # an interactive console on the box, for what a capture cannot do
 console:
@@ -150,10 +143,8 @@ console:
 
 # format the tree rather than checking it
 #
-# Both workspaces, for the same reason `fmt` checks both: a `fix` that reaches
-# only the root leaves `just check` failing on firmware/ with the tree already
-# "formatted", which reads as a rustfmt disagreement rather than a recipe that
-# did not go there.
+# Both workspaces, like `fmt`: formatting only the root would leave
+# `just check` failing on firmware/.
 fix:
     cargo fmt --all
     cd firmware && cargo fmt --all

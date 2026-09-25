@@ -14,11 +14,11 @@
 # `nvs` here holds Wi-Fi calibration and nothing of ours; 16 KB is what every
 # ESP-IDF OTA project ships with.
 #
-# The chip is 8 MB, measured 2026-09-16 from espflash's connection banner and
-# confirmed by the second-stage bootloader's own `SPI Flash Size : 8MB`. At
-# 8 MB the sizing question stops being interesting: 3 MB a slot against an
-# image of 1,066,128 bytes is 2.8x headroom. A slot the image outgrows is a
-# build-time failure — espflash refuses it — not a runtime one.
+# The chip is 8 MB, as reported by espflash's connection banner and the
+# second-stage bootloader (`SPI Flash Size : 8MB`). That leaves plenty of
+# room: 3 MB per slot against an image of about 1.1 MB. An image that
+# outgrows its slot fails at build time (espflash refuses it), not at run
+# time.
 #
 # There is deliberately no `factory` slot. espflash writes `ota_0` directly, a
 # third copy would cost space for recovery value that shorting J100 already
@@ -45,8 +45,8 @@
 # firmware, not of this line.
 #
 # `wifi` holds the WPA2 key derived from the card's SSID and passphrase, so a
-# join skips the 1.75 s the driver spends deriving it (measured 2026-09-24:
-# 1.81 s a join with the passphrase, 64-72 ms with the key). Unlike `cert`,
+# join skips the 1.75 s the driver spends deriving it (measured: 1.81 s to
+# join with the passphrase, 64-72 ms with the key). Unlike `cert`,
 # the firmware writes this one, once per change of credentials. One sector,
 # above `cert`, so again nothing moved.
 #

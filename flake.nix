@@ -118,17 +118,16 @@
           set(CMAKE_AR ${xtensaGcc}/bin/xtensa-esp32s3-elf-ar)
           set(CMAKE_RANLIB ${xtensaGcc}/bin/xtensa-esp32s3-elf-ranlib)
           # A freestanding compiler cannot link a hosted executable, so the
-          # compiler check has to stop at a static library. Link tests are
-          # exactly what made opus-embedded-sys's autotools configure fail;
-          # nothing about libopus itself was ever the obstacle.
+          # compiler check has to stop at a static library. (Link tests are
+          # what break an autotools configure for this target.)
           set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
           set(CMAKE_C_FLAGS_INIT "-mlongcalls -ffunction-sections -fdata-sections")
         '';
 
-        # Fixed point on both sides on purpose: the host is the reference the
-        # device gets compared against in Phase B, and a float host build
-        # would not produce the samples the device produces. The neural
-        # extensions are float-only and megabytes of weights, so they stay off.
+        # Fixed point on both sides on purpose: the host build is the
+        # reference the device's decoded samples are compared against, and a
+        # float build would produce different samples. The neural extensions
+        # are float-only and megabytes of weights, so they stay off.
         opusCmakeFlags = [
           "-DCMAKE_BUILD_TYPE=Release"
           "-DOPUS_BUILD_SHARED_LIBRARY=OFF"
@@ -208,10 +207,9 @@
             # loads libclang at run time to do it. The C itself is compiled by
             # the Xtensa GCC above; this is only the header parser.
             pkgs.libclang.lib
-            # Flashing. Both, and in the shell rather than fetched ad hoc:
-            # `just flash` has to run them in a fixed order with fixed flags,
-            # and a recipe that reaches outside the environment for its tools
-            # is one whose behaviour depends on what the network felt like.
+            # Flashing. Both are pinned in the shell rather than fetched when
+            # needed: `just flash` runs them in a fixed order with fixed
+            # flags, and needs the same versions every time.
             pkgs.espflash
             pkgs.esptool
           ];
