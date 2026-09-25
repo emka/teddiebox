@@ -1,9 +1,7 @@
 //! LIS3DH registers.
 //!
-//! Addresses and values from the ST datasheet (DocID17530 Rev 2). **Unverified
-//! against silicon**: bench step 5 is the first time these meet the real part,
-//! and the part itself is identified from a wiki pinout rather than from its
-//! markings.
+//! Addresses and values from the ST datasheet (DocID17530 Rev 2). The part
+//! was identified from a wiki pinout, not from its markings.
 
 /// Identity register. Reads [`DEVICE_ID`] on a real LIS3DH.
 pub const WHO_AM_I: u8 = 0x0F;
@@ -18,8 +16,7 @@ pub const OUT_X_L: u8 = 0x28;
 
 /// Set in a sub-address to make the device auto-increment through a burst.
 ///
-/// Without it every byte of a six-byte read comes from the same register,
-/// which yields a plausible-looking vector that never changes on two axes.
+/// Without it, every byte of a six-byte read comes from the same register.
 pub const AUTO_INCREMENT: u8 = 0x80;
 
 /// 50 Hz, normal resolution, all three axes enabled.
@@ -30,11 +27,10 @@ pub const CTRL_REG1_50HZ_XYZ: u8 = 0x47;
 
 /// 400 Hz, normal mode, all three axes enabled.
 ///
-/// The click engine runs at the output data rate, so this is what decides how
-/// finely `TIME_LIMIT` can separate a slap's impact from the box rocking
-/// afterwards: 2.5 ms per sample here against 20 ms at 50 Hz. Measured at the
-/// bench 2026-09-13, where at 50 Hz a slap and its recoil were
-/// indistinguishable and the latched sign was a coin toss.
+/// Click detection runs at the sample rate, which decides how finely
+/// `TIME_LIMIT` can separate a slap from the box rocking afterwards: 2.5 ms
+/// per sample here, against 20 ms at 50 Hz. At 50 Hz a slap and its recoil
+/// could not be told apart, and the detected direction was random.
 pub const CTRL_REG1_400HZ_XYZ: u8 = 0x77;
 
 /// Full-scale selection and more. `FS[1:0]` are bits 5:4.
@@ -42,16 +38,13 @@ pub const CTRL_REG4: u8 = 0x23;
 
 /// `FS[1:0] = 10`, +/-8 g.
 ///
-/// Not the +/-2 g the part resets to. Measured at the bench 2026-09-13: a
-/// slap SATURATES at +/-2 g, so its reported peak caps at about 2000 mg while
-/// ordinary handling — setting a figure on the plate, putting the box down —
-/// reaches 1500. The two are compressed into one narrow band and no threshold
-/// separates them: at 45 the box skipped a chapter six times from handling
-/// alone, at the register maximum of 127 it caught two slaps in eight.
-/// At +/-8 g a slap reports its real magnitude and clears handling easily.
+/// Not the +/-2 g default. At +/-2 g a slap saturates at about 2000 mg, while
+/// normal handling (placing a figure, putting the box down) reaches 1500 mg,
+/// so no threshold separates them. At +/-8 g a slap shows its real size and
+/// is well above handling.
 ///
-/// The cost is resolution: one `CLICK_THS` step is 62 mg here against 16 at
-/// +/-2 g, per the datasheet's own table.
+/// The cost is resolution: one `CLICK_THS` step is 62 mg here, against 16 mg
+/// at +/-2 g.
 pub const CTRL_REG4_FS_8G: u8 = 0x20;
 
 /// SA0 tied low. Shared with the TLV320DAC3100, which has no other address.
@@ -94,6 +87,6 @@ pub const CLICK_THS_MAX: u8 = 0x7F;
 
 /// How long the acceleration may stay over the threshold and still be a click.
 pub const TIME_LIMIT: u8 = 0x3B;
-/// `TIME_LIMIT` is seven bits too. Its own constant: the same value for a
-/// different field is a coincidence, not a shared fact.
+/// `TIME_LIMIT` is also seven bits. A separate constant, because the two
+/// fields only happen to have the same limit.
 pub const TIME_LIMIT_MAX: u8 = 0x7F;

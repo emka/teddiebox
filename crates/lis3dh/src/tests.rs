@@ -6,9 +6,8 @@ use embedded_hal_mock::eh1::i2c::{Mock as I2cMock, Transaction};
 
 const ADDR: u8 = regs::ADDRESS_SA0_LOW;
 
-/// Every byte written out by hand rather than taken from `regs`: a test that
-/// reads the same constants as the code cannot disagree with it, which is how
-/// a shifted register map ships green.
+/// Every byte is written by hand rather than taken from `regs`, so the tests
+/// can disagree with the code.
 #[test]
 fn the_identity_register_is_read_from_0x0f() {
     let expected = [Transaction::write_read(ADDR, vec![0x0F], vec![0x33])];
@@ -36,9 +35,8 @@ fn initialisation_writes_the_rate_and_the_axis_enables() {
     dev.release().done();
 }
 
-/// The burst must set the auto-increment bit. Without it the device returns
-/// the same register six times, which reads as a vector that never moves on
-/// two of its three axes.
+/// The burst must set the auto-increment bit, or the device returns the same
+/// register six times.
 #[test]
 fn a_burst_read_sets_the_auto_increment_bit() {
     let expected = [Transaction::write_read(
@@ -51,8 +49,8 @@ fn a_burst_read_sets_the_auto_increment_bit() {
     dev.release().done();
 }
 
-/// Little endian, low byte first, and signed: a tilt one way must not read as
-/// a large positive number.
+/// Little-endian and signed: a negative value must not read as a large
+/// positive one.
 #[test]
 fn a_negative_axis_stays_negative() {
     let expected = [Transaction::write_read(
@@ -65,11 +63,10 @@ fn a_negative_axis_stays_negative() {
     dev.release().done();
 }
 
-/// `CLICK_SRC`'s bit positions are *not* unambiguous in DocID17530 Rev 2:
-/// Table 71 pads CLICK_CFG's unused bits with `--`, but Table 73 lists seven
-/// names for CLICK_SRC without a padding cell. These bytes encode the reading
-/// the driver implements; `Click::raw` carries the register out so one slap at
-/// the bench can contradict it.
+/// `CLICK_SRC`'s bit positions are ambiguous in DocID17530 Rev 2: Table 71
+/// marks CLICK_CFG's unused bits with `--`, but Table 73 lists seven names
+/// for CLICK_SRC with no padding. These bytes follow the driver's reading;
+/// `Click::raw` exposes the raw register to check it.
 #[test]
 fn a_click_on_x_is_reported_with_its_axis() {
     let expected = [Transaction::write_read(ADDR, vec![0x39], vec![0x41])];
@@ -99,8 +96,8 @@ fn no_interrupt_active_is_not_a_click() {
     dev.release().done();
 }
 
-/// Interrupt active with no axis bit is a register we do not understand, and
-/// guessing an axis from it would invent a chapter skip out of nothing.
+/// An interrupt with no axis bit is not understood, so it is discarded
+/// rather than guessed.
 #[test]
 fn an_interrupt_with_no_axis_is_discarded() {
     let expected = [Transaction::write_read(ADDR, vec![0x39], vec![0x40])];
@@ -109,17 +106,13 @@ fn an_interrupt_with_no_axis_is_discarded() {
     dev.release().done();
 }
 
-/// Byte for byte, by hand. 0x04 is HPCLICK in CTRL_REG2 — without the
-/// high-pass filter the 1 g resting on Z biases the click comparator. The
-/// `write_read` on 0x26 that follows is REFERENCE: reading it is what resets
-/// that filter, so it must happen before the axes are armed; the mock's
-/// return byte (0x00) is discarded by the driver and stands for any value
-/// the part might answer. 0xAD is LIR_Click set over a threshold of 45,
-/// which is 703 mg at the 15.625 mg per LSB the part's default +/-2 g full
-/// scale gives. 0x15 is ZS|YS|XS, single-click on all three axes and
-/// double-click on none — written last, after the threshold and timing it
-/// depends on, so a bus error earlier in the sequence cannot leave the axes
-/// armed at CLICK_THS's power-on default of 0.
+/// Byte for byte, by hand. 0x04 is HPCLICK in CTRL_REG2: without the
+/// high-pass filter, gravity's 1 g on Z would affect click detection. The
+/// read of 0x26 (REFERENCE) resets that filter, so it comes before the axes
+/// are enabled; the returned byte is ignored. 0xAD is LIR_Click plus a
+/// threshold of 45. 0x15 is ZS|YS|XS (single click on all three axes, no
+/// double click), written last so a bus error earlier cannot leave the axes
+/// enabled with CLICK_THS at its power-on value of 0.
 #[test]
 fn enabling_click_writes_the_filter_the_axes_the_threshold_and_the_limit() {
     let expected = [
@@ -162,10 +155,9 @@ fn a_single_axis_enables_only_that_axis() {
     dev.release().done();
 }
 
-/// The threshold is seven bits. Masking a too-large value would be silent and
-/// backwards: 200 becomes 72, and the box ends up more than twice as sensitive
-/// as the caller asked for. Clamping errs the other way, towards missing a
-/// slap rather than inventing one.
+/// The threshold is seven bits. Masking 200 would give 72, making the box
+/// more than twice as sensitive. Clamping errs towards missing a slap rather
+/// than inventing one.
 #[test]
 fn an_oversized_threshold_clamps_to_the_least_sensitive_setting() {
     let expected = [
@@ -185,10 +177,8 @@ fn an_oversized_threshold_clamps_to_the_least_sensitive_setting() {
     dev.release().done();
 }
 
-/// `clamped_threshold` is the single source of truth `enable_click` uses
-/// internally and the firmware console calls to report the value actually
-/// applied. Literal outputs, not the constant re-read: 127 is `CLICK_THS`'s
-/// seven-bit ceiling.
+/// `clamped_threshold` is used by `enable_click` and by the console to
+/// report the value actually applied. 127 is the seven-bit maximum.
 #[test]
 fn clamped_threshold_passes_in_range_values_through() {
     assert_eq!(clamped_threshold(45), 45);

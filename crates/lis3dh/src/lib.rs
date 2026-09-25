@@ -2,15 +2,13 @@
 
 //! Driver for the ST LIS3DH accelerometer.
 //!
-//! Enough of the part for bench step 5 and for M7: prove it is there, stream
-//! axes, and run its click engine.
+//! Enough of the part to check it is there, read the axes, and use its
+//! click (tap) detection.
 //!
-//! Tap detection was going to live in `teddiebox-core` where a host test could
-//! hold it. It does not, because the box polls this part every 200 ms and a
-//! slap lasts a few: the part detects the click itself at its own rate and
-//! latches it, which is the only reading that survives that poll interval.
-//! What stays out of here is *policy* — which side of the box an axis means is
-//! `teddiebox_board`'s business, and this crate still only moves bytes.
+//! The chip detects clicks itself and latches them, because the box only
+//! polls it every 200 ms and a slap lasts a few milliseconds. Which side of
+//! the box an axis means is decided in `teddiebox_board`; this crate only
+//! moves bytes.
 
 pub mod regs;
 
@@ -51,20 +49,20 @@ where
 
     /// True when the identity register reads what a LIS3DH reads.
     ///
-    /// Worth calling before anything else: this address is shared with the
-    /// audio codec, which will acknowledge and answer nonsense.
+    /// Call this first: the address may be shared with the audio codec,
+    /// which would also answer.
     pub fn is_present(&mut self) -> Result<bool, Error<E>> {
         Ok(self.who_am_i()? == regs::DEVICE_ID)
     }
 
-    /// Starts the device at 50 Hz with all three axes enabled.
+    /// Starts the device at 400 Hz and +/-8 g, with all three axes enabled.
     pub fn init(&mut self) -> Result<(), Error<E>> {
         self.i2c
             .write(self.address, &[regs::CTRL_REG1, regs::CTRL_REG1_400HZ_XYZ])
             .map_err(Error::Bus)?;
-        // Full scale before anything reads or thresholds: at the reset +/-2 g
-        // a slap clips, and a clipped slap cannot be told from a firm handling
-        // knock. See `CTRL_REG4_FS_8G`.
+        // Set full scale before any reads or thresholds: at the default
+        // +/-2 g a slap clips and looks like normal handling. See
+        // `CTRL_REG4_FS_8G`.
         self.i2c
             .write(self.address, &[regs::CTRL_REG4, regs::CTRL_REG4_FS_8G])
             .map_err(Error::Bus)
@@ -72,8 +70,8 @@ where
 
     /// Reads X, Y and Z as raw signed counts.
     ///
-    /// One burst with the auto-increment bit set, so the three axes come from
-    /// the same sample rather than from three separate ones.
+    /// One burst read with auto-increment, so all three axes come from the
+    /// same sample.
     pub fn acceleration(&mut self) -> Result<[i16; 3], Error<E>> {
         let mut buf = [0u8; 6];
         self.i2c
@@ -106,9 +104,8 @@ pub struct Click {
     pub axis: ClickAxis,
     /// `CLICK_SRC`'s sign bit: which way the box was struck.
     pub negative: bool,
-    /// The whole register as it was read. Carried because this datasheet does
-    /// not pin the bit positions down, so the bench must be able to see what
-    /// the part actually said rather than only what we made of it.
+    /// The raw register value. Kept because the datasheet is unclear about
+    /// the bit positions, so the raw value is useful for debugging.
     pub raw: u8,
 }
 
@@ -118,8 +115,8 @@ where
 {
     /// Takes the latched click, if there is one.
     ///
-    /// Reading `CLICK_SRC` is what clears the latch, so a click is delivered
-    /// exactly once however long it waited.
+    /// Reading `CLICK_SRC` clears the latch, so each click is returned once,
+    /// however long it waited.
     pub fn take_click(&mut self) -> Result<Option<Click>, Error<E>> {
         let mut buf = [0u8; 1];
         self.i2c
@@ -148,9 +145,8 @@ where
 
 /// Which axes the click engine watches.
 ///
-/// A set rather than one axis: which axis a slap lands on depends on how the
-/// part is oriented in the box, and nothing has measured that. Calibration
-/// enables all three and reads the answer off `Click::axis`.
+/// A set rather than one axis, so all three can be enabled and the axis read
+/// from `Click::axis`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClickAxes {
     pub x: bool,
@@ -184,24 +180,22 @@ impl ClickAxes {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClickConfig {
     pub axes: ClickAxes,
-    /// `CLICK_THS[6:0]`. One LSB is full scale / 128, so 15.625 mg at the
-    /// +/-2 g the part defaults to and [`Lis3dh::init`] leaves in place.
-    /// Values above 127 are clamped to 127, not masked.
+    /// `CLICK_THS[6:0]`. One step is full scale / 128: about 62 mg at the
+    /// +/-8 g that [`Lis3dh::init`] sets. Values above 127 are clamped to 127,
+    /// not masked.
     pub threshold: u8,
-    /// `TIME_LIMIT[6:0]`, in ODR periods — 20 ms each at the 50 Hz `init`
-    /// sets. **The unit is not stated in DocID17530 Rev 2**; it is ST's
-    /// AN3308 that gives it as 1/ODR. Confirm at the bench before trusting it.
+    /// `TIME_LIMIT[6:0]`, in sample periods: 2.5 ms each at the 400 Hz that
+    /// `init` sets. **The unit is not stated in DocID17530 Rev 2**; ST's
+    /// AN3308 gives it as 1/ODR. Not verified on the hardware.
     pub time_limit: u8,
 }
 
 /// The threshold [`enable_click`](Lis3dh::enable_click) actually applies for
 /// a requested value.
 ///
-/// `CLICK_THS` is seven bits, so anything above 127 is clamped, not masked —
-/// masking 200 would give 72 and quietly double the box's sensitivity over
-/// what was asked for. Callers that report the threshold back (the console,
-/// a click print) should call this rather than echo the raw request, and
-/// there is exactly one place that does the clamping arithmetic.
+/// `CLICK_THS` is seven bits, so values above 127 are clamped, not masked
+/// (masking 200 would give 72, making the box much more sensitive). Code that
+/// reports the threshold should call this rather than print the raw request.
 pub const fn clamped_threshold(threshold: u8) -> u8 {
     if threshold > regs::CLICK_THS_MAX {
         regs::CLICK_THS_MAX
@@ -216,21 +210,17 @@ where
 {
     /// Sets the part detecting clicks and latching them.
     ///
-    /// Call after [`init`](Self::init): the rate and the axis enables it
-    /// writes are what the click engine runs on.
+    /// Call after [`init`](Self::init), which sets the sample rate and
+    /// enables the axes.
     ///
-    /// `CLICK_CFG` — the per-axis enables — is written **last**, after
-    /// `CLICK_THS` and `TIME_LIMIT`, and not first as the register map is
-    /// laid out. `CLICK_THS` powers up at 0, its most sensitive setting, so a
-    /// bus error partway through this call must never leave the axes armed
-    /// against that default: on a child's toy that reads as random chapter
-    /// skips from being carried across a room. Writing the axis enables last
-    /// means a partial write leaves the click engine disarmed — silent —
-    /// rather than armed and hypersensitive. Do not reorder this back to
+    /// `CLICK_CFG` (the per-axis enables) is written **last**. `CLICK_THS`
+    /// starts at 0, the most sensitive setting, so if a bus error interrupts
+    /// this call, the axes must not already be enabled; otherwise carrying
+    /// the box would skip chapters at random. Do not reorder these writes to
     /// match the register map.
     ///
-    /// `REFERENCE` (0x26) is read, and discarded, right after `CTRL_REG2` and
-    /// before the axes are armed. See the comment on that read for why.
+    /// `REFERENCE` (0x26) is read and discarded after `CTRL_REG2`, before the
+    /// axes are enabled. See the comment on that read.
     pub fn enable_click(&mut self, cfg: ClickConfig) -> Result<(), Error<E>> {
         let ths = regs::CLICK_THS_LIR | clamped_threshold(cfg.threshold);
 
@@ -238,15 +228,11 @@ where
             .write(self.address, &[regs::CTRL_REG2, regs::CTRL_REG2_HPCLICK])
             .map_err(Error::Bus)?;
 
-        // CTRL_REG2 selects HPM[1:0] = 00 — "Normal mode", which Table 34
-        // resets "by reading REFERENCE". Until that read happens, the
-        // high-pass filter's output still carries the standing 1 g on Z as a
-        // step, and that step alone can cross CLICK_THS: a click latched with
-        // nothing struck. This call re-runs on every re-arm, so without this
-        // read each threshold sweep step could inject one phantom click into
-        // the measurement the sweep exists to make. The byte read back is
-        // discarded on purpose — the read itself is what resets the filter.
-        // Do not delete this as dead code.
+        // CTRL_REG2 selects HPM[1:0] = 00, "Normal mode, reset by reading
+        // REFERENCE" (Table 34). Until REFERENCE is read, the filter output
+        // still contains gravity's 1 g on Z as a step, which alone can cross
+        // CLICK_THS and latch a false click. The value is discarded; the
+        // read itself resets the filter. Not dead code.
         let mut reference = [0u8; 1];
         self.i2c
             .write_read(self.address, &[regs::REFERENCE], &mut reference)
