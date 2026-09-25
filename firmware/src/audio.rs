@@ -692,7 +692,7 @@ async fn play_taf_inner(
             // since a whole Tonie is over half an hour. `taf2wav --frames N`
             // decodes the same number of frames on the host.
             esp_println::println!(
-                "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns,                  crc32 {:08X}, decode {}%",
+                "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns, crc32 {:08X}, decode {}%",
                 so_far / 1_000_000,
                 cushion.percent(),
                 cushion.low_water_percent(),
