@@ -10,10 +10,8 @@ const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: u32 = 2;
 /// Left channel. The reference tests measure this one.
 const LEFT_HZ: f32 = 440.0;
-/// Right channel, a perfect fifth above. A different tone per channel is
-/// what makes a channel swap, a mono downmix or an interleaving mistake
-/// detectable at all: with the same samples in both, every such defect
-/// produces output identical to correct output.
+/// Right channel, a perfect fifth above. A different tone per channel makes
+/// a channel swap, mono downmix or interleaving mistake detectable.
 const RIGHT_HZ: f32 = 660.0;
 const SECONDS: u32 = 5;
 const CHAPTER_SECONDS: u32 = 2;
@@ -30,9 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The original single-chapter fixture: a plain 5 s tone, one chapter.
-/// Behaviour is unchanged from before this file gained a second fixture --
-/// still deterministic, still byte-for-byte reproducible.
+/// The single-chapter fixture: a plain 5 s tone. Deterministic, so it is
+/// reproducible byte for byte.
 fn write_single_chapter(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let samples = sine_interleaved(SECONDS * SAMPLE_RATE);
 
@@ -51,10 +48,9 @@ fn write_single_chapter(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// A three-chapter fixture, ~2 s of tone per chapter, via `new_chapter()`
-/// between `encode()` calls. `sine.taf` has exactly one chapter, so it can't
-/// exercise `TafReader::seek_to_chapter` beyond the single trivial case; this
-/// fixture is what the reader's chapter tests actually seek across.
+/// A three-chapter fixture, about 2 s of tone per chapter, made with
+/// `new_chapter()` between `encode()` calls. Used by the reader's chapter
+/// tests.
 fn write_multi_chapter(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let chapter_samples = sine_interleaved(CHAPTER_SECONDS * SAMPLE_RATE);
 

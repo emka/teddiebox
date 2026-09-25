@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# Its own workspace: this crate only ever builds for the device, and a
-# no_std staticlib with its own panic handler cannot also be built for the
-# host as part of `cargo test --workspace`.
+# A separate workspace: this crate only builds for the device. A no_std
+# staticlib with its own panic handler cannot be built for the host by
+# `cargo test --workspace`.
 [workspace]
 
 [lib]

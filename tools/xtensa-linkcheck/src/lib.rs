@@ -1,13 +1,12 @@
-//! Gives the xtensa linker a reason to pull in the whole decode path.
+//! Makes the xtensa linker pull in the whole decode path.
 //!
-//! `cargo check` proves the Rust compiles for the device; it does not prove
-//! that rustc's calls into libopus resolve, or that libopus's own references
-//! — `memcpy`, the libm entry points — can be satisfied by the ESP
-//! toolchain's C library. Those only surface at link time, which needs
-//! something that actually calls the code. This is that something.
+//! `cargo check` shows the Rust compiles for the device, but not that the
+//! calls into libopus resolve, or that libopus's own needs (`memcpy`, libm)
+//! are met by the ESP toolchain's C library. That only shows at link time,
+//! which needs code that calls it. This is that code.
 //!
-//! It is not firmware and is never flashed. `scripts/xtensa-link-check.sh`
-//! builds it and links it; nothing else depends on it.
+//! Not firmware, never flashed. Only `scripts/xtensa-link-check.sh` builds
+//! and links it.
 
 #![no_std]
 

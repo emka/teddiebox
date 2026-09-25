@@ -2,11 +2,11 @@
 //!
 //! Reads `$TEDDIEBOX_IDENTITY_DIR/CLIENT.DER` and `PRIVATE.DER` and writes one
 //! file for `espflash write-bin`. The directory is an environment variable
-//! rather than an argument so the paths to a private key are not retyped —
-//! and not left in shell history — on every box.
+//! rather than an argument, so the private key's path is not typed each time
+//! or left in shell history.
 //!
-//! **It prints lengths and never contents.** The same rule the firmware's
-//! console follows for the tag token and the SLIX password.
+//! **It prints lengths, never contents**, like the firmware's console does
+//! for the tag token and the SLIX password.
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,12 +16,10 @@ use teddiebox_identity::{render, HEADER, MAX_BODY};
 
 /// Reads `dir/upper`, falling back to `dir/upper.to_lowercase()`.
 ///
-/// The files this tool reads come straight off the box's SD card, and a
-/// Linux `vfat` mount presents 8.3 short names lowercased by default — so
-/// the natural `cp /mnt/card/CERT/*.der $TEDDIEBOX_IDENTITY_DIR/` produces
-/// `client.der`, not `CLIENT.DER`. Trying the documented spelling first and
-/// the lowercase one second means that copy just works; naming both
-/// spellings in the error means it is obvious why when it does not.
+/// The files come from the box's SD card, and Linux shows 8.3 short names in
+/// lower case by default, so `cp /mnt/card/CERT/*.der
+/// $TEDDIEBOX_IDENTITY_DIR/` gives `client.der`, not `CLIENT.DER`. Both
+/// spellings are tried, and both are named in the error.
 fn read_der(dir: &Path, upper: &str) -> Result<Vec<u8>, String> {
     let lower = upper.to_lowercase();
     let bytes = match fs::read(dir.join(upper)) {
@@ -34,11 +32,9 @@ fn read_der(dir: &Path, upper: &str) -> Result<Vec<u8>, String> {
         })?,
     };
 
-    // Every DER object here is a SEQUENCE, so its first byte is 0x30. One byte
-    // of checking catches the mistakes that otherwise reach flash and only
-    // surface as a failed handshake at the box: a PEM copied instead of a DER,
-    // a text file, a truncation at the head, a wrong directory. Say which file
-    // and how long it was — the operator is at a laptop and can act on both.
+    // Every DER object here is a SEQUENCE, so its first byte is 0x30. This
+    // catches a PEM instead of a DER, a text file, or the wrong directory,
+    // which would otherwise only show up as a failed TLS handshake on the box.
     match bytes.first() {
         None => Err(format!("{upper} is empty")),
         Some(0x30) => Ok(bytes),

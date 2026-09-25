@@ -1,5 +1,5 @@
-//! A card-shaped thing made of memory, so the assumptions this project makes
-//! about `embedded-sdmmc` can be tested without a card.
+//! An SD card in memory, to test the project's assumptions about
+//! `embedded-sdmmc` without a real card.
 //!
 //! Host-only, test support only. Nothing here ships.
 

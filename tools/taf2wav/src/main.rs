@@ -1,5 +1,5 @@
-//! Decodes a .taf to a .wav. The M1 demonstration, and the tool used to
-//! listen to anything the device later claims it cannot play.
+//! Decodes a .taf to a .wav, for listening on a computer to a file the box
+//! cannot play.
 
 use std::fs;
 
@@ -13,11 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     };
 
-    // Stopping after a fixed number of frames is what makes the device
-    // comparable. Bench step 9 has the box print a running checksum of the PCM
-    // it has decoded; playing a whole Tonie to the end is over half an hour of
-    // loud audio, so the host decodes exactly as many frames as the box
-    // reported and the two checksums are of the same samples.
+    // An optional frame limit, so the output can be compared with the same
+    // number of frames decoded on the box (a whole Tonie is over half an
+    // hour).
     let mut limit: Option<usize> = None;
     if args.next().as_deref() == Some("--frames") {
         limit = match args.next().and_then(|n| n.parse().ok()) {
@@ -31,8 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let data = fs::read(&input).map_err(|e| format!("reading {input}: {e}"))?;
     let source = SlicePages::new(&data).map_err(|e| format!("opening {input}: {e}"))?;
-    // The decoder state is ~27 KB and the decoder borrows it, so it has to
-    // outlive `decoder`. On device this is a static; here, main's stack.
+    // The decoder state is about 27 KB and the decoder borrows it, so it must
+    // outlive `decoder`. On the device it is a static; here, on main's stack.
     let mut state = OpusState::new();
     let opus = LibOpus::new(&mut state).map_err(|e| format!("initializing Opus decoder: {e}"))?;
     let mut decoder =

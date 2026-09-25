@@ -1,8 +1,7 @@
-//! Four things this project's download design rests on. Each was read out of
-//! `embedded-sdmmc`'s source; these run it instead.
+//! Checks the assumptions about `embedded-sdmmc` that the download code
+//! relies on, by running the library rather than reading its source.
 //!
-//! If any of these fails, the design is
-//! wrong, and it is much cheaper to learn that here than at the bench.
+//! If one of these fails, the download design needs rethinking.
 
 use embedded_sdmmc::{Error, Mode, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use fat_assumptions::RamDisk;
@@ -22,8 +21,8 @@ impl TimeSource for NoClock {
     }
 }
 
-/// Where the filesystem starts, in 512-byte blocks. One mebibyte in, which is
-/// where every card formatter has put the first partition since 2009.
+/// Where the filesystem starts, in 512-byte blocks: 1 MiB, where card
+/// formatters put the first partition.
 const PARTITION_START_BLOCK: u32 = 2048;
 
 /// `0x0E`, FAT16 with LBA addressing: one of the five types
@@ -34,21 +33,16 @@ const PARTITION_TYPE_FAT16_LBA: u8 = 0x0E;
 /// an MBR at block 0 naming one FAT16 partition, and that partition's
 /// filesystem.
 ///
-/// `embedded-sdmmc` can mount a FAT volume but cannot create one, so a test
-/// that wants a real filesystem has to bring its own. The alternative was
-/// committing an eight-megabyte binary fixture to git.
+/// `embedded-sdmmc` can mount a FAT volume but cannot create one, so the test
+/// formats its own (instead of committing an 8 MB image to git).
 ///
-/// The partition table is not decoration: `open_raw_volume` reads block 0,
-/// insists on the `0xAA55` signature, and indexes `VolumeIdx(0)` into the
-/// entry at offset 446. A bare filesystem also ends its first block in
-/// `0xAA55`, so handing one over does not fail cleanly — it is misread as a
-/// partition table full of rubbish.
+/// The partition table is needed: `open_raw_volume` reads block 0, requires
+/// the `0xAA55` signature, and reads partition 0 from offset 446. A bare
+/// filesystem also ends its first block with `0xAA55`, so it would be misread
+/// as a garbage partition table rather than rejected.
 ///
-/// **This formats a `Vec<u8>` and nothing else.** The bytes never leave the
-/// process: no block device, no path, no file handle. `format_volume` is
-/// destructive by nature, so never hand it anything but a fresh in-memory
-/// buffer — passing it a `File` opened on a card or a `/dev/` node would
-/// erase that device, and no test here has any reason to own one.
+/// **This only formats an in-memory `Vec<u8>`.** `format_volume` erases what
+/// it is given, so never pass it a file or device.
 fn blank_fat_image_in_memory(megabytes: usize) -> RamDisk {
     let mut image = vec![0u8; megabytes * 1024 * 1024];
     let partition_at = PARTITION_START_BLOCK as usize * 512;
@@ -60,12 +54,8 @@ fn blank_fat_image_in_memory(megabytes: usize) -> RamDisk {
 
     {
         let mut cursor = std::io::Cursor::new(&mut image[partition_at..]);
-        // FAT16 explicitly. `fatfs` does pick FAT16 for this size on its own,
-        // but by estimate: `determine_bytes_per_cluster` guesses a cluster
-        // size and `determine_fs_geometry` then takes the first of FAT32,
-        // FAT16, FAT12 that is self-consistent. Saying FAT16 here makes the
-        // geometry a property of this test rather than of that estimator, and
-        // `embedded-sdmmc` mounts FAT16 and FAT32 but not FAT12.
+        // FAT16 explicitly. `fatfs` would pick FAT16 for this size by itself,
+        // but only by estimate; `embedded-sdmmc` cannot mount FAT12.
         fatfs::format_volume(
             &mut cursor,
             fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat16),
@@ -77,12 +67,12 @@ fn blank_fat_image_in_memory(megabytes: usize) -> RamDisk {
     RamDisk::new(image)
 }
 
-/// The 66 bytes at the end of block 0 that `open_raw_volume` actually reads:
-/// one partition entry and the signature. Everything else stays zero.
+/// The 66 bytes at the end of block 0 that `open_raw_volume` reads: one
+/// partition entry and the signature. Everything else is zero.
 fn write_master_boot_record(image: &mut [u8], start_block: u32, block_count: u32) {
     let entry = &mut image[446..462];
     entry[0] = 0x00; // not bootable, and not the 0x80 that means bootable
-    entry[1..4].copy_from_slice(&[0xFE, 0xFF, 0xFF]); // CHS, unread and unreadable
+    entry[1..4].copy_from_slice(&[0xFE, 0xFF, 0xFF]); // CHS, not used
     entry[4] = PARTITION_TYPE_FAT16_LBA;
     entry[5..8].copy_from_slice(&[0xFE, 0xFF, 0xFF]);
     entry[8..12].copy_from_slice(&start_block.to_le_bytes());
@@ -91,20 +81,19 @@ fn write_master_boot_record(image: &mut [u8], start_block: u32, block_count: u32
     image[511] = 0xAA;
 }
 
-/// `MAX_FILES` is deliberately **2**. With one, the refusal in
-/// `the_same_file_cannot_be_opened_twice` could be `TooManyOpenFiles` and the
-/// test would pass while proving nothing.
+/// `MAX_FILES` is **2**. With 1, the refusal in
+/// `the_same_file_cannot_be_opened_twice` could be `TooManyOpenFiles`, and the
+/// test would prove nothing.
 type Volumes = VolumeManager<RamDisk, NoClock, 4, 2, 1>;
 
 fn mounted(disk: RamDisk) -> Volumes {
-    // `VolumeManager::new` only builds the default 4/4/1 shape; the limits
-    // this test wants have to go through `new_with_limits`.
+    // `VolumeManager::new` only uses the default limits (4/4/1).
     VolumeManager::new_with_limits(disk, NoClock, 5000)
 }
 
-/// The assumption the whole single-handle design rests on: bytes written at
-/// the end of a file can be read back from behind the write head, on the same
-/// handle, without closing it.
+/// The download uses one file handle for writing and reading: bytes written
+/// at the end of a file can be read back from earlier in the file, on the
+/// same handle, without closing it.
 #[test]
 fn one_handle_can_write_at_the_end_and_read_from_behind_it() {
     let volumes = mounted(blank_fat_image_in_memory(8));
@@ -141,10 +130,9 @@ fn one_handle_can_write_at_the_end_and_read_from_behind_it() {
     volumes.close_file(file).unwrap();
 }
 
-/// Why `ContentSink::append` seeks to the end itself. After reading from
-/// behind the write head the offset is *in the middle*, and a write there
-/// overwrites rather than appends — silently, and in the part of the file the
-/// decoder has already been promised.
+/// Why `ContentSink::append` seeks to the end itself: after a read, the
+/// offset is *in the middle*, and a write there silently overwrites instead
+/// of appending.
 #[test]
 fn a_write_after_a_backward_seek_overwrites_unless_you_seek_to_the_end() {
     let volumes = mounted(blank_fat_image_in_memory(8));
@@ -176,8 +164,7 @@ fn a_write_after_a_backward_seek_overwrites_unless_you_seek_to_the_end() {
         "the file did not grow: the write overwrote page 1"
     );
 
-    // And it is page 1 specifically that is gone, not merely a byte count that
-    // failed to move.
+    // Page 1 itself was overwritten.
     volumes.file_seek_from_start(file, 4096).unwrap();
     let mut clobbered = [0u8; 4096];
     let mut filled = 0;
@@ -194,8 +181,8 @@ fn a_write_after_a_backward_seek_overwrites_unless_you_seek_to_the_end() {
     volumes.close_file(file).unwrap();
 }
 
-/// Why a write handle and a read handle on the same file are not an option,
-/// whatever `MAX_FILES` is set to.
+/// Why a separate write handle and read handle on the same file are not
+/// possible, whatever `MAX_FILES` is.
 #[test]
 fn the_same_file_cannot_be_opened_twice() {
     let volumes = mounted(blank_fat_image_in_memory(8));
@@ -208,9 +195,8 @@ fn the_same_file_cannot_be_opened_twice() {
     let refusal = volumes
         .open_file_in_dir(root, "STORY.TAF", Mode::ReadOnly)
         .expect_err("two handles on one file would make the ping-pong unnecessary");
-    // The variant matters. `is_err()` alone would still pass if the refusal
-    // came from the handle budget, which is a limit this project chooses and
-    // could raise, rather than from the library's rule about one file.
+    // Check the exact error: `is_err()` would also pass if the handle limit
+    // (which this project sets) caused the refusal.
     assert!(
         matches!(refusal, Error::FileAlreadyOpen),
         "the refusal must be about this file, not about how many handles fit: {refusal:?}"
@@ -219,16 +205,13 @@ fn the_same_file_cannot_be_opened_twice() {
     volumes.close_file(first).unwrap();
 }
 
-/// A file's recorded length only becomes true at a flush, so the length
-/// written to disk lags behind what the live handle counts. This is why a
-/// separate sidecar is needed to know a download's intended length.
+/// A file's length on disk is only updated at a flush, so it lags behind
+/// the open handle. This is why a separate sidecar records a download's
+/// intended length.
 ///
-/// The difference is only visible across a remount. `file_length` on a live
-/// handle reads `FileInfo.entry.size`, which `write` updates immediately, and
-/// `close_file` flushes on the way out — so a test that closes the file and
-/// reopens it cannot tell a flush from a close, and would pass with the flush
-/// deleted. This one drops the `VolumeManager` with `free`, which hands the
-/// card back without closing anything, the way a flat battery would.
+/// This only shows across a remount: `close_file` also flushes. So the test
+/// drops the `VolumeManager` with `free`, which releases the card without
+/// closing the file, like a power loss.
 #[test]
 fn a_files_recorded_length_only_becomes_true_at_a_flush() {
     let card = {
@@ -242,7 +225,7 @@ fn a_files_recorded_length_only_becomes_true_at_a_flush() {
         volumes.write(file, &[1u8; 4096]).unwrap();
         volumes.flush_file(file).unwrap();
 
-        // A second page, and this time nothing tells the directory entry.
+        // A second page, not flushed.
         volumes.write(file, &[2u8; 4096]).unwrap();
         assert_eq!(
             volumes.file_length(file).unwrap(),
@@ -250,8 +233,8 @@ fn a_files_recorded_length_only_becomes_true_at_a_flush() {
             "the live handle counts every byte handed to it, flushed or not"
         );
 
-        // The power goes away here. `free` returns the card without closing
-        // the file, so the unflushed length never reaches the directory.
+        // Power is lost here: `free` releases the card without closing the
+        // file, so the unflushed length never reaches the directory.
         volumes.free().0
     };
 
@@ -269,10 +252,9 @@ fn a_files_recorded_length_only_becomes_true_at_a_flush() {
     volumes.close_file(reopened).unwrap();
 }
 
-/// The card's config file is opened by name, and `open_file_in_dir` takes a
-/// short name — so the name has to *be* one. This runs the round trip the
-/// firmware will: create the file under the name the crate publishes, hand the
-/// bytes back, and parse them.
+/// The config file is opened by name with `open_file_in_dir`, which only
+/// takes short names. This does what the firmware does: create the file
+/// under the crate's file name, read the bytes back, and parse them.
 #[test]
 fn the_config_file_can_be_opened_by_the_name_the_crate_publishes() {
     const TEXT: &str = "ssid = HomeNet\npassword = hunter2\nserver = box.lan:80\n";
@@ -300,27 +282,21 @@ fn the_config_file_can_be_opened_by_the_name_the_crate_publishes() {
     assert_eq!(config.server.as_str(), "box.lan:80");
 }
 
-/// What a long config filename would actually cost, since this project's
-/// documentation called the file `teddiebox.conf` first.
+/// What a long config file name such as `teddiebox.conf` would need.
 ///
-/// It is **not** impossible, which is what a reading of `open_file_in_dir`
-/// alone suggests: `ShortFileName` refuses the ninth character of the stem, but
-/// `open_long_name_file_in_dir` is a second door and it opens. The real
-/// difference is narrower — that call reassembles every long name in the
-/// directory looking for a match, it cannot *create* a long-name file, and it
-/// is a second way into the filesystem for the media task to own. A short name
-/// needs none of that and `Storage::open_file` already speaks it.
-///
-/// Both halves are asserted here so that neither can be repeated as folklore.
+/// It is possible: `ShortFileName` refuses a stem longer than eight
+/// characters, but `open_long_name_file_in_dir` does open it. However, that
+/// call scans every long name in the directory, cannot *create* a long-name
+/// file, and would add a second way into the filesystem. A short name needs
+/// none of that.
 #[test]
 fn a_long_config_filename_opens_only_through_the_long_name_call() {
     const LONG: &str = "teddiebox.conf";
     const TEXT: &str = "ssid = HomeNet\nserver = box.lan:80\n";
 
     let disk = blank_fat_image_in_memory(8);
-    // Written the way it would really arrive: by the laptop, not by the box.
-    // `open_long_name_file_in_dir` cannot create one, which is the other half
-    // of why a short name is less trouble.
+    // Written by the laptop, not the box: `open_long_name_file_in_dir` cannot
+    // create files.
     let disk = with_long_name_file(disk, LONG, TEXT.as_bytes());
 
     let volumes = mounted(disk);
@@ -330,8 +306,7 @@ fn a_long_config_filename_opens_only_through_the_long_name_call() {
     let refusal = volumes
         .open_file_in_dir(root, LONG, Mode::ReadOnly)
         .expect_err("a short-name open of a long name must fail");
-    // The variant matters: `is_err()` would also pass for a missing file,
-    // which would say nothing about the shape of the name.
+    // Check the exact error: `is_err()` would also pass for a missing file.
     assert!(
         matches!(
             refusal,
@@ -340,7 +315,7 @@ fn a_long_config_filename_opens_only_through_the_long_name_call() {
         "the refusal must be about the ninth character of the stem: {refusal:?}"
     );
 
-    // And the second door, which does open.
+    // The long-name call does open it.
     let file = volumes
         .open_long_name_file_in_dir(root, LONG, Mode::ReadOnly)
         .expect("a long name does open through the long-name call");
@@ -352,8 +327,7 @@ fn a_long_config_filename_opens_only_through_the_long_name_call() {
 
 /// Puts a file with a long name into an image, the way a laptop would.
 ///
-/// `embedded-sdmmc` cannot create one, so this goes through `fatfs`, which is
-/// already here to format the image.
+/// `embedded-sdmmc` cannot create one, so this uses `fatfs`.
 fn with_long_name_file(disk: RamDisk, name: &str, contents: &[u8]) -> RamDisk {
     use std::io::Write;
 
@@ -372,19 +346,16 @@ fn with_long_name_file(disk: RamDisk, name: &str, contents: &[u8]) -> RamDisk {
 
 /// Whether a lower-case name written by a host is reachable by the box.
 ///
-/// FAT stores an 8.3 name in an upper-case field and records "display this
-/// lower case" in two flag bits, so `config.txt` and `CONFIG.TXT` should be the
-/// *same* short entry — no long-name record, and reachable by the upper-case
-/// name `ShortFileName` produces. Should. The card's files are written by a
-/// laptop and opened by `embedded-sdmmc`, and those are different
-/// implementations of that claim, which is the kind of gap this file exists to
-/// close.
+/// FAT stores an 8.3 name in upper case and marks "display in lower case" with
+/// two flag bits, so `config.txt` and `CONFIG.TXT` should be the *same* short
+/// entry, openable by the upper-case name `ShortFileName` produces. The laptop
+/// writes the file and `embedded-sdmmc` reads it, so this checks both agree.
 #[test]
 fn a_lower_case_name_is_the_same_file_as_its_upper_case_short_name() {
     const TEXT: &str = "ssid = HomeNet\nserver = box.lan:80\n";
 
     let disk = blank_fat_image_in_memory(8);
-    // Written the way the card's is: by the host, in lower case.
+    // Written by the host, in lower case, as on the real card.
     let disk = with_long_name_file(disk, "config.txt", TEXT.as_bytes());
 
     let volumes = mounted(disk);
@@ -401,9 +372,8 @@ fn a_lower_case_name_is_the_same_file_as_its_upper_case_short_name() {
     assert_eq!(core::str::from_utf8(&raw[..read]).unwrap(), TEXT);
 }
 
-/// `CardIndex` asks `CONTENT/` first and treats any error as "not on the stock
-/// card". If a directory that was never created did anything but fail cleanly,
-/// every unknown figure would take the wrong branch.
+/// `CardIndex` checks `CONTENT/` first and treats any error as "not on the
+/// stock card", so a missing directory must fail cleanly.
 #[test]
 fn a_content_path_that_does_not_exist_fails_rather_than_panicking() {
     let volumes = mounted(blank_fat_image_in_memory(8));
@@ -416,11 +386,9 @@ fn a_content_path_that_does_not_exist_fails_rather_than_panicking() {
     );
 }
 
-/// The two trees are independent, which is the whole basis of the ordering
-/// that makes writing to a stock card safe: a downloaded story must not be
-/// reachable through `CONTENT/`, and its sidecar must survive the same
-/// directory machinery the content file goes through — a sidecar that cannot
-/// be read back is a complete file refetched for ever.
+/// The two trees are independent: a downloaded story must not appear under
+/// `CONTENT/`, and its sidecar must be readable back (otherwise a complete
+/// file would be downloaded again forever).
 #[test]
 fn a_cached_story_and_its_sidecar_live_only_under_the_cache_tree() {
     const BODY: &[u8] = &[0x00, 0x00, 0x0f, 0xfc];
@@ -472,7 +440,7 @@ fn a_cached_story_and_its_sidecar_live_only_under_the_cache_tree() {
     assert_eq!(&raw[..read], SIDECAR);
 }
 
-/// And the same for a directory, since the certificates live in one.
+/// The same for a directory, since the certificates are in one.
 #[test]
 fn a_lower_case_directory_is_reachable_by_its_short_name() {
     let mut image = blank_fat_image_in_memory(8).into_bytes();
@@ -505,10 +473,9 @@ fn a_lower_case_directory_is_reachable_by_its_short_name() {
 
 /// Rewriting a file shorter than it was leaves no tail.
 ///
-/// The config portal replaces `CONFIG.TXT` in place — `embedded-sdmmc` 0.10
-/// has no rename, so there is no atomic swap available. If truncation left the
-/// old tail behind, a shorter config would end in fragments of the longer one
-/// and still parse, which is the worst shape a bug here could take.
+/// The config portal rewrites `CONFIG.TXT` in place (`embedded-sdmmc` 0.10
+/// has no rename). If the old tail stayed, a shorter config would end with
+/// pieces of the old one and might still parse.
 #[test]
 fn truncating_a_rewrite_leaves_no_tail() {
     let volumes = mounted(blank_fat_image_in_memory(8));
