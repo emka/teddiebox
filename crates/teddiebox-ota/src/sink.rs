@@ -1,18 +1,16 @@
-//! The arithmetic a flash sink needs, with no flash in sight.
+//! The bookkeeping for writing an image to flash, testable without flash.
 //!
-//! Flash erases a whole 4 KB sector at a time and writes into an erased one.
-//! Get the bookkeeping wrong and a sector is erased *after* it was written,
-//! which throws away bytes that were already correct and produces an image
-//! that fails its digest for a reason nothing in the download path explains.
-//! So the bookkeeping lives here, where a fake can watch it.
+//! Flash is erased a whole 4 KB sector at a time, and can only be written
+//! after erasing. If a sector were erased *after* being written, correct bytes
+//! would be lost and the image would fail its digest check.
 
 /// The ESP32-S3's flash sector. Erases are whole sectors, always.
 pub const SECTOR: u32 = 4096;
 
 /// Somewhere sectors can be erased and bytes written.
 ///
-/// A trait because `esp-storage`'s region cannot exist on a host, and the
-/// arithmetic is the part worth being sure about.
+/// A trait so the logic can be tested on the host with a fake instead of
+/// `esp-storage`.
 pub trait FlashRegionLike {
     type Error;
     fn erase(&mut self, range: core::ops::Range<u32>) -> Result<(), Self::Error>;
@@ -21,9 +19,8 @@ pub trait FlashRegionLike {
 
 /// Rounds a length up to a whole number of sectors.
 ///
-/// The last chunk of an image is almost never sector-sized, and a flash write
-/// of a partial sector is not portable. Padding costs at most 4095 bytes of
-/// flash that the image does not use and the bootloader does not read.
+/// The last chunk of an image is rarely a whole sector. Padding wastes at most
+/// 4095 bytes that nothing reads.
 pub fn pad_to_sector(len: u32) -> u32 {
     if len == 0 {
         return 0;
@@ -38,9 +35,8 @@ pub enum SinkError<E> {
     Flash(E),
     /// The write runs past the end of the slot it is being written into.
     ///
-    /// Refused rather than clamped: a silently truncated write produces an
-    /// image that fails its digest, with nothing in the download path to say
-    /// why. Whoever computed this offset is wrong, and the error says so.
+    /// Refused rather than cut short: a cut-short write would only show up
+    /// later as a digest mismatch.
     PastSlotEnd { offset: u32, len: u32, slot: u32 },
 }
 
@@ -61,17 +57,12 @@ impl Sectors {
 
     /// The range to erase before writing `len` bytes at `offset`, if any.
     ///
-    /// `None` means the sectors this write lands in are already erased —
-    /// which is the ordinary case for every write after the first in a
-    /// sector, and erasing anyway would discard bytes already written.
+    /// `None` means the sectors are already erased, which is normal for every
+    /// write after the first in a sector.
     fn erase_before(&mut self, offset: u32, len: u32) -> Option<core::ops::Range<u32>> {
-        // `feed` refuses (before ever calling here) any write whose end
-        // overflows u32 or exceeds `slot_bytes`, so in normal use `offset +
-        // len` never overflows by the time this runs. This still can't wrap
-        // on its own terms: a `checked_add` that would overflow is treated
-        // as "at least the end of the slot", which lands on exactly the
-        // answer the non-overflowing branch already gives once the sum is
-        // clamped to `slot_bytes` — never a wrapped, wrong-sector answer.
+        // `feed` already refuses writes that overflow or pass the slot end.
+        // Even so, an overflow here is treated as the slot end, never
+        // wrapped.
         let unpadded_end = offset
             .checked_add(len)
             .unwrap_or(self.slot_bytes)
@@ -88,10 +79,7 @@ impl Sectors {
     /// Writes `bytes` at `offset`, erasing any sector this write is the first
     /// to touch.
     ///
-    /// The erase has to happen before the write and exactly once per sector:
-    /// erasing after a write throws away bytes that were already correct, and
-    /// that failure surfaces as a digest mismatch with nothing in the download
-    /// path to explain it.
+    /// Each sector is erased exactly once, before it is written.
     pub fn feed<F: FlashRegionLike>(
         &mut self,
         flash: &mut F,
@@ -101,9 +89,8 @@ impl Sectors {
         let len = bytes.len() as u32;
         match offset.checked_add(len) {
             Some(end) if end <= self.slot_bytes => {}
-            // Either the end overflowed u32, or it lands past the slot.
-            // Both are certainly past the slot, and refusing here — before
-            // any erase or write — leaves the flash untouched.
+            // The end overflowed or is past the slot. Refuse before
+            // touching the flash.
             _ => {
                 return Err(SinkError::PastSlotEnd {
                     offset,
@@ -130,9 +117,8 @@ mod tests {
     struct Fake {
         erased: Vec<core::ops::Range<u32>>,
         written: Vec<(u32, usize)>,
-        // Records "erase"/"write" in call order, interleaved, so a test can
-        // tell that a sector's erase happened before the write that touches
-        // it rather than only that both happened.
+        // "erase" and "write" in call order, to check that a sector is
+        // erased before it is written.
         events: Vec<&'static str>,
     }
 
@@ -154,8 +140,7 @@ mod tests {
     fn a_write_at_the_start_erases_the_first_sector_once() {
         let mut s = Sectors::new(0x1D0000);
         assert_eq!(s.erase_before(0, 100), Some(0..SECTOR));
-        // A second write inside the same sector must not erase it again —
-        // that would throw away the bytes just written.
+        // A second write in the same sector must not erase it again.
         assert_eq!(s.erase_before(100, 100), None);
     }
 
@@ -194,10 +179,8 @@ mod tests {
         assert_eq!(pad_to_sector(0), 0);
     }
 
-    /// Checks alignment only — a bug that always erased sector 0 would pass
-    /// this test too.
-    /// `a_resumed_write_lands_where_the_watermark_says_not_at_zero` is what
-    /// catches that.
+    /// Checks alignment only. A bug that always erased sector 0 is caught by
+    /// `a_resumed_write_lands_where_the_watermark_says_not_at_zero`.
     #[test]
     fn erased_ranges_start_and_end_on_a_sector_boundary() {
         let mut s = Sectors::new(0x1D0000);

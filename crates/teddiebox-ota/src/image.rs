@@ -1,12 +1,10 @@
 //! Reads the version out of a downloaded image, and gates activation on it.
 //!
-//! `decide` only ever compares the manifest against the *running* build's
-//! version. Nothing before this module ever checks the manifest against the
-//! image that was actually fetched — so a manifest whose claimed version does
-//! not match what the published image itself reports survives an update
-//! forever: flash it, reboot, find the manifest still disagrees, flash it
-//! again. This is the last gate before `otadata` is flipped, closing that
-//! with no persistent state and no I/O — pure bytes-in/answer-out.
+//! `decide` compares the manifest with the *running* build's version. This
+//! compares the manifest with the downloaded image's own version. If they
+//! differ, the box would install the image, reboot, see the manifest still
+//! differs, and install it again forever. This is the last check before
+//! `otadata` is switched.
 
 use crate::{Manifest, OtaError};
 
@@ -54,10 +52,8 @@ pub fn image_version(image_head: &[u8]) -> Result<&str, OtaError> {
 
 /// Whether a downloaded image may be activated.
 ///
-/// The last gate before `otadata` is flipped. `Ok(())` only when the image's
-/// own version, read out of its descriptor, matches the manifest that sent
-/// us fetching it — closing the loop where the manifest and the image it
-/// points at disagree.
+/// The last check before `otadata` is switched. `Ok(())` only when the
+/// image's own version matches the manifest's.
 pub fn may_activate(image_head: &[u8], manifest: &Manifest) -> Result<(), OtaError> {
     let version = image_version(image_head)?;
     if version == manifest.version.as_str() {
@@ -82,11 +78,10 @@ mod tests {
         Manifest::parse_read(s.as_bytes(), MAX_MANIFEST).unwrap()
     }
 
-    /// A well-formed 0x50-byte image head: 32 bytes of image/segment header
-    /// (contents irrelevant to this function), the descriptor's magic word
-    /// (0xABCD5432, little-endian), a zeroed secure_version and reserv1, then
-    /// the version field `"0e469de"`, NUL-padded to 32 bytes. Hand-written,
-    /// byte by byte — not built with the offsets the code under test uses.
+    /// A valid 0x50-byte image head: 32 bytes of image and segment header
+    /// (not read), the magic word (0xABCD5432, little-endian), zeroed
+    /// secure_version and reserv1, then the version `"0e469de"`, NUL-padded to
+    /// 32 bytes. Written by hand, not with the code's offsets.
     const WELL_FORMED: [u8; 0x50] = [
         // 0x00-0x1F: image header + segment header, unread by image_version.
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -106,9 +101,8 @@ mod tests {
 
     #[test]
     fn the_version_field_truncates_at_the_first_nul() {
-        // Same as WELL_FORMED, but with a stray non-NUL byte after the NUL
-        // padding starts, to prove truncation stops at the *first* NUL
-        // rather than the last.
+        // Like WELL_FORMED, with a non-NUL byte inside the padding, to check
+        // the version ends at the *first* NUL.
         let mut head = WELL_FORMED;
         head[0x30 + 10] = b'X'; // well past "0e469de\0", inside the padding
         assert_eq!(image_version(&head).unwrap(), "0e469de");
@@ -132,8 +126,7 @@ mod tests {
 
     #[test]
     fn a_full_32_byte_version_with_no_nul_returns_all_32_bytes() {
-        // 0x30-0x4F filled with 'a', no NUL terminator anywhere in the
-        // field — the field need not be NUL-terminated when it is full.
+        // 0x30-0x4F filled with 'a' and no NUL: a full field needs no NUL.
         #[rustfmt::skip]
         let head: [u8; 0x50] = [
             // 0x00-0x1F: image header + segment header, unread.
@@ -157,9 +150,9 @@ mod tests {
         assert_eq!(may_activate(&WELL_FORMED, &m), Ok(()));
     }
 
-    /// The real trigger for the reflash loop: a manifest whose version
-    /// carries a trailing comment `teddiebox-config`-style parsing does not
-    /// strip, against an image that (correctly) reports the version alone.
+    /// A manifest version with a trailing comment (which the manifest parser
+    /// does not strip) does not match the image's version. Without this check
+    /// the box would reflash forever.
     #[test]
     fn may_activate_refuses_the_manifest_image_mismatch_that_causes_the_reflash_loop() {
         let m = manifest("v1 # published today");

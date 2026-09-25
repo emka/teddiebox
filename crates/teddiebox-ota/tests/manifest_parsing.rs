@@ -1,8 +1,7 @@
 //! Every way a manifest can be wrong.
 //!
-//! The manifest is fetched over the network from a server anybody on the LAN
-//! can write to, and what it gates is a flash write. A parser that guesses is
-//! worse than one that refuses, so each case here pins a refusal.
+//! The manifest comes from the network and decides what gets flashed, so the
+//! parser refuses anything unclear rather than guessing.
 
 use teddiebox_ota::{Manifest, OtaError, MAX_MANIFEST};
 

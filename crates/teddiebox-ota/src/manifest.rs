@@ -1,12 +1,9 @@
 //! Parses the update manifest the server publishes beside an image.
 //!
-//! Deliberately the same dull `key = value` format as `CONFIG.TXT`, for the
-//! same reason: four fields do not justify a JSON parser with no allocator
-//! behind it, and the person publishing an update already knows this format.
+//! The same simple `key = value` format as `CONFIG.TXT`: four fields do not
+//! need JSON.
 //!
-//! Unlike `CONFIG.TXT` there is no comment rule to get wrong here — a `#` in a
-//! version string or a path would be perverse — so `#` begins a comment only
-//! when it is the first non-blank character of a line.
+//! Unlike `CONFIG.TXT`, `#` only starts a comment at the beginning of a line.
 
 use crate::OtaError;
 use heapless::String;
@@ -16,25 +13,23 @@ pub const FILENAME: &str = "teddiebox.txt";
 
 /// Longest version string accepted.
 ///
-/// Sized against the ESP-IDF application descriptor's `version: [c_char;
-/// 32]` field (esp-bootloader-esp-idf-0.6.0/src/lib.rs:141) — 32 bytes less
-/// a NUL. `esp-bootloader-esp-idf` truncates silently when filling that
-/// field, so a longer version here would be one `decide` accepted but
-/// `espflash board-info` would show cut short. `git describe --always
-/// --dirty` on this repo produces well under this.
+/// The ESP-IDF application descriptor's `version: [c_char; 32]` field
+/// (esp-bootloader-esp-idf-0.6.0/src/lib.rs:141), minus a NUL. A longer
+/// version would be silently cut short in the image. `git describe --always
+/// --dirty` is well under this.
 pub const MAX_VERSION: usize = 31;
 
 /// Longest image path accepted, relative to the manifest.
 pub const MAX_IMAGE_PATH: usize = 64;
 
-/// Buffer the whole manifest is read into. Four lines need nothing like this
-/// much; the slack is what lets `Truncated` mean something.
+/// Buffer the whole manifest is read into. Much larger than four lines need,
+/// so a full buffer really means the file was too long.
 pub const MAX_MANIFEST: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
-    /// Compared with our own for **difference**, never for order — so a
-    /// deliberate downgrade works, which is how a bad build gets undone.
+    /// Compared with our own for **difference**, not order, so a downgrade
+    /// works.
     pub version: String<MAX_VERSION>,
     pub sha256: [u8; 32],
     pub length: u32,
@@ -45,11 +40,9 @@ pub struct Manifest {
 impl Manifest {
     /// Parses a manifest that was read into a fixed buffer.
     ///
-    /// `capacity` is how large that buffer was. **A read that filled it
-    /// exactly is refused**, for the reason `Config::parse_read` gives: nothing
-    /// distinguishes a file that just fits from one that was cut off, and a
-    /// manifest cut mid-digest still parses into a plausible-looking value
-    /// nobody published.
+    /// `capacity` is the size of that buffer. **A read that filled it exactly
+    /// is refused**, as in `Config::parse_read`: the file may have been cut
+    /// off.
     pub fn parse_read(raw: &[u8], capacity: usize) -> Result<Self, OtaError> {
         if raw.len() >= capacity {
             return Err(OtaError::Truncated);
@@ -85,12 +78,9 @@ impl Manifest {
                 "image" if !value.is_empty() => {
                     image = Some(String::try_from(value).map_err(|_| OtaError::ValueTooLong)?);
                 }
-                // Unknown keys are ignored, so a manifest written for a newer
-                // firmware is still readable by an older one. An empty
-                // `version` or `image` value falls through here too, since
-                // it supplies no value — the field stays unset and the
-                // missing-field check below refuses it, rather than
-                // accepting a value nobody actually gave.
+                // Ignore unknown keys, so older firmware can read a newer
+                // manifest. An empty `version` or `image` also ends up here,
+                // so it counts as missing below.
                 _ => {}
             }
         }
@@ -108,8 +98,8 @@ impl Manifest {
 mod tests {
     use super::*;
 
-    /// The digest below is typed out, not computed. A test that hashes the
-    /// same bytes the parser does cannot disagree with the parser.
+    /// The digest is written out, not computed, so the test can disagree with
+    /// the parser.
     const GOOD: &str = "\
 version = 2026-09-15-a1b2c3d
 sha256  = 3f786850e387550fdab836ed7e6dc881de23001b000000000000000000000000

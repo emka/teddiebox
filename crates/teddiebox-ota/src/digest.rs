@@ -1,9 +1,8 @@
 //! Reading and comparing the digest a manifest carries.
 //!
-//! **Nothing here hashes.** mbedtls is already compiled into the firmware with
-//! `alg-sha256` and already holds the TLS session; a second SHA-256 would be a
-//! second thing to be wrong about. What belongs on a host is the parsing and
-//! the comparison, and that is all this is.
+//! **Nothing here computes a hash.** The firmware uses mbedtls's SHA-256,
+//! which it already has for TLS. Only the parsing is here, so it can be tested
+//! on the host.
 
 use crate::OtaError;
 
@@ -18,9 +17,7 @@ fn nibble(c: u8) -> Option<u8> {
 
 /// Reads exactly 64 hex characters into 32 bytes.
 ///
-/// **Exactly** — a digest one character short is not a digest with a shorter
-/// value, it is a truncated line, and accepting it would compare 31 good bytes
-/// and one invented one.
+/// **Exactly** 64: a shorter value is a cut-off line, not a valid digest.
 pub fn parse_hex32(value: &str) -> Result<[u8; 32], OtaError> {
     let bytes = value.as_bytes();
     if bytes.len() != 64 {

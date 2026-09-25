@@ -1,47 +1,40 @@
 //! Whether this boot should confirm itself, revert, or do nothing.
 //!
-//! This bootloader does not act on OTA state at all — a slot armed `New`
-//! stayed `New` across three measured reboots, never promoted to
-//! `PendingVerify`, with nothing validating it (spec §7a). So the app must
-//! run this state machine itself, using the same `New -> PendingVerify ->
-//! Valid` field `otadata` already has room for. The bootloader ignoring the
-//! field is exactly what makes it safe for the app to own it: nothing else
-//! ever writes it.
+//! This box's bootloader ignores the OTA state: a slot set to `New` stays
+//! `New` across reboots. So the app runs the `New -> PendingVerify -> Valid`
+//! state machine itself, using the state field in `otadata`. Since the
+//! bootloader never writes that field, the app can safely own it.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotState {
-    /// A slot just selected, either by a real update or by the bench's
-    /// `otaboot` command. Never booted since.
+    /// A slot just selected, by an update or by the `otaboot` console
+    /// command. Not booted since.
     New,
     /// A previous boot of this slot marked it `PendingVerify` and did not
-    /// reach `Valid` before rebooting — the attempt this state exists to
-    /// catch.
+    /// reach `Valid` before rebooting: the new image failed.
     PendingVerify,
-    /// Everything else: `Valid` (the ordinary running case), `Invalid`,
-    /// `Aborted`, or `Undefined` (a box that has never run an update).
-    /// Collapsed into one variant because the app does the same thing for
-    /// all of them: nothing.
+    /// Everything else: `Valid` (the normal case), `Invalid`, `Aborted`, or
+    /// `Undefined` (a box that has never updated). One variant, because the
+    /// app does nothing in all of them.
     Confirmed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootAction {
-    /// First boot of a freshly-selected slot. Mark it `PendingVerify` before
-    /// anything else runs, so a crash on this attempt is visible on the next
-    /// boot rather than silent.
+    /// First boot of a newly selected slot. Mark it `PendingVerify` before
+    /// anything else runs, so a crash is noticed on the next boot.
     ConfirmFirstBoot,
-    /// `PendingVerify` survived to this boot, so the last attempt never
-    /// reached `Valid`. Switch to the other slot now, before this attempt
-    /// gets a chance to fail the same way again.
+    /// Still `PendingVerify`, so the last attempt never reached `Valid`.
+    /// Switch back to the other slot now, before this attempt fails the same
+    /// way.
     Revert,
     /// Nothing to confirm.
     Proceed,
 }
 
-/// One retry per flash: a slot gets exactly one `New` boot to become
-/// `PendingVerify`, and exactly one `PendingVerify` boot to become `Valid`.
-/// Finding `PendingVerify` a second time is the only signal this state
-/// machine has, and it means the second thing, not a third chance.
+/// A slot gets one `New` boot to become `PendingVerify`, and one
+/// `PendingVerify` boot to become `Valid`. Finding `PendingVerify` again
+/// means that boot failed, so revert.
 pub fn boot_action(state: SlotState) -> BootAction {
     match state {
         SlotState::New => BootAction::ConfirmFirstBoot,

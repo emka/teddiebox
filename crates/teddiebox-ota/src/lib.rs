@@ -47,13 +47,12 @@ pub enum OtaError {
     /// we do not know what was downloaded.
     NotAnImage,
     /// The downloaded image's own version does not match what the manifest
-    /// promised. This is the guard that stops an unbounded reflash loop when
-    /// the two disagree.
+    /// promised. Refusing it stops the box from reflashing the same image
+    /// forever.
     VersionMismatch,
-    /// An `update_url` did not start with `https://`. Refused rather than
-    /// tried: the teddyCloud on this LAN is TLS-only, and a plain-HTTP
-    /// request to it hangs instead of failing, so a box that tried anyway
-    /// would present as frozen rather than as badly configured.
+    /// An `update_url` did not start with `https://`. teddyCloud only speaks
+    /// TLS, and a plain-HTTP request to it hangs instead of failing, so the
+    /// box would look frozen rather than misconfigured.
     NotHttps,
     /// An `update_url`, or an `image` resolved against a manifest path, is
     /// not shaped the way this crate requires: no `/` after the host, a path

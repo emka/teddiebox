@@ -1,27 +1,24 @@
 //! Takes an `update_url` apart, and puts a manifest's `image` path back
 //! together against it.
 //!
-//! `CONFIG.TXT`'s `update_url` names the manifest in full — scheme, host,
-//! path — because that is what a parent copies out of a browser bar.
-//! `teddiebox_cloud::build_path_request` wants the host and the path
-//! separately, and a manifest's `image` key is relative to the manifest, not
-//! to the server root. Both joins are pure decision logic with no I/O, which
-//! is why they live here rather than at the call site: a wrong join silently
-//! fetches the wrong file or 404s, and that is worth testing without a box.
+//! `CONFIG.TXT`'s `update_url` is the manifest's full URL (scheme, host,
+//! path), as copied from a browser's address bar.
+//! `teddiebox_cloud::build_path_request` needs the host and path separately,
+//! and a manifest's `image` is relative to the manifest, not to the server
+//! root. A mistake here would fetch the wrong file, so it is tested on the
+//! host.
 //!
 //! ## Trust model
 //!
-//! M10 has no code signing, anywhere. `decide` only compares version
-//! strings, and `digest` checks a hash that the *same manifest* supplies —
-//! so whoever can write the manifest a box fetches dictates the bytes that
-//! get flashed. Nothing in this module changes that.
+//! There is no code signing. `decide` only compares version strings, and the
+//! digest check uses a hash from the *same manifest*, so whoever can write
+//! the manifest decides what gets flashed.
 //!
-//! The one boundary that does hold: the TLS peer is always the host taken
-//! from the card's `update_url`, never anything the manifest names. A
-//! manifest can steer which *path* on that host gets fetched; it can never
-//! steer which *server* the box talks to. Whoever writes the fetch must
-//! preserve that property — a manifest's `image` must never be allowed to
-//! become a scheme or a host.
+//! The one guarantee: the TLS server is always the host from the card's
+//! `update_url`, never one named in the manifest. A manifest can choose the
+//! *path* on that host, never the *server*. Code that fetches the image must
+//! keep it that way: a manifest's `image` must never become a scheme or a
+//! host.
 
 use crate::OtaError;
 use heapless::String;
@@ -44,18 +41,16 @@ pub struct UpdateUrl {
 
 /// Splits an `update_url` into a host and a manifest path.
 ///
-/// The scheme must be `https://`. This is not fussiness: the teddyCloud on
-/// this LAN is TLS-only, and a plain-HTTP request to it hangs rather than
-/// failing — so an `http://` URL would present as a box that has frozen, not
-/// as a box with a bad config. Refusing here names the problem where someone
-/// can read it, instead of leaving it to be diagnosed from a bench.
+/// The scheme must be `https://`. teddyCloud only speaks TLS, and a plain
+/// HTTP request to it hangs instead of failing, so an `http://` URL would
+/// make the box look frozen. Refusing it here gives a clear error.
 pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
     const SCHEME: &str = "https://";
 
     let rest = update_url.strip_prefix(SCHEME).ok_or(OtaError::NotHttps)?;
 
-    // The key is specified as naming the manifest in full, so there must be
-    // a `/` after the host at all.
+    // The URL names the manifest in full, so there must be a `/` after the
+    // host.
     let slash = rest.find('/').ok_or(OtaError::MalformedUrl)?;
 
     let host = &rest[..slash];
@@ -63,15 +58,12 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
         return Err(OtaError::MalformedUrl);
     }
 
-    // `split_server` (firmware/src/tls.rs) requires a `host:port` string and
-    // refuses to guess a port itself, so a host copied without one — the
-    // ordinary shape for a default-port URL out of a browser bar — would
-    // parse clean here and then be unable to connect. The scheme is fixed at
-    // `https`, so the port to fill in is known.
+    // `split_server` (firmware/src/tls.rs) needs `host:port` and does not
+    // guess a port. A URL copied from a browser often has no port, so add
+    // `:443`, the HTTPS default.
     //
-    // Length is checked after the port is appended, not before: a host that
-    // fits under MAX_HOST on its own can still overflow once `:443` is
-    // added, and checking first would accept a value that cannot be stored.
+    // The length is checked after adding the port, since that can push it
+    // over MAX_HOST.
     let mut host = String::<MAX_HOST>::try_from(host).map_err(|_| OtaError::ValueTooLong)?;
     if !host.contains(':') {
         host.push_str(":443").map_err(|_| OtaError::ValueTooLong)?;
@@ -82,16 +74,13 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
     if path.ends_with('/') {
         return Err(OtaError::MalformedUrl);
     }
-    // A fragment never leaves the client, and this key never carried a
-    // query string; either riding along into a request line sent verbatim
-    // is not what the person who pasted this URL meant.
+    // A fragment is never sent to a server, and no query string is
+    // expected; refuse both rather than send them in the request line.
     if path.contains('#') || path.contains('?') {
         return Err(OtaError::MalformedUrl);
     }
-    // And the same allow-list `resolve_image` applies to the half a manifest
-    // contributes, for the half the card contributes. A resolved image path is
-    // the two concatenated, so checking only one of them leaves the request
-    // line reachable from the other.
+    // The same check `resolve_image` applies to the manifest's part. The
+    // resolved image path joins both parts, so both must be checked.
     if !is_path_safe(path) {
         return Err(OtaError::MalformedUrl);
     }
@@ -104,11 +93,9 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
 
 /// Says whether a value may be interpolated into a request line.
 ///
-/// A conservative allow-list -- ASCII letters, digits, and `._-/~`, which is
-/// enough for a filename on this server -- is cheaper and safer than trying to
-/// enumerate everything that is dangerous. It subsumes the space and the CR
-/// that would otherwise let a value add tokens or a stray line terminator to
-/// the request line.
+/// Allows only ASCII letters, digits and `._-/~`, which is enough for a
+/// file name. This rules out spaces and CRs, which could add tokens or line
+/// breaks to the request line.
 fn is_path_safe(value: &str) -> bool {
     value
         .bytes()
@@ -117,8 +104,8 @@ fn is_path_safe(value: &str) -> bool {
 
 /// Says whether a value is shaped like the `host:port` a `Host:` header wants.
 ///
-/// Same argument as [`is_path_safe`], for the other half of the URL: a host is
-/// made of letters, digits, `.`, `-` and `_`, plus the `:` before a port.
+/// Like [`is_path_safe`], for the host: letters, digits, `.`, `-` and `_`,
+/// plus the `:` before a port.
 fn is_host_port(value: &str) -> bool {
     value
         .bytes()
@@ -131,20 +118,16 @@ fn is_host_port(value: &str) -> bool {
 /// joined to `manifest_path`'s directory — everything up to and including its
 /// last `/` — the same rule a browser applies to a relative link.
 ///
-/// Refuses any `image` containing a `..` path **segment**. This is hygiene,
-/// not a security boundary — see the module's "Trust model" section above:
-/// an absolute `image` is used as-is by design, so anyone wanting to name a
-/// path outside the manifest's directory just writes one and never needs
-/// `..` to get there. The check still earns its keep against an honest
-/// mistake in a hand-edited manifest. It is segment-based, not
-/// substring-based, so a filename that merely contains two dots —
-/// `teddiebox..bin` — is not mistaken for one.
+/// Refuses any `image` with a `..` path **segment**. This only catches
+/// mistakes; it is not a security boundary (see "Trust model" above), since
+/// an absolute `image` can name any path anyway. It checks whole segments,
+/// so a name like `teddiebox..bin` is allowed.
 pub fn resolve_image(manifest_path: &str, image: &str) -> Result<String<MAX_PATH>, OtaError> {
     if image.is_empty() {
         return Err(OtaError::MalformedUrl);
     }
-    // `build_path_request` interpolates the resolved path into an HTTP request
-    // line unescaped, so any byte `image` contributes lands on the wire as-is.
+    // `build_path_request` copies the path into the request line without
+    // escaping.
     if !is_path_safe(image) {
         return Err(OtaError::MalformedUrl);
     }
@@ -158,11 +141,9 @@ pub fn resolve_image(manifest_path: &str, image: &str) -> Result<String<MAX_PATH
         out.push('/').map_err(|_| OtaError::ValueTooLong)?;
         out.push_str(absolute).map_err(|_| OtaError::ValueTooLong)?;
     } else {
-        // `split`'s output always has a leading slash, so this only bites a
-        // caller that hands resolve_image a manifest_path of its own. There
-        // is no directory to join a relative image against, and silently
-        // falling back to the image alone would build a relative request
-        // line (`GET teddiebox.bin HTTP/1.1`) instead of failing loudly.
+        // `split` always returns a leading slash, so this only fails for
+        // other callers. Without a directory, the result would be an invalid
+        // relative request line (`GET teddiebox.bin HTTP/1.1`).
         let dir_end = manifest_path
             .rfind('/')
             .map(|i| i + 1)
@@ -189,10 +170,8 @@ mod tests {
         assert_eq!(u.path.as_str(), "/content/FIRMWARE/teddiebox.txt");
     }
 
-    // `split_server` (firmware/src/tls.rs) requires a colon in its `server`
-    // argument and never guesses a port, so a host with none left as-is
-    // parses clean here and then cannot connect. The scheme is fixed at
-    // `https`, so the default port is known — fill it in.
+    // `split_server` (firmware/src/tls.rs) needs a port, so the HTTPS default
+    // is added.
     #[test]
     fn splits_a_url_with_no_port() {
         let u = split("https://teddycloud.local/teddiebox.txt").unwrap();
@@ -229,10 +208,8 @@ mod tests {
         );
     }
 
-    /// Both halves go into a request unescaped -- the host into `Host:`, the
-    /// path into the request line -- and neither `split`'s callers nor
-    /// `build_path_request` escape anything. A `CR` here is a header the
-    /// server never sent; a space is an extra token on the request line.
+    /// The host goes into `Host:` and the path into the request line, both
+    /// unescaped. A `CR` would add a header; a space would add a token.
     #[test]
     fn refuses_a_host_carrying_a_bare_cr() {
         assert_eq!(
@@ -270,10 +247,8 @@ mod tests {
         assert_eq!(split(&url), Err(OtaError::ValueTooLong));
     }
 
-    // The host alone fits under MAX_HOST, but the default port that gets
-    // appended pushes it one byte over. Checking the length before the port
-    // is filled in would let this through with a host that cannot actually
-    // be stored.
+    // The host alone fits under MAX_HOST, but adding the default port pushes
+    // it one byte over.
     #[test]
     fn refuses_a_host_that_only_overflows_once_the_default_port_is_added() {
         // 61 'a's + ":443" is 65, one past MAX_HOST (64).
@@ -282,10 +257,8 @@ mod tests {
         assert_eq!(split(&url), Err(OtaError::ValueTooLong));
     }
 
-    // A fragment is client-only and must never reach the wire; a query
-    // string was never part of this key's contract either. The module doc
-    // justifies taking a full URL precisely because it is what someone
-    // copies out of a browser bar -- the one place a `#fragment` comes from.
+    // A URL copied from a browser may have a `#fragment`, which must never be
+    // sent. No query string is expected either.
     #[test]
     fn refuses_a_path_with_a_fragment() {
         assert_eq!(
@@ -352,9 +325,8 @@ mod tests {
         );
     }
 
-    // build_path_request interpolates the resolved path into an HTTP
-    // request line unescaped. A space adds a token to that line; this is
-    // what an unquoted `image = a.bin HTTP/1.1` in the manifest would do.
+    // The path goes into the request line unescaped. A space would add a
+    // token, as `image = a.bin HTTP/1.1` in the manifest would.
     #[test]
     fn resolve_image_refuses_a_space() {
         assert_eq!(
@@ -363,9 +335,8 @@ mod tests {
         );
     }
 
-    // A lone CR is a line terminator to some HTTP parsers and proxies, even
-    // without an LF alongside it (str::lines already keeps an LF from
-    // getting this far) -- a request-smuggling primitive, not just a typo.
+    // Some HTTP parsers treat a lone CR as a line break, which could be used
+    // to inject a request. (`str::lines` already removes LF.)
     #[test]
     fn resolve_image_refuses_a_bare_carriage_return() {
         assert_eq!(
@@ -388,11 +359,8 @@ mod tests {
         assert_eq!(p.as_str(), "/teddiebox.bin");
     }
 
-    // `split`'s output always has a leading slash, so this manifest_path
-    // shape cannot reach resolve_image through the ordinary path. It is
-    // still reachable through this pub fn directly, and silently returning
-    // "teddiebox.bin" would build `GET teddiebox.bin HTTP/1.1` -- a relative
-    // request line -- rather than failing loudly.
+    // `split` always returns a leading slash, but other callers might not.
+    // Returning "teddiebox.bin" would build an invalid relative request line.
     #[test]
     fn resolve_image_refuses_a_manifest_path_with_no_slash_at_all() {
         assert_eq!(
@@ -401,9 +369,7 @@ mod tests {
         );
     }
 
-    // Refusing rather than truncating is the other safety property this
-    // function has (heapless push_str is all-or-nothing); pin it directly
-    // rather than relying on it as an accident of the other tests.
+    // A path that is too long is refused, not cut short.
     #[test]
     fn resolve_image_refuses_a_join_that_overflows_max_path() {
         // The manifest directory alone (93 bytes) fits under MAX_PATH (96);
