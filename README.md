@@ -74,12 +74,11 @@ did, but the six steps they move are about 12 dB quieter when something is
 plugged in, and each output remembers where it was left: turning the
 headphones down does not leave the speaker quiet when the plug comes out.
 
-That 12 dB is a starting point rather than a measurement — nobody has yet sat
-down with a pair of headphones and tuned it. If it is wrong for yours, both
-ladders are written out step by step in `crates/teddiebox-core/src/volume.rs`:
-change the levels in the `HEADPHONES` table to what you want to hear, and the
-`HEADPHONE_OFFSET_DB` constant beside it to the distance you have just put
-between the two. A test checks that they still agree.
+That 12 dB is an estimate, not tuned against real headphones. If it is wrong
+for yours, both volume scales are written out step by step in
+`crates/teddiebox-core/src/volume.rs`: change the levels in the `HEADPHONES`
+table to what you want to hear, and the `HEADPHONE_OFFSET_DB` constant beside
+it to the new difference between the two. A test checks that they still agree.
 
 ### Its settings can be fixed without a card reader
 
@@ -177,11 +176,10 @@ key does not belong on a medium that comes out of the box and goes into other
 machines. A box that has not been provisioned plays everything on its card and
 cannot fetch; it says so at boot.
 
-`CERT/` on the card holds `TCCA.DER` alone. On a box that carried its identity
-on the card before this change, `CLIENT.DER` and `PRIVATE.DER` are still
-sitting in `CERT/` after the upgrade — the firmware no longer reads them.
-Once `just identity` has been run and the box boots reporting its identity
-from flash, delete both files from the card.
+`CERT/` on the card only needs `TCCA.DER`. If the card also has `CLIENT.DER`
+and `PRIVATE.DER` there, the firmware ignores them: once `just identity` has
+been run and the box reports its identity from flash at boot, delete both
+files from the card, so the private key is not left on it.
 
 The box also keeps the WiFi key it derives from `ssid` and `password`, in the
 `wifi` flash partition, so that joining the network takes a tenth of a second
@@ -208,5 +206,5 @@ out:
     TEDDIEBOX_RELEASE=1 just flash
 
 That image answers `dl`, which reboots it for flashing, and nothing else. It is
-also about 19 KB smaller. Everything the box does for the child it is for is
-unchanged; there is simply no longer a way to talk it into anything else.
+also about 19 KB smaller. Everything the box does for a child works the same;
+there is just no way to make it do anything else over the console.
