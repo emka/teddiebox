@@ -1,14 +1,11 @@
 //! Raw declarations for the part of libopus the firmware calls.
 //!
-//! Only the decoder entry points are declared, and only the ones actually
-//! used. Generated bindings would cover the encoder, the CTL varargs and the
-//! multistream API too, at the cost of a libclang dependency in the build —
-//! and none of it would ever be linked.
+//! Only the decoder functions actually used are declared. Generated bindings
+//! would need libclang in the build and would cover much more.
 //!
-//! The allocating constructor (`opus_decoder_create`) is deliberately absent.
+//! The allocating constructor (`opus_decoder_create`) is left out on purpose.
 //! [`opus_decoder_get_size`] and [`opus_decoder_init`] let the caller place
-//! the decoder state wherever it wants, which is what keeps the firmware free
-//! of a heap.
+//! the decoder state, so the firmware needs no heap.
 
 #![no_std]
 
@@ -70,8 +67,8 @@ mod tests {
 
     #[test]
     fn the_linked_libopus_reports_a_stereo_decoder_state_size() {
-        // Proves the archive is found, linked, and callable. Everything
-        // else in this crate is a declaration the compiler cannot check.
+        // Checks the library is found, linked and callable. The declarations
+        // above cannot be checked by the compiler.
         let size = unsafe { opus_decoder_get_size(2) };
         assert!(
             size > 0,

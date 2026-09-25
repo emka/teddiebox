@@ -1,10 +1,9 @@
 //! Locates the static libopus the Nix dev shell built for this target.
 //!
-//! Deliberately does no compiling of its own. Building libopus from a build
-//! script is what made the previous binding uncross-compilable, and it also
-//! hides the codec's configuration — fixed point, no neural extensions —
-//! inside a Rust crate where nothing reviews it. The flake owns that
-//! configuration and hands the finished archive over by path.
+//! Does not compile libopus itself. Building it in a build script makes
+//! cross-compiling hard and hides the codec's configuration (fixed point, no
+//! neural extensions). The Nix flake owns that configuration and passes the
+//! finished library by path.
 
 use std::env;
 
