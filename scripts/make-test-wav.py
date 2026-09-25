@@ -21,7 +21,6 @@ The signal is chosen so a dropout is obvious rather than subtle:
 import argparse
 import math
 import struct
-import sys
 import zlib
 
 SAMPLE_RATE = 48_000
@@ -70,8 +69,7 @@ def main():
     duration = args.minutes * 60
     frames = bytearray()
     for value in samples(duration):
-        frame = struct.pack("<hh", value, value)
-        frames += frame
+        frames += struct.pack("<hh", value, value)
 
     data_len = len(frames)
     byte_rate = SAMPLE_RATE * CHANNELS * BITS // 8

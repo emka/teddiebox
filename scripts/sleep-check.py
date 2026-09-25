@@ -203,7 +203,7 @@ def main():
             print("\n--- sending `sleep`.")
             os.write(fd, b"sleep\r")
             said = read_lines(fd, 15.0, log)
-            refused = next((NOT_ARMED.search(line) for line in said if NOT_ARMED.search(line)), None)
+            refused = next((found for found in map(NOT_ARMED.search, said) if found), None)
             if refused:
                 print(f"\n!!! The box refused to sleep: {refused.group(1)}")
                 print("!!! Nothing below is worth measuring until that is fixed.")
