@@ -5,8 +5,8 @@ here is about board **`TONIEBOX-ESP32` rev 1.6.C (2022-04-27)**; Toniebox pinout
 are revision-specific, so check the silkscreen before trusting any of it.
 
 The ESP32-S3 on this board has **no USB**: GPIO19/20, the S3's native D−/D+, are
-used for the red LED and the left ear. There is no USB-Serial-JTAG. UART0 on
-J103 is the debug channel.
+used for the red LED and the larger ear (on the box's right). There is no
+USB-Serial-JTAG. UART0 on J103 is the debug channel.
 
 ## J103 — UART0
 
