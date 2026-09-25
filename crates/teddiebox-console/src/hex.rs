@@ -1,20 +1,17 @@
 //! Eight hex digits to a `u32`.
 //!
-//! A `const fn`, because two very different callers need the same answer: the
-//! console parsing what somebody typed, and a build baking a value out of the
-//! environment into the image. One of those happens at compile time, and a
-//! second implementation for it would be a second thing to get wrong about a
-//! credential.
+//! A `const fn`, so the same code serves both the console (parsing what was
+//! typed) and the build (compiling a password from the environment into the
+//! image).
 
 /// Digits a password must have. Exactly eight, because a privacy password is
-/// a `u32` and a short one is a typo rather than a small number.
+/// a `u32` and a shorter value is a typo.
 pub const DIGITS: usize = 8;
 
 /// Parses exactly [`DIGITS`] hex digits. `None` for anything else at all.
 ///
-/// Strict on purpose. Getting a privacy password wrong matters more than
-/// usual: a tag refuses a wrong one by staying silent, which is also what an
-/// empty plate and a broken antenna look like.
+/// Strict on purpose: a tag answers a wrong password with silence, which
+/// looks the same as an empty plate or a broken antenna.
 pub const fn u32_from_hex(text: &[u8]) -> Option<u32> {
     if text.len() != DIGITS {
         return None;
@@ -46,7 +43,7 @@ mod tests {
         assert_eq!(u32_from_hex(b"0000ffff"), Some(0x0000_FFFF));
     }
 
-    /// The leading zeros are the case a number-shaped parser loses.
+    /// Leading zeros count as digits.
     #[test]
     fn leading_zeros_are_digits_like_any_other() {
         assert_eq!(u32_from_hex(b"00000001"), Some(1));
@@ -58,8 +55,7 @@ mod tests {
         assert_eq!(u32_from_hex(b"ABCDEF01"), u32_from_hex(b"abcdef01"));
     }
 
-    /// Seven digits is a typo, and a typo that parsed would be a password that
-    /// silences every tag it touches.
+    /// Seven digits is a typo, not a shorter password.
     #[test]
     fn anything_but_exactly_eight_digits_is_refused() {
         assert_eq!(u32_from_hex(b"deadbee"), None);
@@ -74,8 +70,7 @@ mod tests {
         assert_eq!(u32_from_hex(b"0xdeadbe"), None);
     }
 
-    /// The whole reason this is a `const fn`: a build computes it, so a wrong
-    /// value fails the build rather than the bench.
+    /// A wrong compiled-in value fails the build instead of the box.
     #[test]
     fn it_can_be_computed_at_compile_time() {
         const VALUE: Option<u32> = u32_from_hex(b"12345678");

@@ -1,15 +1,13 @@
 #![no_std]
 
-//! The bench console: commands the box accepts on UART0.
+//! The serial console: commands the box accepts on UART0.
 //!
-//! Line matching only, so it can be tested on the host. What a command *does*
-//! belongs to the firmware, which owns the hardware to do it with.
+//! Only parses lines, so it can be tested on the host. The firmware carries
+//! out the commands.
 //!
-//! Its own crate rather than a module of `teddiebox-core`: a line parser has
-//! nothing to do with the reducer, and keeping it apart means a change to what
-//! the box accepts on a wire cannot reach what the box decides. `hex` comes
-//! with it, because the only two things that parse a hex password are a
-//! command typed here and the build that bakes one in.
+//! A separate crate from `teddiebox-core`, so changes to the console cannot
+//! affect the reducer. `hex` lives here because the only users of a hex
+//! password are a console command and the build that compiles one in.
 
 pub mod hex;
 
@@ -17,212 +15,168 @@ use heapless::String;
 
 /// A command the box understands.
 ///
-/// Not `Copy`: the credential commands carry a string, and a passphrase is not
-/// something to be duplicated by accident.
+/// Not `Copy`: some commands carry a passphrase, which should not be copied
+/// by accident.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Reboot into the ROM's UART download mode, for flashing.
     DownloadMode,
     /// Start the test tone.
     ///
-    /// Opt-in rather than automatic: a tone that plays on every boot is
-    /// unusable on a bench, and this box has no volume control of its own yet.
+    /// Only on request: a tone on every boot would be annoying.
     Tone,
     /// Reboot into the application.
     ///
-    /// Exists so a laptop can restart the box while watching its console.
-    /// `esptool`'s reset takes exclusive hold of the serial port, so it cannot
-    /// run while anything is capturing; writing two bytes can.
+    /// Lets a laptop restart the box while watching its console. `esptool`'s
+    /// reset needs exclusive use of the serial port, so it cannot run while
+    /// something is capturing the output.
     Reboot,
     /// Mount the SD card and checksum what is on it.
     ///
-    /// Opt-in for the same reason the tone is: it powers a rail, holds the bus
-    /// for as long as the card is large, and has no business running on a boot
-    /// that was not asking for it.
+    /// Only on request: it powers a rail and can keep the bus busy for hours
+    /// on a large card.
     Storage,
     /// Play the first WAV file on the card.
     ///
-    /// Bench step 8, joining steps 6 and 7. Opt-in like the others: it powers
-    /// a rail, takes the I2S peripheral for good, and is loud.
+    /// Tests the path from card to speaker without the decoder.
     PlayWav,
     /// Decode and play one named content file, `CONTENT/<dir>/<file>`.
     ///
-    /// The Toniebox keeps its own system sounds under the reserved IDs
-    /// `00000000` and `00000001`, a few tens of kilobytes each against tens of
-    /// megabytes for a figure. Naming one is what makes them usable, both as a
-    /// start-up sound and as a playback fixture that finishes in seconds.
+    /// Also reaches the system sounds under `00000000` to `00000003`, which
+    /// are small and finish in seconds, so they make good test files.
     PlayContent { directory: u32, file: u32 },
     /// Play one of the box's own sounds, in whichever language it speaks.
     ///
-    /// The same file ID means the same sound in all four language
-    /// directories, so naming the directory as well is noise everywhere
-    /// except when deliberately comparing languages.
+    /// A file ID means the same sound in all four language directories, so
+    /// only the file is named.
     PlaySound { file: u32 },
     /// Stop whatever is playing.
     Stop,
     /// Decode the first TAF and print its samples, without playing them.
     ///
-    /// Silent and as fast as the decoder goes, because this is a measurement
-    /// rather than a listening test: what the host needs is the numbers.
+    /// Silent and as fast as the decoder can go, for comparing the samples
+    /// with a reference decoder on the host.
     DumpPcm { frames: u8 },
     /// Print one CSV line of pack telemetry every `seconds`, or stop if zero.
     ///
-    /// Deliberately dumb: no judgement, no bucket, no smoothing. Two runs on
-    /// 2026-09-09 gave `BatteryConfig` its first real numbers this way, which
-    /// is also how the box was found to brown out 410 mV above the cutoff that
-    /// was supposed to protect it. It stays for the next pack, and for the
-    /// playback-transient question those runs opened and did not answer.
+    /// Raw readings only, with no levels or smoothing. Used to measure a
+    /// discharge and calibrate `BatteryConfig`.
     BatteryLog { seconds: u8 },
     /// Decode and play the first TAF file on the card.
     ///
-    /// Bench step 9. Opt-in like the rest, and the loudest thing here — it is
-    /// real content rather than a test tone.
+    /// Only on request, like the other playback commands.
     PlayTaf,
     /// Bring the NFC reader up and report any tag on the plate.
     ///
-    /// Bench step 10a. A plain ISO 15693 tag answers inventory; a Tonie in
-    /// privacy mode does not, and looks identical to a wiring fault.
+    /// A plain ISO 15693 tag answers inventory; a Tonie in privacy mode does
+    /// not, which looks the same as a wiring fault.
     Nfc,
     /// Remember the SLIX privacy password for this session.
     ///
-    /// Typed at the bench rather than compiled in or kept on the card: it is a
-    /// credential, and credentials have stayed out of this repository. It
-    /// lives in RAM and dies with the next reset.
+    /// Typed at the console so the credential stays out of the repository.
+    /// Kept in RAM only, until the next reset.
     Password(u32),
     /// Unlock a Tonie with the remembered password, then read its UID.
-    ///
-    /// Bench step 10b.
     Unlock,
     /// Send SET PASSWORD unconditionally, skipping the inventory that would
     /// otherwise answer first.
     ///
-    /// A SLIX taken out of privacy mode stays out of it until something puts
-    /// it back, and this driver has no command that does. So on the bench tag
-    /// `Unlock` returns on its first inventory and the password exchange —
-    /// the longest frame the reader sends, and the only one a tag can refuse
-    /// — is never put on the air at all. This forces it.
+    /// A tag that is already unlocked answers the first inventory, so
+    /// `Unlock` never sends the password. This sends it anyway, to test the
+    /// password exchange (the longest frame the reader sends).
     ForceUnlock,
     /// Put a tag back into privacy mode with the remembered password.
     ///
-    /// The only command here that leaves a tag less readable than it found
-    /// it. Stock firmware re-locks a figure after reading it, so this is what
-    /// restores a bench tag to the state a figure actually arrives in — and
-    /// without it the privacy path cannot be exercised twice.
+    /// Stock firmware re-locks a figure after reading it. This puts a test tag
+    /// back in that state, so the unlock path can be tested again.
     Lock,
     /// Dump a tag's memory, `count` blocks starting at `first`.
     ///
-    /// The bench instrument behind the auth token. teddyCloud relays the box's
-    /// `Authorization: BD <64 hex>` upstream without ever validating it, and
-    /// revvox's protocol analysis calls that value the memory content of the
-    /// tag — so it is readable with the reader already on this board.
+    /// The `Authorization: BD <64 hex>` token the box sends to teddyCloud is
+    /// the tag's memory content. On a Tonie, `mem 00 08` reads the whole
+    /// token; blocks from 8 onward do not answer.
     ///
-    /// The range is typed at the bench rather than fixed here so that this
-    /// command can contradict the guess it was written to test. It did the
-    /// opposite on 2026-09-03: `mem 00 08` reads the token whole, and block 8
-    /// onward does not answer, so the token is the entire user memory with
-    /// nothing spare. The range stays typed because that is what found the
-    /// boundary, and what would find a different one on a different tag.
+    /// The range is typed rather than fixed, so a different tag can be
+    /// explored.
     ReadMemory { first: u8, count: u8 },
     /// Ask the radio what access points it can hear.
     ///
-    /// The first thing the radio is asked to do, and chosen because it needs
-    /// no credentials, no network stack and no card: a scan that comes back
-    /// empty is a statement about the radio or the antenna, never about a
-    /// password. That separation is the whole reason it exists before
-    /// anything that associates.
+    /// Needs no credentials, network stack or card, so an empty result points
+    /// at the radio or antenna, not a password.
     NetScan,
     /// Remember the network name to associate with.
     ///
-    /// Typed at the bench, held in RAM, gone at the next reset — the same
-    /// treatment [`Command::Password`] gets, and for the same reason. This is
-    /// a stop-gap: the design has credentials arriving from the card's
-    /// `CONFIG.TXT`, which is why `net.rs` takes a whole `Config` rather than
-    /// two strings.
+    /// Kept in RAM until the next reset, and overrides the card's
+    /// `CONFIG.TXT`.
     NetSsid(String<MAX_SSID>),
     /// Remember the passphrase to associate with.
     ///
-    /// Never echoed, and the reason [`MAX_LINE`] is as long as it is.
+    /// Never echoed. This is why [`MAX_LINE`] is so long.
     NetPassword(String<MAX_PASSPHRASE>),
     /// Change, or remove, the passphrase of the box's own setup access point.
     ///
-    /// `None` removes the key, putting the card back to the published
-    /// passphrase. Only setup mode acts on this: it is the way back into a box
-    /// whose `setup_password` was forgotten, and by the time it is needed the
-    /// access point it changes is already the thing standing in the way.
+    /// `None` removes the key, going back to the published passphrase. Only
+    /// setup mode acts on this; it is the way back into a box whose
+    /// `setup_password` was forgotten.
     SetupPassword(Option<String<MAX_PASSPHRASE>>),
     /// Associate with the remembered network and take a DHCP lease.
     NetUp,
     /// Open a TLS connection to the configured server and hang up.
     ///
-    /// The smallest thing that exercises the transport on its own. Kept apart
-    /// from fetching content deliberately: a failure here is the handshake,
-    /// the cipher suite or the record layer, and a failure in a download is
-    /// not — which is the difference between a bisect and a guess.
+    /// Tests TLS on its own, separately from downloading, so a failure here
+    /// points at the handshake, cipher suite or record layer.
     NetTls,
     /// Report how deep the stack has ever gone.
     ///
-    /// Sizing anything that shares DRAM with the stack — the audio buffer, a
-    /// second core's stack — needs this number, and until now it has only ever
-    /// been assumed.
+    /// Needed to size anything that shares RAM with the stack, such as the
+    /// audio buffer.
     StackReport,
     /// Report which slot booted and what `otadata` says about it.
     ///
-    /// The cheap half of the OTA spikes: it reads and changes nothing, and it
-    /// is the only way to see from outside whether a rollback actually
-    /// happened or the box merely rebooted.
+    /// Changes nothing. Shows from outside whether a rollback happened or the
+    /// box only rebooted.
     OtaStatus,
     /// Erase, write and read back one sector of the slot that is not running.
     ///
-    /// Spec §7b. The question is whether a flash write survives with the radio
-    /// associated — flash writes suspend the instruction cache while Wi-Fi
-    /// ISRs are firing, and if they do not survive, the image has to land on
-    /// the card first and the sink changes shape. Writing into the inactive
-    /// slot rather than a scratch area is deliberate: it is where a real
-    /// update writes, so the answer is about the thing being asked about.
+    /// Tests whether a flash write works while Wi-Fi is connected: flash
+    /// writes suspend the instruction cache while Wi-Fi interrupts are
+    /// running. Writes to the inactive slot, where a real update writes.
     OtaWriteProbe,
     /// Arm the next boot on `slot`, in the state a fresh image is left in.
     ///
-    /// Spec §7a. Sets the slot and marks it pending verification, which is
-    /// what a real update does immediately before rebooting — so if this
-    /// bootloader honours rollback, an image that panics before marking
-    /// itself valid comes back as the *other* slot. If it does not, the box
-    /// boots the panicking image for ever and the way out is J100. That is
-    /// the finding, not a mishap, but it is why the slot is typed out.
+    /// Sets the slot and marks it pending verification, as a real update does
+    /// just before rebooting. Used to test what happens when a new image
+    /// fails. If the image in that slot cannot boot, the way out is J100
+    /// (download mode), so the slot must be typed explicitly.
     OtaBoot { slot: u8 },
     /// Whether a held ear skips a chapter, for this session.
     ///
-    /// The card's `ears_skip` is the box's real answer; this is how a bench
-    /// tries the other one without pulling the card. Like every other typed
-    /// setting it wins over a later card read, and is lost on a reset.
+    /// Overrides the card's `ears_skip` until the next reset, including over
+    /// a later card read.
     EarsSkip(bool),
     /// Download one content file and check it, without writing to the card.
     ///
     /// The eight bytes are the identifier **as it appears in the URL and in
-    /// teddyCloud's listing** — the reversed UID — so that what is typed can
-    /// be copied from the server and compared against it. `request.rs`
-    /// reverses again on the way out, which is why the caller hands these
-    /// over backwards.
+    /// teddyCloud's listing** (the reversed UID), so it can be copied from the
+    /// server. `request.rs` reverses it again, so the caller passes the bytes
+    /// in reverse order.
     Get([u8; 8]),
     /// Read the tag's memory and keep it, to spend on a download.
     ///
-    /// Distinct from [`Command::ReadMemory`], which prints blocks for a person
-    /// to read. This one keeps them and prints nothing but their length: what
-    /// it holds is the credential that fetches this figure's audio.
+    /// Unlike [`Command::ReadMemory`], this keeps the blocks and prints only
+    /// their length, because they are the credential for downloading this
+    /// figure's audio.
     ReadToken,
     /// Play a file a download put in `/CACHE/`.
     ///
-    /// Named by the same sixteen digits that fetched it, so `get X` and
-    /// `play X` are the two halves of one job. The halves are already split
-    /// here because that is how the directory and file are named on the card.
+    /// Named by the same sixteen digits used with `get`. Split into directory
+    /// and file, as on the card.
     PlayCache { directory: u32, file: u32 },
     /// Checksum one file a download put in `/CACHE/`, without walking the
     /// rest of the card.
     ///
-    /// `sd` computes the same per-file CRC32, but only as one step of a walk
-    /// over everything on the card, which takes hours on a large one — so a
-    /// downloaded file's whole-file integrity has never been checkable on
-    /// its own. Named the same way `get X` and `play X` are: the sixteen
-    /// digits that fetched a download also name the file it landed in.
+    /// `sd` computes the same CRC32 but walks the whole card, which takes
+    /// hours. Named by the same sixteen digits as `get` and `play`.
     Crc { directory: u32, file: u32 },
     /// Drop the association and power the modem down.
     NetDown,
@@ -230,119 +184,97 @@ pub enum Command {
     NetStatus,
     /// Override one register of the codec's start-up sequence.
     ///
-    /// Which register decides whether the box clicks on start-up can only be
-    /// settled by ear, and a reflash between guesses makes that loop minutes
-    /// long. Overrides are applied by `CodecInit`, not immediately, because
-    /// the question is always what the *start-up* does.
+    /// For finding by ear which registers cause a click at start-up, without
+    /// reflashing. Overrides take effect at the next `CodecInit`, not
+    /// immediately.
     CodecSet { page: u8, register: u8, value: u8 },
     /// Forget every override, back to the compiled-in sequence.
     CodecClear,
-    /// Take the codec down and bring it up again, so the start-up transient
-    /// can be heard on demand rather than once per reboot.
+    /// Power the codec down and up again, so the start-up click can be heard
+    /// without rebooting.
     CodecInit,
     /// Run the codec's software power-down and nothing else.
     CodecDown,
     /// Power the codec's output path up or down.
     ///
-    /// Powering the class-D amplifier and the DAC is what the box clicks on,
-    /// so the start-up no longer does it and this is what makes the box
-    /// audible at all. Eventually playback will ask for it; for now the bench
-    /// asks, so the two can be heard apart.
+    /// Powering the class-D amplifier and the DAC causes the click. Playback
+    /// does this automatically; this command does it by hand.
     Output(bool),
     /// Mute or unmute the class-D speaker driver, now rather than at start-up.
     ///
-    /// Unmuting is what the box clicks on, and the codec's soft-stepping only
-    /// runs when it has a clock — which it does not have until audio is
-    /// playing. Separating the two needs the mute reachable at any moment.
+    /// The codec's soft-stepping only works while it has a clock, which it
+    /// only has while audio plays. This allows unmuting at any time, to hear
+    /// the difference.
     Speaker(bool),
     /// Say what the codec's headset-detect register reads, and what the box is
     /// routing to.
     ///
-    /// The first bench question of M12 is whether detection works on this
-    /// board at all, and the register is the only thing that can answer it —
-    /// the box's own belief can have been forced by the command below.
+    /// The register shows what the hardware detects; the box's own routing
+    /// may have been forced by the command below.
     HeadphoneStatus,
     /// Force the routing, whatever detection says.
     ///
-    /// Both the mute and the volume ladder, together: setting one without the
-    /// other is the confusing half-state where the speaker is silent and the
-    /// level belongs to the wrong output. This is also the escape hatch if the
-    /// jack's switch turns out not to reach the codec on this board — the box
-    /// stays usable by hand.
+    /// Sets both the speaker mute and the volume steps together; setting only
+    /// one would leave a confusing mix. Also a manual fallback if detection
+    /// fails.
     Headphones(bool),
     /// Whether the reader polls the plate on its own.
     ///
-    /// **On at boot**, because a box that ignores every figure until somebody
-    /// types at it is not a box — and a release image, which answers no
-    /// command but `dl`, could never be told otherwise.
+    /// **On at boot**, so the box reacts to figures without any command. A
+    /// release image only accepts `dl`, so it could not turn it on.
     ///
-    /// `plate off` is what a measurement asks for: a poller that unlocks tags
-    /// by itself contaminates any bench run involving a figure, and the
-    /// download tests are exactly that.
+    /// `plate off` is for tests: a reader that unlocks tags on its own would
+    /// interfere with any test involving a figure, such as downloads.
     Plate(bool),
     /// Hold the idle timeout off, or let it run again.
     ///
-    /// A bench session is hours of deliberate waiting — a discharge curve, a
-    /// download, a person listening for one sound — during which the box is
-    /// doing exactly what the idle timeout was written to end. Off at boot: a
-    /// box that stays awake because a previous session said so is a box
-    /// measuring the wrong thing.
+    /// For long tests (a discharge, a download) during which the idle timeout
+    /// would otherwise park the box. Off at boot.
     StayAwake(bool),
     /// Enter deep sleep now, wakeable by the ear line.
     ///
-    /// Manual only. The automatic path is deliberately not wired to this until
-    /// sleep current and the state of the gate pins have been measured, and a
-    /// box that switches itself off mid-session is the wrong instrument for
-    /// taking those two numbers.
+    /// Manual only. See [`Command::AutoSleep`] for the automatic path.
     Sleep,
     /// Forget which figures have been asked about, so the next placement asks
     /// the server again.
     ///
-    /// Each figure is revalidated once per boot, because asking costs the
-    /// radio. That is the right cadence for a child and the wrong one for a
-    /// bench that has just replaced a file on the server, whose only other
-    /// way to make the box ask again is a power cycle.
+    /// Each figure is checked once per boot, because using Wi-Fi costs
+    /// battery. After replacing a file on the server, this makes the box ask
+    /// again without a power cycle.
     Revalidate,
     /// Whether the box may end a session in deep sleep rather than parking.
     ///
-    /// Off at boot and lost on every reset, like [`Command::StayAwake`].
-    /// Until sleep current and the state of the gate
-    /// pins have been measured, a box that switches itself all the way off is
-    /// a box that cannot be asked what it did — so the automatic ending is
-    /// something a bench arms deliberately, for one session at a time.
+    /// Off at boot and reset on every restart, like [`Command::StayAwake`].
+    /// Sleep current and the gate pins' state during sleep have not been
+    /// measured, so automatic sleep must be turned on explicitly.
     AutoSleep(bool),
-    /// Set `CLICK_THS` live, so the bench can sweep the slap threshold
-    /// without a reflash. One LSB is 15.625 mg (full scale / 128 at the
-    /// +/-2 g default).
+    /// Set `CLICK_THS` without reflashing, to tune the slap threshold. One
+    /// step is full scale / 128: about 62 mg at the +/-8 g the driver sets.
     SlapThreshold { threshold: u8 },
-    /// Set `TIME_LIMIT` live. In output-data-rate periods — 2.5 ms each at the
-    /// 400 Hz `init` sets — it is the longest an acceleration may stay over
-    /// the threshold and still count as a click, so it is what separates a
-    /// slap's impact from the box rocking afterwards.
+    /// Set `TIME_LIMIT` without reflashing. Counted in sample periods (2.5 ms
+    /// at the 400 Hz `init` sets), it is the longest an acceleration may stay
+    /// over the threshold and still count as a click. It separates a slap
+    /// from the box rocking afterwards.
     SlapTimeLimit { limit: u8 },
 }
 
 /// Longest network name accepted, in octets. 802.11 says 32.
 pub const MAX_SSID: usize = 32;
-/// Longest passphrase accepted. A WPA2 personal passphrase runs to 63
-/// characters; the 64-character form is a raw PSK, which is a different thing
-/// and not what is typed here.
+/// Longest passphrase accepted. A WPA2 passphrase has up to 63 characters; a
+/// 64-character value is a raw key, which is not accepted here.
 pub const MAX_PASSPHRASE: usize = 63;
 
-/// Longest command line accepted. Anything longer cannot be a command, and is
-/// discarded rather than allowed to shift a buffer around.
+/// Longest command line accepted. Longer lines are discarded.
 ///
-/// Sized for `net pw <63 characters>`, which at seventy is far and away the
-/// longest line this console takes — the next longest is `play <8 hex>/<8
-/// hex>` at twenty-one. It grew from 24 for exactly that reason: a passphrase
-/// silently truncated to fit would fail association with no hint why.
+/// Sized for `net pw <63 characters>` (70 bytes), by far the longest command.
+/// A cut-off passphrase would fail to connect with no hint why.
 const MAX_LINE: usize = 72;
 
 /// Watches a byte stream for a command line.
 ///
-/// Deliberately line-oriented: the box prints status lines unprompted and a
-/// terminal may echo, so a command fires only on a complete line that matches
-/// exactly. `ddl` is a typo, not a request to reboot.
+/// A command only runs on a complete line that matches exactly, because the
+/// box prints status lines on its own and a terminal may echo. `ddl` is a
+/// typo, not a request to reboot.
 #[derive(Debug)]
 pub struct CommandWatch {
     line: [u8; MAX_LINE],
@@ -462,10 +394,8 @@ fn hex_u32(digits: &[u8]) -> Option<u32> {
 
 /// Reads `otaboot <0|1>`, the slot to arm the next boot on.
 ///
-/// Exactly one digit, and only the two that name a slot. Nothing here is
-/// clamped or rounded towards a valid answer: this command arms a boot that
-/// may not come back, so a line that is not exactly right is not a command at
-/// all.
+/// Only `0` or `1`. This command can leave the box unbootable, so anything
+/// else is not a command.
 fn parse_ota_boot(line: &[u8]) -> Option<Command> {
     match line.strip_prefix(b"otaboot ")? {
         b"0" => Some(Command::OtaBoot { slot: 0 }),
@@ -501,9 +431,8 @@ fn slap(line: &[u8]) -> Option<Command> {
 /// Reads `play <8 hex>/<8 hex>`, the path the box keeps its audio under.
 fn parse_play_content(line: &[u8]) -> Option<Command> {
     let rest = line.strip_prefix(b"play ")?;
-    // Sixteen digits is an identifier rather than a path: it is what `get`
-    // takes, and what a download is filed under. Checked before the split so
-    // that the two shorter forms keep their meaning exactly.
+    // Sixteen digits is a downloaded file's identifier, as for `get`.
+    // Checked before splitting on `/`.
     if rest.len() == 16 {
         let directory = hex_u32(&rest[..8])?;
         let file = hex_u32(&rest[8..])?;
@@ -511,8 +440,8 @@ fn parse_play_content(line: &[u8]) -> Option<Command> {
     }
     let mut halves = rest.split(|&b| b == b'/');
     let first = hex_u32(halves.next()?)?;
-    // One half names a sound in the box's own language; two name a path, which
-    // is what comparing languages needs.
+    // One part names a system sound in the box's language; two parts name a
+    // path.
     let Some(second) = halves.next() else {
         return Some(Command::PlaySound { file: first });
     };
@@ -526,16 +455,10 @@ fn parse_play_content(line: &[u8]) -> Option<Command> {
     })
 }
 
-/// Reads two hex digits, exactly.
-///
-/// Exactly two, because a register or a value written with one digit is a
-/// typo rather than a small number, and these go to a live codec where a
-/// wrong register is a write to something unrelated.
 /// Parses `get <16 hex>` into the eight identifier bytes.
 ///
-/// All or nothing: an identifier a digit short names a different figure, and
-/// the server answers that with a `404` the box would report as "no content"
-/// — a wrong answer wearing the shape of a right one.
+/// Exactly sixteen digits: a shorter identifier would name a different
+/// figure, and the server's `404` would look like "no content".
 fn parse_get(line: &[u8]) -> Option<Command> {
     let rest = line.strip_prefix(b"get ")?;
     if rest.len() != 16 {
@@ -548,9 +471,7 @@ fn parse_get(line: &[u8]) -> Option<Command> {
     Some(Command::Get(uid))
 }
 
-/// Reads `crc <16 hex>` into the directory/file split `play`'s sixteen-digit
-/// form already uses — the same identifier, so a file just downloaded can be
-/// checked by pasting the same digits `get` and `play` took.
+/// Reads `crc <16 hex>`, the same identifier `get` and `play` take.
 fn parse_crc(line: &[u8]) -> Option<Command> {
     let rest = line.strip_prefix(b"crc ")?;
     if rest.len() != 16 {
@@ -561,6 +482,10 @@ fn parse_crc(line: &[u8]) -> Option<Command> {
     Some(Command::Crc { directory, file })
 }
 
+/// Reads exactly two hex digits.
+///
+/// A single digit is treated as a typo, since these values are written to
+/// hardware registers.
 fn hex_byte(digits: &[u8]) -> Option<u8> {
     if digits.len() != 2 {
         return None;
@@ -582,9 +507,8 @@ fn hex_byte(digits: &[u8]) -> Option<u8> {
 fn parse_codec_set(line: &[u8]) -> Option<Command> {
     let rest = line.strip_prefix(b"cset ")?;
     let mut parts = rest.split(|&b| b == b' ');
-    // The codec has pages 0, 1 and — for the headset-detect debounce clock —
-    // 3. Nothing this firmware touches lives anywhere else, and a mistyped
-    // page would write to a quite different register.
+    // Only the pages this firmware uses: 0, 1, and 3 (headset-detect
+    // debounce clock).
     let page = match parts.next()? {
         b"0" => 0,
         b"1" => 1,
@@ -605,28 +529,18 @@ fn parse_codec_set(line: &[u8]) -> Option<Command> {
 
 /// Most blocks one `mem` command will read.
 ///
-/// Bounds the reply buffer the firmware has to hold. Comfortably past the
-/// eight blocks a SLIX-L is believed to carry, so the hypothesis can be
-/// overshot and disproved rather than merely confirmed.
+/// Limits the reply buffer. Well above the eight blocks of a Tonie, so a
+/// read can go past the end.
 pub const MAX_MEMORY_BLOCKS: u8 = 32;
 
-/// Reads `net ssid <name>` and `net pw <passphrase>`.
+/// Reads `setup pw off`, or `setup pw <passphrase>`.
 ///
-/// The value is taken verbatim to the end of the line: a passphrase may
-/// contain spaces, and trimming it to be tidy would change the credential.
-/// Empty is refused — it is a typo, and one the driver would otherwise be
-/// handed as though it were meant. Too long is refused rather than truncated,
-/// for the same reason.
-/// `setup pw off`, or `setup pw` and a passphrase.
+/// Everything after the space is the passphrase, including `#`. `off` cannot
+/// be a real passphrase: WPA2 needs at least 8 characters.
 ///
-/// Everything after the space is the passphrase, `#` included, for the reason
-/// `CONFIG.TXT` exempts `password` from its comment rule. `off` is not a
-/// passphrase anyone can lose to this: WPA2 will not take three characters, so
-/// the word could never have been set in the first place.
-///
-/// Length is not checked here. The firmware writes the value into the file and
-/// re-parses the whole thing before it saves, so `teddiebox_config` stays the
-/// one authority on what a `setup_password` may be.
+/// The length is not checked here. The firmware writes the value into the
+/// file and parses the whole file before saving, so `teddiebox_config`
+/// decides what is valid.
 fn parse_setup_password(line: &[u8]) -> Option<Command> {
     let rest = line.strip_prefix(b"setup pw ")?;
     if rest == b"off" {
@@ -639,6 +553,10 @@ fn parse_setup_password(line: &[u8]) -> Option<Command> {
         .map(|s| Command::SetupPassword(Some(s)))
 }
 
+/// Reads `net ssid <name>` and `net pw <passphrase>`.
+///
+/// The value is taken exactly, to the end of the line: a passphrase may
+/// contain spaces. Empty or too-long values are refused, not truncated.
 fn parse_credential(line: &[u8]) -> Option<Command> {
     if let Some(rest) = line.strip_prefix(b"net ssid ") {
         let text = core::str::from_utf8(rest).ok()?;
@@ -657,8 +575,7 @@ fn parse_credential(line: &[u8]) -> Option<Command> {
 
 /// Reads `mem <2 hex first block> <2 hex block count>`.
 ///
-/// Both are hex for the same reason the codec's are: block numbers are read
-/// off a datasheet's tables, not counted out.
+/// Hex, because block numbers come from datasheet tables.
 fn parse_read_memory(line: &[u8]) -> Option<Command> {
     let rest = line.strip_prefix(b"mem ")?;
     let mut parts = rest.split(|&b| b == b' ');
@@ -667,9 +584,8 @@ fn parse_read_memory(line: &[u8]) -> Option<Command> {
     if parts.next().is_some() {
         return None;
     }
-    // Zero is a typo rather than a small request, and anything past the buffer
-    // would have to be truncated — which would print a short dump that reads
-    // exactly like a complete one.
+    // Zero is a typo. More than the buffer holds would have to be cut short,
+    // and a short dump looks complete.
     if count == 0 || count > MAX_MEMORY_BLOCKS {
         return None;
     }
@@ -678,15 +594,12 @@ fn parse_read_memory(line: &[u8]) -> Option<Command> {
 
 /// Reads `pw <8 hex digits>`.
 ///
-/// Exactly eight, because a privacy password is a `u32` and a short one is a
-/// typo rather than a small number. Getting it wrong matters more than usual:
-/// a tag refuses a wrong password by staying silent, which is what an empty
-/// plate and a broken antenna also look like.
+/// Exactly eight, because the password is a `u32` and a shorter value is a
+/// typo. A tag answers a wrong password with silence, which looks the same as
+/// an empty plate or a broken antenna.
 fn parse_password(line: &[u8]) -> Option<Command> {
     let digits = line.strip_prefix(b"pw ")?;
-    // The same parse a build does when it bakes one in from the environment.
-    // Two implementations of "what is a valid password" is two things to get
-    // wrong about a credential, and the build's copy cannot be typed at.
+    // The same parser the build uses for a compiled-in password.
     Some(Command::Password(crate::hex::u32_from_hex(digits)?))
 }
 
@@ -741,14 +654,14 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"rb\n"), Some(Command::Reboot));
     }
 
-    /// Line-oriented on purpose. An earlier matcher fired on `ddl` because it
-    /// scanned for a substring; a mistyped line must not reboot the box.
     #[test]
     fn the_tone_command_is_a_single_letter() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"t\r"), Some(Command::Tone));
     }
 
+    /// Only an exact line matches, so `ddl` does not put the box into
+    /// download mode.
     #[test]
     fn a_mistyped_line_does_not_fire() {
         let mut watch = CommandWatch::new();
@@ -797,10 +710,8 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
     }
 
-    /// The privacy path has to be reachable on a tag that does not need it.
-    /// `slix` tries a plain inventory first and stops as soon as that answers,
-    /// so on an unlocked tag SET PASSWORD is never sent at all — and the one
-    /// exchange this bench most needs to provoke becomes unreachable.
+    /// `slix` stops as soon as a plain inventory answers, so on an unlocked
+    /// tag it never sends the password. `slixp` always sends it.
     #[test]
     fn the_forced_unlock_command_is_distinct_from_the_unlock_one() {
         let mut watch = CommandWatch::new();
@@ -808,9 +719,8 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
     }
 
-    /// Locking is not the inverse of any command here — it is its own — and
-    /// it must not be reachable by a typo of `slix` or `slixp`, because the
-    /// tag it acts on stops answering afterwards.
+    /// A locked tag stops answering, so `lock` must not be confused with
+    /// `slix` or `slixp`.
     #[test]
     fn the_lock_command_is_distinct_from_the_unlock_ones() {
         let mut watch = CommandWatch::new();
@@ -819,27 +729,15 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"slixp\r"), Some(Command::ForceUnlock));
     }
 
-    /// The codec's pop behaviour is decided by a handful of register values,
-    /// and which of them matters can only be settled by ear. Reflashing
-    /// between each guess makes that loop minutes long, so the values are
-    /// overridable from the console and the sequence is re-runnable.
-    /// The class-D mute has to be reachable while the box is running, not
-    /// only during start-up: whether unmuting clicks may depend on whether
-    /// the codec has a clock, and it only has one once audio is playing.
-    /// Every moment the box clicks — `rb`, `cinit` — contains the codec's
-    /// software power-down, and every silent one does not. Running that step
-    /// on its own, changing nothing else, is what tells the two apart.
+    /// Runs only the codec's software power-down, to hear whether that step
+    /// is what clicks.
     #[test]
     fn the_codec_power_down_command_fires_on_its_own_line() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"cdown\r"), Some(Command::CodecDown));
     }
 
-    /// The box's own system sounds live at `CONTENT/00000000/` and
-    /// `CONTENT/00000001/` alongside the figures, and `taf` can only reach
-    /// whichever file it happens to find first. Naming one is what makes the
-    /// short ones usable as fixtures — seconds instead of the half hour a
-    /// real figure takes.
+    /// Naming a file lets short system sounds be played as quick tests.
     #[test]
     fn the_play_command_carries_the_content_id_it_names() {
         let mut watch = CommandWatch::new();
@@ -859,8 +757,7 @@ mod tests {
         );
     }
 
-    /// One half means "in this box's language", which is what almost every
-    /// use wants: the same file ID is the same sound in all four directories.
+    /// One part means a system sound in the box's language.
     #[test]
     fn a_play_command_with_one_half_names_a_sound_not_a_path() {
         let mut watch = CommandWatch::new();
@@ -870,8 +767,8 @@ mod tests {
         );
     }
 
-    /// Both halves are eight hex digits: that is how the Toniebox names them
-    /// on the card, and a short one would silently open a different file.
+    /// Both parts must be eight hex digits, as on the card; a shorter one
+    /// would open a different file.
     #[test]
     fn a_malformed_content_id_does_not_fire() {
         let mut watch = CommandWatch::new();
@@ -887,13 +784,9 @@ mod tests {
         );
     }
 
-    /// Stopping has to be its own word rather than a second `taf`: playback is
-    /// loud, and the command that ends it must not be a typo away from one
-    /// that starts it.
-    /// Step 9's criterion is that the box's samples match the host's, and a
-    /// checksum can only ever answer yes or no. Opus is not specified to be
-    /// bit-exact across platforms, so the useful question is *how far apart*,
-    /// and that needs the samples themselves.
+    /// Opus is not bit-exact across platforms, so the box's samples are dumped
+    /// to compare how far they are from the host's, not just whether they
+    /// match.
     #[test]
     fn the_pcm_command_carries_how_many_frames_to_dump() {
         let mut watch = CommandWatch::new();
@@ -922,8 +815,7 @@ mod tests {
         );
     }
 
-    /// Zero is how the log is turned off, so it is a valid interval rather
-    /// than a rejected one.
+    /// Zero turns the log off, so it is accepted.
     #[test]
     fn a_batlog_interval_of_zero_stops_the_log() {
         let mut watch = CommandWatch::new();
@@ -1017,12 +909,9 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"hp 2\r"), None, "not a routing");
     }
 
-    /// Page 3 holds the headset-detect debounce clock, and whether that
-    /// register is the reason detection does not work is a question the bench
-    /// must be able to ask both ways without a reflash. Page 0 and page 1 are
-    /// the pages the start-up sequence itself writes and stayed reachable when
-    /// page 3 was added. Everything else stays refused: a mistyped page writes
-    /// to a quite different register.
+    /// Page 3 holds the headset-detect debounce clock. Pages 0 and 1 hold the
+    /// start-up registers. Other pages are refused, since a mistyped page
+    /// would write an unrelated register.
     #[test]
     fn cset_reaches_the_headset_debounce_clock_and_no_further() {
         let mut watch = CommandWatch::new();
@@ -1080,9 +969,7 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"cclr\r"), Some(Command::CodecClear));
     }
 
-    /// A mistyped override must not quietly become a different register. This
-    /// writes to a live codec, where a wrong page is a write to something
-    /// entirely unrelated.
+    /// A mistyped override must not write to a different register.
     #[test]
     fn a_malformed_codec_override_does_not_fire() {
         let mut watch = CommandWatch::new();
@@ -1109,7 +996,7 @@ mod tests {
         );
     }
 
-    /// Lower case is what anyone actually types.
+    /// People usually type lower case.
     #[test]
     fn a_password_in_lower_case_is_accepted() {
         let mut watch = CommandWatch::new();
@@ -1130,9 +1017,8 @@ mod tests {
         );
     }
 
-    /// A mistyped password must not silently become a different one. Sending
-    /// the wrong value to a tag is indistinguishable from an empty plate, so a
-    /// typo would look like a hardware fault.
+    /// A mistyped password is refused. A tag answers a wrong password with
+    /// silence, which would look like a hardware fault.
     #[test]
     fn a_malformed_password_does_not_fire() {
         let mut watch = CommandWatch::new();
@@ -1142,8 +1028,7 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"pw\r"), None, "no value at all");
     }
 
-    /// Status lines the box prints unprompted. None of them may look like a
-    /// command, including any prefix of one.
+    /// Status lines the box prints on its own must not look like commands.
     #[test]
     fn ordinary_traffic_does_not_fire_anything() {
         let mut watch = CommandWatch::new();
@@ -1154,16 +1039,14 @@ mod tests {
         );
     }
 
-    /// An overlong line is discarded whole rather than having its tail matched.
+    /// An overlong line is discarded entirely; its end is not matched.
     #[test]
     fn an_overlong_line_cannot_match_by_its_ending() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"aaaaaaaaaaaaadl\r"), None);
     }
 
-    /// The instrument that answers "which blocks hold the token". The range is
-    /// typed rather than fixed, because pinning it to the eight-block guess
-    /// would stop it from ever disagreeing with that guess.
+    /// The range is typed, not fixed, so any blocks can be read.
     #[test]
     fn a_memory_dump_names_its_first_block_and_a_count() {
         let mut watch = CommandWatch::new();
@@ -1173,8 +1056,8 @@ mod tests {
         );
     }
 
-    /// Reading past the end is the point: where the tag stops answering is the
-    /// measurement, so a first block beyond the guessed user memory is legal.
+    /// Reading past the end of the tag's memory is allowed, to find where it
+    /// stops answering.
     #[test]
     fn a_memory_dump_may_start_past_the_expected_end() {
         let mut watch = CommandWatch::new();
@@ -1187,40 +1070,36 @@ mod tests {
         );
     }
 
-    /// The reply buffer is fixed, so a count it cannot hold is refused rather
-    /// than quietly truncated into a dump that reads as complete.
+    /// The reply buffer is fixed, so a larger count is refused rather than
+    /// cut short.
     #[test]
     fn a_memory_dump_longer_than_the_buffer_is_refused() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"mem 00 21\r"), None);
     }
 
-    /// Nothing to read is a typo, not a request.
+    /// A count of zero is a typo.
     #[test]
     fn a_memory_dump_of_no_blocks_is_refused() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"mem 00 00\r"), None);
     }
 
-    /// The first radio command, and deliberately the one that needs no
-    /// credentials: a scan that finds nothing is a statement about the radio,
-    /// not about a password.
+    /// A scan needs no credentials, so an empty result points at the radio,
+    /// not a password.
     #[test]
     fn the_scan_command_asks_the_radio_what_it_can_hear() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"net scan\r"), Some(Command::NetScan));
     }
 
-    /// `net` alone does nothing yet, and must not be mistaken for a command
-    /// that does.
+    /// `net` on its own is not a command.
     #[test]
     fn net_without_a_verb_does_not_fire() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"net\r"), None);
     }
 
-    /// Credentials are typed at the bench for now, so the console has to carry
-    /// a string rather than a number for the first time.
     #[test]
     fn the_ssid_command_carries_the_name_it_names() {
         let mut watch = CommandWatch::new();
@@ -1232,8 +1111,8 @@ mod tests {
         );
     }
 
-    /// An SSID is 32 octets at most (802.11), and one octet more is a typo
-    /// rather than a name to be quietly cut down to fit.
+    /// An SSID is at most 32 bytes (802.11); a longer one is refused, not cut
+    /// short.
     #[test]
     fn an_ssid_longer_than_the_standard_allows_is_refused() {
         let mut watch = CommandWatch::new();
@@ -1244,8 +1123,8 @@ mod tests {
         assert_eq!(feed_all(&mut watch, &line), None);
     }
 
-    /// A WPA2 passphrase runs to 63 characters, which is longer than every
-    /// other line this console has ever accepted.
+    /// A WPA2 passphrase can be 63 characters, the longest line the console
+    /// accepts.
     #[test]
     fn a_passphrase_of_the_full_length_still_fits_a_line() {
         let mut watch = CommandWatch::new();
@@ -1263,8 +1142,7 @@ mod tests {
         );
     }
 
-    /// An empty credential is a typo, and one that would otherwise be handed
-    /// to the driver as if it were meant.
+    /// An empty credential is a typo.
     #[test]
     fn an_empty_ssid_is_refused() {
         let mut watch = CommandWatch::new();
@@ -1281,16 +1159,8 @@ mod tests {
             Some(Command::NetStatus)
         );
     }
-    /// `net tls` is the smallest thing that exercises the transport: it
-    /// connects, handshakes, asks one question and hangs up. Separate from
-    /// `get` on purpose — a failure here is the transport, and a failure there
-    /// is not.
-    /// The card is the place this belongs, but the card is inside the box and
-    /// the bench is not. Same relationship `net ssid` has to the card's ssid.
-    /// `on`/`off` like the other switches a bench types, rather than the
-    /// `yes`/`no` the card takes: this is the same family as `plate on` and
-    /// `awake on`, and typing what the file says is a different act from
-    /// typing what the box should do right now.
+    /// Uses `on`/`off` like the other console switches (`plate on`,
+    /// `awake on`), not the `yes`/`no` of the card.
     #[test]
     fn ears_skip_can_be_switched_from_the_console() {
         let mut watch = CommandWatch::new();
@@ -1310,10 +1180,9 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"net tls\n"), Some(Command::NetTls));
     }
     /// `get` takes the identifier **as it appears in the URL and in
-    /// teddyCloud's own listing** — the reversed UID — because that is the
-    /// string a person can copy from the server and compare against. The
-    /// figure on the bench is UID `E0040350503F2E1D`, which teddyCloud files
-    /// under `1D2E3F50500304E0`.
+    /// teddyCloud's listing** (the reversed UID), so it can be copied from the
+    /// server. A figure with UID `E0040350503F2E1D` is listed as
+    /// `1D2E3F50500304E0`.
     #[test]
     fn get_takes_the_reversed_uid_as_it_appears_on_the_server() {
         let mut watch = CommandWatch::new();
@@ -1336,10 +1205,8 @@ mod tests {
         );
     }
 
-    /// Short, long, or not hex is not a command. An identifier one digit out
-    /// names a different figure, and the server answers that with a 404 the
-    /// box would report as "no content" — a wrong answer that looks like a
-    /// right one.
+    /// Too short, too long or not hex is refused. A wrong identifier would
+    /// name a different figure and look like "no content".
     #[test]
     fn a_malformed_identifier_is_not_a_command() {
         let mut watch = CommandWatch::new();
@@ -1348,9 +1215,6 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304EZ\n"), None);
         assert_eq!(feed_all(&mut watch, b"get \n"), None);
     }
-    /// The three OTA spike commands, which exist to answer questions the
-    /// firmware half cannot be written without: whether a sector survives a
-    /// write while the radio is up, and whether this bootloader rolls back.
     #[test]
     fn ota_status_is_recognised() {
         let mut watch = CommandWatch::new();
@@ -1366,9 +1230,8 @@ mod tests {
         );
     }
 
-    /// Naming the slot rather than saying "the other one": the command arms a
-    /// boot that may not come back, so which slot it means has to be on the
-    /// line somebody typed, not inferred from state they cannot see.
+    /// The slot is named explicitly, not "the other one": this command can
+    /// leave the box unbootable.
     #[test]
     fn ota_boot_takes_a_slot() {
         let mut watch = CommandWatch::new();
@@ -1382,8 +1245,7 @@ mod tests {
         );
     }
 
-    /// There are two slots. Anything else is a typo, and arming a boot on a
-    /// typo is how a bench session ends at J100.
+    /// There are two slots; anything else is a typo.
     #[test]
     fn ota_boot_refuses_anything_but_a_slot() {
         let mut watch = CommandWatch::new();
@@ -1393,16 +1255,13 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"otaboot 01\n"), None);
     }
 
-    /// The measurement three experiments this session guessed at instead.
     #[test]
     fn stack_is_recognised() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"stack\n"), Some(Command::StackReport));
     }
-    /// The other half of `get`. A download lands in `/CACHE/` under the same
-    /// identifier that fetched it, so the same sixteen digits play it back —
-    /// which is what closes the loop from "the box fetched a story" to "the box
-    /// tells it".
+    /// A download is stored in `/CACHE/` under the identifier `get` used, so
+    /// the same sixteen digits play it.
     #[test]
     fn play_takes_a_ruid_to_mean_the_cache() {
         let mut watch = CommandWatch::new();
@@ -1415,8 +1274,8 @@ mod tests {
         );
     }
 
-    /// And the two older forms keep their meaning: eight digits is a sound in
-    /// the box's own language, eight and eight is a path under `CONTENT`.
+    /// Eight digits is a system sound in the box's language; eight and eight
+    /// is a path under `CONTENT`.
     #[test]
     fn the_shorter_play_forms_still_mean_what_they_did() {
         let mut watch = CommandWatch::new();
@@ -1432,9 +1291,8 @@ mod tests {
             })
         );
     }
-    /// The third leg of `get`/`play`/`crc`: the same sixteen digits that
-    /// fetched a download and play it back now check it, without a walk over
-    /// the rest of the card.
+    /// The same sixteen digits as `get` and `play` check a download, without
+    /// walking the whole card.
     #[test]
     fn crc_takes_a_ruid_to_mean_the_cache() {
         let mut watch = CommandWatch::new();
@@ -1447,9 +1305,7 @@ mod tests {
         );
     }
 
-    /// Short, long, or not hex is not a command — the same discipline `get`
-    /// holds identifiers to, and for the same reason: a digit out names a
-    /// different file.
+    /// Too short, too long or not hex is refused, as for `get`.
     #[test]
     fn a_malformed_crc_identifier_is_not_a_command() {
         let mut watch = CommandWatch::new();
@@ -1459,19 +1315,15 @@ mod tests {
         assert_eq!(feed_all(&mut watch, b"crc \n"), None);
     }
 
-    /// Reading the token is separate from `mem` because it is not for looking
-    /// at: `mem` prints blocks so a person can compare them, this keeps them so
-    /// the box can spend them.
+    /// Separate from `mem`: `mem` prints blocks, `token` keeps them for a
+    /// download.
     #[test]
     fn token_is_recognised() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"token\n"), Some(Command::ReadToken));
     }
 
-    /// A bench session is hours of a person watching a box that is
-    /// deliberately doing nothing — which is precisely what the idle timeout
-    /// is for. Without a way to say so, half the measurements this box still
-    /// owes cannot be taken in one capture.
+    /// Long tests need the idle timeout held off.
     #[test]
     fn the_idle_shutdown_can_be_held_off_from_the_console() {
         let mut watch = CommandWatch::new();
@@ -1486,21 +1338,15 @@ mod tests {
         );
     }
 
-    /// Deep sleep has to exist before it can be measured, and it must not be
-    /// reachable automatically before it has been: sleep current and the state
-    /// of the gate pins are the two numbers that decide whether any of the
-    /// power story works, and they are taken with a meter and a box that can
-    /// be told to sleep on demand.
+    /// Sleep on demand, so sleep current can be measured.
     #[test]
     fn sleep_is_its_own_command() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"sleep\r"), Some(Command::Sleep));
     }
 
-    /// Deep sleep as the real ending of a session is not armed by default,
-    /// and is lost on every reset. A box that sleeps because a previous
-    /// session said so is a box that disappears mid-measurement, and a park
-    /// costs a power cycle to undo.
+    /// Automatic sleep is off by default and must be turned on after each
+    /// reset.
     #[test]
     fn the_automatic_ending_can_be_armed_from_the_console() {
         let mut watch = CommandWatch::new();
@@ -1515,9 +1361,8 @@ mod tests {
         );
     }
 
-    /// A bench that has just replaced a file on the server needs the box to
-    /// notice. Without this the only way to make it ask again is a power
-    /// cycle, because "once per boot" is exactly what the memory means.
+    /// After replacing a file on the server, this makes the box ask again
+    /// without a power cycle.
     #[test]
     fn the_box_can_be_told_to_ask_the_server_again() {
         let mut watch = CommandWatch::new();
