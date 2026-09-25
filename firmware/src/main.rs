@@ -4,12 +4,12 @@
 mod audio;
 mod battery;
 mod flash;
+mod i2c_bus;
 mod identity;
 mod index;
 mod inputs;
 mod led;
 mod libc_shim;
-mod motion;
 mod net;
 mod nfc;
 mod ota;
@@ -1101,7 +1101,7 @@ async fn sleep_now(lpwr: &mut Option<LPWR<'static>>) -> Result<(), &'static str>
 /// Shared by the box turning itself off and the console asking it to, so the
 /// order is only written once.
 async fn go_dark(board: &mut BoardPins<'_>, gates: &mut Gates, rgb: Option<&led::Rgb<'_>>) {
-    motion::quieten_codec().await;
+    i2c_bus::quieten_codec().await;
     // Before the rail goes down, not after. LEDC keeps driving the LED on its
     // own, and `Gates::led` refuses once the peripherals rail is down, so
     // doing this second would leave the LED lit.
@@ -1285,7 +1285,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             // The storage rail is already on, or the card would not be
             // mounted, but the codec's output must be powered here; the
             // console `play` command leaves that to the user.
-            motion::request_output(motion::OUTPUT_UP);
+            i2c_bus::request_output(i2c_bus::OUTPUT_UP);
             REQUEST.store(request, Ordering::Relaxed);
         }
 
@@ -1300,7 +1300,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         // the level in dB.
         Action::SetVolume { step, db } => {
             esp_println::println!("teddiebox: volume step {} — {db} dB", step.0);
-            motion::VOLUME_REQUEST.store(db, Ordering::Relaxed);
+            i2c_bus::VOLUME_REQUEST.store(db, Ordering::Relaxed);
         }
 
         // Only mutes or unmutes the class-D driver; `HEADPHONES_IN` is left
@@ -1317,10 +1317,10 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             // `SPEAKER_RESUME` rather than a plain unmute: a story started
             // with headphones in never powered the amplifier. The click of
             // powering it is acceptable just after a plug was pulled.
-            motion::SPEAKER_REQUEST.store(
+            i2c_bus::SPEAKER_REQUEST.store(
                 match output {
-                    AudioOutput::Speaker => motion::SPEAKER_RESUME,
-                    AudioOutput::Headphones => motion::SPEAKER_MUTE,
+                    AudioOutput::Speaker => i2c_bus::SPEAKER_RESUME,
+                    AudioOutput::Headphones => i2c_bus::SPEAKER_MUTE,
                 },
                 Ordering::Relaxed,
             );
@@ -1922,7 +1922,7 @@ async fn media(
                     // when it asked, and powering down would silence it (and
                     // click).
                     if REQUEST.load(Ordering::Relaxed) == REQUEST_NONE {
-                        motion::request_output(motion::OUTPUT_DOWN);
+                        i2c_bus::request_output(i2c_bus::OUTPUT_DOWN);
                     }
                 }
                 PLAYING.store(false, Ordering::Relaxed);
@@ -2839,9 +2839,9 @@ async fn main(spawner: Spawner) {
     match I2c::new(p.I2C0, I2cConfig::default()) {
         Ok(i2c) => {
             let mut i2c = i2c.with_sda(p.GPIO5).with_scl(p.GPIO6);
-            motion::scan_i2c(&mut i2c);
+            i2c_bus::scan_i2c(&mut i2c);
             let reset = Output::new(p.GPIO26, Level::Low, OutputConfig::default());
-            spawner.spawn(motion::motion(i2c, reset).unwrap());
+            spawner.spawn(i2c_bus::i2c_bus(i2c, reset).unwrap());
         }
         Err(_) => esp_println::println!("teddiebox: I2C would not configure"),
     }
@@ -2895,14 +2895,14 @@ async fn main(spawner: Spawner) {
         //
         // It also hides the click of powering the class-D amplifier, as the
         // original firmware does.
-        if startup_pending && motion::CODEC_READY.load(Ordering::Relaxed) {
+        if startup_pending && i2c_bus::CODEC_READY.load(Ordering::Relaxed) {
             startup_pending = false;
             SOUND_REQUEST.store(Sound::Startup.file(), Ordering::Relaxed);
             STARTUP_SOUNDED.store(true, Ordering::Relaxed);
         }
 
         if !boot_confirmed
-            && motion::CODEC_READY.load(Ordering::Relaxed)
+            && i2c_bus::CODEC_READY.load(Ordering::Relaxed)
             && CARD_MOUNTED.load(Ordering::Relaxed)
         {
             boot_confirmed = true;
@@ -2914,7 +2914,7 @@ async fn main(spawner: Spawner) {
         let pending = SOUND_REQUEST.swap(NO_SOUND, Ordering::Relaxed);
         if pending != NO_SOUND {
             board.apply(gates.power(Rail::Storage, true));
-            motion::request_output(motion::OUTPUT_UP);
+            i2c_bus::request_output(i2c_bus::OUTPUT_UP);
             CONTENT_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
             CONTENT_FILE.store(pending, Ordering::Relaxed);
             // Set here rather than by the media task, so there is no moment
@@ -2967,7 +2967,7 @@ async fn main(spawner: Spawner) {
             if !BENCH {
                 match command {
                     Some(Command::DownloadMode) => {
-                        motion::quieten_codec().await;
+                        i2c_bus::quieten_codec().await;
                         reboot_to_download(&mut board, &mut gates)
                     }
                     Some(_) => not_in_this_build(),
@@ -2979,22 +2979,22 @@ async fn main(spawner: Spawner) {
 
             match command {
                 Some(Command::DownloadMode) => {
-                    motion::quieten_codec().await;
+                    i2c_bus::quieten_codec().await;
                     reboot_to_download(&mut board, &mut gates)
                 }
                 Some(Command::Reboot) => {
-                    motion::quieten_codec().await;
+                    i2c_bus::quieten_codec().await;
                     reboot(&mut board, &mut gates)
                 }
                 Some(Command::Tone) => {
                     // The output is off until something plays, so every audio
                     // command must switch it on first.
-                    motion::request_output(motion::OUTPUT_UP);
+                    i2c_bus::request_output(i2c_bus::OUTPUT_UP);
                     REQUEST.store(REQUEST_TONE, Ordering::Relaxed);
                 }
                 Some(Command::PlayWav) => {
                     board.apply(gates.power(Rail::Storage, true));
-                    motion::request_output(motion::OUTPUT_UP);
+                    i2c_bus::request_output(i2c_bus::OUTPUT_UP);
                     REQUEST.store(REQUEST_WAV, Ordering::Relaxed);
                 }
                 Some(Command::Nfc) => {
@@ -3014,7 +3014,7 @@ async fn main(spawner: Spawner) {
                     register,
                     value,
                 }) => {
-                    if motion::codec_override_set(page, register, value) {
+                    if i2c_bus::codec_override_set(page, register, value) {
                         esp_println::println!(
                             "teddiebox: codec page {page} register {register:#04x} -> {value:#04x} on next cinit"
                         );
@@ -3023,40 +3023,40 @@ async fn main(spawner: Spawner) {
                     }
                 }
                 Some(Command::CodecClear) => {
-                    motion::codec_overrides_clear();
+                    i2c_bus::codec_overrides_clear();
                     esp_println::println!("teddiebox: codec overrides cleared");
                 }
                 Some(Command::CodecInit) => {
-                    motion::CODEC_REINIT.store(true, Ordering::Relaxed);
+                    i2c_bus::CODEC_REINIT.store(true, Ordering::Relaxed);
                 }
                 Some(Command::CodecDown) => {
-                    motion::CODEC_POWER_DOWN.store(true, Ordering::Relaxed);
+                    i2c_bus::CODEC_POWER_DOWN.store(true, Ordering::Relaxed);
                 }
                 Some(Command::Output(on)) => {
-                    motion::request_output(if on {
-                        motion::OUTPUT_UP
+                    i2c_bus::request_output(if on {
+                        i2c_bus::OUTPUT_UP
                     } else {
-                        motion::OUTPUT_DOWN
+                        i2c_bus::OUTPUT_DOWN
                     });
                 }
                 Some(Command::Speaker(on)) => {
-                    motion::SPEAKER_REQUEST.store(
+                    i2c_bus::SPEAKER_REQUEST.store(
                         if on {
-                            motion::SPEAKER_UNMUTE
+                            i2c_bus::SPEAKER_UNMUTE
                         } else {
-                            motion::SPEAKER_MUTE
+                            i2c_bus::SPEAKER_MUTE
                         },
                         Ordering::Relaxed,
                     );
                 }
                 Some(Command::HeadphoneStatus) => {
-                    motion::HEADPHONE_REPORT.store(true, Ordering::Relaxed);
+                    i2c_bus::HEADPHONE_REPORT.store(true, Ordering::Relaxed);
                 }
                 // Sets both the static the codec bring-up reads and the event
                 // for the reducer, which switches the output and its volume
                 // scale together.
                 Some(Command::Headphones(on)) => {
-                    motion::HEADPHONES_IN.store(on, Ordering::Relaxed);
+                    i2c_bus::HEADPHONES_IN.store(on, Ordering::Relaxed);
                     esp_println::println!(
                         "teddiebox: headphones forced {}",
                         if on { "in" } else { "out" }
@@ -3199,19 +3199,19 @@ async fn main(spawner: Spawner) {
                 }
                 Some(Command::PlayTaf) => {
                     board.apply(gates.power(Rail::Storage, true));
-                    motion::request_output(motion::OUTPUT_UP);
+                    i2c_bus::request_output(i2c_bus::OUTPUT_UP);
                     REQUEST.store(REQUEST_TAF, Ordering::Relaxed);
                 }
                 Some(Command::PlaySound { file }) => {
                     board.apply(gates.power(Rail::Storage, true));
-                    motion::request_output(motion::OUTPUT_UP);
+                    i2c_bus::request_output(i2c_bus::OUTPUT_UP);
                     CONTENT_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
                     CONTENT_FILE.store(file, Ordering::Relaxed);
                     REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
                 }
                 Some(Command::PlayContent { directory, file }) => {
                     board.apply(gates.power(Rail::Storage, true));
-                    motion::request_output(motion::OUTPUT_UP);
+                    i2c_bus::request_output(i2c_bus::OUTPUT_UP);
                     CONTENT_DIRECTORY.store(directory, Ordering::Relaxed);
                     CONTENT_FILE.store(file, Ordering::Relaxed);
                     REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
@@ -3231,10 +3231,10 @@ async fn main(spawner: Spawner) {
                     }
                 }
                 Some(Command::SlapTimeLimit { limit }) => {
-                    motion::SLAP_TIME_LIMIT.store(limit, Ordering::Relaxed);
+                    i2c_bus::SLAP_TIME_LIMIT.store(limit, Ordering::Relaxed);
                 }
                 Some(Command::SlapThreshold { threshold }) => {
-                    motion::SLAP_THRESHOLD.store(threshold, Ordering::Relaxed);
+                    i2c_bus::SLAP_THRESHOLD.store(threshold, Ordering::Relaxed);
                 }
                 Some(Command::Stop) => {
                     audio::STOP.store(true, Ordering::Relaxed);

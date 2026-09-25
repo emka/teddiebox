@@ -28,7 +28,7 @@ use crate::{inputs, park_task, PARKED};
 /// Both accelerometer addresses are tried, because 0x18 is shared with the
 /// audio codec, which also answers there.
 #[embassy_executor::task]
-pub(crate) async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>) {
+pub(crate) async fn i2c_bus(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>) {
     // Reset the codec first: it may still be running, half-configured, from
     // before the last reboot.
     let hold = board::dac_reset(true);
@@ -560,29 +560,29 @@ pub(crate) static CODEC_READY: AtomicBool = AtomicBool::new(false);
 ///
 /// The class-D amplifier stays powered during a session, and cutting its
 /// supply makes the speaker click. The codec can power down cleanly, but only
-/// over I2C, which `motion` owns, so this is a request rather than a call.
+/// over I2C, which `i2c_bus` owns, so this is a request rather than a call.
 static CODEC_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static CODEC_QUIET: AtomicBool = AtomicBool::new(false);
 
-/// Ask the motion task to take the codec down and bring it back up.
+/// Ask the I2C bus task to take the codec down and bring it back up.
 pub(crate) static CODEC_REINIT: AtomicBool = AtomicBool::new(false);
 
-/// Ask the motion task to run the codec's power-down, and nothing else.
+/// Ask the I2C bus task to run the codec's power-down, and nothing else.
 pub(crate) static CODEC_POWER_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// What is plugged into the headphone jack, as far as the box knows.
 ///
-/// **The only place the firmware records this.** The detect poll in `motion`
+/// **The only place the firmware records this.** The detect poll in `i2c_bus`
 /// writes it, `hp 1` / `hp 0` override it, and the codec bring-up reads it.
 /// `Action::SetOutput` does not write it; it only drives `SPEAKER_REQUEST`, so
 /// there are never two copies that could disagree.
 pub(crate) static HEADPHONES_IN: AtomicBool = AtomicBool::new(false);
 
-/// Ask the motion task to read and print the headset-detect registers. A
-/// request, because the codec is on the motion task's bus.
+/// Ask the I2C bus task to read and print the headset-detect registers. A
+/// request, because the codec sits on the bus that task owns.
 pub(crate) static HEADPHONE_REPORT: AtomicBool = AtomicBool::new(false);
 
-/// Full passes of the `motion` loop between headset-detect reads.
+/// Full passes of the `i2c_bus` loop between headset-detect reads.
 ///
 /// Each pass waits `ACCEL_POLL_MS`, so three passes is about 600 ms; plugging
 /// in takes effect after that plus the codec's 128 ms debounce. Counted in
@@ -610,7 +610,7 @@ static OUTPUT_REQUEST: AtomicU8 = AtomicU8::new(0);
 pub(crate) const OUTPUT_DOWN: u8 = 1;
 pub(crate) const OUTPUT_UP: u8 = 2;
 
-/// Ends the `motion` task's nap early.
+/// Ends the `i2c_bus` task's nap early.
 ///
 /// Without it, starting a story's output waited up to 132 ms (measured) for
 /// the nap to end.
