@@ -38,7 +38,7 @@ SILENCE_MS = 120
 
 
 def samples(duration_s):
-    """Interleaved stereo frames for the whole file."""
+    """One sample per frame for the whole file, for both channels."""
     total = 0
     segment = 0
     silence = int(SAMPLE_RATE * SILENCE_MS / 1000)
@@ -89,7 +89,7 @@ def main():
     crc = zlib.crc32(frames, crc)
     print(f"{args.output}: {len(header) + data_len} bytes, {duration:.0f} s, CRC32 {crc:08X}")
     print("Copy it to the SD card; the box plays the first .WAV it finds.")
-    print("Step 7's checksum walk will confirm it landed byte for byte.")
+    print("scripts/sd-checksums.py confirms it landed byte for byte.")
 
 
 if __name__ == "__main__":
