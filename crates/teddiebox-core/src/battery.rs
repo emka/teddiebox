@@ -1,23 +1,22 @@
 //! Three-cell NiMH state of charge.
 //!
-//! NiMH has a famously flat discharge curve, so a percentage would be fiction.
-//! This reports coarse buckets with hysteresis instead. Cells have no
-//! protection circuit, so the low-voltage cutoff here is what stops the pack
-//! being driven into cell reversal.
+//! NiMH voltage barely changes over most of a discharge, so a percentage would
+//! be meaningless. This reports coarse levels with hysteresis instead. The
+//! cells have no protection circuit, so the cutoff here is what stops the
+//! pack being over-discharged (which can reverse a cell).
 //!
-//! The 2026-09-09 measurement showed the curve is worse than flat: 3943 mV
-//! down to 3680 over eight hours, then 250 mV in the last two and a half.
-//! There is about 25 minutes between the first honest warning and the box
-//! failing to stay powered.
+//! A measured discharge went from 3943 mV to 3680 mV over eight hours, then
+//! dropped 250 mV in the last two and a half. There are about 25 minutes
+//! between the first useful warning and the box losing power.
 //!
-//! **What this module cannot do.** The voltage at which the box stops working
-//! depends on what it is doing: it rebooted mid-story at 3656 mV, then idled
-//! from 3663 mV for two and a half hours. Steady playback costs only 9 mV, so
-//! the gap is transient current, invisible to a two-second ADC sample. One
-//! bucket boundary therefore cannot both leave the plateau usable and keep a
-//! story from browning the box out — deciding whether to *start* playing
-//! wants a higher bar than deciding whether to stay awake, and that decision
-//! does not live here.
+//! **Limitation.** The voltage at which the box stops working depends on what
+//! it is doing: it once rebooted mid-story at 3656 mV, then idled from
+//! 3663 mV for two and a half hours. Steady playback lowers the reading by
+//! only 9 mV, so the difference is short current spikes that a sample every
+//! two seconds does not see. One threshold cannot both allow use of the flat
+//! part of the curve and prevent a story from causing a brownout. Deciding
+//! whether to *start* playing would need a higher threshold than deciding
+//! whether to stay awake; that is not done here.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BatteryLevel {
@@ -40,16 +39,12 @@ pub struct BatteryConfig {
     /// Millivolts added back to a reading taken while playing, to compensate
     /// for sag under load.
     ///
-    /// Measured 2026-09-09: **9 mV** median across seven playback bouts,
-    /// 14 mV worst. The 150 mV placeholder this replaces was the "too large
-    /// and the cutoff is defeated" case in the line below — it lifted every
-    /// reading taken during a story clean over the shutdown.
+    /// Measured: 9 mV median over seven playback sessions, 14 mV worst. A value
+    /// that is too large lifts readings taken during a story above the
+    /// cutoff, so the cutoff never fires.
     ///
-    /// Steady sag is not what kills the box, though. It rebooted at 3656 mV
-    /// mid-story and then idled from 3663 mV for two and a half hours: the
-    /// floor moves ~250 mV with load, which 9 mV of sag cannot explain. That
-    /// is a transient the two-second sampling never sees, and no value here
-    /// addresses it — see the module docs.
+    /// Steady sag is not what causes brownouts; short current spikes are, and
+    /// no value here covers them. See the module docs.
     pub load_offset_mv: u16,
     /// Millivolts a reading must exceed a threshold by before the level is
     /// allowed to climb back up, preventing flicker at a boundary.
@@ -57,31 +52,25 @@ pub struct BatteryConfig {
     /// Readings that must agree before the level is allowed to change, and
     /// consecutive readings below `cutoff_mv` before the shutdown latches.
     ///
-    /// The pack reading has been implausible before — the very first sample
-    /// this project took was 9453 mV from three NiMH cells — and a single bad
-    /// one must not make the box announce that it is turning off. Four
-    /// readings at the battery task's two-second interval is eight seconds,
-    /// which is nothing against a discharge curve.
+    /// The ADC has returned impossible readings (9453 mV from three NiMH
+    /// cells), and one bad reading must not turn the box off. Four readings,
+    /// two seconds apart, take eight seconds, which is short compared to a
+    /// discharge.
     ///
-    /// This is a filter for noise, not for load: a pack that sags under
-    /// playback stays sagged for the length of a story, so no number here
-    /// would tell that apart from a pack that is genuinely empty. That is what
-    /// `load_offset_mv` is for.
+    /// This filters noise, not load: sag under playback lasts the whole story.
+    /// `load_offset_mv` handles load.
     pub readings_to_agree: u8,
 }
 
 impl Default for BatteryConfig {
     fn default() -> Self {
-        // Measured on 2026-09-09, from a charge-to-brownout run and the
-        // discharge-only run that followed it (`battery-discharge01.csv`,
-        // `...02.csv`: 13.6 h, 3943 -> 3407 mV).
+        // Measured on this box's pack over two full discharge runs (13.6 h,
+        // 3943 mV down to 3407 mV).
         //
-        // These are not cell chemistry. Nominal NiMH says a cell is empty at
-        // 1.0 V, so 3000 for the pack — but the box stops booting at 3410,
-        // with charge still in the cells. A cutoff below the voltage the
-        // hardware browns out at can never fire, and never did: replayed
-        // against both runs, the shipped defaults reported `Ok` up to a
-        // mid-story reboot and `Low` through eleven more.
+        // These are not the textbook NiMH values. A NiMH cell counts as empty
+        // at 1.0 V (3000 mV for the pack), but this box stops booting at about
+        // 3410 mV while the cells still hold charge. A cutoff below the
+        // brownout voltage could never fire.
         Self {
             full_mv: 3_800,
             ok_mv: 3_650,
@@ -105,11 +94,10 @@ pub struct BatteryModel {
     agreed: u8,
     /// How many consecutive readings have been below the cutoff.
     ///
-    /// Counted apart from `agreed`, which counts agreement on the *bucket*. A
-    /// pack settled in the Critical bucket buckets an implausible 2500 mV as
-    /// Critical too, so bucket agreement rises rather than resetting and one
-    /// bad sample used to latch the shutdown — in the 3000-3200 mV window
-    /// every discharge passes through.
+    /// Counted separately from `agreed`, which counts agreement on the level.
+    /// A pack already at Critical would also place a bogus 2500 mV reading in
+    /// Critical, so `agreed` would keep rising and one bad reading could
+    /// trigger the shutdown.
     below_cutoff: u8,
 }
 
@@ -129,9 +117,8 @@ impl BatteryModel {
         self.level
     }
 
-    /// True once the pack has fallen below the cutoff. Latching: it never
-    /// clears on its own, because a pack that recovers voltage after the load
-    /// is removed is still empty.
+    /// True once the pack has fallen below the cutoff. Never clears, because a
+    /// pack whose voltage recovers once the load is removed is still empty.
     pub fn must_shut_down(&self) -> bool {
         self.shut_down
     }
@@ -145,9 +132,9 @@ impl BatteryModel {
         };
 
         let hyst = self.config.hysteresis_mv;
-        // Climbing a bucket requires clearing its threshold by the hysteresis
-        // margin; falling takes effect immediately, because under-reporting
-        // charge is the safe direction to be wrong in.
+        // Rising to a higher level needs the threshold plus the hysteresis
+        // margin. Falling happens at the threshold, because reporting too
+        // little charge is the safer mistake.
         let new = if mv >= self.config.full_mv.saturating_add(hyst)
             || (self.level >= BatteryLevel::Full && mv >= self.config.full_mv)
         {
@@ -171,15 +158,9 @@ impl BatteryModel {
             self.agreed = 1;
         }
 
-        // The hard cutoff is a separate, lower threshold than the boundary of
-        // the Critical bucket — 3000 mV against 3200 — and it is the one that
-        // stops these unprotected cells being driven into reversal. So it is
-        // judged on the compensated reading rather than on which bucket the
-        // reading landed in, and it keeps its own agreement rather than
-        // borrowing the bucket's: a pack already settled at Critical agrees
-        // with itself about an absurd sample, which is how a single reading
-        // used to switch the box off. Never cleared once armed: a pack that
-        // recovers voltage as soon as the load comes off is still empty.
+        // The cutoff is a separate threshold, below the start of Critical. It
+        // uses the load-compensated reading and its own agreement count (see
+        // `below_cutoff`). Once set, it is never cleared.
         if mv < self.config.cutoff_mv {
             self.below_cutoff = self.below_cutoff.saturating_add(1);
             if self.below_cutoff >= self.config.readings_to_agree {
@@ -208,12 +189,10 @@ mod tests {
 
     /// A model on fixed, deliberately round thresholds.
     ///
-    /// Not `BatteryConfig::default()`: these tests are about the mechanism —
-    /// bucket edges, hysteresis, agreement counting, the cutoff latch — and
-    /// none of them care what this pack's real voltages are. Pinning them to
-    /// the shipped calibration meant every recalibration broke a dozen tests
-    /// that were not about calibration. The measured numbers are exercised in
-    /// `calibration` below, against the real default.
+    /// Not `BatteryConfig::default()`: these tests are about the logic
+    /// (levels, hysteresis, agreement, the cutoff), not the real pack's
+    /// voltages, so recalibrating must not break them. The real values are
+    /// tested in `calibration` below.
     fn model() -> BatteryModel {
         BatteryModel::new(BatteryConfig {
             full_mv: 3_900,
@@ -229,8 +208,8 @@ mod tests {
     #[test]
     fn a_full_pack_reads_full() {
         let mut b = model();
-        // The model no longer believes a single sample: a level only commits
-        // once `readings_to_agree` consecutive readings agree on it.
+        // A level only changes once `readings_to_agree` readings in a row
+        // agree on it.
         for _ in 0..3 {
             assert_eq!(b.update(4_000, false), None, "not yet agreed");
         }
@@ -338,10 +317,9 @@ mod tests {
         assert!(!b.must_shut_down());
     }
 
-    /// The Critical bucket starts at `low_mv` and the hard cutoff is 200 mV
-    /// below it. Reaching the bucket is a state worth announcing; reaching the
-    /// cutoff is what stops the discharge, and conflating them switches the box
-    /// off while the pack still has usable charge.
+    /// Critical starts at `low_mv`; the cutoff is 200 mV lower. Reaching
+    /// Critical is worth a warning. Only the cutoff turns the box off, since
+    /// the pack still has usable charge above it.
     #[test]
     fn settling_at_critical_does_not_by_itself_arm_the_shutdown() {
         let mut b = model();
@@ -355,8 +333,8 @@ mod tests {
         );
     }
 
-    /// A pack already settled at Critical goes on falling, and the latch has to
-    /// fire then — after the level has stopped changing.
+    /// A pack already at Critical keeps falling; the shutdown must still
+    /// trigger even though the level no longer changes.
     #[test]
     fn falling_past_the_cutoff_arms_the_shutdown_even_once_critical_is_settled() {
         let mut b = model();
@@ -370,10 +348,10 @@ mod tests {
         assert!(b.must_shut_down());
     }
 
-    /// The very first pack sample this project ever took was 9453 mV from three
-    /// NiMH cells. One reading like that, in the other direction, must not switch
-    /// a box off. Hysteresis does not cover this: it guards a *boundary*, this
-    /// guards a *reading*.
+    /// The ADC has returned impossible readings (9453 mV from three NiMH
+    /// cells). One such reading must not change the level or turn the box
+    /// off. Hysteresis does not help here: it protects a *threshold*, this
+    /// protects against a bad *reading*.
     #[test]
     fn one_implausible_reading_does_not_move_the_level() {
         let mut b = model();
@@ -403,12 +381,8 @@ mod tests {
         assert!(b.must_shut_down());
     }
 
-    /// The agreement filter used to guard the cutoff only by accident: it
-    /// counted agreement on the *bucket*, and a pack settled in the Critical
-    /// bucket buckets an implausible 2500 mV as Critical too. So the count went
-    /// up rather than resetting, and one bad sample latched the shutdown. The
-    /// 3000-3200 mV window is one every discharge passes through, and this ADC
-    /// has reported 9453 mV from three NiMH cells.
+    /// A pack already at Critical would also place a bogus 2500 mV reading in
+    /// Critical. That single reading must not trigger the shutdown.
     #[test]
     fn one_implausible_reading_from_a_settled_critical_pack_does_not_arm_the_shutdown() {
         let mut b = model();
@@ -426,8 +400,8 @@ mod tests {
         );
     }
 
-    /// The cutoff keeps its own count, so noise either side of it never
-    /// accumulates into a shutdown the way bucket agreement did.
+    /// The cutoff keeps its own count, so noise on either side of it never
+    /// adds up to a shutdown.
     #[test]
     fn a_reading_above_the_cutoff_restarts_the_cutoff_count() {
         let mut b = model();
@@ -459,9 +433,9 @@ mod tests {
 
     /// The shipped calibration, against the pack it was measured on.
     ///
-    /// Every millivolt here is a reading from the 2026-09-09 runs
-    /// (`battery-discharge01.csv`, `...02.csv`), not a number derived from the
-    /// config — so these tests can disagree with it.
+    /// Every millivolt value here is a real reading from two measured
+    /// discharge runs, not derived from the config, so these tests can
+    /// disagree with it.
     mod calibration {
         use super::*;
 
@@ -471,8 +445,8 @@ mod tests {
 
         #[test]
         fn the_shutdown_latches_above_the_voltage_the_box_browns_out_at() {
-            // 3_410 mV is where the box rebooted, eleven times, in run 02.
-            // Reaching it means the cutoff never fired.
+            // The box rebooted at 3_410 mV eleven times during a measured
+            // run. The cutoff must fire before that.
             let mut b = measured();
             for _ in 0..4 {
                 b.update(3_410, false);
@@ -494,9 +468,10 @@ mod tests {
 
         #[test]
         fn the_load_offset_does_not_lift_a_dying_pack_over_the_cutoff() {
-            // Playing costs 9 mV of sag, median of seven bouts in run 01, so a
-            // reading taken during a story is within a few mV of the truth. An
-            // offset big enough to hide the floor defeats the cutoff entirely.
+            // Playing lowers the reading by about 9 mV (measured), so a
+            // reading during a story is close to the true value. An offset
+            // large enough to hide the brownout voltage would stop the cutoff
+            // from ever firing.
             let mut b = measured();
             for _ in 0..4 {
                 b.update(3_410, true);
@@ -509,8 +484,8 @@ mod tests {
 
         #[test]
         fn the_level_drops_before_the_curve_does() {
-            // Run 02 fell 3_570 -> 3_407 in the 40 minutes after this reading.
-            // Ok here would mean the last warning came 40 minutes before death.
+            // A measured run fell from 3_570 to 3_407 mV in the 40 minutes
+            // after this voltage, so this must already read Low.
             let mut b = measured();
             for _ in 0..4 {
                 b.update(3_550, false);
@@ -520,8 +495,8 @@ mod tests {
 
         #[test]
         fn a_pack_just_off_the_charger_reads_full() {
-            // 3_943 mV: run 01's first discharge sample, once the surface
-            // charge had gone.
+            // 3_943 mV: the first reading of a measured discharge, once the
+            // surface charge had gone.
             let mut b = measured();
             for _ in 0..4 {
                 b.update(3_943, false);
@@ -531,8 +506,8 @@ mod tests {
 
         #[test]
         fn the_eight_hour_plateau_reads_ok_throughout() {
-            // The pack spends the whole usable life here; calling any of it
-            // Low would make the warning meaningless.
+            // The pack spends most of its life here; calling any of it Low
+            // would make the warning meaningless.
             let mut b = measured();
             for mv in [3_900, 3_800, 3_750, 3_700, 3_680] {
                 for _ in 0..4 {

@@ -1,7 +1,7 @@
 //! The box's inputs: two ears and the wake line.
 //!
-//! Debouncing and polarity, decided where a host test can see them. The pins
-//! themselves belong to the firmware.
+//! Debouncing and pin polarity, kept here so they can be tested on the host.
+//! The firmware owns the pins themselves.
 
 /// The larger ear, on the box's right. Active low.
 pub const EAR_LARGER: u8 = 20;
@@ -12,23 +12,16 @@ pub const WAKE: u8 = 7;
 
 /// How long an ear must be held to mean "next chapter" rather than "louder".
 ///
-/// Lives here rather than in `CoreConfig` because the reducer no longer reads
-/// it: a hold is announced by whoever owns the pin, at the moment the press
-/// becomes one, and this is the number that moment is measured against. It
-/// sits with the other facts about what this box's switches do.
+/// Used by the firmware task that reads the ear pins, which sends
+/// `Event::EarHeld` when a press lasts this long. The reducer does not use it.
 ///
-/// 600 was inherited as a guess and is now a judgement: both ears were held
-/// against it and it was kept. It only became judgeable
-/// once the skip started landing while the ear was still down — before that
-/// nothing happened until the release, so there was no wait to be too long and
-/// no way to feel whether this number was one.
+/// Chosen by trying it on the box.
 pub const LONG_PRESS_MS: u32 = 600;
 
 /// How long a level must hold before it counts.
 ///
-/// A starting point, not a measurement: bench step 2 exists partly to find the
-/// real bounce duration of these particular switches, and this should be set
-/// from what it finds rather than from taste.
+/// A starting value, not measured. It should be set from the measured bounce
+/// time of these switches.
 pub const DEBOUNCE_MS: u32 = 20;
 
 /// True when an ear is pressed. The ears are wired active low.
@@ -71,8 +64,8 @@ impl Debounced {
 
     /// Feeds one sample. `Some` exactly once per settled change.
     ///
-    /// `now_ms` may wrap — it does every 49 days — so the elapsed time is a
-    /// wrapping subtraction rather than a difference.
+    /// `now_ms` wraps every 49 days, so elapsed time uses a wrapping
+    /// subtraction.
     pub fn update(&mut self, pressed: bool, now_ms: u32) -> Option<Edge> {
         if pressed != self.candidate {
             self.candidate = pressed;
@@ -105,8 +98,7 @@ impl Debounced {
 mod tests {
     use super::*;
 
-    /// A press that has not settled is not a press. The ears are the box's
-    /// only controls, so a bounce counted as a second press skips a chapter.
+    /// A bounce shorter than the debounce time is not a press.
     #[test]
     fn a_bounce_shorter_than_the_window_reports_nothing() {
         let mut button = Debounced::released();
@@ -137,8 +129,7 @@ mod tests {
         );
     }
 
-    /// The clock wraps every 49 days. A box left on a shelf must not become
-    /// unresponsive, and `now - since` is where that would happen.
+    /// The clock wraps every 49 days; the ears must keep working after that.
     #[test]
     fn the_millisecond_clock_may_wrap() {
         let mut button = Debounced::released();

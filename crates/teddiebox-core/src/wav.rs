@@ -1,19 +1,16 @@
-//! Just enough WAV to play one from the SD card.
+//! Just enough WAV parsing to play a file from the SD card.
 //!
-//! Bench step 8 joins steps 6 and 7: a file read off the card and pushed at the
-//! codec, for several minutes, without a gap. It uses WAV rather than TAF
-//! deliberately — the point of the step is the path from card to I2S, and a
-//! decoder in the middle would make an underrun and a decode fault look alike.
+//! Used to test the path from card to I2S without a decoder in between, so an
+//! underrun cannot be confused with a decode fault.
 //!
-//! Chunks are walked rather than assumed. The canonical header is 44 bytes and
-//! `data` almost always starts there, but the format permits `LIST` or `fact`
-//! chunks in between, and a parser that trusts offset 44 reads metadata as
-//! audio — which sounds exactly like a driver fault.
+//! Chunks are walked, not assumed. The standard header is 44 bytes and `data`
+//! almost always starts there, but `LIST` or `fact` chunks may come first. A
+//! parser that assumed offset 44 would play metadata as audio.
 
 /// The only format code that means plain samples.
 const PCM_FORMAT: u16 = 1;
 
-/// What step 6 configured the I2S peripheral and the codec for.
+/// The format the I2S peripheral and the codec are configured for.
 const CODEC_SAMPLE_RATE: u32 = 48_000;
 const CODEC_CHANNELS: u16 = 2;
 const CODEC_BITS: u16 = 16;
@@ -54,8 +51,8 @@ impl WavFormat {
         let mut cursor = 12usize;
 
         loop {
-            // A chunk header is an eight-byte tag and length. Anything less
-            // left means the chunk we want was never there.
+            // A chunk header is an eight-byte tag and length. Fewer bytes
+            // left means the chunk we want is missing.
             if cursor + 8 > bytes.len() {
                 return Err(WavError::Truncated);
             }
@@ -104,8 +101,8 @@ impl WavFormat {
                 ));
             }
 
-            // Odd-length chunks carry a pad byte that their declared size does
-            // not count. Ignoring it reads every later chunk one byte out.
+            // Odd-length chunks have a pad byte not counted in their size.
+            // Ignoring it would read every later chunk one byte off.
             let advance = (size as usize).checked_add(size as usize & 1);
             let next = advance
                 .and_then(|padded| body.checked_add(padded))
@@ -117,11 +114,10 @@ impl WavFormat {
         }
     }
 
-    /// Whether this is what the codec was configured for in step 6.
+    /// Whether this matches the codec's configuration.
     ///
     /// The I2S peripheral is set up once, at boot, for 48 kHz stereo 16-bit.
-    /// Anything else would play at the wrong speed rather than fail, which is
-    /// a confusing thing to debug by ear.
+    /// Anything else would play at the wrong speed instead of failing.
     pub const fn matches_codec(&self) -> bool {
         self.channels == CODEC_CHANNELS
             && self.sample_rate == CODEC_SAMPLE_RATE
@@ -130,15 +126,14 @@ impl WavFormat {
 
     /// How long the file plays for, in milliseconds.
     ///
-    /// Step 8's criterion is "several minutes", so the bench needs to know
-    /// whether the file it is about to play is long enough to prove anything.
+    /// Used to check a test file is long enough.
     pub const fn duration_ms(&self) -> u32 {
         let bytes_per_frame = self.channels as u32 * (self.bits_per_sample as u32 / 8);
         if bytes_per_frame == 0 || self.sample_rate == 0 {
             return 0;
         }
-        // Milliseconds first, so a long file does not overflow the frame count
-        // before it is scaled down.
+        // Divide instead of multiplying by 1000, so a long file cannot
+        // overflow.
         (self.data_len / bytes_per_frame) / (self.sample_rate / 1000)
     }
 }
@@ -147,9 +142,8 @@ impl WavFormat {
 mod tests {
     use super::*;
 
-    /// The first 44 bytes of a real file written by `tools/taf2wav`, which is
-    /// how any WAV on the bench card will have been made. Literal, from
-    /// `xxd`, so this test can disagree with the parser.
+    /// The first 44 bytes of a real file written by `tools/taf2wav`, copied
+    /// from `xxd` so the test can disagree with the parser.
     const REAL_HEADER: [u8; 44] = [
         0x52, 0x49, 0x46, 0x46, 0x24, 0x97, 0x0e, 0x00, // "RIFF", size 956196
         0x57, 0x41, 0x56, 0x45, // "WAVE"
@@ -163,10 +157,8 @@ mod tests {
         0x64, 0x61, 0x74, 0x61, 0x00, 0x97, 0x0e, 0x00, // "data", size 956160
     ];
 
-    /// The first 44 bytes of a file from `scripts/make-test-wav.py`, which is
-    /// what step 8 actually plays. A second writer, so the parser is pinned
-    /// against both tools that produce WAVs for this project rather than
-    /// against one of them.
+    /// The first 44 bytes of a file from `scripts/make-test-wav.py`, the
+    /// other tool that writes WAVs for this project.
     const GENERATED_HEADER: [u8; 44] = [
         0x52, 0x49, 0x46, 0x46, 0x24, 0xe8, 0x6e, 0x03, // "RIFF", size 57600036
         0x57, 0x41, 0x56, 0x45, // "WAVE"
@@ -178,8 +170,7 @@ mod tests {
         0x64, 0x61, 0x74, 0x61, 0x00, 0xe8, 0x6e, 0x03, // "data", size 57600000
     ];
 
-    /// Step 8 asks for "several minutes". Five, and the parser agrees with the
-    /// generator about it — the two compute it from opposite ends.
+    /// The generated test file is five minutes long.
     #[test]
     fn the_step_8_test_file_is_five_minutes_the_codec_can_play() {
         let format = WavFormat::parse(&GENERATED_HEADER).expect("the generator's header parses");
@@ -211,11 +202,9 @@ mod tests {
         assert_eq!(format.duration_ms(), 4980);
     }
 
-    /// The trap this parser exists for: `data` need not be at offset 44.
-    /// Trusting that offset reads a metadata chunk as audio, which sounds like
-    /// a broken driver rather than like a mis-parsed file.
-    /// `RIFF` + size + `WAVE`, then an interloping chunk, then the real
-    /// `fmt ` and `data` headers from the file above.
+    /// A file with an extra chunk before `fmt `, so `data` is not at offset
+    /// 44: `RIFF` + size + `WAVE`, then `chunk`, then the real `fmt ` and
+    /// `data` headers from the file above.
     fn with_leading_chunk(chunk: &[u8]) -> [u8; 64] {
         let mut file = [0u8; 64];
         file[..12].copy_from_slice(&REAL_HEADER[..12]);
@@ -235,9 +224,8 @@ mod tests {
         assert_eq!(format.data_offset, 56, "12 bytes further on than usual");
     }
 
-    /// RIFF pads odd-sized chunks to an even boundary, and the pad byte is not
-    /// counted in the chunk's declared size. Miss it and every later chunk is
-    /// read one byte out of step.
+    /// RIFF pads odd-sized chunks to an even length, and the pad byte is not
+    /// counted in the chunk's size.
     #[test]
     fn an_odd_sized_chunk_is_padded_to_an_even_boundary() {
         // "LIST", size 3, "abc", then one pad byte that the size does not count
@@ -270,8 +258,7 @@ mod tests {
         assert_eq!(WavFormat::parse(&[]), Err(WavError::NotWave));
     }
 
-    /// Compressed WAVs exist. Playing one as PCM is loud noise, so it is worth
-    /// naming rather than discovering through the speaker.
+    /// Playing a compressed WAV as PCM would be loud noise.
     #[test]
     fn a_file_that_is_not_plain_pcm_is_rejected() {
         let mut file = REAL_HEADER;
@@ -286,8 +273,8 @@ mod tests {
         assert_eq!(WavFormat::parse(&file), Err(WavError::Malformed));
     }
 
-    /// Mono, or 44.1 kHz, would play at the wrong speed rather than fail. The
-    /// file is still well formed, so this is a separate question from parsing.
+    /// Mono or 44.1 kHz would play at the wrong speed. The file is still
+    /// valid, so parsing succeeds and only the codec check fails.
     #[test]
     fn a_file_the_codec_was_not_configured_for_parses_but_does_not_match() {
         let mut file = REAL_HEADER;

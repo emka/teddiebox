@@ -1,69 +1,65 @@
-//! Whether a figure is on the plate, from readings that disagree.
+//! Decides whether a figure is on the plate, from readings that are sometimes
+//! wrong.
 //!
-//! A tag drops out of inventory for reasons that have nothing to do with a
-//! child's hand — the reader's own `T2_QUIET_US` work exists because a correct
-//! transaction can go unanswered — so a single missed read must not stop a
-//! story, and a single stray read must not start one.
+//! A tag can go unread even when nobody touched it, so one missed reading must
+//! not stop a story, and one stray reading must not start one.
 //!
-//! Nor stop one. A reading can be wrong as well as absent: on 2026-09-07 the
-//! reader was measured returning a UID that had never been on the plate while
-//! the radio was busy, and because a changed UID used to announce a departure
-//! on sight, one such reading stopped the story and restarted it from the
-//! beginning. Every transition here now costs several agreeing readings —
-//! arrival, departure by absence, and departure by replacement alike.
+//! A reading can also be wrong rather than missing: while Wi-Fi is busy, the
+//! reader sometimes returns a UID that was never on the plate. So every change
+//! needs several readings that agree — an arrival, a departure by absence, and
+//! a departure because another figure replaced it.
 
 use crate::{Event, TagUid};
 
 /// Consecutive readings of the same tag before it counts as arrived.
 ///
-/// Provisional. Nothing has calibrated this: it trades how fast a placement
-/// feels against a false arrival. The precedent is
+/// Not calibrated: it trades how fast a placement feels against the risk of a
+/// false arrival. Compare
 /// [`BatteryConfig::readings_to_agree`](crate::BatteryConfig::readings_to_agree),
-/// which is 4 for a quantity that changes far more slowly than a hand.
+/// which is 4 for a value that changes far more slowly.
 pub const ARRIVALS_TO_AGREE: u8 = 2;
 
 /// Consecutive empty readings before a tag counts as gone.
 ///
-/// Provisional, and deliberately larger than `ARRIVALS_TO_AGREE`: stopping a
-/// story that should still be playing is a worse failure than starting one
-/// slightly late.
+/// Not calibrated. Larger than `ARRIVALS_TO_AGREE` on purpose: stopping a
+/// story that should keep playing is worse than starting one a little late.
 pub const MISSES_TO_LEAVE: u8 = 4;
 
 /// How often an empty plate is read.
 ///
-/// Half of how long a placement takes to be noticed. The reader's field is on
-/// for the whole boot, so a faster cadence costs executor time rather than
-/// field time — about 12 ms per empty poll, measured 2026-09-24.
+/// This sets about half of how long a placement takes to be noticed. The
+/// reader's field is always on, so polling faster costs CPU time (about 12 ms
+/// per empty poll), not extra field time.
 ///
-/// Not a free parameter even so: every poll transmits into the field, this
-/// pack has no protection circuit, and the one unexplained brownout in this
-/// project happened while transmitting into a coupled tag.
+/// Still, do not lower it freely: every poll transmits, the battery pack has
+/// no protection circuit, and a brownout has been seen while transmitting to
+/// a tag.
 pub const EMPTY_POLL_MS: u32 = 200;
 
 /// How often a plate holding a figure is read.
 ///
-/// Slower than an empty one because a figure on the plate is almost always a
-/// story playing: on 2026-09-24 a 200 ms cadence here cost 12 audible DMA
-/// restarts in 49 s of playback, against 4 in 47 s at this one. It no longer
-/// sets how long a lift takes: see [`LEAVING_POLL_MS`].
+/// Slower than an empty plate, because a figure on the plate usually means a
+/// story is playing, and each poll can disturb the audio. Polling every
+/// 200 ms caused 12 audible glitches in 49 s of playback; every 500 ms caused
+/// 4 in 47 s. How fast a lift is noticed is set by [`LEAVING_POLL_MS`].
 pub const OCCUPIED_POLL_MS: u32 = 500;
 
 /// How soon a figure that missed a reading is read again.
 ///
-/// A lift can only begin with a miss, so the misses that agree it are taken
-/// quickly and the story is disturbed only when one happens: a lift pauses in
-/// one occupied poll plus three of these, rather than four occupied polls.
+/// A lift always starts with a miss, so after a miss the plate is read
+/// quickly, and the audio is disturbed only then. A lift is noticed after one
+/// occupied poll plus three of these, instead of four occupied polls.
 ///
-/// Not 20 like [`CONFIRM_POLL_MS`]: under radio traffic the reader misses a
-/// figure that never moved, and misses read back to back are more likely to
-/// share whatever caused the first. Whether 100 ms is far enough apart is for
-/// the bench to say, with the radio up.
+/// Not as short as [`CONFIRM_POLL_MS`]: while Wi-Fi is busy the reader can
+/// miss a figure that did not move, and readings taken back to back are more
+/// likely to fail for the same reason. 100 ms has not been tested with Wi-Fi
+/// running.
 pub const LEAVING_POLL_MS: u32 = 100;
 
 /// How soon a first reading of a figure is read again.
 ///
-/// The second reading is what guards against a corrupt one; waiting a whole
-/// poll for it guards against nothing and cost 507 ms per placement.
+/// The second reading protects against a corrupt first one. Waiting a whole
+/// poll for it adds nothing and made each placement about 500 ms slower.
 pub const CONFIRM_POLL_MS: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,10 +105,9 @@ impl Presence {
         }
     }
 
-    /// Feeds one poll's result and returns an event only when the reading has
-    /// settled. A different tag while one is present reports the departure
-    /// first; its arrival follows on later calls, so a swap is never a single
-    /// unbroken presence.
+    /// Takes one poll's result and returns an event once the readings agree.
+    /// When a different tag replaces the current one, the departure is
+    /// reported first and the new arrival on a later call.
     pub fn feed(&mut self, seen: Option<TagUid>) -> Option<TagEvent> {
         match (self.state, seen) {
             (State::Empty, None) => None,
@@ -133,9 +128,8 @@ impl Presence {
                 self.settle_arrival(tag, seen)
             }
 
-            // A different tag restarts the count rather than inheriting it.
-            // No departure is announced because nothing had arrived yet, so this
-            // reading counts toward the newcomer's tally.
+            // A different tag restarts the count. Nothing had arrived yet, so
+            // there is no departure; this reading counts for the new tag.
             (State::Arriving { .. }, Some(now)) => {
                 self.state = State::Arriving { tag: now, seen: 1 };
                 self.settle_arrival(now, 1)
@@ -157,9 +151,9 @@ impl Presence {
                 None
             }
 
-            // Another figure while one is present. The departure is not
-            // announced yet: a swap has to agree the same way an arrival does,
-            // or a single corrupt reading ends a story that never stopped.
+            // Another figure while one is present. Do not report a departure
+            // yet: a swap needs agreeing readings like an arrival does, or
+            // one corrupt reading would stop the story.
             (State::Present { tag, missed }, Some(now)) => {
                 self.state = State::Swapping {
                     from: tag,
@@ -170,15 +164,15 @@ impl Presence {
                 self.settle_swap(now, 1)
             }
 
-            // The newcomer again. Once enough readings agree, the figure that
-            // was there has genuinely gone.
+            // The new figure again. Once enough readings agree, the old
+            // figure has really gone.
             (State::Swapping { to, seen, .. }, Some(now)) if now == to => {
                 let seen = seen.saturating_add(1);
                 self.settle_swap(to, seen)
             }
 
-            // The original answered after all, so the odd reading was noise.
-            // The miss count goes with it: this was a reading, not a silence.
+            // The original figure answered, so the odd reading was noise.
+            // Reset the miss count too: this was a reading, not a miss.
             (State::Swapping { from, .. }, Some(now)) if now == from => {
                 self.state = State::Present {
                     tag: from,
@@ -187,8 +181,8 @@ impl Presence {
                 None
             }
 
-            // A third UID. Neither candidate has been seen twice, so this is
-            // noise rather than the start of anything.
+            // A third UID. Neither new UID has been seen twice, so this is
+            // noise.
             (State::Swapping { from, missed, .. }, Some(now)) => {
                 self.state = State::Swapping {
                     from,
@@ -199,9 +193,9 @@ impl Presence {
                 self.settle_swap(now, 1)
             }
 
-            // Silence while a newcomer was pending. The figure that is still
-            // believed present carries on toward its own departure, so noise
-            // cannot keep a story alive after its figure has been lifted.
+            // A miss while a new figure is pending. Count it against the
+            // current figure, so noise cannot keep a story playing after its
+            // figure was lifted.
             (State::Swapping { from, missed, .. }, None) => {
                 let missed = missed.saturating_add(1);
                 if missed >= self.misses_to_leave {
@@ -217,10 +211,9 @@ impl Presence {
 
     /// How long the reader should wait before its next reading.
     ///
-    /// A figure arriving on an empty plate is confirmed at once. A plate
-    /// holding one — including one that may be being swapped — is read on
-    /// the occupied cadence until it misses a reading, and quickly after that
-    /// until it answers again or is agreed gone.
+    /// A new figure on an empty plate is confirmed at once. A plate holding a
+    /// figure (even one that may be being swapped) is read slowly until a
+    /// reading misses, then quickly until the figure answers or is gone.
     pub fn poll_again_in_ms(&self) -> u32 {
         match self.state {
             State::Arriving { seen, .. } if seen > 0 => CONFIRM_POLL_MS,
@@ -230,11 +223,11 @@ impl Presence {
         }
     }
 
-    /// Announces the departure once a newcomer has been seen often enough.
+    /// Reports the departure once the new figure has been seen often enough.
     ///
-    /// The newcomer then earns its arrival from zero, exactly as it would have
-    /// on an empty plate: the readings that proved the swap are spent on the
-    /// departure.
+    /// The new figure then starts counting its arrival from zero, as it would
+    /// on an empty plate: the readings that proved the swap are used up on
+    /// the departure.
     fn settle_swap(&mut self, to: TagUid, seen: u8) -> Option<TagEvent> {
         if seen >= self.arrivals_to_agree {
             self.state = State::Arriving { tag: to, seen: 0 };
@@ -261,11 +254,8 @@ mod tests {
     const A: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
     const B: TagUid = TagUid([9, 9, 9, 9, 9, 9, 9, 9]);
 
-    /// The module's own rule — "a single stray read must not start one" — has
-    /// to hold for stopping too. Measured on the bench 2026-09-07: under radio
-    /// traffic the reader occasionally answers with a UID that was never on the
-    /// plate, and one such reading was enough to stop a story and restart it
-    /// from the beginning.
+    /// One stray reading must not stop a story. While Wi-Fi is busy, the
+    /// reader sometimes returns a UID that was never on the plate.
     #[test]
     fn a_single_stray_reading_of_another_tag_does_not_end_the_story() {
         let mut p = Presence::new(2, 4);
@@ -368,9 +358,9 @@ mod tests {
         assert_eq!(p.feed(None), None);
     }
 
-    /// Swapping figures without a gap must not look like one long presence —
-    /// and the departure now has to be agreed, so the first sight of the
-    /// newcomer announces nothing.
+    /// Swapping figures without a gap must not look like one long presence.
+    /// The departure needs agreeing readings, so the first reading of the new
+    /// figure reports nothing.
     #[test]
     fn swapping_one_figure_for_another_leaves_before_it_arrives() {
         let mut p = Presence::new(2, 4);
@@ -392,17 +382,17 @@ mod tests {
         assert_eq!(p.feed(None), None);
     }
 
-    /// An empty plate is where every placement starts, so how often it is
-    /// looked at is half of how long a placement takes to be noticed.
+    /// Every placement starts on an empty plate, so this sets about half of
+    /// how long a placement takes to be noticed.
     #[test]
     fn an_empty_plate_is_looked_at_every_200_ms() {
         let p = Presence::new(2, 4);
         assert_eq!(p.poll_again_in_ms(), 200);
     }
 
-    /// Measured 2026-09-24: waiting a whole poll for the second reading was
-    /// 507 of the ~675 ms between first reading a figure and its story
-    /// starting. The second reading is the protection; the wait is not.
+    /// Waiting a whole poll for the second reading took about 500 of the
+    /// ~675 ms between first seeing a figure and its story starting. The
+    /// second reading is what protects; the wait is not.
     #[test]
     fn a_first_reading_is_confirmed_at_once() {
         let mut p = Presence::new(2, 4);
@@ -410,9 +400,9 @@ mod tests {
         assert_eq!(p.poll_again_in_ms(), 20);
     }
 
-    /// A figure on the plate is almost always a story playing, and on
-    /// 2026-09-24 reading it every 200 ms cost 12 audible DMA restarts in 49 s
-    /// of playback, against 4 in 47 s at 500 ms.
+    /// A figure on the plate usually means a story is playing. Reading it
+    /// every 200 ms caused 12 audible glitches in 49 s of playback; every
+    /// 500 ms caused 4 in 47 s.
     #[test]
     fn a_figure_on_the_plate_is_looked_at_every_500_ms() {
         let mut p = Presence::new(2, 4);
@@ -421,9 +411,9 @@ mod tests {
         assert_eq!(p.poll_again_in_ms(), 500);
     }
 
-    /// A swap is where a corrupt reading was measured, under radio traffic,
-    /// so it is not hurried: a second reading taken at once is more likely to
-    /// share whatever corrupted the first.
+    /// Corrupt readings that look like a swap happen while Wi-Fi is busy, so a
+    /// swap is not confirmed at once: a second reading taken straight away is
+    /// more likely to be corrupt for the same reason.
     #[test]
     fn a_possible_swap_is_not_confirmed_at_once() {
         let mut p = Presence::new(2, 4);
@@ -452,9 +442,8 @@ mod tests {
         assert_eq!(silent_ms, 800);
     }
 
-    /// A miss is the only moment a lift is possible, so that is when the
-    /// plate is read quickly — not all through a story, where on 2026-09-24 a
-    /// faster cadence cost audible DMA restarts.
+    /// A lift always starts with a miss, so that is when the plate is read
+    /// quickly. Reading quickly all through a story causes audible glitches.
     #[test]
     fn a_missed_figure_is_looked_at_again_after_100_ms() {
         let mut p = Presence::new(2, 4);
@@ -464,8 +453,8 @@ mod tests {
         assert_eq!(p.poll_again_in_ms(), 100);
     }
 
-    /// A figure that answers after a miss was never lifted, and its story goes
-    /// back to being disturbed as little as possible.
+    /// A figure that answers after a miss was never lifted, so polling goes
+    /// back to the slow rate.
     #[test]
     fn a_figure_answering_after_a_miss_is_looked_at_every_500_ms_again() {
         let mut p = Presence::new(2, 4);
@@ -476,8 +465,8 @@ mod tests {
         assert_eq!(p.poll_again_in_ms(), 500);
     }
 
-    /// A figure that displaces another mid-Arriving counts the displacing
-    /// reading toward its own tally, since no departure is announced.
+    /// A figure that replaces one not yet confirmed counts that reading
+    /// toward its own arrival, since there is no departure to report.
     #[test]
     fn a_figure_swapped_before_the_first_one_settled_starts_its_own_count() {
         let mut p = Presence::new(2, 4);
@@ -489,10 +478,9 @@ mod tests {
 
 /// What the reader last said about the plate.
 ///
-/// The token rides in the same variant as the uid rather than in a second
-/// message, for the reason [`Placed`] exists: two messages can be read in
-/// either order, and "this figure, that figure's token" would then have a
-/// representation.
+/// The token travels with the uid in one value, not in a separate message:
+/// two messages could be read in either order, and a figure could end up
+/// paired with another figure's token. See [`Placed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Seen {
     Figure {
@@ -504,10 +492,9 @@ pub enum Seen {
 
 /// Whether an answer that names a figure is about the one on the plate.
 ///
-/// Three outcomes rather than an `Option`, because "a different figure is
-/// here" and "the plate is empty" are not the same event to whoever asked:
-/// the first is worth saying out loud, and the second is the harmless case
-/// the identity check exists to guarantee.
+/// Three outcomes instead of an `Option`, because "a different figure is
+/// here" and "the plate is empty" are handled differently: the first is worth
+/// telling the user about, the second is harmless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answering {
     TheFigure(TagUid),
@@ -517,15 +504,12 @@ pub enum Answering {
 
 /// The figure on the plate and the token that authorises fetching its story.
 ///
-/// The two are one value because they are two halves of one identity, and
-/// letting them drift apart is a real defect rather than a hypothetical one: a
-/// token that outlives the figure it arrived with is a token available to
-/// authorise the *next* figure's fetch. Every write goes through
-/// [`Placed::observe`], so there is one place where they can disagree and it
-/// replaces both.
+/// Kept together because a token that outlives its figure could authorise a
+/// fetch for the *next* figure. Every change goes through
+/// [`Placed::observe`], which always replaces both.
 ///
-/// Held by whoever drains the reader's signal, and asked — rather than read —
-/// whenever a late answer has to be matched against what is here now.
+/// Owned by the task that receives reader updates. Use [`Placed::answering`]
+/// to check whether a late answer still belongs to the figure on the plate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placed {
     figure: Option<TagUid>,
@@ -546,11 +530,10 @@ impl Placed {
         }
     }
 
-    /// Takes a reading and says what happened in the reducer's words.
+    /// Records a reading and returns it as an [`Event`] for the reducer.
     ///
-    /// Total: every reading is a `TagPresent` or a `TagAbsent`, because the
-    /// caller only has a reading at all when the reader's own filter has
-    /// already decided something changed.
+    /// Always returns an event: the caller only gets a reading after the
+    /// reader's filter has decided something changed.
     pub fn observe(&mut self, seen: Seen) -> Event {
         match seen {
             Seen::Figure { uid, token } => {
@@ -578,10 +561,9 @@ impl Placed {
 
     /// Whether an answer naming `ruid` belongs to what is on the plate now.
     ///
-    /// The reducer checks the same identity again before it acts on the event
-    /// this produces. That is not redundant: this decides whether the reducer
-    /// is told at all, which is what keeps one figure's answer from ever being
-    /// spoken about another.
+    /// The reducer checks the identity again before acting. This check decides
+    /// whether the reducer is told at all, so one figure's answer is never
+    /// reported for another.
     pub fn answering(&self, ruid: u64) -> Answering {
         match self.figure {
             Some(tag) if tag.ruid() == ruid => Answering::TheFigure(tag),
@@ -617,8 +599,8 @@ mod placed_tests {
         assert_eq!(placed.token(), Some(TOKEN_A));
     }
 
-    /// A figure whose token could not be read is still a figure. The box plays
-    /// what the card already holds; only a fetch needs the token.
+    /// A figure whose token could not be read is still a figure. The box can
+    /// play what the card already holds; only a download needs the token.
     #[test]
     fn a_figure_whose_token_was_not_read_is_still_announced() {
         let mut placed = Placed::empty();
@@ -628,8 +610,8 @@ mod placed_tests {
         assert_eq!(placed.token(), None);
     }
 
-    /// The pair is the point. A token outliving the figure it came with is a
-    /// token available to authorise the *next* figure's fetch.
+    /// A token that outlives its figure could authorise the *next* figure's
+    /// download.
     #[test]
     fn a_figure_leaving_takes_its_token_with_it() {
         let mut placed = Placed::empty();
@@ -640,8 +622,7 @@ mod placed_tests {
         assert_eq!(placed.token(), None);
     }
 
-    /// The same rule across a swap, which is where it is easiest to get wrong:
-    /// both halves move at once or neither does.
+    /// The same rule during a swap: figure and token change together.
     #[test]
     fn a_replacing_figure_brings_its_own_token_and_not_the_last_one() {
         let mut placed = Placed::empty();
@@ -672,9 +653,8 @@ mod placed_tests {
         assert_eq!(placed.answering(A.ruid()), Answering::TheFigure(A));
     }
 
-    /// A console `get` that finishes while something else sits on the plate.
-    /// Attributing it to whatever is there is the bug this identity exists to
-    /// prevent.
+    /// A console `get` that finishes while another figure is on the plate
+    /// must not be reported for that figure.
     #[test]
     fn an_answer_naming_a_different_figure_is_not_about_the_one_on_the_plate() {
         let mut placed = Placed::empty();

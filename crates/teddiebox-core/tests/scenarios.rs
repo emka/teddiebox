@@ -97,9 +97,8 @@ fn an_exhausted_pack_powers_the_box_off_mid_story() {
     };
     core.handle(Event::TagPresent(TAG), &library);
 
-    // The model no longer believes a single sample: readings must agree
-    // before the level, and the shutdown, commit (default readings_to_agree
-    // is 4).
+    // Readings must agree before the level or the shutdown changes (the
+    // default readings_to_agree is 4).
     for _ in 0..3 {
         core.handle(
             Event::Battery {
@@ -119,10 +118,9 @@ fn an_exhausted_pack_powers_the_box_off_mid_story() {
     assert!(has(&flat, Action::PowerOff(PowerOffReason::PackEmpty)));
 }
 
-/// A figure placed for the first time this session, whose story is already on
-/// the card. The box asks the server before it plays, hears that the file has
-/// changed, and fetches the new one — the child hears the current story, not
-/// the old one with a swap happening underneath it.
+/// A figure placed for the first time since boot, whose story is already on
+/// the card. The box asks the server before playing, learns that the file has
+/// changed, and downloads the new one, so the child hears the current story.
 #[test]
 fn a_cached_story_the_server_has_changed_is_fetched_before_it_plays() {
     let mut core = Core::new(CoreConfig::default());
@@ -142,8 +140,7 @@ fn a_cached_story_the_server_has_changed_is_fetched_before_it_plays() {
     let stale = core.handle(Event::Revalidated(TAG, Freshness::Stale), &cached);
     assert!(has(&stale, Action::RequestContent(TAG)));
 
-    // The refetch lands, and the story starts from the place the child left
-    // it — a new file is not a reason to lose somebody's page.
+    // The download finishes, and the story starts where the child left it.
     let ready = core.handle(Event::ContentReady(TAG), &cached);
     assert!(has(
         &ready,
@@ -154,8 +151,7 @@ fn a_cached_story_the_server_has_changed_is_fetched_before_it_plays() {
     ));
 }
 
-/// The offline case, which is the one that decides whether this is safe to
-/// ship: the server could not be asked, so the cached story plays.
+/// Offline: the server cannot be reached, so the cached story plays.
 #[test]
 fn a_story_the_server_could_not_be_asked_about_still_plays() {
     let mut core = Core::new(CoreConfig::default());

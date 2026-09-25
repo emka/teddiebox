@@ -1,20 +1,17 @@
-//! Where one figure's story got to, held until the card has to be told.
+//! Where one figure's story got to, kept in RAM until it has to be written to
+//! the card.
 //!
-//! Children lift a figure and put it straight back, over and over. Writing the
-//! card on every lift makes that ordinary act cost a write, so this holds the
-//! place in RAM and the card is written only where the place would otherwise
-//! be lost: another figure needing the slot, or the box shutting down. Measured
-//! at the bench on 2026-09-08 — six lifts, two writes, both displacements.
+//! Children lift a figure and put it back again and again. Writing the card on
+//! every lift would cost a write each time, so the position is kept in RAM and
+//! written to the card only when it would otherwise be lost: when another
+//! figure needs the slot, or when the box shuts down.
 //!
-//! One slot, not a table. "The most recent figure" is the stock behaviour being
-//! matched, and a second figure evicting the first is correct rather than a
-//! limitation: the evicted figure's place goes to the card on its way out, so
-//! nothing is dropped, it only stops being free to read back.
+//! One slot, not a table, matching the stock box's "most recent figure"
+//! behaviour. When a second figure replaces the first, the first figure's
+//! position is written to the card, so nothing is lost.
 //!
-//! What it gives up, deliberately: an ending nobody chose — a flat battery, a
-//! crash, a console reboot — loses whatever RAM is holding. A dead box is not
-//! being listened to, so the cost is one restart rather than a child losing
-//! their place mid-story.
+//! Trade-off: an unplanned stop (flat battery, crash, console reboot) loses
+//! the position held in RAM.
 
 use crate::TagUid;
 
@@ -32,12 +29,11 @@ impl PendingPlace {
         Self { slot: None }
     }
 
-    /// Holds a figure's place, handing back the one it displaced.
+    /// Stores a figure's position and returns the one it replaced, if any.
     ///
-    /// Only a *different* figure displaces anything: the same figure moving on
-    /// through its story just moves the page on, which is what keeps repeated
-    /// lifts free. What comes back is owed to the card — its place is about to
-    /// become unreachable and this is the last moment anything knows it.
+    /// Only a *different* figure replaces anything; the same figure just
+    /// updates its page. The caller must write the returned position to the
+    /// card, or it is lost.
     pub fn remember(&mut self, tag: TagUid, page: u32) -> Option<Place> {
         let displaced = match self.slot {
             Some((held, held_page)) if held != tag => Some((held, held_page)),
@@ -49,8 +45,7 @@ impl PendingPlace {
 
     /// What is held for this figure, if anything.
     ///
-    /// Asked before the card, because the slot is newer by construction: it is
-    /// written the moment a figure comes off, and the card only learns later.
+    /// Check this before the card: the slot is always newer than the card.
     pub fn held(&self, tag: TagUid) -> Option<u32> {
         match self.slot {
             Some((held, page)) if held == tag => Some(page),
@@ -58,12 +53,12 @@ impl PendingPlace {
         }
     }
 
-    /// Drops the place held for one story, named the way the card names it.
+    /// Forgets the position held for one story, identified by its ruid.
     ///
-    /// Keyed by the story rather than by the figure because the caller is the
-    /// media task, which knows the path it is playing from and not which figure
-    /// asked for it — and because a console `play` of another story running to
-    /// its end must not forget a figure's place.
+    /// Keyed by story, not by figure, because the caller (the media task)
+    /// knows which file it is playing but not which figure asked for it. A
+    /// console `play` of another story that ends must not clear a figure's
+    /// position.
     pub fn forget(&mut self, ruid: u64) {
         if matches!(self.slot, Some((held, _)) if held.ruid() == ruid) {
             self.slot = None;
@@ -72,9 +67,8 @@ impl PendingPlace {
 
     /// Takes whatever is held, leaving the slot empty.
     ///
-    /// Called where the slot is about to be lost for good, so it is idempotent
-    /// by construction: a second call has nothing to hand back and therefore
-    /// writes nothing.
+    /// Called just before the slot would be lost. A second call returns
+    /// nothing, so nothing is written twice.
     pub fn take(&mut self) -> Option<Place> {
         self.slot.take()
     }
@@ -84,9 +78,9 @@ impl PendingPlace {
 mod tests {
     use super::*;
 
-    /// The bench figure, `CONTENT/1D2E3F50/500304E0`.
+    /// A real figure, `CONTENT/1D2E3F50/500304E0`.
     const LEO: TagUid = TagUid([0xE0, 0x04, 0x03, 0x50, 0x50, 0x3F, 0x2E, 0x1D]);
-    /// *Abends im Walde*, `1E2F4051500304E0` — the resume test's second file.
+    /// Another real figure, *Abends im Walde*, `1E2F4051500304E0`.
     const WALDE: TagUid = TagUid([0xE0, 0x04, 0x03, 0x50, 0x51, 0x40, 0x2F, 0x1E]);
 
     #[test]
@@ -108,9 +102,7 @@ mod tests {
         assert_eq!(places.held(WALDE), None);
     }
 
-    /// The whole reason this is a cache rather than a write-through. Lifting a
-    /// figure and putting it back is most of what happens to a figure, and it
-    /// must not reach the card.
+    /// Lifting a figure and putting it back must not cause a card write.
     #[test]
     fn the_same_figure_again_moves_the_page_on_and_displaces_nothing() {
         let mut places = PendingPlace::new();
@@ -119,8 +111,7 @@ mod tests {
         assert_eq!(places.held(LEO), Some(247));
     }
 
-    /// The displaced entry is what the caller writes to the card: this is the
-    /// last moment anything knows it.
+    /// The caller writes the replaced position to the card.
     #[test]
     fn a_different_figure_displaces_the_one_held_and_hands_it_back() {
         let mut places = PendingPlace::new();
@@ -137,9 +128,8 @@ mod tests {
         assert_eq!(places.held(WALDE), Some(12));
     }
 
-    /// A story that reached its end has no place worth keeping, and the slot
-    /// must go with the card: a stale entry outranks the file just zeroed,
-    /// because [`PendingPlace`] is asked first.
+    /// A finished story has no position to keep. The slot must be cleared
+    /// too, because it is checked before the card.
     #[test]
     fn a_story_that_ended_is_forgotten() {
         let mut places = PendingPlace::new();
@@ -148,9 +138,8 @@ mod tests {
         assert_eq!(places.held(LEO), None);
     }
 
-    /// Keyed by the story, not by whoever is on the plate — the media task
-    /// knows where it is playing from and not which figure asked for it. A
-    /// console `play` running to its end must not forget a figure's place.
+    /// Keyed by story, not by figure: a console `play` that ends must not
+    /// clear a figure's position.
     #[test]
     fn a_different_story_ending_leaves_the_slot_alone() {
         let mut places = PendingPlace::new();
@@ -167,9 +156,7 @@ mod tests {
         assert_eq!(places.held(LEO), None);
     }
 
-    /// What makes the shutdown flush idempotent: it is called where the slot is
-    /// about to be lost for good, and a second call must write nothing rather
-    /// than write the same place again.
+    /// A second call at shutdown must not write the same position again.
     #[test]
     fn taking_an_empty_slot_hands_back_nothing() {
         assert_eq!(PendingPlace::new().take(), None);

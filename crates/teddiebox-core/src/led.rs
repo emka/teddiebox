@@ -1,8 +1,7 @@
-//! Maps machine state onto the single RGB indicator.
+//! Chooses what the single RGB LED shows.
 //!
-//! One LED must express playback, network and power state at once, so the
-//! ordering here is a priority decision, not a lookup: the user needs to see
-//! the condition that requires action.
+//! One LED has to show playback, network and battery state, so the order of
+//! the checks below is a priority: show the state that most needs attention.
 
 use crate::{BatteryLevel, LedState};
 use teddiebox_board::Colour;
@@ -17,20 +16,18 @@ pub enum PlaybackKind {
 }
 
 pub fn led_for(playback: PlaybackKind, battery: BatteryLevel, charging: bool) -> LedState {
-    // A failure first, charger or no charger: it is the only state here that
-    // will not resolve itself by waiting.
+    // A failure comes first, even while charging: it is the only state that
+    // will not fix itself.
     if playback == PlaybackKind::Failed {
         return LedState::Error;
     }
-    // A pack this close to empty outranks the story it is about to interrupt —
-    // unless it is already on a charger, where the situation is being dealt
-    // with and saying so is more useful than raising an alarm.
+    // A nearly empty pack comes before playback, unless it is already
+    // charging.
     if battery == BatteryLevel::Critical && !charging {
         return LedState::BatteryCritical;
     }
-    // Above the tired pack, because a download is the one state here the child
-    // can neither see nor hear: the box is silent and looks idle, and painting
-    // it orange would hide the one thing worth waiting for.
+    // Before a low pack, because during a download the box is silent and
+    // looks idle; the LED is the only sign that something is happening.
     if playback == PlaybackKind::Fetching {
         return LedState::Fetching;
     }
@@ -38,12 +35,10 @@ pub fn led_for(playback: PlaybackKind, battery: BatteryLevel, charging: bool) ->
         return LedState::BatteryLow;
     }
     match playback {
-        // Handled above; repeated here because the compiler cannot know that.
+        // Handled above; listed here so the match is complete.
         PlaybackKind::Failed | PlaybackKind::Fetching => LedState::Error,
         PlaybackKind::Playing => LedState::Playing,
-        // Charging says nothing while a story plays — that is what the green
-        // is for — so it is left to the states where the box has nothing else
-        // to report.
+        // Charging is shown only when the box has nothing else to show.
         PlaybackKind::Paused | PlaybackKind::Idle if charging => LedState::Charging,
         PlaybackKind::Paused | PlaybackKind::Idle => LedState::Ready,
     }
@@ -51,24 +46,19 @@ pub fn led_for(playback: PlaybackKind, battery: BatteryLevel, charging: bool) ->
 
 /// The colour that stands for a state.
 ///
-/// Kept apart from [`led_for`], which decides *which* state is worth showing:
-/// this only says what it looks like. Both halves are here rather than in the
-/// firmware because neither needs a peripheral to be tested, and the one that
-/// decides what a child sees is the last place to want an untested branch.
+/// [`led_for`] decides *which* state to show; this decides what it looks
+/// like. Both live here rather than in the firmware so they can be tested on
+/// the host.
 pub const fn colour_for(state: LedState) -> Colour {
     match state {
-        // Nothing to say, and nothing lit. Standby, and the state a box holds
-        // while it is being switched off.
+        // Standby, and while the box is switching off.
         LedState::Off => Colour::Off,
-        // On, and either about to be useful or already useful. The same green
-        // for both: a story playing is the box working as intended, which is
-        // not news worth its own colour.
+        // The box is working normally.
         LedState::Booting | LedState::Ready | LedState::Playing => Colour::Green,
         LedState::Fetching => Colour::Blue,
         LedState::Charging => Colour::Cyan,
         LedState::BatteryLow => Colour::Orange,
-        // The same red as a fault, deliberately: a box about to switch itself
-        // off has failed to be a box, whatever the reason.
+        // The same red as a fault: either way, the box cannot play.
         LedState::BatteryCritical | LedState::Error => Colour::Red,
         LedState::Setup => Colour::Magenta,
     }
@@ -79,8 +69,6 @@ mod tests {
     use super::*;
     use teddiebox_board::Colour;
 
-    /// The five colours asked for, in one place, because the mapping is the
-    /// whole of what anybody looking at the box can see.
     #[test]
     fn each_state_shows_the_colour_it_was_given() {
         assert_eq!(colour_for(LedState::Ready), Colour::Green);
@@ -92,9 +80,8 @@ mod tests {
         assert_eq!(colour_for(LedState::Off), Colour::Off);
     }
 
-    /// The seam to the task that owns the LED is one atomic byte, so every
-    /// state has to survive the round trip. A state that does not is a colour
-    /// that silently never appears.
+    /// The state reaches the LED task as one atomic byte, so every state must
+    /// survive the round trip.
     #[test]
     fn every_state_survives_the_trip_through_an_atomic() {
         for state in LedState::ALL {
@@ -102,16 +89,14 @@ mod tests {
         }
     }
 
-    /// A byte that is not a state must not be mistaken for one — the atomic
-    /// starts at zero and anything could write to it.
+    /// A byte that is not a state must not be mistaken for one.
     #[test]
     fn a_byte_that_names_no_state_is_refused() {
         assert_eq!(LedState::from_code(200), None);
     }
 
-    /// The pack this box carries goes flat without warning, so the warning it
-    /// can give has to arrive while there is still charge to act on. `Low` is
-    /// 3300 mV, `Critical` is 3000, and the fall between them is minutes.
+    /// The pack goes flat quickly at the end, so the warning must show even
+    /// while a story plays.
     #[test]
     fn a_low_pack_warns_in_orange_while_a_story_plays() {
         assert_eq!(
@@ -120,9 +105,7 @@ mod tests {
         );
     }
 
-    /// Distinct from `BatteryLow`, and deliberately the same red as a fault:
-    /// by this point the box is about to switch itself off, which is a
-    /// failure of the same order as a story that cannot be played.
+    /// Critical is red, like a fault, because the box is about to switch off.
     #[test]
     fn a_critical_pack_is_red_rather_than_orange() {
         assert_eq!(
@@ -131,9 +114,8 @@ mod tests {
         );
     }
 
-    /// A download is the one thing here the child can neither see nor hear —
-    /// the box is silent and apparently idle — so it outranks the tired pack
-    /// that would otherwise paint the same idle box orange.
+    /// During a download the box is silent and looks idle, so the download is
+    /// shown instead of a low pack.
     #[test]
     fn fetching_outranks_a_low_pack() {
         assert_eq!(
@@ -142,8 +124,8 @@ mod tests {
         );
     }
 
-    /// Charging used to outrank everything, which on a bench box — always on
-    /// its charger — meant no other colour could ever be seen.
+    /// Charging must not hide other states; a box that is always on its
+    /// charger would otherwise never show anything else.
     #[test]
     fn charging_does_not_hide_a_download() {
         assert_eq!(
@@ -160,7 +142,7 @@ mod tests {
         );
     }
 
-    /// What is left for charging to say: the box is idle and plugged in.
+    /// Charging shows when the box is idle and plugged in.
     #[test]
     fn charging_shows_when_there_is_nothing_else_to_show() {
         assert_eq!(
@@ -201,9 +183,8 @@ mod tests {
         );
     }
 
-    /// A flat pack still outranks a playing story: the box is about to stop
-    /// either way, and which of the two the LED names decides whether anybody
-    /// reaches for the charger.
+    /// A nearly empty pack is shown instead of playback, so somebody reaches
+    /// for the charger.
     #[test]
     fn a_critical_pack_outranks_playback() {
         assert_eq!(
@@ -212,8 +193,8 @@ mod tests {
         );
     }
 
-    /// On the charger and nearly empty, the charger is the more useful fact —
-    /// it says the situation is already being dealt with.
+    /// Nearly empty but charging: show charging, since the problem is being
+    /// fixed.
     #[test]
     fn charging_answers_an_empty_pack() {
         assert_eq!(

@@ -1,43 +1,39 @@
-//! Volume stepping with a parental ceiling.
+//! Volume steps with a parental limit.
 
 use crate::{Output, Volume, MAX_VOLUME};
 
-/// How much quieter the headphone ladder is than the speaker's, in whole dB.
+/// How much quieter each headphone step is than the same speaker step, in
+/// whole dB.
 ///
-/// **A guess until somebody listens.** It is a guess with a reason — roughly
-/// what separates a small speaker across a room from a driver in an ear — but
-/// it is not evidence. Tuning it after a listening session is this number and
-/// the test that pins it, changed together.
+/// **An untested guess**, based roughly on the difference between a small
+/// speaker across a room and a headphone in an ear. To tune it, change this
+/// number and the test that checks it together.
 pub const HEADPHONE_OFFSET_DB: i8 = 12;
 
 /// The level, in whole dB, that one volume step asks of the codec.
 ///
-/// The speaker ladder is anchored on the only listening the box has had rather
-/// than on a curve: a Tonie at -12 dB was reported as "120% of the max
-/// volume", so the ceiling sits under it, and -35 dB is the level the bench
-/// has played stories at for weeks, so the step a box boots on lands beside
-/// it. Seven dB apart, because equal dB steps are what equal loudness steps
-/// sound like.
+/// The speaker steps are based on listening, not on a formula: -12 dB was
+/// much too loud, so the loudest step is below it, and -35 dB was a
+/// comfortable level, so the starting step is close to it. Steps are 7 dB
+/// apart, because equal dB steps sound like equal loudness steps.
 ///
-/// The headphone ladder is the same six rungs, [`HEADPHONE_OFFSET_DB`]
-/// quieter, so the ears mean the same thing whatever is plugged in.
+/// The headphone steps are the same, [`HEADPHONE_OFFSET_DB`] quieter.
 ///
-/// Zero is silence rather than one more rung, on both.
-/// `Tlv320Dac3100::set_volume_db` takes whole dB and its register floor is
-/// -63.5, so -63 is as quiet as the codec goes without muting it — and the
-/// offset is not applied to it, because there is nothing below it to reach.
+/// Step 0 is silence on both outputs. `Tlv320Dac3100::set_volume_db` takes
+/// whole dB and the codec's lowest level is -63.5 dB, so -63 is the quietest
+/// level without muting. The offset is not applied to it, since there is
+/// nothing lower.
 ///
-/// A step above [`MAX_VOLUME`] is answered with the ceiling. [`Volume`] is a
-/// tuple struct with a public field and nothing in the type prevents one, and
-/// the ceiling is the only safe answer beside a child's head.
+/// A step above [`MAX_VOLUME`] gets the loudest step. [`Volume`] has a public
+/// field, so the type cannot prevent such a value, and the loudest step is
+/// the only safe answer.
 pub const fn db_for(output: Output, volume: Volume) -> i8 {
     const SPEAKER: [i8; MAX_VOLUME as usize + 1] = [-63, -43, -36, -29, -22, -15];
-    // Written out rather than derived, so the ladder a child hears is a table
-    // somebody can read, and so step 0 can be the codec's floor on both.
+    // Written out rather than computed, so the levels are easy to read and
+    // step 0 can be the codec's minimum on both.
     const HEADPHONES: [i8; MAX_VOLUME as usize + 1] = [-63, -55, -48, -41, -34, -27];
-    // `Ord::min` is not const, and the firmware needs this in a `const` so the
-    // level it powers the codec up at is this ladder's rather than a second
-    // number that happens to agree with it.
+    // `Ord::min` is not const, and the firmware calls this in a `const` to get
+    // the codec's start-up level.
     let step = if volume.0 > MAX_VOLUME {
         MAX_VOLUME
     } else {
@@ -56,8 +52,8 @@ pub struct VolumeModel {
 }
 
 impl VolumeModel {
-    /// `limit` is clamped into `0..=MAX_VOLUME`. Starts at half the limit so a
-    /// freshly booted box is audible without being startling.
+    /// `limit` is clamped to `0..=MAX_VOLUME`. Starts at half the limit, so a
+    /// freshly booted box is audible without being too loud.
     pub fn new(limit: u8) -> Self {
         let limit = limit.min(MAX_VOLUME);
         Self {
@@ -97,32 +93,29 @@ impl VolumeModel {
 mod tests {
     use super::*;
 
-    /// The ceiling is set from the one listening test there has been. A first
-    /// Tonie played at -12 dB was, in the listener's words, "120% of the max
-    /// volume", so the loudest step the ears can reach sits below it.
+    /// A Tonie played at -12 dB was much too loud, so the loudest step is
+    /// below it.
     #[test]
     fn the_loudest_step_is_quieter_than_the_level_that_was_too_loud() {
         assert_eq!(db_for(Output::Speaker, Volume(MAX_VOLUME)), -15);
     }
 
-    /// `VolumeModel::new` starts a box at half its limit, so this is the level
-    /// a freshly booted box plays at. -35 dB is what the bench has actually
-    /// listened to and found reasonable; landing within a dB of it means the
-    /// default is evidence rather than taste.
+    /// `VolumeModel::new` starts at half the limit, so this is the start-up
+    /// level. It is within 1 dB of -35 dB, a level found comfortable in
+    /// listening tests.
     #[test]
     fn the_step_a_box_boots_at_is_the_level_the_bench_listened_to() {
         assert_eq!(db_for(Output::Speaker, Volume(MAX_VOLUME / 2)), -36);
     }
 
-    /// Zero is silence, not one more rung. The codec's own floor is -63.5 dB
-    /// and `set_volume_db` takes whole dB, so -63 is as quiet as it goes.
+    /// Step 0 is silence. The codec's minimum is -63.5 dB and `set_volume_db`
+    /// takes whole dB, so -63 is the quietest level.
     #[test]
     fn the_lowest_step_is_the_codecs_floor_rather_than_another_rung() {
         assert_eq!(db_for(Output::Speaker, Volume(0)), -63);
     }
 
-    /// Equal dB steps are what equal loudness steps sound like. A ladder that
-    /// bunched up at one end would give the ears a dead zone.
+    /// Equal dB steps sound like equal loudness steps.
     #[test]
     fn the_audible_steps_are_evenly_spaced() {
         assert_eq!(db_for(Output::Speaker, Volume(1)), -43);
@@ -132,19 +125,16 @@ mod tests {
         assert_eq!(db_for(Output::Speaker, Volume(5)), -15);
     }
 
-    /// `Volume` is a tuple struct with a public field, so nothing in the type
-    /// stops a caller handing over a step that does not exist. Answering the
-    /// ceiling is the only safe reading beside someone's head.
+    /// `Volume` has a public field, so a caller can pass a step that does not
+    /// exist. The loudest step is the only safe answer.
     #[test]
     fn a_step_above_the_maximum_is_answered_with_the_ceiling() {
         assert_eq!(db_for(Output::Speaker, Volume(MAX_VOLUME + 1)), -15);
         assert_eq!(db_for(Output::Speaker, Volume(255)), -15);
     }
 
-    /// A driver in an ear is not a speaker across a room. The offset is the
-    /// whole of the headphone ladder's claim, so it is asserted step by step
-    /// rather than computed — a test that applied the same subtraction the
-    /// code does could not disagree with it.
+    /// Each headphone step is quieter than the speaker's. Written out as
+    /// literals, so the test can disagree with the code.
     #[test]
     fn the_headphone_ladder_is_the_speakers_own_steps_made_quieter() {
         assert_eq!(db_for(Output::Headphones, Volume(1)), -55);
@@ -154,18 +144,16 @@ mod tests {
         assert_eq!(db_for(Output::Headphones, Volume(5)), -27);
     }
 
-    /// Zero is silence on both ladders, not the offset applied to the floor.
-    /// The codec stops at -63.5 dB and `set_volume_db` takes whole dB, so
-    /// -75 does not exist to ask for.
+    /// Step 0 is silence on both outputs; the offset is not applied. The codec
+    /// cannot go below -63.5 dB, so -75 dB is not possible.
     #[test]
     fn silence_is_the_codecs_floor_on_both_outputs() {
         assert_eq!(db_for(Output::Headphones, Volume(0)), -63);
         assert_eq!(db_for(Output::Speaker, Volume(0)), -63);
     }
 
-    /// The two ladders are the same six rungs a fixed distance apart, so the
-    /// ears mean the same thing whatever is plugged in. Checked above silence,
-    /// which is the one rung the offset deliberately does not reach.
+    /// The two outputs' steps are a fixed distance apart. Step 0 is skipped
+    /// because the offset is not applied to silence.
     #[test]
     fn the_two_ladders_stay_the_same_distance_apart() {
         for step in 1..=MAX_VOLUME {
@@ -177,9 +165,7 @@ mod tests {
         }
     }
 
-    /// `Volume` is a tuple struct with a public field, so a step that does not
-    /// exist can be handed over on either ladder. The ceiling is the only safe
-    /// answer beside a child's head, and headphones are the closer of the two.
+    /// The same for headphones, where a too-loud level matters most.
     #[test]
     fn a_step_above_the_maximum_is_answered_with_the_ceiling_on_both_outputs() {
         assert_eq!(db_for(Output::Headphones, Volume(MAX_VOLUME + 1)), -27);
@@ -192,9 +178,8 @@ mod tests {
         assert_eq!(VolumeModel::new(4).current(), Volume(2));
     }
 
-    /// Pinned because the firmware powers the codec up at this step's level,
-    /// computed at compile time, and would otherwise be free to disagree with
-    /// the reducer about how loud a freshly booted box is.
+    /// The firmware powers the codec up at this step's level, computed at
+    /// compile time, so it must match the reducer's start-up step.
     #[test]
     fn a_box_with_no_parental_limit_starts_on_the_middle_step() {
         assert_eq!(VolumeModel::new(MAX_VOLUME).current(), Volume(2));

@@ -1,9 +1,8 @@
 //! A test tone.
 //!
-//! Bench step 6 wants a clean audible tone out of the speaker. One cycle of a
-//! sine, sampled so that repeating it yields exactly 1000 Hz at a
-//! 48000 Hz sample rate — no phase discontinuity at the seam, because the
-//! table is a whole number of cycles.
+//! One cycle of a sine wave. Repeated at a 48000 Hz sample rate it gives
+//! exactly 1000 Hz, with no click where it repeats, because the table holds
+//! exactly one cycle.
 
 /// Samples per cycle at 48 kHz.
 pub const SAMPLE_RATE_HZ: u32 = 48_000;
@@ -13,9 +12,7 @@ pub const TONE_HZ: u32 = SAMPLE_RATE_HZ / SINE.len() as u32;
 
 /// Peak amplitude, a little under half full scale.
 ///
-/// Deliberately not full scale: this is the first sound the box will ever
-/// make, into a speaker nobody has tested, with a codec whose gain settings
-/// have never been heard.
+/// Not full scale, to be safe on an untested speaker and codec setup.
 pub const PEAK: i16 = 16000;
 
 /// One cycle of a sine wave.
@@ -46,15 +43,14 @@ mod tests {
         assert_eq!(SINE[3 * SINE.len() / 4], -PEAK);
     }
 
-    /// A tone with a DC offset heats the speaker coil and is not a tone.
+    /// A DC offset would heat the speaker coil.
     #[test]
     fn the_cycle_has_no_direct_current() {
         let sum: i32 = SINE.iter().map(|&s| i32::from(s)).sum();
         assert_eq!(sum, 0);
     }
 
-    /// Each half is the negation of the other, which is what makes it a sine
-    /// rather than something merely sine-shaped.
+    /// The second half is the negative of the first.
     #[test]
     fn the_second_half_mirrors_the_first() {
         let half = SINE.len() / 2;

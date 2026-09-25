@@ -1,14 +1,12 @@
-//! The box's own voice: the audio it plays about itself.
+//! The box's system sounds.
 //!
-//! A Toniebox ships four copies of its system sounds under `CONTENT/`, one per
-//! language, numbered `00000000` to `00000003`. Everything else under
-//! `CONTENT/` is a figure, one file per directory. Which language a box speaks
-//! is a property of the box rather than of the card, so it is chosen at build
-//! time from `TEDDIEBOX_LANGUAGE` in `.envrc`.
+//! A Toniebox card holds four sets of system sounds under `CONTENT/`, one per
+//! language, in directories `00000000` to `00000003`. Everything else under
+//! `CONTENT/` is a figure, one file per directory. The language is chosen at
+//! build time from `TEDDIEBOX_LANGUAGE` in `.envrc`.
 //!
-//! Mapping from the Toniebox wiki's list of internal audio files, confirmed on
-//! this card by the file counts: 22, 25, 22 and 22 files against exactly one
-//! for every figure.
+//! The file IDs were identified by listening to them; the Toniebox wiki's
+//! list is wrong in places.
 
 /// Which set of system sounds the box speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,10 +20,8 @@ pub enum Language {
 impl Language {
     /// Reads the name used in `.envrc`.
     ///
-    /// `const` so a wrong value fails the build rather than the box: a
-    /// mistyped language would otherwise be a silent fall back to whichever
-    /// default seemed reasonable, and the first sign of it would be the box
-    /// speaking the wrong language to a child.
+    /// `const` so a wrong value fails the build instead of silently falling
+    /// back to a default language.
     pub const fn from_name(name: &str) -> Option<Self> {
         // `match` on strings is not const, so compare bytes.
         const fn eq(a: &[u8], b: &[u8]) -> bool {
@@ -68,28 +64,23 @@ impl Language {
 
 /// A sound the box plays about itself, as the file ID within a language.
 ///
-/// Only the ones this firmware has a use for are named. The rest of each
-/// directory is a series of error messages distinguished by a codeword
-/// animal, which are worth naming when something needs to play one.
+/// Only the sounds the firmware uses are named. The rest are error messages,
+/// each identified by an animal codeword.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sound {
-    /// The jingle at power-on. Three seconds, and the reason a start-up can
-    /// afford to power the speaker: it covers the transient with the sound
-    /// stock covers it with.
+    /// The three-second jingle at power-on. It hides the click of the speaker
+    /// powering up, as on a stock box.
     Startup,
     /// A short rising chime — "tada".
     Confirmation,
     /// "Caution, battery is low." A warning: the box keeps playing.
     ///
-    /// Identified by ear on this box. The wiki lists this one only as a
-    /// generic alert, so the pairing with `BatteryCritical` below comes from
-    /// the bench rather than from the table.
+    /// Identified by listening; the wiki lists it only as a generic alert.
     BatteryLow,
     /// "Battery is critical, turning off now."
     ///
-    /// Not a warning but an announcement, which makes it the one sound with an
-    /// ordering requirement: it has to finish before the box powers down, or
-    /// it says the box is turning off and then does not.
+    /// An announcement, not a warning, so it must finish playing before the
+    /// box powers down.
     BatteryCritical,
     /// "Now I'm ready for the Tonies."
     Ready,
@@ -98,9 +89,8 @@ pub enum Sound {
     /// "Help me with the config."
     ///
     /// For a `/CONFIG.TXT` that is missing, truncated or malformed. The box
-    /// keeps playing everything already on the card — a typo in a config file
-    /// must never cost a child their story — but a parent with no serial cable
-    /// needs some way to know, and this is the box's own word for it.
+    /// still plays everything already on the card; this tells a parent
+    /// without a serial cable that the config needs fixing.
     ConfigError,
     /// "No Internet."
     ///
@@ -109,32 +99,23 @@ pub enum Sound {
     NoInternet,
     /// "Wrong password."
     ///
-    /// Specifically the Wi-Fi passphrase. The bench proved a wrong one reports
-    /// `FourWayHandshakeTimeout`, which is distinguishable from a network that
-    /// is simply out of range — so the box can say which of the two it is
-    /// rather than blaming the network for a typo.
+    /// The Wi-Fi passphrase. A wrong one shows up as
+    /// `FourWayHandshakeTimeout`, which is different from a network being out
+    /// of range, so the box can tell the two apart.
     WrongPassword,
     /// The box reached the server and there is no story for this figure.
     ///
-    /// Identified by ear on the bench, like the two battery sounds and for the
-    /// same reason: the published mapping has been wrong before. It sits
-    /// between `NoInternet` and `WrongPassword` on the card, which is the sort
-    /// of coincidence that makes a wrong guess plausible — so this one is
-    /// pinned by its own test.
+    /// Identified by listening. It sits between `NoInternet` and
+    /// `WrongPassword`, so it has its own test.
     NoStory,
 }
 
 impl Sound {
-    /// What the box should say for a prompt, if it has words for it.
+    /// The sound for a prompt, if there is one.
     ///
-    /// `None` is a real answer and not an oversight. Every sound here was
-    /// identified by ear on this card, because the published mapping has been
-    /// wrong before — and so was the silence: all twenty-five German files were
-    /// played and listened to on 2026-09-14 before the volume ceiling was left
-    /// without one. The only candidate was `0x02`, the box's discouraging
-    /// "no", and it was turned down. Pointing a prompt at a sound that says
-    /// something else would have the box say something true about the wrong
-    /// thing, which is the failure this module guards against elsewhere.
+    /// `None` is deliberate. The volume limit has no sound: every file on the
+    /// card was checked and none fits (the closest, `0x02`, is a
+    /// discouraging "no", and was rejected).
     pub const fn for_prompt(prompt: crate::Prompt) -> Option<Self> {
         match prompt {
             crate::Prompt::Startup => Some(Self::Startup),
@@ -171,9 +152,8 @@ mod tests {
     use super::*;
     use crate::Prompt;
 
-    /// Spelled out, like the language directories and for the same reason: a
-    /// table that agreed with itself could be wrong about every entry. These
-    /// three were identified on the bench.
+    /// Written as literals, so the test can disagree with the table. These
+    /// were identified by listening.
     #[test]
     fn the_failure_sounds_name_the_files_the_bench_identified() {
         assert_eq!(Sound::ConfigError.file(), 0x0000_000B);
@@ -181,9 +161,8 @@ mod tests {
         assert_eq!(Sound::WrongPassword.file(), 0x0000_0013);
     }
 
-    /// Two sounds sharing a file is the bug this catches: the box would say
-    /// something true about the wrong thing, which is worse than silence and
-    /// far harder to notice than a crash.
+    /// Two sounds sharing a file would make the box say the wrong thing,
+    /// which is worse than silence and hard to notice.
     #[test]
     fn no_two_sounds_share_a_file() {
         let all = [
@@ -205,9 +184,8 @@ mod tests {
         }
     }
 
-    /// The four directories, spelled out rather than derived: these are the
-    /// numbers on the card, and a table that agreed with itself could be
-    /// wrong about every one of them.
+    /// The four directories, written as literals so the test can disagree
+    /// with the code.
     #[test]
     fn each_language_names_its_own_content_directory() {
         assert_eq!(Language::German.content_directory(), 0x0000_0001);
@@ -224,9 +202,7 @@ mod tests {
         assert_eq!(Language::from_name("fr"), Some(Language::French));
     }
 
-    /// A mistyped language must not quietly become a working one. The box
-    /// would then speak the wrong language to a child, and nothing about that
-    /// looks like a configuration error.
+    /// A mistyped language must be refused, not replaced with a default.
     #[test]
     fn an_unknown_language_is_refused_rather_than_defaulted() {
         assert_eq!(Language::from_name("german"), None);
@@ -239,10 +215,8 @@ mod tests {
         assert_eq!(Sound::Startup.file(), 0x0000_0000);
     }
 
-    /// The two battery sounds say different things — "caution, battery is
-    /// low" against "battery is critical, turning off now" — and playing the
-    /// second when the first was meant tells a child the box is about to stop
-    /// when it is not.
+    /// "Caution, battery is low" and "battery is critical, turning off now"
+    /// are different files.
     #[test]
     fn the_two_battery_sounds_are_not_the_same_file() {
         assert_eq!(Sound::BatteryLow.file(), 0x0000_0003);
@@ -271,12 +245,9 @@ mod tests {
         );
     }
 
-    /// Three neighbouring files, and the box has to pick the right one of the
-    /// three: `no internet` at 0x11, `no story` at 0x12, `wrong password` at
-    /// 0x13. All three were identified by ear because the published mapping has
-    /// been wrong before, and a wrong guess here is plausible rather than
-    /// obvious — so the two a network failure can reach are pinned apart, by
-    /// number, in one place.
+    /// Three neighbouring files: `no internet` at 0x11, `no story` at 0x12,
+    /// `wrong password` at 0x13, identified by listening. A mix-up here would
+    /// be easy to miss.
     #[test]
     fn a_refused_passphrase_and_an_absent_network_are_different_files() {
         assert_eq!(Sound::WrongPassword.file(), 0x0000_0013);
@@ -284,26 +255,20 @@ mod tests {
         assert_ne!(Sound::WrongPassword.file(), Sound::NoInternet.file());
     }
 
-    /// The file a figure with no story gets. Written out rather than compared
-    /// against the mapping, because the whole value of this identification is
-    /// that it came from someone listening to the card.
+    /// The sound for a figure with no story, identified by listening.
     #[test]
     fn the_figure_with_no_story_has_its_own_file() {
         assert_eq!(Sound::NoStory.file(), 0x0000_0012);
     }
 
-    /// The volume ceiling is silent by decision, not for want of looking.
-    /// Every one of the card's twenty-five German files was played and listened
-    /// to on 2026-09-14; the only candidate was `0x02`, the discouraging
-    /// "tadum mhh mhh", and silence was chosen over it. A ceiling that says
-    /// nothing is what this box does.
+    /// The volume limit is silent on purpose: no file on the card fits it.
     #[test]
     fn the_volume_ceiling_is_deliberately_silent() {
         assert_eq!(Sound::for_prompt(Prompt::VolumeLimit), None);
     }
 
-    /// Identified by ear, and the published wiki mapping was wrong about this
-    /// one: 0x09 is "battery is critical, turning off now", not 0x03.
+    /// Identified by listening; the wiki is wrong about this one. 0x09 is
+    /// "battery is critical, turning off now", not 0x03.
     #[test]
     fn the_critical_announcement_has_its_own_file() {
         assert_eq!(Sound::BatteryCritical.file(), 0x0000_0009);

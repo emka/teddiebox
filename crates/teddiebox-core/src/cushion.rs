@@ -1,14 +1,9 @@
-//! How close the audio buffer came to running dry.
+//! Measures how close the audio buffer came to running empty.
 //!
-//! Bench step 8 asks for several minutes of playback with zero underruns and
-//! the buffer occupancy logged, and design §5 says the cushion must be sized
-//! "from measurement, not from this estimate". This is the thing that
-//! measures it.
+//! Used to size the audio buffer from measurements and to log underruns.
 //!
-//! It records levels the DMA driver reports rather than keeping its own count
-//! of bytes in and out. A parallel tally would be a second opinion that can
-//! drift from the hardware, and a cushion that disagrees with the buffer it is
-//! describing is worse than no cushion at all.
+//! It records the levels the DMA driver reports, instead of counting bytes in
+//! and out itself, so it cannot drift from the hardware.
 
 /// A record of how full the audio buffer has been.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,8 +22,7 @@ impl Cushion {
         Self {
             capacity,
             level: 0,
-            // Nothing has been seen yet, so the emptiest so far is "as full as
-            // it gets" — any real observation lowers it.
+            // Nothing seen yet; the first real reading lowers it.
             low_water: capacity,
             underruns: 0,
             playing: false,
@@ -38,14 +32,12 @@ impl Cushion {
 
     /// Begins counting.
     ///
-    /// Separate from construction because an empty buffer before playback is
-    /// normal — it is the state every track starts in — while an empty buffer
-    /// during playback is the fault step 8 is looking for.
+    /// Separate from `new` because an empty buffer before playback is normal,
+    /// while an empty buffer during playback is an underrun.
     pub fn start(&mut self) {
         self.playing = true;
         self.low_water = self.capacity;
-        // Whatever the buffer was before playback, the first observation
-        // during it decides whether it is dry.
+        // Only readings during playback decide whether the buffer is empty.
         self.empty = false;
     }
 
@@ -68,8 +60,8 @@ impl Cushion {
             self.low_water = level;
         }
 
-        // Count the transition into dry, not each look at a dry buffer: ten
-        // polls during one dropout are one dropout.
+        // Count the change to empty, not every empty reading: ten readings
+        // during one dropout are one dropout.
         let newly_empty = level == 0 && !self.empty;
         self.empty = level == 0;
         if newly_empty {
@@ -84,8 +76,8 @@ impl Cushion {
 
     /// The emptiest the buffer has been since playback started.
     ///
-    /// This is the headroom measurement. A run that never drops below, say,
-    /// 80% was never close to failing; one that touches 5% passed by luck.
+    /// This shows the headroom. A run that never drops below 80% was never
+    /// close to failing; one that reaches 5% nearly failed.
     pub const fn low_water(&self) -> u32 {
         self.low_water
     }
@@ -108,8 +100,8 @@ impl Cushion {
         if self.capacity == 0 {
             return 0;
         }
-        // Scaled before dividing, so a small buffer does not round to zero;
-        // capacity is bytes of audio, far below the overflow point.
+        // Multiply before dividing, so a small value does not round to zero.
+        // The capacity is far too small to overflow.
         value * 100 / self.capacity
     }
 }
@@ -127,9 +119,7 @@ mod tests {
         assert_eq!(cushion.level(), 0);
     }
 
-    /// An empty buffer before playback is every track's starting state, not a
-    /// fault. Counting it would make every run report an underrun it did not
-    /// have.
+    /// Every track starts with an empty buffer; that is not an underrun.
     #[test]
     fn an_empty_buffer_before_playback_starts_is_not_an_underrun() {
         let mut cushion = Cushion::new(CAPACITY);
@@ -146,9 +136,7 @@ mod tests {
         assert_eq!(cushion.underruns(), 1);
     }
 
-    /// The gap this closes: polling a dry buffer ten times is one dropout, not
-    /// ten. Counting observations rather than transitions would make a single
-    /// glitch look like a catastrophe and hide how often it really happened.
+    /// Reading an empty buffer ten times is one dropout, not ten.
     #[test]
     fn staying_dry_is_one_underrun_rather_than_many() {
         let mut cushion = Cushion::new(CAPACITY);
@@ -171,8 +159,7 @@ mod tests {
         assert_eq!(cushion.underruns(), 2);
     }
 
-    /// The measurement design §5 asks for: not whether it survived, but by how
-    /// much.
+    /// The low-water mark shows how close the buffer came to running empty.
     #[test]
     fn the_low_water_mark_is_the_emptiest_it_has_been() {
         let mut cushion = Cushion::new(CAPACITY);
@@ -203,9 +190,8 @@ mod tests {
         assert_eq!(cushion.low_water_percent(), 25);
     }
 
-    /// A driver reporting more than the buffer holds is a bug somewhere, but
-    /// it must not produce a percentage above 100 in the log and send someone
-    /// hunting the wrong fault.
+    /// A driver reporting more than the buffer holds is a bug, but the log
+    /// must not show more than 100%.
     #[test]
     fn a_level_beyond_capacity_is_clamped_rather_than_believed() {
         let mut cushion = Cushion::new(CAPACITY);
@@ -215,9 +201,8 @@ mod tests {
         assert_eq!(cushion.percent(), 100);
     }
 
-    /// A zero-capacity cushion is nonsense, but dividing by it in a log line
-    /// would panic on the device, which is a worse outcome than a useless
-    /// number.
+    /// A zero capacity makes no sense, but must not cause a divide-by-zero
+    /// panic on the device.
     #[test]
     fn a_zero_capacity_cushion_does_not_divide_by_zero() {
         let mut cushion = Cushion::new(0);

@@ -10,19 +10,18 @@ pub trait ContentIndex {
     /// Whether this figure's story should be checked against the server
     /// before it plays.
     ///
-    /// A narrower question than [`Self::is_available`], and deliberately not
-    /// folded into it: one asks whether there is anything to play, the other
-    /// whether what there is has been questioned lately. Only cached content
-    /// can answer yes — a file shipped under `CONTENT/` has no sidecar to
-    /// compare a length against, and was never downloaded.
+    /// Separate from [`Self::is_available`]: that asks whether there is
+    /// anything to play, this asks whether it needs checking. Only downloaded
+    /// content can need checking; a file placed under `CONTENT/` by hand has
+    /// no sidecar to compare against.
     fn wants_revalidation(&self, tag: TagUid) -> bool;
 }
 
 /// What the server said about a story already on the card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Freshness {
-    /// Nothing contradicted the cached copy — including a server that could
-    /// not be asked at all. Offline is not a reason to refuse a story.
+    /// Nothing contradicted the cached copy, including when the server could
+    /// not be reached. Being offline is not a reason to refuse a story.
     Current,
     /// The server has a different file under this figure's name.
     Stale,
@@ -31,7 +30,7 @@ pub enum Freshness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Idle,
-    /// Waiting to hear whether the cached story is still the server's.
+    /// Waiting to hear whether the cached story is still current.
     Checking(TagUid),
     Fetching(TagUid),
     Playing(TagUid),
@@ -40,9 +39,8 @@ enum State {
 
 /// Why a figure's story could not be produced.
 ///
-/// The split is what a person holding the box can act on. A network they can
-/// go and look at is worth naming; a figure the server simply has no story
-/// for is not their fault and not their problem to fix.
+/// Split by what the user can do about it: a network problem they can check,
+/// or a figure the server has no story for, which they cannot fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unavailable {
     /// Association, DHCP, TLS, the socket, a timeout, or a server that
@@ -51,10 +49,9 @@ pub enum Unavailable {
     /// The access point was there and turned the box away: the passphrase on
     /// the card is not the one it wants.
     ///
-    /// Deliberately narrow. Everything a caller is not *sure* about belongs in
-    /// [`Unavailable::Unreachable`], because the expensive mistake is the other
-    /// one — telling somebody their passphrase is wrong when the router was
-    /// merely off sends them to retype something that was already correct.
+    /// Use this only when sure. Anything uncertain belongs in
+    /// [`Unavailable::Unreachable`]: telling somebody their passphrase is
+    /// wrong when the router was just off makes them retype a correct one.
     Refused,
     /// The server was reached and has nothing for this figure.
     NoContent,
@@ -83,8 +80,7 @@ impl Playback {
     pub fn kind(&self) -> PlaybackKind {
         match self.state {
             State::Idle => PlaybackKind::Idle,
-            // Told apart internally, and not outside: to everything watching,
-            // a box waiting on the network is a box waiting on the network.
+            // Both are "waiting on the network" to everything outside.
             State::Checking(_) | State::Fetching(_) => PlaybackKind::Fetching,
             State::Playing(_) => PlaybackKind::Playing,
             State::Failed => PlaybackKind::Failed,
@@ -105,12 +101,10 @@ impl Playback {
 
     pub fn on_tag_present<I: ContentIndex>(&mut self, tag: TagUid, index: &I) -> Actions {
         let mut actions = Actions::new();
-        // Already dealing with this very figure. A repeat arrival carries no
-        // new information, and acting on it is actively harmful: asking the
-        // card whether it holds a story it is *currently reading out* gets the
-        // answer "no", because `embedded-sdmmc` will not open one file twice —
-        // which on 2026-09-14 sent the box off to re-download nineteen
-        // megabytes over the top of the story it was playing.
+        // Already handling this figure, so ignore the repeat. Acting on it is
+        // harmful: while a story is playing its file is open, and
+        // `embedded-sdmmc` cannot open a file twice, so the card would report
+        // the story missing and the box would download it again.
         if matches!(
             self.state,
             State::Playing(seen) | State::Fetching(seen) | State::Checking(seen) if seen == tag
@@ -118,10 +112,9 @@ impl Playback {
             return actions;
         }
         if index.is_available(tag) {
-            // Asked before it plays, not behind it. A stale story swapped
-            // underneath a listening child would need two handles on one file,
-            // which `embedded-sdmmc` refuses, and a rename, which it does not
-            // have.
+            // Check before playing, not during. Replacing a file while it
+            // plays would need two handles on one file and a rename, and
+            // `embedded-sdmmc` supports neither.
             if index.wants_revalidation(tag) {
                 self.state = State::Checking(tag);
                 let _ = actions.push(Action::Revalidate(tag));
@@ -148,14 +141,12 @@ impl Playback {
                 });
                 let _ = actions.push(Action::Pause);
             }
-            // Nobody is waiting for these bytes any more. What is already on
-            // the card keeps its sidecar, so placing the figure again resumes
-            // instead of starting over.
+            // Stop the download. The partial file keeps its sidecar, so
+            // placing the figure again resumes instead of starting over.
             State::Fetching(_) => {
                 let _ = actions.push(Action::AbortFetch);
             }
-            // Nothing was fetched, so there is nothing to abort. The answer
-            // still arriving is discarded by the identity guard in
+            // Nothing to abort. A late answer is ignored by the check in
             // `on_revalidated`.
             State::Checking(_) | State::Idle | State::Failed => {}
         }
@@ -171,8 +162,8 @@ impl Playback {
         index: &I,
     ) -> Actions {
         let mut actions = Actions::new();
-        // The same guard the download outcome has: an answer that arrives
-        // after the figure was lifted or swapped belongs to nobody.
+        // Ignore an answer that arrives after the figure was lifted or
+        // swapped.
         if self.state != State::Checking(tag) {
             return actions;
         }
@@ -183,8 +174,8 @@ impl Playback {
                 self.state = State::Playing(tag);
                 let _ = actions.push(Action::Play { tag, from });
             }
-            // The path a figure with no content at all takes. One refetch, not
-            // two, so the resume rules and the failure words stay in one place.
+            // Same path as a figure with no content, so there is only one
+            // download path.
             Freshness::Stale => {
                 self.state = State::Fetching(tag);
                 let _ = actions.push(Action::RequestContent(tag));
@@ -208,14 +199,12 @@ impl Playback {
 
     /// The story reached its end on its own.
     ///
-    /// Distinct from a lift: nothing is saved, because a finished story is not
-    /// a paused one and its place has just been cleared. Distinct from
-    /// `TrackFinished`, which advances a chapter — a story ending and a chapter
-    /// ending are different facts and sharing an event for them is how the
-    /// second one would silently acquire the first one's consequences.
+    /// Unlike a lift, nothing is saved: a finished story is not paused, and
+    /// its saved position has just been cleared. Unlike `TrackFinished`, this
+    /// does not move to the next chapter.
     ///
-    /// Only a story that was playing can end. A fetch in progress is left
-    /// alone, because the sound that just finished was something else.
+    /// Only a playing story can end. A download in progress is left alone,
+    /// because the sound that finished was something else.
     pub fn on_playback_ended(&mut self) -> Actions {
         if matches!(self.state, State::Playing(_)) {
             self.state = State::Idle;
@@ -289,9 +278,8 @@ mod tests {
         }
     }
 
-    /// Decision: a story whose cached copy may be out of
-    /// date is not played while a fresh one arrives behind it. The box asks
-    /// first, and the answer decides what happens.
+    /// A cached story that may be out of date is checked with the server
+    /// before it plays.
     #[test]
     fn a_figure_that_has_not_been_asked_about_is_asked_before_it_plays() {
         let mut p = Playback::new();
@@ -315,9 +303,8 @@ mod tests {
         assert_eq!(p.kind(), PlaybackKind::Playing);
     }
 
-    /// A stale story takes the same path a figure with no story at all takes.
-    /// One refetch code path, not two — and the child hears the new version,
-    /// not the old one with a swap happening underneath it.
+    /// A stale story is downloaded again, the same way as a figure with no
+    /// story, so the child hears the new version.
     #[test]
     fn a_stale_story_is_fetched_again_rather_than_played() {
         let mut p = Playback::new();
@@ -327,8 +314,8 @@ mod tests {
         assert_eq!(p.kind(), PlaybackKind::Fetching);
     }
 
-    /// The same identity guard the download outcome has. A probe that finishes
-    /// after the figure was lifted or swapped belongs to nobody.
+    /// An answer that arrives after the figure was lifted or swapped is
+    /// ignored.
     #[test]
     fn an_answer_for_a_figure_no_longer_on_the_plate_is_ignored() {
         let mut p = Playback::new();
@@ -337,8 +324,8 @@ mod tests {
         assert!(actions.as_slice().is_empty());
     }
 
-    /// Lifting a figure mid-question stops the box waiting for an answer it no
-    /// longer has a use for. Nothing is aborted, because nothing was fetched.
+    /// Lifting a figure while it is being checked stops the wait. Nothing is
+    /// aborted, because nothing was being downloaded.
     #[test]
     fn lifting_a_figure_that_is_being_asked_about_aborts_nothing() {
         let mut p = Playback::new();
@@ -348,8 +335,8 @@ mod tests {
         assert_eq!(p.kind(), PlaybackKind::Idle);
     }
 
-    /// A figure asked about earlier in the session plays without a word to the
-    /// server: the radio is the largest consumer on this pack.
+    /// A figure already checked since boot plays without asking the server
+    /// again: Wi-Fi uses the most battery.
     #[test]
     fn a_figure_already_asked_about_plays_straight_away() {
         let mut p = Playback::new();
@@ -363,16 +350,10 @@ mod tests {
         );
     }
 
-    /// Seen on hardware 2026-09-14: the plate poller re-announced a figure
-    /// that was already playing, and the reducer asked the card whether it had
-    /// that story — **while the media task held the file open**.
-    /// `embedded-sdmmc` will not open one file twice, so the card answered
-    /// "not here" and the box raised the radio to re-download nineteen
-    /// megabytes it already had, over the top of the story it was playing.
-    ///
-    /// A figure that is already playing has arrived already. Saying so twice
-    /// is not new information, and acting on it means asking a question at the
-    /// one moment it cannot be answered.
+    /// A repeated arrival of the playing figure must do nothing. While the
+    /// story plays its file is open, and `embedded-sdmmc` cannot open a file
+    /// twice, so asking the card would report the story missing and start a
+    /// needless download.
     #[test]
     fn a_figure_already_playing_is_not_started_again() {
         let mut p = Playback::new();
@@ -385,9 +366,8 @@ mod tests {
         assert_eq!(p.kind(), PlaybackKind::Playing);
     }
 
-    /// The same for a fetch already under way: a repeat arrival must not
-    /// restart it, which would abandon the bytes already on the card and
-    /// begin again from zero.
+    /// The same for a download in progress: a repeated arrival must not
+    /// restart it from zero.
     #[test]
     fn a_figure_already_being_fetched_is_not_fetched_again() {
         let mut p = Playback::new();
@@ -397,8 +377,7 @@ mod tests {
         assert_eq!(p.kind(), PlaybackKind::Fetching);
     }
 
-    /// A *different* figure is a real change and must still be acted on, or
-    /// swapping one figure for another would do nothing.
+    /// A *different* figure is a real change and must still be acted on.
     #[test]
     fn a_different_figure_still_replaces_the_one_playing() {
         let mut p = Playback::new();
@@ -523,8 +502,7 @@ mod tests {
         assert_eq!(p.kind(), PlaybackKind::Failed);
     }
 
-    /// The split a person can act on: a network they can go and look at,
-    /// against a figure nothing can be done about.
+    /// A network problem gets its own prompt, because the user can check it.
     #[test]
     fn a_figure_that_could_not_be_reached_blames_the_network() {
         let mut p = Playback::new();
@@ -534,10 +512,8 @@ mod tests {
         assert_eq!(p.kind(), PlaybackKind::Failed);
     }
 
-    /// A network that refused the box is not a network that was not there, and
-    /// the two send whoever is holding the box to different places: one to the
-    /// passphrase on the card, the other to the router. Saying "no internet"
-    /// for a refused passphrase sends them to look at a router that is working.
+    /// A refused passphrase is not a missing network. The user should check
+    /// the passphrase on the card, not the router.
     #[test]
     fn a_figure_whose_network_refused_the_passphrase_blames_the_passphrase() {
         let mut p = Playback::new();
@@ -559,8 +535,7 @@ mod tests {
     }
 
     /// Lifting a figure mid-download stops the download. The partial file and
-    /// its sidecar stay on the card, so placing it again resumes rather than
-    /// starting over — which is only cheap because resume works.
+    /// its sidecar stay on the card, so placing it again resumes.
     #[test]
     fn lifting_a_figure_that_is_still_fetching_abandons_the_download() {
         let mut p = Playback::new();
@@ -594,10 +569,8 @@ mod tests {
         assert!(p.on_tag_absent().is_empty());
     }
 
-    /// A story that reaches its end leaves the box idle, with the figure still on
-    /// the plate. Until this existed the only way out of `Playing` was lifting the
-    /// figure, so a finished story pinned the indicator and made the idle timeout
-    /// — gated on not-playing — unable to fire at all.
+    /// A story that reaches its end leaves the box idle, with the figure still
+    /// on the plate, so the LED updates and the idle timeout can fire.
     #[test]
     fn a_story_reaching_its_end_leaves_the_box_idle() {
         let mut p = Playback::new();
@@ -607,8 +580,8 @@ mod tests {
         assert_eq!(p.kind(), PlaybackKind::Idle);
     }
 
-    /// Not `SavePosition`: a finished story is not a paused one, and its place has
-    /// just been cleared on purpose. Not `Pause` either — nothing is playing.
+    /// No `SavePosition`: a finished story is not paused, and its position was
+    /// cleared on purpose. No `Pause` either: nothing is playing.
     #[test]
     fn a_story_reaching_its_end_saves_no_position() {
         let mut p = Playback::new();

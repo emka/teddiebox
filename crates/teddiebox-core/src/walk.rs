@@ -1,20 +1,17 @@
-//! Where a directory walk has got to.
+//! The position of a directory walk over the SD card.
 //!
-//! The walk over the SD card used to be a recursive function. Recursion cannot
-//! yield to the executor without boxing its futures, and there is no allocator
-//! on the device to box them in, so the walk held the single executor for as
-//! long as the card was large — no heartbeat, no console, no way to stop it.
+//! A recursive async walk would need boxed futures, and the device has no
+//! allocator. Without yielding, a walk over a large card would block the
+//! only executor. So the walk is a cursor instead: one entry index per open
+//! directory level, and a decision about what to do next.
 //!
-//! This is the recursion unrolled into a cursor: one entry index per open
-//! level, and a decision about what to do next. It knows nothing about
-//! filesystems, which is what lets it be tested on the host rather than only
-//! on a box with a full card in it.
+//! It knows nothing about filesystems, so it can be tested on the host.
 
 /// How deep the walk descends before it refuses to go further.
 ///
-/// A Toniebox card is `CONTENT/<8 hex>/<8 hex>`, so three is enough and four
-/// leaves room. The limit exists so a directory loop is bounded rather than
-/// endless, and it also fixes how many directories are open at once.
+/// A Toniebox card uses `CONTENT/<8 hex>/<8 hex>`, so three levels are enough
+/// and four leave room. The limit stops a directory loop from being endless,
+/// and bounds how many directories are open at once.
 pub const MAX_DEPTH: usize = 4;
 
 /// What sits at the cursor's current position.
@@ -75,8 +72,8 @@ impl Cursor {
 
     /// Steps over the current entry without acting on it.
     ///
-    /// For an entry the caller could not open. Without this the walk would ask
-    /// about the same unreadable entry forever.
+    /// For an entry the caller could not open. Without this, the walk would
+    /// ask about the same entry forever.
     pub fn skip(&mut self) {
         self.index[self.depth] += 1;
     }
@@ -102,9 +99,8 @@ impl Cursor {
                     return Action::Finished;
                 }
                 self.depth -= 1;
-                // Step past the directory just left. Forgetting this is an
-                // endless walk: the parent hands back the same subdirectory
-                // and the cursor descends into it again, forever.
+                // Step past the directory just left, or the walk would enter
+                // it again forever.
                 self.index[self.depth] += 1;
                 Action::Ascend
             }
@@ -142,8 +138,8 @@ mod tests {
         assert_eq!(cursor.index(), 0, "a freshly opened directory starts at 0");
     }
 
-    /// The bug this guards is an endless walk: on leaving a subdirectory the
-    /// parent must resume *past* it, or it hands back the same one forever.
+    /// On leaving a subdirectory, the parent must continue *after* it, or the
+    /// walk never ends.
     #[test]
     fn leaving_a_directory_resumes_the_parent_after_it() {
         let mut cursor = Cursor::new();
@@ -161,8 +157,8 @@ mod tests {
         assert_eq!(cursor.advance(Found::Nothing), Action::Finished);
     }
 
-    /// Descends to the deepest level the limit allows, leaving the cursor
-    /// poised on a directory it must refuse.
+    /// Descends to the deepest allowed level, so the next directory must be
+    /// refused.
     fn at_the_deepest_allowed_level() -> Cursor {
         let mut cursor = Cursor::new();
         while cursor.depth() < MAX_DEPTH - 1 {
@@ -184,8 +180,8 @@ mod tests {
         assert_eq!(cursor.depth(), MAX_DEPTH - 1);
     }
 
-    /// The one that would catch an endless walk: refusing to descend has to
-    /// still step past the entry, or the same directory is offered forever.
+    /// Refusing to descend must still step past the entry, or the walk never
+    /// ends.
     #[test]
     fn a_directory_too_deep_to_enter_is_still_stepped_over() {
         let mut cursor = at_the_deepest_allowed_level();

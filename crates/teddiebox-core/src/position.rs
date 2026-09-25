@@ -1,14 +1,9 @@
 //! Where a story should resume, as it is written on the card.
 //!
-//! Text, like `CONFIG.TXT`, so a card can be read on a laptop when the box
-//! does something surprising. Small enough to sit inside one sector, which is
-//! what keeps the window for a torn write short.
+//! Plain text, like `CONFIG.TXT`, so it can be read on a laptop. Small enough
+//! to fit in one sector, so a write is unlikely to be interrupted halfway.
 //!
-//! The number is a container page — the exact spot, not the chapter. Writing
-//! the exact position is no more expensive than writing a coarse one, and it
-//! is written when a figure is lifted rather than at every chapter boundary,
-//! so a child who skips through twenty chapters costs one write instead of
-//! twenty.
+//! The number is an Ogg page index: the exact position, not the chapter.
 
 use crate::Position;
 
@@ -17,8 +12,8 @@ pub const MAX_POSITION: usize = 11;
 
 /// Writes `page` into `out`, returning how many bytes it used.
 ///
-/// Hand-rolled rather than `write!`: this crate is `no_std` and a formatter
-/// would pull in machinery for one number.
+/// Written by hand rather than with `write!`, to avoid pulling in the
+/// formatting machinery for one number.
 pub fn render(page: u32, out: &mut [u8; MAX_POSITION]) -> usize {
     let mut digits = [0u8; 10];
     let mut n = page;
@@ -40,14 +35,12 @@ pub fn render(page: u32, out: &mut [u8; MAX_POSITION]) -> usize {
 
 /// Reads what [`render`] wrote.
 ///
-/// Anything else is [`Position::Start`]. The card is not a trusted input — a
-/// torn write leaves whatever the sector held — and no byte on it should be
-/// able to strand a figure at a chapter its story does not have.
+/// Anything else is [`Position::Start`]. The card cannot be trusted: an
+/// interrupted write can leave any bytes behind.
 pub fn parse(text: &str) -> Position {
     match text.trim().parse::<u32>() {
-        // Page 0 is the header rather than audio, so it was never a place to
-        // resume — which is what lets a cleared story and an absent file mean
-        // the same thing.
+        // Page 0 is the header, not audio, so it is never a resume point.
+        // Writing 0 is how a finished story is cleared.
         Ok(0) | Err(_) => Position::Start,
         Ok(page) => Position::Exact { page },
     }
@@ -72,8 +65,7 @@ mod tests {
         assert_eq!(parse(text), Position::Exact { page: 31_200 });
     }
 
-    /// A story is over a hundred megabytes at four kilobytes a page, so the
-    /// page number outgrows five digits long before the file outgrows a card.
+    /// Page numbers can have more than five digits.
     #[test]
     fn a_page_late_in_a_long_story_survives_the_trip() {
         let mut out = [0u8; MAX_POSITION];
@@ -82,17 +74,14 @@ mod tests {
         assert_eq!(parse(text), Position::Exact { page: 4_000_000 });
     }
 
-    /// Zero is how a finished story is cleared, and it has to mean the same
-    /// thing as no file at all — `storage` has no delete, so this is what
-    /// clearing looks like. Page 0 is the header rather than audio anyway, so
-    /// it was never a place to resume.
+    /// Writing zero clears a finished story (the storage code cannot delete
+    /// files), so it must mean the same as no file.
     #[test]
     fn zero_is_the_start_rather_than_a_page() {
         assert_eq!(parse("0\n"), Position::Start);
     }
 
-    /// The card is not a trusted input. A torn write, a truncated sector or a
-    /// file somebody edited by hand must not strand a figure.
+    /// An interrupted write or a hand-edited file must fall back to the start.
     #[test]
     fn anything_unreadable_is_the_start() {
         assert_eq!(parse(""), Position::Start);

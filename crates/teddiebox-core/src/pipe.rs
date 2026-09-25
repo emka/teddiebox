@@ -1,25 +1,20 @@
 //! A fixed-capacity byte queue between one producer and one consumer.
 //!
-//! The download and the card are on opposite sides of a deadline. Bytes arrive
-//! from the network in whatever sizes TLS hands over, at whatever moment the
-//! server sends them; they leave towards the card only in the gaps between
-//! audio frames. Neither side can wait for the other — a media loop that
-//! awaited the network would underrun the moment the server paused, and a
-//! network task that awaited the card would stall the connection behind a
-//! decode.
+//! Bytes arrive from the network in any size and at any time; they can only be
+//! written to the card between audio frames. Neither side can wait for the
+//! other: if the media loop waited for the network, audio would underrun when
+//! the server paused, and if the network task waited for the card, the
+//! connection would stall behind decoding.
 //!
-//! So this sits between them and absorbs the difference. **It never blocks and
-//! never fails**: a write into a full pipe reports how much it took, and a read
-//! from an empty one reports zero. Running dry is not an error, because the
-//! download's watermark gate already knows what to do about it — pause
-//! decoding until more has arrived — and running full is not an error either,
-//! because the producer simply asks the server for less.
+//! This buffer sits between them. **It never blocks and never fails**: a write
+//! into a full pipe returns how much it took, and a read from an empty pipe
+//! returns zero. Neither is an error: when it runs empty, decoding waits for
+//! more data; when it is full, the producer reads less from the server.
 
 /// Bytes waiting to move from the network to the card.
 ///
-/// Sized by the caller. One producer and one consumer are assumed: the counts
-/// are plain fields, not atomics, so the whole thing lives behind whatever
-/// lock the firmware already uses rather than pretending to be lock-free.
+/// Sized by the caller. Assumes one producer and one consumer. The counts are
+/// plain fields, not atomics, so the firmware must keep it behind a lock.
 #[derive(Debug)]
 pub struct Pipe<const N: usize> {
     bytes: [u8; N],
@@ -58,11 +53,10 @@ impl<const N: usize> Pipe<N> {
         N - self.len
     }
 
-    /// Queues as much of `bytes` as fits, and says how much that was.
+    /// Queues as much of `bytes` as fits and returns how much that was.
     ///
-    /// A short write is the ordinary way this reports back-pressure, so the
-    /// caller must use the return value: dropping it silently loses the tail
-    /// of a download, which then fails a checksum a long way from here.
+    /// A short write is normal when the pipe is full, so the caller must use
+    /// the return value, or part of the download is lost.
     #[must_use = "a short write means the rest of these bytes were not taken"]
     pub fn write(&mut self, bytes: &[u8]) -> usize {
         let taken = bytes.len().min(self.free());
@@ -74,7 +68,7 @@ impl<const N: usize> Pipe<N> {
         taken
     }
 
-    /// Fills `out` with as much as is queued, and says how much that was.
+    /// Fills `out` with as much as is queued and returns how much that was.
     #[must_use = "a short read means fewer bytes were available than asked for"]
     pub fn read(&mut self, out: &mut [u8]) -> usize {
         let given = out.len().min(self.len);
@@ -101,8 +95,7 @@ mod tests {
         assert!(pipe.is_empty());
     }
 
-    /// The producer's back-pressure signal. A caller that ignores it drops the
-    /// middle of a download and finds out at the checksum.
+    /// A short write tells the producer the pipe is full.
     #[test]
     fn a_write_that_does_not_fit_takes_what_it_can_and_says_so() {
         let mut pipe: Pipe<4> = Pipe::new();
@@ -119,7 +112,7 @@ mod tests {
         );
     }
 
-    /// Running dry is the normal state between server bursts, not a fault.
+    /// An empty pipe is normal between bursts from the server.
     #[test]
     fn reading_an_empty_pipe_yields_nothing_rather_than_failing() {
         let mut pipe: Pipe<8> = Pipe::new();
@@ -127,10 +120,9 @@ mod tests {
         assert_eq!(pipe.read(&mut out), 0);
     }
 
-    /// The bug this type exists to not have. After a partial read the queue
-    /// starts partway along the array, so the next write wraps past the end —
-    /// and a naive implementation returns those bytes in the wrong order or
-    /// overwrites ones it has not handed over yet.
+    /// After a partial read the queue starts partway along the array, so the
+    /// next write wraps past the end. The bytes must still come out in order
+    /// and none may be overwritten.
     #[test]
     fn bytes_survive_wrapping_around_the_end_of_the_buffer() {
         let mut pipe: Pipe<8> = Pipe::new();
@@ -149,8 +141,8 @@ mod tests {
         assert_eq!(&rest, b"efghijk", "the wrap reordered or clobbered bytes");
     }
 
-    /// Many small writes and one big read is the shape this actually sees:
-    /// TLS hands over records, the card takes pages.
+    /// Many small writes and one big read is the normal pattern: TLS delivers
+    /// records, the card takes pages.
     #[test]
     fn many_small_writes_drain_as_one_run() {
         let mut pipe: Pipe<16> = Pipe::new();
@@ -162,8 +154,7 @@ mod tests {
         assert_eq!(&out[..10], b"abcdefghij");
     }
 
-    /// And the reverse: one big write drained in card-sized bites, repeatedly,
-    /// so the indices keep wrapping rather than wrapping once.
+    /// Repeated writes and reads, so the indices wrap many times.
     #[test]
     fn a_pipe_stays_correct_over_many_wraps() {
         let mut pipe: Pipe<8> = Pipe::new();

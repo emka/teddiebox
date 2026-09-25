@@ -38,13 +38,12 @@ pub enum Event {
     /// Periodic tick. Drives timeouts; the only way time advances.
     Tick(Millis),
     EarDown(Ear, Millis),
-    /// The ear has now been down long enough to be a hold rather than a tap.
+    /// The ear has been down long enough to count as a hold, not a tap.
     ///
-    /// Raised by whoever owns the pin, because it is the only thing awake at
-    /// the moment a press *becomes* a hold — the reducer sees events, not
-    /// time, and its tick is rate-limited to once a second. Before this
-    /// existed, the tap-or-hold question was settled on release, which meant
-    /// no chapter could change until the ear was let go.
+    /// Sent by the task that reads the ear's pin. The reducer only sees
+    /// events and ticks at most once a second, so it cannot notice the moment
+    /// a press becomes a hold. This lets a chapter change while the ear is
+    /// still held down.
     EarHeld(Ear, Millis),
     EarUp(Ear, Millis),
     TagPresent(TagUid),
@@ -58,9 +57,7 @@ pub enum Event {
     Charger(bool),
     /// The current track reached its end.
     TrackFinished,
-    /// The story reached its end on its own.
-    ///
-    /// Fed by whoever owns playback, which is the only thing that can know.
+    /// The story played to its end. Sent by the playback task.
     PlaybackEnded,
     /// Content for this tag is now available locally.
     ContentReady(TagUid),
@@ -69,14 +66,14 @@ pub enum Event {
     Revalidated(TagUid, Freshness),
     /// Content for this tag could not be obtained, and why.
     ContentMissing(TagUid, Unavailable),
-    /// The box was struck on one side. Detected and latched by the
-    /// accelerometer, so this arrives once per slap however long it waited.
+    /// The box was slapped on one side. The accelerometer detects and latches
+    /// it, so this arrives once per slap, however late it is read.
     Slap(Side),
-    /// A jack went into the headphone socket, or came out of it.
+    /// A plug went into the headphone socket, or came out of it.
     ///
-    /// Raised by whoever polls the codec's detect register, because nothing
-    /// else can know: this jack has no switch the ESP32 can see, and the
-    /// codec does not interrupt for it on a pin this board has proved.
+    /// Sent by the task that polls the codec's headset-detect register. The
+    /// socket has no switch the ESP32 can read, and no codec interrupt pin for
+    /// it is known to work on this board.
     Headphones(bool),
 }
 
@@ -92,19 +89,16 @@ pub enum Action {
     SeekTo(Position),
     NextTrack,
     PrevTrack,
-    /// Where the sound should go. The firmware mutes or unmutes the speaker on
-    /// this and touches nothing else — in particular not its own record of
-    /// what is plugged in, which has exactly one writer.
+    /// Where the sound should go. The firmware only mutes or unmutes the
+    /// speaker. It does not change its own record of what is plugged in; only
+    /// the headphone-detect code writes that.
     SetOutput(Output),
-    /// The level to play at, as both the step the ears moved and the dB the
-    /// codec takes.
+    /// The level to play at, as both the volume step and the codec's dB.
     ///
-    /// Both, deliberately. The ladder is this crate's policy and the
-    /// firmware's job is only to say it in the codec's units; if this carried
-    /// the step alone the firmware would have to know which output is current,
-    /// which means a second copy of state that can disagree with the
-    /// reducer's. The step comes along because it is what the console line
-    /// says and what a reducer test asserts.
+    /// The dB value is included so the firmware does not need to know which
+    /// output is active to convert the step; that would be a second copy of
+    /// state that could disagree with the reducer. The step is included for
+    /// the console output and for tests.
     SetVolume {
         step: Volume,
         db: i8,
@@ -115,14 +109,14 @@ pub enum Action {
         pos: Position,
     },
     RequestContent(TagUid),
-    /// Ask the server whether this figure's cached story is still its own.
+    /// Ask the server whether the story cached for this figure is still
+    /// current.
     ///
-    /// Answered by [`Event::Revalidated`]. Nothing plays until it is: a story
-    /// that may be out of date is not played while a fresh one arrives behind
-    /// it, because swapping one underneath a listening child would need two
-    /// handles on one file and a rename, and the card has neither.
+    /// Answered by [`Event::Revalidated`]. Nothing plays until then: replacing
+    /// a file while it plays would need two open handles on one file and a
+    /// rename, and the SD card library supports neither.
     Revalidate(TagUid),
-    /// Stop a download nobody is waiting for any more.
+    /// Stop a download that is no longer needed.
     AbortFetch,
     PlayPrompt(Prompt),
     PowerOff(PowerOffReason),
@@ -149,38 +143,31 @@ impl Default for CoreConfig {
 #[derive(Debug)]
 pub struct Core {
     config: CoreConfig,
-    /// One per [`Output`], indexed by it. Each keeps its own place on its own
-    /// ladder, so a plug pulled out does not bring back a speaker that was
-    /// turned down for an ear.
+    /// One per [`Output`], indexed by it. Each output keeps its own volume, so
+    /// turning the headphones down does not change the speaker's level.
     volumes: [VolumeModel; 2],
     output: Output,
     battery: BatteryModel,
     playback: Playback,
     charging: bool,
     ear_down: [Option<Millis>; 2],
-    /// Set when a press has already been spent on a chapter skip, so the
-    /// release that follows steps the volume for nobody.
+    /// Set when a press has already been used (for a chapter skip or a
+    /// volume step), so the release that follows does nothing.
     ear_spent: [bool; 2],
     led: LedState,
     last_activity: Millis,
     last_tick: Millis,
-    /// Set once the shutdown prompt has been played for the current
-    /// `must_shut_down` latch, so the reducer says it once rather than on
-    /// every subsequent battery reading for as long as the box has power to
-    /// keep asking.
+    /// Set once the empty-battery shutdown has been requested, so it is
+    /// requested once and not on every later battery reading.
     announced_shutdown: bool,
     /// Set once the idle timeout has asked the box to park, so it asks once
-    /// rather than on every tick for as long as the box has power to keep
-    /// asking — the same guard, and for the same reason, as
-    /// `announced_shutdown`.
+    /// and not on every tick.
     ///
-    /// Never cleared. A park drops the rails and the console loop does not
-    /// come back from it, so the only exit is a reset, which builds a new
-    /// `Core` anyway. Clearing it on renewed activity would be a promise this
-    /// box cannot keep.
+    /// Never cleared: parking cuts the power rails, and only a reset (which
+    /// creates a new `Core`) brings the box back.
     asked_to_park: bool,
-    /// Set by the firmware when something outside the reducer's sight is
-    /// keeping the box in use. See [`Core::note_in_use`].
+    /// Set by the firmware when something the reducer cannot see is keeping
+    /// the box in use. See [`Core::note_in_use`].
     externally_in_use: bool,
     /// Whether a held ear skips a chapter. See [`Core::note_ears_skip`].
     ears_skip: bool,
@@ -217,37 +204,29 @@ impl Core {
 
     /// Records how far the story has got, so lifting the figure can save it.
     ///
-    /// Not an `Event`, because it carries no decision and would be the most
-    /// frequent one by far: the media task calls this once per decoded frame,
-    /// beside the plate and the ears it already services there. It touches RAM
-    /// only — the card's copy is written at chapter boundaries by whoever owns
-    /// the card, which is not this.
+    /// Not an `Event`: it makes no decision and is called once per decoded
+    /// frame, far more often than anything else. It only updates RAM; the
+    /// firmware writes the position to the card.
     pub fn note_position(&mut self, pos: Position) {
         self.playback.note_position(pos);
     }
 
     /// Records that something the reducer cannot see is keeping the box in
-    /// use, so the idle timeout does not park it mid-job.
+    /// use, so the idle timeout does not park it in the middle of a job.
     ///
-    /// Not an `Event`, for the same reason [`Core::note_position`] is not: it
-    /// carries no decision, only a fact the firmware holds and the reducer
-    /// cannot derive. The reducer's state answers for figures on the plate and
-    /// nothing else — a console `play` or `taf` runs with the reducer sitting
-    /// at `Idle`, and a `batlog` run is hours of deliberate use during which
-    /// the box may make no sound at all.
-    ///
-    /// The policy stays here, where a host test can reach it. All the firmware
-    /// does is report the fact.
+    /// Not an `Event`, for the same reason as [`Core::note_position`]. The
+    /// reducer only knows about figures on the plate. A console `play` or
+    /// `taf` runs while the reducer is `Idle`, and a `batlog` run can last
+    /// hours without making a sound.
     pub fn note_in_use(&mut self, in_use: bool) {
         self.externally_in_use = in_use;
     }
 
-    /// Steps the volume for one ear, or says the box is already at the end of
-    /// the ladder.
+    /// Steps the volume for one ear, or plays the limit prompt if the volume
+    /// is already at its end.
     ///
-    /// One place, because the press and the release both reach it depending on
-    /// whether skipping is on, and a ceiling that prompted from one path and
-    /// not the other would be a silence nobody could explain.
+    /// Called from both the press and the release (depending on whether
+    /// skipping is on), so both behave the same at the limit.
     fn step_volume(&mut self, ear: Ear, actions: &mut Actions) {
         let output = self.output;
         let model = &mut self.volumes[output as usize];
@@ -268,26 +247,22 @@ impl Core {
         }
     }
 
-    /// Reports whether a held ear skips a chapter, which the card decides.
+    /// Sets whether holding an ear skips a chapter (a setting on the card).
     ///
-    /// The reducer cannot read the card, but it has to know: the answer
-    /// decides whether a press is *ambiguous*. While a hold can mean "next
-    /// chapter", a press cannot be acted on until it is known not to be one.
-    /// With skipping off there is nothing to wait for, so the volume moves on
-    /// the press — which is what a stock box does, and what an ear feels like
-    /// it should do.
+    /// When holding can skip, a press must wait until release to know it was
+    /// a tap. When skipping is off, the volume changes on the press, like a
+    /// stock box.
     pub fn note_ears_skip(&mut self, skips: bool) {
         self.ears_skip = skips;
     }
 
-    /// Whether anything at all is going on, from every source that knows.
+    /// Whether the box is busy with anything.
     ///
-    /// A fetch counts: this box downloads at about 42.5 KB/s, so a 37 MB story
-    /// takes a quarter of an hour against a five-minute timeout, and parking
-    /// mid-download leaves a dark box and a half-written cache file.
+    /// A download counts: at about 42.5 KB/s, a 37 MB story takes about 15
+    /// minutes, longer than the 5-minute idle timeout.
     ///
-    /// The charger counts because the spec deliberately declines to make it a
-    /// wake source: a box parked while plugged in is a box nothing can wake.
+    /// Charging counts because the charger cannot wake the box, so a box
+    /// parked while plugged in could not be woken by it.
     fn in_use(&self) -> bool {
         self.charging
             || self.externally_in_use
@@ -300,11 +275,10 @@ impl Core {
     pub fn handle<I: ContentIndex>(&mut self, event: Event, index: &I) -> Actions {
         let mut actions = Actions::new();
 
-        // Timestamped events date themselves; untimestamped ones are dated by
-        // the most recent tick, which is the only clock the core ever sees.
-        // Battery and charger events deliberately do not count as activity: a
-        // box sitting on the shelf still samples its pack, and treating that
-        // as use would keep it awake forever.
+        // Events with a timestamp use it; the others use the last tick, the
+        // only clock the core has. Battery and charger events are not
+        // activity: the box samples its battery even when unused, and counting
+        // that would keep it awake forever.
         match event {
             Event::Tick(now) => self.last_tick = now,
             Event::EarDown(_, at) | Event::EarHeld(_, at) | Event::EarUp(_, at) => {
@@ -317,7 +291,7 @@ impl Core {
             | Event::ContentMissing(..)
             | Event::PlaybackEnded
             | Event::Slap(_)
-            // A jack does not move on its own: somebody put it there.
+            // Somebody plugged or unplugged something, so this is activity.
             | Event::Headphones(_) => {
                 self.last_activity = self.last_tick;
             }
@@ -326,10 +300,9 @@ impl Core {
 
         match event {
             Event::Tick(now) => {
-                // While the box is in use the countdown has not started, so
-                // the clock is carried forward rather than merely skipped:
-                // otherwise a use that outlasts the timeout would power the
-                // box off the instant it ended.
+                // While the box is in use, keep moving the last-activity time
+                // forward. Otherwise a job longer than the timeout would power
+                // the box off the moment it ended.
                 if self.in_use() {
                     self.last_activity = now;
                 } else if !self.asked_to_park
@@ -342,18 +315,16 @@ impl Core {
 
             Event::EarDown(ear, at) => {
                 self.ear_down[ear as usize] = Some(at);
-                // Spent on the press itself when a press can only mean one
-                // thing. The release then has nothing left to do, which is
-                // what stops one press stepping the volume twice.
+                // With skipping off, the press changes the volume right away
+                // and the release does nothing, so one press is one step.
                 self.ear_spent[ear as usize] = !self.ears_skip;
                 if !self.ears_skip {
                     self.step_volume(ear, &mut actions);
                 }
             }
 
-            // The press becomes a chapter skip here, with the ear still down,
-            // rather than on the release. One skip per press: an ear held on
-            // and on must not walk through the story.
+            // A hold skips a chapter while the ear is still down. Only one
+            // skip per press, however long the ear is held.
             Event::EarHeld(ear, _) => {
                 if self.ear_down[ear as usize].is_none() || self.ear_spent[ear as usize] {
                     return actions;
@@ -367,12 +338,11 @@ impl Core {
 
             Event::EarUp(ear, _) => {
                 let was_down = self.ear_down[ear as usize].take().is_some();
-                // A release nobody announced a press for is not a release.
+                // Ignore a release without a press.
                 if !was_down {
                     return actions;
                 }
-                // Already spent on a skip. Stepping the volume as well would
-                // make every chapter change the loudness too.
+                // The press was already used (for a skip or a volume step).
                 if self.ear_spent[ear as usize] {
                     self.ear_spent[ear as usize] = false;
                     return actions;
@@ -419,20 +389,18 @@ impl Core {
                 pack_mv,
                 under_load,
             } => {
-                // The warning follows the bucket the level settles into: Low
-                // or Critical both mean "getting low", and warning on both
-                // catches a fast drop that skips the Low bucket entirely.
+                // Warn when the level settles into Low or Critical. Warning on
+                // both catches a fast drop that skips Low.
                 if let Some(BatteryLevel::Low | BatteryLevel::Critical) =
                     self.battery.update(pack_mv, under_load)
                 {
                     let _ = actions.push(Action::PlayPrompt(Prompt::BatteryLow));
                 }
 
-                // The stop follows the hard cutoff, not the Critical bucket:
-                // `must_shut_down` latches by design (a pack that recovers
-                // voltage once the load is off is still empty), so this fires
-                // once, on the false-to-true transition, rather than on every
-                // reading for as long as the box has power to keep asking.
+                // Shut down at the hard cutoff, not at Critical.
+                // `must_shut_down` stays true once set (a pack whose voltage
+                // recovers without load is still empty), so only act on the
+                // first time it becomes true.
                 if self.battery.must_shut_down() && !self.announced_shutdown {
                     self.announced_shutdown = true;
                     let _ = actions.push(Action::PlayPrompt(Prompt::BatteryCritical));
@@ -457,21 +425,17 @@ impl Core {
 
             Event::Slap(side) => {
                 let _ = actions.push(match side {
-                    // Left goes back, right goes forward — the transport
-                    // convention, and a call made at the bench.
-                    //
-                    // This agrees with the ears: the larger ear is on the
-                    // box's right and skips forward, and so does a slap on
-                    // that side. One side of the box, one direction, however
-                    // you touch it.
+                    // Left goes back, right goes forward, like media player
+                    // controls. This matches the ears: the larger ear is on
+                    // the right and also skips forward.
                     Side::Left => Action::PrevTrack,
                     Side::Right => Action::NextTrack,
                 });
             }
 
-            // Routing and level together, and nothing else. The story carries
-            // on: a child who yanks a plug should not lose their place or
-            // have to do anything to get the story back.
+            // Change the output and its volume, nothing else. The story keeps
+            // playing, so a child who pulls the plug does not lose their
+            // place.
             Event::Headphones(plugged) => {
                 self.output = if plugged {
                     Output::Headphones
@@ -520,9 +484,7 @@ mod tests {
         }
     }
 
-    /// A card with nothing on it, so a test can reach `State::Fetching`. The
-    /// stub above answers `true` unconditionally, which is why nothing here
-    /// ever exercised a download despite the whole of it being host-decidable.
+    /// A card with nothing on it, so a test can reach `State::Fetching`.
     struct Unknown;
     impl ContentIndex for Unknown {
         fn is_available(&self, _tag: TagUid) -> bool {
@@ -536,13 +498,11 @@ mod tests {
         }
     }
 
-    /// A core whose battery thresholds are fixed here rather than taken from
-    /// the shipped calibration.
+    /// A core with fixed battery thresholds, not the shipped calibration.
     ///
-    /// The tests below are about what the core *does* with a level — warn
-    /// once per bucket, stop at the cutoff, stay quiet otherwise — and none of
-    /// them are about this pack's voltages. Reading them from the default
-    /// meant a recalibration silently changed what a test was exercising.
+    /// These tests are about what the core does with a battery level, not
+    /// about the real pack's voltages, so recalibrating the pack must not
+    /// change them.
     fn core() -> Core {
         Core::new(CoreConfig {
             battery: BatteryConfig {
@@ -562,9 +522,8 @@ mod tests {
         actions.contains(&wanted)
     }
 
-    /// `Playback::note_position` has existed since M2 and is reachable only
-    /// from its own tests, so lifting a figure has always saved the position
-    /// the story *started* at. The firmware holds a `Core`, not a `Playback`.
+    /// Lifting a figure saves the position the story had reached, not the one
+    /// it started at.
     #[test]
     fn a_lifted_figure_saves_where_the_story_had_reached() {
         let mut c = core();
@@ -582,9 +541,7 @@ mod tests {
         ));
     }
 
-    /// The bigger ear does the bigger thing. A stock box puts volume up and
-    /// next-track on the large ear, and a child reaches for it without being
-    /// told which is which.
+    /// The larger ear turns the volume up, as on a stock box.
     #[test]
     fn a_tap_on_the_larger_ear_raises_the_volume() {
         let mut c = core();
@@ -610,10 +567,8 @@ mod tests {
         assert!(c.volume() < before);
     }
 
-    /// A press that can only mean one thing acts on the press. With skipping
-    /// off there is nothing to wait for — the box cannot be about to be told
-    /// "next chapter" — and waiting for the release is the deafness that made
-    /// the hold feel wrong in the first place.
+    /// With skipping off, a press cannot be a skip, so there is no reason to
+    /// wait for the release.
     #[test]
     fn with_skipping_off_a_press_changes_the_volume_at_once() {
         let mut c = core();
@@ -641,9 +596,8 @@ mod tests {
         assert_eq!(c.volume(), stepped, "one press, one step");
     }
 
-    /// The wait exists exactly where the ambiguity does. While a hold can mean
-    /// "next chapter", a press cannot be acted on until it is known not to be
-    /// one — and stepping the volume on every skip would drift it 7 dB a time.
+    /// With skipping on, a press might become a hold, so the volume waits for
+    /// the release. Otherwise every skip would also change the volume.
     #[test]
     fn with_skipping_on_a_press_still_waits_for_the_release() {
         let mut c = core();
@@ -670,9 +624,8 @@ mod tests {
         assert!(contains(&actions, Action::PlayPrompt(Prompt::VolumeLimit)));
     }
 
-    /// The skip lands while the ear is still down. Waiting for the release
-    /// made the box feel deaf: a child holds an ear, nothing happens, and the
-    /// chapter only changes once they give up and let go.
+    /// The skip happens while the ear is still held. Waiting for the release
+    /// makes the box feel unresponsive.
     #[test]
     fn a_hold_skips_while_the_ear_is_still_down() {
         let mut c = core();
@@ -685,8 +638,8 @@ mod tests {
         assert!(contains(&back, Action::PrevTrack));
     }
 
-    /// The press was spent on the skip. A release that stepped the volume too
-    /// would make every chapter skip a volume change as well.
+    /// The press was used for the skip, so the release must not also change
+    /// the volume.
     #[test]
     fn the_release_after_a_hold_does_nothing() {
         let mut c = core();
@@ -698,8 +651,7 @@ mod tests {
         assert_eq!(c.volume(), before);
     }
 
-    /// One hold, one chapter — decided at the bench. An ear held on
-    /// and on must not walk through the story.
+    /// One hold skips one chapter, however long the ear is held.
     #[test]
     fn holding_on_after_the_skip_does_not_skip_again() {
         let mut c = core();
@@ -709,10 +661,8 @@ mod tests {
         assert!(!contains(&again, Action::NextTrack), "{again:?}");
     }
 
-    /// How long the ear was down is now the firmware's business: it holds the
-    /// pin and it starts the clock. A release the reducer was never warned
-    /// about is a tap however late it arrives, because a hold would have said
-    /// so at the moment it became one.
+    /// The firmware decides when a press becomes a hold. A release with no
+    /// `EarHeld` before it is a tap, however long it took.
     #[test]
     fn a_release_with_no_hold_before_it_is_a_tap_however_long_it_took() {
         let mut c = core();
@@ -750,8 +700,8 @@ mod tests {
         assert!(contains(&actions, Action::PlayPrompt(Prompt::VolumeLimit)));
     }
 
-    /// The larger ear is on the box's right, and right goes forward — the same
-    /// direction a slap on that side means. See `teddiebox_board::side_for_click`.
+    /// The larger ear is on the box's right, and right goes forward, like a
+    /// slap on that side. See `teddiebox_board::side_for_click`.
     #[test]
     fn a_long_press_on_the_right_ear_skips_forward() {
         let mut c = core();
@@ -801,10 +751,7 @@ mod tests {
         assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
-    /// The pack-empty path latches on `announced_shutdown` precisely so it
-    /// fires once; the idle path had no such guard, and at the bench on
-    /// 2026-09-08 it asked to park 125 times in three minutes — once per tick,
-    /// for as long as the box had power to keep asking.
+    /// The idle timeout asks to park once, not on every tick after it expires.
     #[test]
     fn the_idle_park_is_asked_for_once_not_on_every_tick() {
         let mut c = core();
@@ -826,9 +773,8 @@ mod tests {
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
-    /// The case finding 4 showed was unreachable: a child wanders off and leaves
-    /// the figure on the plate. Before `PlaybackEnded` the reducer still believed
-    /// it was playing, so the timeout — gated on not-playing — never fired.
+    /// A child walks away and leaves the figure on the plate. Once the story
+    /// ends, the idle timeout must still fire.
     #[test]
     fn a_finished_story_lets_the_idle_timeout_fire_with_the_figure_still_on() {
         let mut c = Core::new(CoreConfig::default());
@@ -840,11 +786,9 @@ mod tests {
         assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
-    /// A story that ran for longer than the idle timeout must not switch the box
-    /// off the moment it ends: the countdown starts when the box becomes idle, not
-    /// when the figure was placed. Feeding the tick only at the top of the media
-    /// loop, which is inside the playback call for the whole story, is what made
-    /// this a real hazard rather than a theoretical one.
+    /// A story longer than the idle timeout must not switch the box off the
+    /// moment it ends: the countdown starts when the box becomes idle, not when
+    /// the figure was placed.
     #[test]
     fn the_idle_countdown_starts_when_the_story_ends_not_when_it_began() {
         let mut c = core();
@@ -867,11 +811,10 @@ mod tests {
         );
     }
 
-    /// A child puts an unknown figure on the plate. This box downloads at about
-    /// 42.5 KB/s, so a 37 MB story is a quarter of an hour against a five-minute
-    /// timeout — and nothing refreshes the clock in between, because
-    /// `ContentReady` arrives only at the end. Parking here drops the rails while
-    /// the card is still being written.
+    /// A child puts an unknown figure on the plate. At about 42.5 KB/s, a 37 MB
+    /// story takes about 15 minutes to download, longer than the idle timeout,
+    /// and `ContentReady` only arrives at the end. Parking would cut power
+    /// while the card is being written.
     #[test]
     fn a_download_in_progress_holds_the_box_awake() {
         let mut c = core();
@@ -883,10 +826,9 @@ mod tests {
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
-    /// A console `play` or `taf` runs with the reducer sitting at `Idle` — it has
-    /// no figure and never saw one — so the state gate alone cuts a bench story
-    /// off a second in. The same gap defeats a `batlog` run, which is hours of
-    /// deliberate use during which the box makes no sound at all.
+    /// A console `play` or `taf` runs while the reducer is `Idle`, and a
+    /// `batlog` run can last hours without a sound. The firmware reports these
+    /// so the box stays awake.
     #[test]
     fn something_only_the_firmware_can_see_holds_the_box_awake() {
         let mut c = core();
@@ -907,9 +849,8 @@ mod tests {
         assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
-    /// The spec deliberately declines to make the charger a wake source, so a box
-    /// parked while plugged in is a box nothing can wake — the worst of the two
-    /// available outcomes, reached by leaving it charging overnight.
+    /// The charger cannot wake the box, so a box parked while charging
+    /// overnight could not be woken by it.
     #[test]
     fn a_charging_box_does_not_park_itself() {
         let mut c = core();
@@ -920,9 +861,8 @@ mod tests {
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
-    /// Unplugging is not activity — the spec is explicit that charger events must
-    /// not defer the timeout — but it does start the countdown, because until
-    /// then there was nothing to count.
+    /// Unplugging the charger is not activity, but it starts the idle
+    /// countdown, because charging kept the box in use until then.
     #[test]
     fn unplugging_the_charger_starts_the_countdown() {
         let mut c = core();
@@ -947,9 +887,8 @@ mod tests {
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
-    /// The box says what it is about to do, then does it. Both exactly once: a
-    /// latching shutdown that re-pushed `PowerOff` on every subsequent reading
-    /// would have the box announcing its own death every two seconds.
+    /// The box announces the shutdown, then shuts down, each exactly once and
+    /// not again on later readings.
     #[test]
     fn a_pack_reaching_critical_announces_it_and_stops_once() {
         let mut c = core();
@@ -1007,8 +946,7 @@ mod tests {
     }
 
     /// The Critical bucket starts at `low_mv` (3200) and the hard cutoff is at
-    /// 3000. Between them the pack is very low and the box still works, so it
-    /// warns — and must not announce a shutdown it is not performing.
+    /// 3000. Between them the box warns but does not shut down.
     #[test]
     fn the_critical_bucket_above_the_cutoff_warns_without_stopping() {
         let mut c = core();
@@ -1038,9 +976,8 @@ mod tests {
         );
     }
 
-    /// A pack that keeps falling is worth mentioning again: settling into Low
-    /// warns once, and settling into Critical afterwards — a real change of
-    /// bucket, not a repeat of the same reading — warns again.
+    /// Settling into Low warns once; falling further into Critical warns
+    /// again.
     #[test]
     fn a_pack_that_falls_further_is_warned_about_again() {
         let mut c = core();
@@ -1076,9 +1013,7 @@ mod tests {
         assert_eq!(warnings, 2, "falling on into Critical warns again");
     }
 
-    /// A pack recovering above a threshold is good news, and good news does
-    /// not interrupt a story — but it must re-arm the warning, so a pack that
-    /// falls low again after a recharge is still worth mentioning.
+    /// A recovering pack makes no sound, but a later drop warns again.
     #[test]
     fn recovering_is_silent_but_arms_the_warning_again() {
         let mut c = core();
@@ -1098,8 +1033,8 @@ mod tests {
         }
         assert_eq!(warnings, 1);
 
-        // 3_700 clears the Ok threshold plus hysteresis, so the level climbs
-        // back up silently: recovery is not worth interrupting anyone for.
+        // 3_700 is above the Ok threshold plus hysteresis, so the level rises
+        // again, silently.
         for _ in 0..4 {
             for a in c.handle(
                 Event::Battery {
@@ -1154,9 +1089,8 @@ mod tests {
         assert!(contains(&actions, Action::PrevTrack));
     }
 
-    /// The bench established on 2026-09-20 that this jack does not switch the
-    /// speaker off: with the tone running, plugging headphones in left the
-    /// speaker playing. So the box has to do it, and this is the decision.
+    /// The headphone socket does not switch the speaker off by itself, so the
+    /// box has to.
     #[test]
     fn a_jack_going_in_moves_the_sound_to_the_headphones() {
         let mut c = core();
@@ -1165,9 +1099,7 @@ mod tests {
         assert_eq!(c.output(), Output::Headphones);
     }
 
-    /// Stock behaviour, chosen deliberately: a child who yanks a plug should
-    /// not lose their place or have to do anything to get the story back.
-    /// Nothing here pauses, stops or seeks.
+    /// Like a stock box: pulling the plug does not pause, stop or seek.
     #[test]
     fn a_jack_coming_out_brings_the_speaker_back_without_touching_playback() {
         let mut c = core();
@@ -1182,8 +1114,8 @@ mod tests {
         );
     }
 
-    /// The level has to move with the routing, or the first moment in the
-    /// headphones is the speaker's level in somebody's ear.
+    /// The volume changes with the output, or the headphones would start at
+    /// the speaker's level.
     #[test]
     fn plugging_in_asks_for_the_headphone_ladders_level() {
         let mut c = core();
@@ -1198,9 +1130,9 @@ mod tests {
         ));
     }
 
-    /// Each output keeps its own place on the ladder. Turning the headphones
-    /// down must not leave the speaker quiet when the plug comes out, and a
-    /// speaker turned up must not be waiting in an ear.
+    /// Each output keeps its own volume. Turning the headphones down must not
+    /// make the speaker quiet, and a loud speaker must not carry over to the
+    /// headphones.
     #[test]
     fn each_output_remembers_its_own_step_across_a_plug_and_an_unplug() {
         let mut c = core();
@@ -1233,8 +1165,7 @@ mod tests {
         ));
     }
 
-    /// The ears keep meaning what they mean; they simply move a different
-    /// ladder. A tap with headphones in must ask for a headphone level.
+    /// With headphones in, the ears change the headphone volume.
     #[test]
     fn an_ear_steps_the_ladder_of_whatever_is_plugged_in() {
         let mut c = core();
@@ -1250,9 +1181,7 @@ mod tests {
         ));
     }
 
-    /// Inserting a jack is a deliberate human act, so it counts as use. A box
-    /// that parked itself a moment after somebody plugged headphones in would
-    /// look broken.
+    /// Plugging in headphones counts as activity.
     #[test]
     fn plugging_headphones_in_restarts_the_idle_countdown() {
         let mut c = core();

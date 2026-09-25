@@ -1,8 +1,8 @@
 //! Battery and charger sensing.
 //!
-//! The board divides both rails down before the ADC sees them, with a
-//! different ratio each. Getting a divider wrong reads as a plausible voltage
-//! rather than an obvious fault, which is why the arithmetic lives here.
+//! The board divides both voltages down before the ADC, each by a different
+//! ratio. A wrong divider gives a plausible but wrong voltage, so the
+//! arithmetic lives here where it is tested.
 
 /// Battery sense, divided by four.
 pub const BATTERY_PIN: u8 = 9;
@@ -17,22 +17,18 @@ pub const ADC_MAX: u16 = 4095;
 
 /// Millivolts at full scale.
 ///
-/// **Measured, not nominal.** On 2026-09-01 a multimeter read 3.82 V across the
-/// pack while the ADC reported raw 3111, which with the documented 100k/33k
-/// divider gives 1257 mV at full scale:
-/// `3820 x 4095 / (3111 x 4)`.
+/// **Measured, not from the datasheet.** A multimeter read 3.82 V across the
+/// pack while the ADC reported 3111, which with the 100k/33k divider gives
+/// 1257 mV at full scale: `3820 x 4095 / (3111 x 4)`.
 ///
-/// The nominal figure for the attenuation this driver requests would be around
-/// 3100 mV, and using it put the pack at 9.4 V — impossible for three NiMH
-/// cells. 1257 mV is close to the 6 dB range rather than the 11 dB one asked
-/// for, so either the attenuation is not applied as requested or the nominal
-/// endpoints are badly wrong. The measurement is trusted over the theory.
+/// The datasheet value for the requested attenuation is about 3100 mV, which
+/// put the pack at an impossible 9.4 V. 1257 mV is closer to the 6 dB range
+/// than the 11 dB range requested, so the attenuation is probably not applied
+/// as requested.
 ///
-/// **This is one point on a line.** The ESP32-S3's ADC is not linear, and step
-/// 3's criterion is that the millivolts track a meter across a real charge and
-/// discharge. Until that has been done, treat the reading as good near 3.8 V
-/// and approximate elsewhere. The charger channel is **not** calibrated at all
-/// — nobody has put a meter on it.
+/// **Calibrated at one point only.** The ESP32-S3's ADC is not linear, so the
+/// reading is accurate near 3.8 V and approximate elsewhere. The charger
+/// channel is not calibrated at all.
 const FULL_SCALE_MV: u32 = 1257;
 
 const fn scaled_mv(raw: u16, divider: u32) -> u32 {
@@ -52,11 +48,9 @@ pub const fn charger_mv(raw: u16) -> u32 {
 
 /// Whether the charger is plugged in.
 ///
-/// The channel is uncalibrated, so this is a threshold between two observed
-/// states rather than a voltage with a meaning: nothing connected reads about
-/// 1,950 counts, and a connected charger rails the channel at full scale.
-/// Half way between them is far from either, which is the most this reading
-/// can honestly support.
+/// The channel is not calibrated, so this is a raw threshold between two
+/// observed readings: about 1,950 with nothing connected, and full scale with
+/// a charger connected.
 pub const fn charger_present(raw: u16) -> bool {
     raw > 3_000
 }
@@ -65,10 +59,7 @@ pub const fn charger_present(raw: u16) -> bool {
 mod tests {
     use super::*;
 
-    /// Both readings are from this bench, not from the divider arithmetic:
-    /// the channel is uncalibrated, so what it is worth is exactly the two
-    /// states it has been observed in. Deriving these from `charger_mv` would
-    /// make the test agree with the code by construction.
+    /// Real readings from the box, not derived from `charger_mv`.
     #[test]
     fn the_charger_is_seen_when_the_reading_rails_and_not_when_it_floats() {
         assert!(
@@ -91,8 +82,7 @@ mod tests {
         assert_eq!(charger_mv(0), 0);
     }
 
-    /// Literal expectations, not the formula restated: a test that recomputes
-    /// what the code computes cannot disagree with it.
+    /// Literal expected values, so the test can disagree with the code.
     #[test]
     fn a_midscale_reading_converts_with_its_own_divider() {
         assert_eq!(battery_mv(2048), 2_514);
@@ -105,8 +95,8 @@ mod tests {
         assert_eq!(battery_mv(9_999), battery_mv(ADC_MAX));
     }
 
-    /// The calibration point itself: the raw count the ADC actually reported
-    /// while a multimeter read 3.82 V across the pack.
+    /// The calibration point: the ADC read 3111 while a multimeter read 3.82 V
+    /// across the pack.
     #[test]
     fn the_measured_calibration_point_reproduces_the_meter() {
         let mv = battery_mv(3111);

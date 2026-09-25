@@ -1,8 +1,8 @@
 //! The shared vocabulary of the reducer.
 
-/// Milliseconds since boot. Supplied by the caller; the core never reads a clock.
 pub use teddiebox_board::Side;
 
+/// Milliseconds since boot. Supplied by the caller; the core never reads a clock.
 pub type Millis = u64;
 
 /// The unique identifier of an ISO 15693 tag, as read from the figure.
@@ -10,14 +10,12 @@ pub type Millis = u64;
 pub struct TagUid(pub [u8; 8]);
 
 impl TagUid {
-    /// The same identifier in the byte order everything outside the reader
-    /// uses: the card's `<8 hex>/<8 hex>` path, teddyCloud's ruid, and the
-    /// `get` command's argument.
+    /// The UID in the byte order used everywhere outside the reader: the
+    /// card's `<8 hex>/<8 hex>` path, teddyCloud's ruid, and the `get`
+    /// command's argument.
     ///
-    /// The reader hands the UID over least-significant byte first and every
-    /// other party reads it the other way round, so one of the two has to
-    /// reverse it. Doing it here means callers name the conversion instead of
-    /// open-coding a `reverse()` each time they need a story's identity.
+    /// The reader returns the UID least-significant byte first; everything
+    /// else uses the reverse order.
     pub fn ruid(self) -> u64 {
         let mut bytes = self.0;
         bytes.reverse();
@@ -25,49 +23,31 @@ impl TagUid {
     }
 }
 
-/// A resume point, expressed as an Ogg page index within the TAF file.
-///
 /// Where a story should resume.
 ///
-/// An enum rather than a bare `u32` so that "nothing is remembered" is a state
-/// the type carries rather than a magic zero every caller has to remember to
-/// check — and so a coarser kind can be added later without every reader
-/// silently treating it as a page.
+/// An enum rather than a bare `u32`, so "nothing saved" is its own case and
+/// not a magic zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
     /// Nothing is remembered: play from the beginning.
     #[default]
     Start,
-    /// The exact container page the decoder had reached.
-    ///
-    /// A chapter variant existed here briefly, for a coarse position written
-    /// at every chapter boundary. It earned nothing: writing the exact page
-    /// costs the same bytes, and writing it when the figure is lifted costs
-    /// one write instead of one per chapter.
+    /// The Ogg page index within the TAF file that the decoder had reached.
     Exact { page: u32 },
 }
 
 /// The two ears, named by size rather than by side.
 ///
-/// A Toniebox has one large ear and one small one, and which is which is the
-/// only thing a person can tell without being told. "Left" and "right" are
-/// worse than useless here: they are the *box's* left and right, so an
-/// instruction to press the right ear gets the other ear pressed about half
-/// the time — which it did, at the bench, on 2026-09-08.
+/// A Toniebox has one large ear and one small one, which anyone can tell
+/// apart. "Left" and "right" are ambiguous: the box's right is the left of
+/// someone facing it.
 ///
-/// The sides below were also wrong until 2026-09-13, which is the case for
-/// naming them by size: the mistake sat here for over a month and cost
-/// nothing, because nothing in the firmware ever asked which side an ear was
-/// on. A slap does, so it had to be settled.
-///
-/// The discriminants are explicit because the reducer indexes its
-/// press-timestamp array by ear, and they follow the pin order in
-/// [`crate::input`] so the two cannot drift apart.
+/// The discriminants are explicit because the reducer indexes arrays by ear.
+/// They follow the pin order in [`crate::input`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Ear {
-    /// GPIO20. **The box's right** — established at the bench 2026-09-13,
-    /// correcting what this said since M5.
+    /// GPIO20, the box's right.
     Larger = 0,
     /// GPIO21, the box's left.
     Smaller = 1,
@@ -82,14 +62,11 @@ pub const MAX_VOLUME: u8 = 5;
 
 /// Where the sound is going.
 ///
-/// The jack on this board does not switch the speaker off — measured by ear
-/// on 2026-09-20, plugging headphones in left the speaker playing — so which
-/// output is live is something the box decides and not something the hardware
-/// does for it.
+/// The headphone socket on this board does not switch the speaker off, so the
+/// firmware chooses the output.
 ///
 /// The discriminants are explicit because the reducer indexes one
-/// [`crate::VolumeModel`] per output by this, the way it already indexes ear
-/// presses by [`Ear`].
+/// [`crate::VolumeModel`] per output by this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Output {
@@ -105,21 +82,20 @@ pub enum LedState {
     Playing,
     Fetching,
     Charging,
-    /// The pack is running out but the box still works — a warning, in orange.
+    /// The pack is running low but the box still works. A warning, in orange.
     BatteryLow,
     /// The pack is nearly gone and the box is about to stop, in red.
     BatteryCritical,
     Error,
     /// The box is serving the setup page and will not play anything.
     ///
-    /// A colour used by nothing else, because the one thing somebody needs to
-    /// know on sight is that this boot is not going to become a teddy bear.
+    /// Uses a colour no other state uses, so it is obvious the box is not
+    /// going to play.
     Setup,
 }
 
 impl LedState {
-    /// Every state, so a test can prove the round trip below covers them all
-    /// rather than the handful somebody remembered.
+    /// Every state, so a test can check the round trip below for all of them.
     pub const ALL: [LedState; 10] = [
         LedState::Off,
         LedState::Booting,
@@ -135,10 +111,10 @@ impl LedState {
 
     /// The byte that carries this state between tasks.
     ///
-    /// The reducer runs in the media task and the LED is owned by the console
-    /// loop, so what passes between them is one atomic. Written as an explicit
-    /// number per state rather than a cast, because a reordering of the enum
-    /// would otherwise silently change what a stored byte means.
+    /// The reducer runs in the media task and the LED belongs to the console
+    /// loop, so the state is passed as one atomic byte. Each state has an
+    /// explicit number rather than a cast, so reordering the enum cannot
+    /// change what a byte means.
     pub const fn code(self) -> u8 {
         match self {
             LedState::Off => 0,
@@ -180,26 +156,22 @@ pub enum Prompt {
     NoNetwork,
     /// The access point refused the passphrase on the card.
     ///
-    /// Separate from [`Prompt::NoNetwork`] because the two send whoever is
-    /// holding the box to different places: this one to the card, that one to
-    /// the router.
+    /// Separate from [`Prompt::NoNetwork`] because the fix is different: this
+    /// one means check the card, that one means check the router.
     WrongPassword,
     BatteryLow,
     /// The pack is nearly gone and the box is about to stop.
     ///
-    /// Separate from [`Prompt::BatteryLow`], which is a warning the box carries
-    /// on after. This one is an announcement of something it is doing.
+    /// Unlike [`Prompt::BatteryLow`], which is only a warning, this announces
+    /// that the box is shutting down.
     BatteryCritical,
     VolumeLimit,
 }
 
-/// Which authority decided the box should stop.
+/// Why the box is powering off.
 ///
-/// Both causes want the same mechanism and a child hears the same silence
-/// either way, so this changes nothing the box does. It exists because the
-/// console is the only thing that can say which of the two it was, and a
-/// shutdown that names the wrong cause sends whoever reads it to the wrong
-/// place — a bench box parked by its idle timer used to report a flat pack.
+/// Both reasons power off the same way. The reason is only shown on the
+/// console, so the log names the right cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerOffReason {
     /// The pack fell below the hard cutoff.
@@ -212,17 +184,13 @@ pub enum PowerOffReason {
 mod tests {
     use super::*;
 
-    /// The two tiers carry different things — an exact page in RAM, a chapter
-    /// on the card — and a `page` that sometimes means a chapter is the kind
-    /// of lie that costs an evening.
     #[test]
     fn a_position_with_nothing_saved_is_the_start() {
         assert_eq!(Position::default(), Position::Start);
     }
 
-    /// A real Tonie off this project's own card: the reader hands its UID over
-    /// as `E0040350503F2E1D`, and the story sits at `CONTENT/1D2E3F50/500304E0`.
-    /// A synthetic vector would pass by construction; this one was observed.
+    /// A real Tonie: the reader returns its UID as `E0040350503F2E1D`, and
+    /// its story is stored at `CONTENT/1D2E3F50/500304E0`.
     #[test]
     fn a_real_tonie_uid_reverses_to_the_identifier_its_story_is_filed_under() {
         let tag = TagUid([0xE0, 0x04, 0x03, 0x50, 0x50, 0x3F, 0x2E, 0x1D]);
