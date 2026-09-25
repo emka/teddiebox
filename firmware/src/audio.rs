@@ -7,7 +7,7 @@
 //! Buffer accounting ([`teddiebox_core::cushion`]) and WAV header parsing
 //! ([`teddiebox_core::wav`]) are tested on the host. This file drives the DMA.
 
-use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU32};
+use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU32};
 use portable_atomic::Ordering;
 
 use embassy_futures::yield_now;
@@ -249,13 +249,12 @@ const _: () = assert!(
 /// transmitter and buffer the DMA transfer owns.
 pub static STOP: AtomicBool = AtomicBool::new(false);
 
-/// The container page the decoder is on, and the chapter it is in.
+/// The container page the decoder is on: the position that is saved when a
+/// figure is lifted.
 ///
-/// Statics, because the decoder only exists inside the playback loop (the
-/// same reason as for `STOP` and `SKIP`). `PAGE` is the position that is saved
-/// when a figure is lifted. `CHAPTER` is currently not read anywhere.
+/// A static, because the decoder only exists inside the playback loop (the
+/// same reason as for `STOP` and `SKIP`).
 pub static PAGE: AtomicU32 = AtomicU32::new(0);
-pub static CHAPTER: AtomicU16 = AtomicU16::new(0);
 
 /// How playback ended, which decides whether a saved position is worth
 /// keeping.
@@ -658,7 +657,6 @@ async fn play_taf_inner(
                     // Published for position memory, which cannot reach the
                     // decoder.
                     PAGE.store(decoder.page(), Ordering::Relaxed);
-                    CHAPTER.store(decoder.chapter() as u16, Ordering::Relaxed);
                 }
                 Ok(None) => break,
                 Err(_) => {
