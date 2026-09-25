@@ -9,8 +9,8 @@ teddiebox-taf = { path = "../teddiebox-taf" }
 teddiebox-opus-sys = { path = "../teddiebox-opus-sys" }
 
 [dev-dependencies]
-# No plotting or rayon: this is run to read a number, not to produce a
-# report, and both pull in a lot of build for nothing.
+# No plotting or rayon: the benchmark is run to read a number, and both add a
+# lot of build time.
 criterion = { version = "0.8", default-features = false, features = [
     "cargo_bench_support",
 ] }

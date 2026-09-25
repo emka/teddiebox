@@ -1,17 +1,15 @@
 //! Measures what one Opus packet costs to decode.
 //!
-//! Real-time margin is the project's go/no-go question, and M1 produced no
-//! number for a device measurement to be compared against. This is that
-//! number, taken against the same fixed-point libopus the device will run,
-//! so the two are comparable rather than merely similar.
+//! Decoding must be faster than real time. This measures the host speed with
+//! the same fixed-point libopus the device runs, so device measurements can
+//! be compared against it.
 //!
 //! Throughput is declared in samples per channel, so criterion's `elem/s`
 //! reads directly as a sampling rate: divide it by 48 000 to get the
 //! real-time factor. A device that decodes at 1x is exactly keeping up and
 //! has no margin for the SD card, the DAC, or anything else.
 //!
-//! Not run in CI. A wall-clock assertion on a shared runner is a flaky
-//! assertion, and a test nobody trusts provides no feedback.
+//! Not run in CI: timing on a shared runner is unreliable.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
@@ -50,9 +48,8 @@ fn decode_one_packet(c: &mut Criterion) {
     let mut group = c.benchmark_group("opus");
     group.throughput(Throughput::Elements(SAMPLES_PER_PACKET as u64));
 
-    // Cycling through the fixture's packets rather than repeating one keeps
-    // the decoder's state evolving the way it does during playback, so the
-    // measurement is not of a single unusually warm code path.
+    // Cycle through all the fixture's packets rather than repeating one, so
+    // the decoder state changes as it does during playback.
     let mut next = 0usize;
     group.bench_function(BenchmarkId::new("decode", "60ms stereo frame"), |b| {
         b.iter(|| {

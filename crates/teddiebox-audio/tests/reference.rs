@@ -1,11 +1,8 @@
-//! Decodes the fixtures and checks the result really is what `fixturegen`
-//! encoded: 440 Hz on the left, 660 Hz on the right. This is the same
-//! assertion Phase B step 9 runs on device, so a device regression is
-//! comparable against a known-good host run.
+//! Decodes the fixtures and checks the result is what `fixturegen` encoded:
+//! 440 Hz on the left, 660 Hz on the right.
 //!
-//! The windows here are deliberately wide, and a device producing subtly
-//! wrong audio would still pass all of them. Phase B step 9 needs
-//! sample-accurate golden PCM if it is to be planned around this file.
+//! The tolerances are wide, so subtly wrong audio would still pass. Checking
+//! the device's output exactly needs reference PCM, not these tests.
 
 use teddiebox_audio::{LibOpus, OpusState, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE};
 use teddiebox_taf::SlicePages;
@@ -75,10 +72,8 @@ fn the_decoded_signal_is_a_440_hz_tone() {
     );
 }
 
-/// The channels carry different tones, so this fails on a channel swap, a
-/// mono downmix, and an interleaving mistake alike. None of those were
-/// detectable while the fixture put identical samples in both channels:
-/// every one of them produced output identical to correct output.
+/// The channels carry different tones, so this catches a channel swap, a
+/// mono downmix, or an interleaving mistake.
 #[test]
 fn the_left_and_right_channels_carry_their_own_tones() {
     let pcm = decode_all();
@@ -96,10 +91,7 @@ fn the_left_and_right_channels_carry_their_own_tones() {
     );
 }
 
-/// Track skip is the box's primary interaction, and until now every seek
-/// test used a stub decoder while the only tests that produced real audio
-/// never seeked. Between them sat the case that matters: seeking and then
-/// actually hearing something.
+/// Seeks with the real decoder and checks that audio comes out.
 #[test]
 fn seeking_to_a_chapter_yields_audible_audio_from_that_chapter_onward() {
     let whole = decode_from(CHAPTERS, None);
@@ -114,9 +106,9 @@ fn seeking_to_a_chapter_yields_audible_audio_from_that_chapter_onward() {
         "expected ~880 zero crossings for 440 Hz after the seek, got {crossings}"
     );
 
-    // Chapter 1 of 3 starts roughly a third in, so seeking there must drop
-    // roughly a third of the audio. Asserting it is *shorter* would pass on a
-    // decoder that seeked to the end and produced almost nothing.
+    // Chapter 1 of 3 starts about a third in, so seeking there must drop
+    // about a third of the audio. Only checking that it is *shorter* would
+    // also pass if the seek went to the end.
     let dropped = whole.len() as f64 - from_second.len() as f64;
     let fraction = dropped / whole.len() as f64;
     assert!(

@@ -8,23 +8,21 @@ use teddiebox_opus_sys as sys;
 
 /// Bytes reserved for a 48 kHz stereo decoder.
 ///
-/// libopus reports 27 124 bytes on a 64-bit host, and less on the 32-bit
-/// device because every pointer and offset inside the state shrinks — so the
-/// host figure is a safe reservation for both, and the device wastes a few
-/// kilobytes until Phase B can measure the real number. Most of it is CELT's
-/// decode history: 2048 samples × 2 channels × 4 bytes is 16 KB on its own
-/// and cannot be traded away.
+/// libopus needs 27 124 bytes on a 64-bit host, and less on the 32-bit
+/// device, where pointers are smaller. The host size is therefore safe for
+/// both; the device wastes a few kilobytes. Most of it is CELT's decode
+/// history (2048 samples × 2 channels × 4 bytes = 16 KB), which cannot be
+/// reduced.
 ///
-/// [`LibOpus::new`] checks this against what libopus asks for, so changing
-/// the codec's configuration cannot silently under-reserve.
+/// [`LibOpus::new`] checks this against what libopus asks for, so a codec
+/// configuration change cannot silently reserve too little.
 pub const OPUS_STATE_BYTES: usize = 28 * 1024;
 
 /// Storage for one libopus decoder, owned by the caller.
 ///
-/// libopus sizes its own state and initialises it in place, which is what
-/// lets the firmware decode with no heap at all. The consequence is that
-/// 27 KB has to come from somewhere the caller chooses: put this in a
-/// `static`, not on an embassy task stack, which is smaller than the state.
+/// libopus initialises its state in place, so the firmware needs no heap. The
+/// caller provides the 27 KB: put it in a `static`, not on an embassy task
+/// stack, which is too small.
 #[repr(C, align(8))]
 pub struct OpusState {
     bytes: [u8; OPUS_STATE_BYTES],
@@ -61,9 +59,9 @@ impl<'a> LibOpus<'a> {
     pub fn new(state: &'a mut OpusState) -> Result<Self, AudioError> {
         let needed = unsafe { sys::opus_decoder_get_size(CHANNELS as c_int) };
         if needed < 0 || needed as usize > OPUS_STATE_BYTES {
-            // Unreachable while `the_reservation_covers_what_libopus_asks_for`
-            // passes: reaching it means the codec configuration changed
-            // without OPUS_STATE_BYTES being re-measured.
+            // Cannot happen while `the_reservation_covers_what_libopus_asks_for`
+            // passes. If it does, the codec configuration changed and
+            // OPUS_STATE_BYTES must be measured again.
             return Err(AudioError::Decode);
         }
 
@@ -110,8 +108,8 @@ impl OpusDecode for LibOpus<'_> {
         if n < 0 {
             return Err(AudioError::Decode);
         }
-        // libopus counts samples per channel; the trait's contract is the
-        // interleaved total, so this is the one place the two disagree.
+        // libopus counts samples per channel; the trait returns the
+        // interleaved total.
         Ok(n as usize * CHANNELS)
     }
 }
@@ -146,8 +144,8 @@ mod tests {
         let n = decoder.decode(&scratch[..len], &mut pcm).unwrap();
 
         // 60 ms of stereo audio at 48 kHz: 2880 samples/channel x 2 channels.
-        // This is the real adapter, not the stub — it pins the per-channel to
-        // interleaved conversion against genuine libopus output.
+        // Uses real libopus, to check the per-channel to interleaved
+        // conversion.
         assert_eq!(n, 5760);
     }
 

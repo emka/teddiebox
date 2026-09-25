@@ -60,25 +60,15 @@ pub enum Skip {
 pub struct TafDecoder<S: PageSource, D: OpusDecode> {
     reader: TafReader<S>,
     decoder: D,
-    /// Sized so that every packet a TAF file can contain fits — see
-    /// [`MAX_PACKET`], which is derived from the page size rather than from
-    /// the codec, so "too big for this buffer" is not a state this decoder
-    /// can reach.
+    /// Big enough for any packet a TAF file can contain; see [`MAX_PACKET`].
     packet: [u8; MAX_PACKET],
 }
 
 impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
     /// Opens a source and takes ownership of the reader.
     ///
-    /// Deliberately does **not** accept a pre-built `TafReader`, so that the
-    /// container position and the decoder's own packet buffer cannot drift
-    /// apart: a caller holding its own handle could advance the reader behind
-    /// the decoder's back. Owning it from the start makes that unreachable
-    /// rather than merely discouraged.
-    ///
-    /// Note this is no longer what protects the Opus header packets — those
-    /// are identified by magic in [`Self::next_frame`], which is correct from
-    /// any starting position.
+    /// Does **not** accept a ready-made `TafReader`, so no caller can move the
+    /// reader without the decoder knowing.
     pub fn open(source: S, decoder: D) -> Result<Self, AudioError> {
         Ok(Self {
             reader: TafReader::open(source)?,
@@ -97,24 +87,22 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
 
     /// Which chapter is playing, zero-based.
     ///
-    /// Delegated to the reader rather than latched on seek: the reader is the
-    /// only thing that knows the stream advanced past a chapter start on its
-    /// own, and a copy kept here would be wrong for the whole rest of any
-    /// story played straight through.
+    /// Asked of the reader, because a story played straight through moves
+    /// into later chapters without any seek.
     pub fn chapter(&self) -> usize {
         self.reader.current_chapter()
     }
 
     /// Seeks to a chapter and resumes decoding from there.
     ///
-    /// A failed seek leaves the reader positioned exactly where it was,
-    /// mirroring `TafReader::seek_to_chapter`'s own contract.
+    /// A failed seek leaves the reader where it was, as
+    /// `TafReader::seek_to_chapter` does.
     pub fn seek_to_chapter(&mut self, n: usize) -> Result<(), AudioError> {
         self.reader.seek_to_chapter(n)?;
         Ok(())
     }
 
-    /// Which container page the reader is on — what position memory saves
+    /// Which 4096-byte block the reader is on. This is the position saved
     /// when a figure is lifted.
     pub fn page(&self) -> u32 {
         self.reader.current_page()
@@ -122,9 +110,9 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
 
     /// Resumes at a page reported earlier by [`page`](Self::page).
     ///
-    /// A failed seek leaves the reader exactly where it was, the same contract
-    /// [`seek_to_chapter`](Self::seek_to_chapter) keeps — so a saved page that
-    /// belongs to some other story costs nothing but the seek.
+    /// A failed seek leaves the reader where it was, like
+    /// [`seek_to_chapter`](Self::seek_to_chapter), so a saved page from
+    /// another story does no harm.
     pub fn seek_to_page(&mut self, page: u32) -> Result<(), AudioError> {
         self.reader.seek_to_page(page)?;
         Ok(())
@@ -132,10 +120,9 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
 
     /// Skips forward to the start of the following chapter.
     ///
-    /// [`Skip::PastTheEnd`] from the last chapter, with the story left where
-    /// it was: skipping out of the end of the last chapter is the same thing
-    /// as the story finishing, and the caller ends it rather than playing
-    /// that chapter a second time.
+    /// Returns [`Skip::PastTheEnd`] from the last chapter and does not move:
+    /// skipping past the last chapter means the story is finished, and the
+    /// caller ends it.
     pub fn next_chapter(&mut self) -> Result<Skip, AudioError> {
         let next = self.chapter() + 1;
         if next >= self.chapter_count() {
@@ -148,9 +135,8 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
     /// Skips back to the start of the previous chapter, or restarts the
     /// current one if there is none.
     ///
-    /// Restarting rather than refusing, because a control that does nothing
-    /// is indistinguishable from a control that is broken, and starting the
-    /// story again is what going back from its beginning means.
+    /// Restarts rather than doing nothing, because a control that does
+    /// nothing looks broken.
     pub fn previous_chapter(&mut self) -> Result<usize, AudioError> {
         let previous = self.chapter().saturating_sub(1);
         self.seek_to_chapter(previous)?;
@@ -159,23 +145,18 @@ impl<S: PageSource, D: OpusDecode> TafDecoder<S, D> {
 
     /// Decodes the next audio packet. `Ok(None)` at end of stream.
     ///
-    /// Retry semantics differ by error, and callers need to know which they
-    /// got. An [`AudioError::Container`] leaves the packet unconsumed, so
-    /// retrying re-attempts it. A [`AudioError::Decode`] arrives *after* the
-    /// packet has been taken from the container, so that frame's audio is
-    /// gone: a retry resumes at the following packet. Treat a decode error
-    /// as a dropped frame, not as a repeatable failure.
+    /// Errors behave differently on retry. After an [`AudioError::Container`]
+    /// the packet is not consumed, so a retry tries it again. An
+    /// [`AudioError::Decode`] happens after the packet was consumed, so a
+    /// retry continues with the next packet. Treat a decode error as one lost
+    /// frame.
     pub fn next_frame(&mut self, pcm: &mut [i16]) -> Result<Option<usize>, AudioError> {
         if pcm.len() < MAX_FRAME_SAMPLES {
             return Err(AudioError::BufferTooSmall);
         }
-        // OpusHead and OpusTags must not reach libopus. Identify them by
-        // their magic rather than by position: a positional skip is wrong
-        // after a seek, because chapter 0 legitimately starts *at* OpusHead —
-        // the headers and the first audio page share the first container
-        // block. Skipping by position would drop real audio from chapter 0,
-        // and a "already skipped" flag set on seek would feed OpusHead to
-        // libopus as audio. Matching the magic is correct in every position.
+        // OpusHead and OpusTags must not reach libopus. They are recognised
+        // by their magic bytes, not their position, because after seeking to
+        // chapter 0 the reader starts *at* OpusHead.
         loop {
             match self.reader.next_packet(&mut self.packet) {
                 Ok(None) => return Ok(None),
@@ -228,10 +209,7 @@ mod tests {
         .unwrap();
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
 
-        // A single call only proves the *first* decoded packet isn't a
-        // header -- the name says "never". Drive the decoder over the
-        // whole stream, as the neighbouring test does, so the assertion
-        // actually matches what the name claims.
+        // Decode the whole stream, not just the first packet.
         while dec.next_frame(&mut pcm).unwrap().is_some() {}
         assert!(!dec.decoder.saw_opus_header);
     }
@@ -252,9 +230,8 @@ mod tests {
         while dec.next_frame(&mut pcm).unwrap().is_some() {
             frames += 1;
         }
-        // Measured from the real fixture: 85 packets total, of which the first
-        // two are OpusHead and OpusTags, leaving 83 audio frames. `toniefile`
-        // encodes 60 ms Opus frames (2880 samples/channel), not 20 ms —
+        // The fixture has 85 packets: OpusHead, OpusTags and 83 audio frames.
+        // `toniefile` encodes 60 ms Opus frames (2880 samples/channel):
         // 83 x 2880 = 239040 samples = 4.98 s.
         assert_eq!(frames, 83, "expected 83 audio frames, got {frames}");
         assert_eq!(dec.next_frame(&mut pcm).unwrap(), None);
@@ -274,8 +251,8 @@ mod tests {
         assert_eq!(dec.next_frame(&mut pcm), Err(AudioError::BufferTooSmall));
     }
 
-    /// The decode loop is the only thing that knows a story is playing, so a
-    /// skip decided elsewhere has to be able to ask the decoder where it is.
+    /// A chapter skip needs to know the current chapter, so the decoder
+    /// reports it.
     #[test]
     fn the_decoder_reports_the_chapter_it_is_playing() {
         const CHAPTERS_FIXTURE: &[u8] =
@@ -293,8 +270,8 @@ mod tests {
         assert_eq!(dec.chapter(), 2);
     }
 
-    /// The firmware holds a decoder and never a reader, so position memory's
-    /// exact tier is only reachable if both halves pass through.
+    /// The firmware only holds a decoder, not a reader, so the decoder must
+    /// pass page positions through.
     #[test]
     fn the_decoder_returns_to_the_page_it_reported() {
         const CHAPTERS_FIXTURE: &[u8] =
@@ -318,8 +295,8 @@ mod tests {
         assert_eq!(dec.chapter(), 2, "and it is back in that chapter");
     }
 
-    /// Records the last packet it was asked to decode, so a test can say
-    /// which part of the file the decoder actually went to.
+    /// Records the last packet it was asked to decode, so a test can see
+    /// where in the file the decoder is.
     struct LastPacket {
         buf: [u8; MAX_PACKET],
         len: usize,
@@ -356,10 +333,8 @@ mod tests {
         assert_eq!(dec.chapter(), 2);
     }
 
-    /// A child skipping forward out of the last chapter has reached the end
-    /// of the story, which is the same thing as the story finishing. Saying
-    /// so is what lets the decode loop end instead of playing the last
-    /// chapter twice.
+    /// Skipping forward from the last chapter ends the story, instead of
+    /// playing the last chapter again.
     #[test]
     fn there_is_no_chapter_after_the_last_one() {
         let mut dec = chapters_decoder();
@@ -376,10 +351,8 @@ mod tests {
         assert_eq!(dec.chapter(), 1);
     }
 
-    /// Going back from the first chapter restarts it rather than doing
-    /// nothing. Nothing at all is indistinguishable from a control that did
-    /// not work, and starting the story over is what the gesture means
-    /// everywhere else it exists.
+    /// Going back from the first chapter restarts it, rather than doing
+    /// nothing.
     #[test]
     fn going_back_from_the_first_chapter_starts_it_again() {
         let mut dec = chapters_decoder();
@@ -508,10 +481,8 @@ mod tests {
 
     #[test]
     fn seeking_to_chapter_zero_decodes_its_first_real_audio_packet_not_opus_head() {
-        // Chapter 0 begins at the same container block as OpusHead and OpusTags,
-        // so positional header skipping fails: it would either skip real audio
-        // or feed OpusHead to the decoder depending on how the seek was entered.
-        // This test ensures we identify headers by magic, not by position.
+        // Chapter 0 begins in the same block as OpusHead and OpusTags, so the
+        // headers must be recognised by their magic bytes, not by position.
 
         // Independently determine what the first real audio packet of chapter 0 is.
         let mut direct = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
