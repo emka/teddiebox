@@ -1,4 +1,4 @@
-//! `application/x-www-form-urlencoded`, the one direction this box needs it.
+//! Decoding `application/x-www-form-urlencoded` form bodies.
 
 use heapless::Vec;
 
@@ -14,9 +14,8 @@ pub enum FormError {
 
 /// Decodes one named field out of a form body.
 ///
-/// The name must match a whole field — `configuration=x` does not answer a
-/// request for `config`, which is why this compares against the `=` rather
-/// than looking for a prefix.
+/// The name must match the whole field name: `configuration=x` does not
+/// match `config`.
 pub fn field<const N: usize>(body: &[u8], name: &str) -> Result<Vec<u8, N>, FormError> {
     let raw = body
         .split(|&b| b == b'&')
@@ -109,10 +108,8 @@ mod tests {
         assert_eq!(got.unwrap_err(), FormError::BadEscape);
     }
 
-    /// The exact boundary. `MAX_CONFIG` is both what this will decode into
-    /// and what the box writes to the card, so a file of precisely that many
-    /// bytes has to survive the whole round trip — and the off-by-one that
-    /// broke reading one back had no test on this side either.
+    /// A value of exactly the capacity is kept. (`MAX_CONFIG` is both the
+    /// decode capacity and the largest file the box writes.)
     #[test]
     fn a_value_of_exactly_the_capacity_is_kept() {
         let got: heapless::Vec<u8, 4> = field(b"config=abcd", "config").unwrap();

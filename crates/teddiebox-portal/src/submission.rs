@@ -1,11 +1,10 @@
-//! What a submitted form means, decided before anything touches the card.
+//! Decides what a submitted form means, before anything is written to the
+//! card.
 //!
-//! The rule this exists to hold: **validate before writing, never after.** A
-//! file the box will refuse at its next boot must not reach the card, because
-//! the person who finds out is whoever picks up a box that no longer works,
-//! with no clue why. That rule lived inside an `async fn` welded to a
-//! `TcpSocket` and a mounted card, so nothing could check it ran in the right
-//! order — or at all.
+//! **Validate before writing.** A file the box would refuse at its next boot
+//! must never reach the card, or the box would stop working with no clue
+//! why. Keeping this separate from the socket and the card makes the rule
+//! testable.
 
 use crate::form;
 use crate::MAX_CONFIG;
@@ -13,21 +12,19 @@ use heapless::Vec;
 
 /// What the box should do about a submitted form.
 ///
-/// The card is deliberately absent. Whether one is mounted is the caller's
-/// question and is asked *after* this, so a config typed against a box with no
-/// card in it is still decoded, still validated, and still handed back to the
-/// person who typed it.
+/// The card is not involved. The caller checks for a card *after* this, so a
+/// config typed on a box without a card is still decoded, checked, and shown
+/// back to the person who typed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Submission {
     /// Refuse, with nothing in the textarea.
     ///
-    /// For the cases where there are no bytes worth handing back: a form that
-    /// did not decode, and one that is not text. Both are things a browser
-    /// does not do, so nothing a person typed is lost by not echoing them.
+    /// For a form that did not decode or is not text. A browser does not send
+    /// either, so nothing typed is lost.
     Refuse(&'static str),
     /// Hand these bytes back in the textarea, with this complaint.
     ///
-    /// A typo then costs a correction rather than a retype.
+    /// So a typo only needs correcting, not retyping.
     HandBack(Vec<u8, MAX_CONFIG>, &'static str),
     /// Parses. These bytes are safe to put on the card.
     Write(Vec<u8, MAX_CONFIG>),
@@ -35,11 +32,8 @@ pub enum Submission {
 
 /// Decodes a `POST /save` body and says what it means.
 pub fn examine(body: &[u8]) -> Submission {
-    // One arm per variant: `TooLong` is the only one of the three that is
-    // about the *file* rather than about the request carrying it, and it is
-    // the one somebody can do something about. Saying "did not arrive intact"
-    // to a config that is simply too big sends them looking at their phone
-    // instead of at their file.
+    // One arm per variant: `TooLong` is about the *file*, not the request,
+    // so it gets its own message pointing at the file.
     let submitted: Vec<u8, MAX_CONFIG> = match form::field(body, "config") {
         Ok(bytes) => bytes,
         Err(form::FormError::TooLong) => {
@@ -60,11 +54,10 @@ pub fn examine(body: &[u8]) -> Submission {
     }
 }
 
-/// Says what went wrong in words somebody can act on.
+/// Explains what went wrong in words a person can act on.
 ///
-/// One arm per variant and no catch-all, so a new
-/// [`teddiebox_config::ConfigError`] makes this fail to compile rather than
-/// quietly telling everybody "invalid".
+/// No catch-all arm, so a new [`teddiebox_config::ConfigError`] variant fails
+/// to compile until it has a message.
 pub fn describe(trouble: teddiebox_config::ConfigError) -> &'static str {
     use teddiebox_config::ConfigError::*;
     match trouble {
@@ -84,8 +77,8 @@ mod tests {
     use super::*;
     use std::vec::Vec as StdVec;
 
-    /// Percent-encodes the way a browser's form post does, so the tests drive
-    /// the decoder rather than going round it.
+    /// Percent-encodes like a browser's form post, so the tests go through
+    /// the decoder.
     fn posted(config: &str) -> StdVec<u8> {
         let mut body = StdVec::from(&b"config="[..]);
         for byte in config.as_bytes() {
@@ -112,9 +105,8 @@ mod tests {
         );
     }
 
-    /// The rule this module exists for. A config missing the one line the box
-    /// cannot boot without must come back to whoever typed it, not go to the
-    /// card and surface as a box that no longer works.
+    /// A config missing a required line comes back to the person who typed
+    /// it, and is not written to the card.
     #[test]
     fn a_config_the_box_would_refuse_at_boot_never_reaches_the_card() {
         let no_server = "ssid = homenet\npassword = hunter2\n";
@@ -134,8 +126,8 @@ mod tests {
         }
     }
 
-    /// What was typed comes back, so a typo costs a correction rather than a
-    /// retype. The bytes echoed are the submitted ones, not a re-rendering.
+    /// The submitted bytes come back unchanged, so a typo only needs
+    /// correcting.
     #[test]
     fn a_rejected_config_comes_back_exactly_as_it_was_typed() {
         let malformed = "ssid = homenet\nthis line has no equals\nserver = teddycloud.local\n";
@@ -149,8 +141,8 @@ mod tests {
         }
     }
 
-    /// A body carrying no `config` field at all is not something a browser
-    /// sends, so there is nothing of anybody's to hand back.
+    /// A body with no `config` field is not something a browser sends, so
+    /// there is nothing to hand back.
     #[test]
     fn a_body_with_no_config_field_is_refused_with_an_empty_textarea() {
         assert_eq!(
@@ -167,8 +159,8 @@ mod tests {
         );
     }
 
-    /// Distinguished from a broken form on purpose: this one is about the
-    /// file, and it is the one somebody can do something about.
+    /// Separate from a broken form: this one is about the file, which the
+    /// person can fix.
     #[test]
     fn a_config_too_long_for_the_box_blames_the_file_and_not_the_form() {
         let huge = "x".repeat(MAX_CONFIG + 1);

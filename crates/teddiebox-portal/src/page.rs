@@ -1,35 +1,29 @@
 //! The one page the portal serves.
 //!
-//! **Self-contained on purpose.** On the setup access point the phone has a
-//! route to nothing, so anything this page referenced — a stylesheet, a font,
-//! a script — would simply not load. Everything is inline, and the test
-//! `the_page_loads_nothing_from_the_network` is what keeps it that way.
+//! **Self-contained.** On the setup access point the phone cannot reach the
+//! internet, so external stylesheets, fonts or scripts would not load.
+//! Everything is inline; `the_page_loads_nothing_from_the_network` checks
+//! this.
 //!
-//! **Streamed rather than built.** An earlier version rendered into a single
-//! `heapless::Vec` and had to pick a size for it; the size picked (4096) was
-//! smaller than a full-size `CONFIG.TXT` can escape to (6144 plus markup), so
-//! a file the box would happily save could not be shown back — a 413 for its
-//! own file, with no way left to correct it. Growing the buffer to fit costs
-//! 7.6 KB that would sit in `.bss` for the life of the firmware, and `.bss`
-//! is precisely what this box has none of. So the page goes out in pieces
-//! instead: [`length`] says how long it will be, [`pieces`] says what they
-//! are, and [`escape_chunk`] hands the escaped runs over a few bytes at a
-//! time. Nothing here holds a page.
+//! **Streamed, not built in memory.** A full-size `CONFIG.TXT` can escape to
+//! over 6 KB, and there is no spare RAM for a buffer that size. So
+//! [`length`] says how long the page will be, [`pieces`] lists its parts,
+//! and [`escape_chunk`] escapes them a few bytes at a time.
 
 use heapless::Vec;
 
 /// How many [`Piece`]s a page is ever made of.
 ///
-/// Head, the three of the error paragraph, the form's two halves and the
+/// The head, three for the error paragraph, the form's two halves, and the
 /// config between them.
 const PIECES: usize = 7;
 
 /// A stretch of the page, in the order it goes on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Piece<'a> {
-    /// Markup, already safe, to be written as it is.
+    /// Markup, written as it is.
     Literal(&'a str),
-    /// Content, to be escaped on its way out — see [`escape_chunk`].
+    /// Content, escaped as it is written. See [`escape_chunk`].
     Escaped(&'a [u8]),
 }
 
@@ -55,14 +49,12 @@ const FORM_CLOSE: &str = "</textarea><button type=\"submit\">Save and restart</b
 
 /// The page, in the order it goes out.
 ///
-/// The card's bytes go in the textarea and the error, if there is one, above
-/// it. Neither is copied: the pieces borrow, and the caller writes them.
+/// The card's bytes go in the textarea, with the error (if any) above it.
+/// Nothing is copied: the pieces borrow, and the caller writes them.
 pub fn pieces<'a>(config: &'a [u8], error: Option<&'a str>) -> Vec<Piece<'a>, PIECES> {
     let mut out = Vec::new();
-    // Every push below is one of the `PIECES` this is sized for, so none of
-    // them can fail. `let _ =` rather than `unwrap`: a panic in a no_std
-    // firmware is a box that goes silent, and there is nothing here to panic
-    // about.
+    // The vector has room for all `PIECES`, so no push can fail. `let _ =`
+    // rather than `unwrap`, to avoid a panic path in the firmware.
     let _ = out.push(Piece::Literal(HEAD));
     if let Some(message) = error {
         let _ = out.push(Piece::Literal(ERROR_OPEN));
@@ -77,9 +69,7 @@ pub fn pieces<'a>(config: &'a [u8], error: Option<&'a str>) -> Vec<Piece<'a>, PI
 
 /// How many bytes [`pieces`] will produce once escaped.
 ///
-/// Needed before the first of them is written, because it is the response's
-/// `Content-Length` — which is why this counts rather than measuring: there is
-/// no rendered page to measure.
+/// Needed before anything is written, for the `Content-Length` header.
 pub fn length(config: &[u8], error: Option<&str>) -> usize {
     pieces(config, error)
         .iter()
@@ -100,14 +90,13 @@ pub fn escaped_len(bytes: &[u8]) -> usize {
 
 /// Escapes as much of `bytes` as fits `out`.
 ///
-/// Answers `(consumed, written)`: how far into `bytes` it got, and how much of
-/// `out` it filled. An escape is never split across two calls — `out` is left
-/// short rather than torn — so the caller can hand over any size of buffer and
-/// call again from `consumed`.
+/// Returns `(consumed, written)`: how much of `bytes` was used, and how much
+/// of `out` was filled. An escape is never split across two calls, so the
+/// caller can use any buffer size and call again from `consumed`.
 ///
-/// An `out` shorter than the longest escape (`&quot;`, six bytes) can return
-/// `(0, 0)` and make no progress. Callers pass a buffer larger than that; the
-/// alternative would be to write a torn escape, which is worse than looping.
+/// If `out` is shorter than the longest escape (`&quot;`, six bytes), this
+/// may return `(0, 0)` and make no progress, so callers must pass a larger
+/// buffer.
 pub fn escape_chunk(bytes: &[u8], out: &mut [u8]) -> (usize, usize) {
     let mut consumed = 0;
     let mut written = 0;
@@ -151,11 +140,10 @@ mod tests {
     use std::string::{String, ToString};
     use std::vec::Vec as StdVec;
 
-    /// The whole page, assembled the way the firmware assembles it.
+    /// The whole page, assembled the way the firmware does it.
     ///
-    /// The chunk is deliberately eight bytes — barely more than the longest
-    /// escape — so every test here runs the streaming across a boundary
-    /// rather than in one comfortable pass.
+    /// The chunk is only eight bytes, just over the longest escape, so every
+    /// test crosses chunk boundaries.
     fn page_of(config: &[u8], error: Option<&str>) -> StdVec<u8> {
         let mut out = StdVec::new();
         for piece in pieces(config, error) {
@@ -229,9 +217,8 @@ mod tests {
         }
     }
 
-    /// The `Content-Length` goes out before the first byte of the page does,
-    /// so a count that disagrees with what is streamed leaves the phone
-    /// waiting for bytes that never come, or reading into the next response.
+    /// `Content-Length` is sent before the page, so it must match exactly, or
+    /// the phone would wait for missing bytes or read too far.
     #[test]
     fn the_promised_length_is_the_length_that_arrives() {
         for (config, error) in [
@@ -244,9 +231,8 @@ mod tests {
         }
     }
 
-    /// The exact boundary this used to fail at: `MAX_CONFIG` bytes of the one
-    /// byte escaping expands furthest. That is a file `form::field` decodes
-    /// and `write_config` writes, so the page has to be able to show it back.
+    /// `MAX_CONFIG` bytes of the character that escapes longest. The box can
+    /// save such a file, so the page must be able to show it.
     #[test]
     fn the_largest_file_of_the_worst_bytes_is_shown_in_full() {
         let worst = [b'"'; crate::MAX_CONFIG];
@@ -257,8 +243,8 @@ mod tests {
         assert_eq!(&text[open..close], "&quot;".repeat(crate::MAX_CONFIG));
     }
 
-    /// An escape that would not fit is left for the next call rather than cut
-    /// in half. Six bytes of room take one `&quot;`; five take none.
+    /// An escape that does not fit is left for the next call, not cut in
+    /// half. Six bytes of room fit one `&quot;`; five fit none.
     #[test]
     fn an_escape_is_never_split_across_a_chunk() {
         let mut out = [0u8; 6];
@@ -283,8 +269,8 @@ mod tests {
         assert_eq!(escaped_len(b"plain"), 5);
     }
 
-    /// The box has no route anywhere on this network, so a password with `#`
-    /// and `&` in it has to survive the page and come back byte-identical.
+    /// A password with `#` and `&` must survive the page and come back
+    /// unchanged.
     #[test]
     fn a_password_with_hash_and_ampersand_survives_the_round_trip() {
         let original = b"ssid = Home\npassword = a#b&c\nserver = box.lan:443\n";

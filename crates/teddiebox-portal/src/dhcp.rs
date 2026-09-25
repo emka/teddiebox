@@ -1,9 +1,8 @@
 //! One lease, four messages.
 //!
-//! `embassy-net`'s `dhcpv4` is the *client*, and smoltcp carries no server, so
-//! this is the box's own. It is deliberately the smallest thing that gets a
-//! phone an address: one fixed lease handed to whoever asks, `DISCOVER` and
-//! `REQUEST` answered, everything else ignored.
+//! `embassy-net` only has a DHCP *client*, and smoltcp has no server, so this
+//! is a minimal DHCP server: one fixed lease for whoever asks. `DISCOVER` and
+//! `REQUEST` are answered; everything else is ignored.
 
 use heapless::Vec;
 
@@ -127,8 +126,9 @@ pub fn reply(to: &Incoming, kind: Reply) -> Vec<u8, MAX_DATAGRAM> {
 mod tests {
     use super::*;
 
-    /// A DISCOVER as a handset sends one: BOOTREQUEST over Ethernet, a
-    /// six-byte MAC, the cookie, option 53 = 1, and the terminator.
+    /// A minimal DISCOVER built from the RFC: BOOTREQUEST over Ethernet, a
+    /// six-byte MAC, the broadcast flag, the cookie, option 53 = 1, and the
+    /// terminator.
     fn discover() -> [u8; 244] {
         let mut d = [0u8; 244];
         d[0] = 1; // op: BOOTREQUEST
@@ -143,25 +143,16 @@ mod tests {
         d
     }
 
-    /// A DISCOVER an Android handset actually sent, captured off the box on
-    /// 2026-09-16 while a phone joined the setup access point and was given a
-    /// lease. Byte-exact except the client's hardware address, which is
-    /// substituted in both `chaddr` and option 61 — the fixture's worth is its
-    /// option layout, not somebody's MAC.
+    /// A DISCOVER a real Android phone sent to the setup access point. Exact
+    /// bytes, except the phone's MAC address (in `chaddr` and option 61),
+    /// which was replaced.
     ///
-    /// It exists because [`discover`] above was assembled from the RFC, and a
-    /// synthetic datagram agrees with whatever reading of the spec produced
-    /// it. Two of its assumptions turned out to be wrong about real clients:
+    /// It differs from the minimal [`discover`] above:
     ///
-    /// * **It sets the broadcast flag; this phone does not.** `discover` uses
-    ///   `0x8000` and calls it what a handset sends. A real one sent `0x0000`.
-    ///   Nothing breaks — [`reply`] broadcasts whatever the flag says, because
-    ///   a client with no address cannot be reached any other way — but the
-    ///   comment claimed something untrue.
-    /// * **It carries one option; this carries seven** (53, 61, 57, 60, 12,
-    ///   55, 80), and option 80 has **length zero**. So the option walk was
-    ///   only ever exercised against a single option sitting first, which is
-    ///   the case that cannot fail.
+    /// * **No broadcast flag** (`0x0000`). [`reply`] broadcasts anyway,
+    ///   because a client without an address cannot be reached otherwise.
+    /// * **Seven options** (53, 61, 57, 60, 12, 55, 80), and option 80 has
+    ///   **length zero**.
     fn captured_discover() -> [u8; 300] {
         [
             0x01, 0x01, 0x06, 0x00, 0x64, 0xEC, 0x7F, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -189,33 +180,27 @@ mod tests {
         ]
     }
 
-    /// The parser against bytes it did not have a hand in shaping.
+    /// The parser against real bytes.
     #[test]
     fn a_real_handsets_discover_is_recognised() {
         let got = parse(&captured_discover()).unwrap();
         assert_eq!(got.kind, Kind::Discover);
         assert_eq!(got.chaddr, [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
-        // Not the broadcast flag the synthetic fixture assumes.
+        // No broadcast flag, unlike the minimal fixture.
         assert_eq!(got.flags, [0x00, 0x00]);
         assert_eq!(got.xid, [0x64, 0xEC, 0x7F, 0x98]);
     }
 
-    /// Option 53 is found when it sits *behind* a zero-length option.
+    /// Option 53 is found when it comes *after* a zero-length option.
     ///
-    /// The first version of this test moved 53's value in place and proved
-    /// nothing: 53 is the first option in both fixtures, so a walk that reads
-    /// offset 240 and stops still finds it. Confirmed by mutation — breaking
-    /// the walk to `break` after one option left all 52 tests green.
-    ///
-    /// Real clients are free to order options however they like, and this one
-    /// sent a zero-length option 80. So the case that matters is 53 arriving
-    /// last, behind an option whose length byte is zero: get the stride wrong
-    /// and the walk either stops early or never advances.
+    /// Clients may order options freely. With 53 last, behind a zero-length
+    /// option, a walk with the wrong step size would stop early or never
+    /// advance.
     fn discover_with_message_type_last() -> Vec<u8, MAX_DATAGRAM> {
         let captured = captured_discover();
         let mut d: Vec<u8, MAX_DATAGRAM> = Vec::new();
         d.extend_from_slice(&captured[..OPTIONS]).unwrap();
-        // The options this handset actually sent, minus 53, in its own order.
+        // The options the real phone sent, minus 53, in the same order.
         for option in [
             &[61u8, 7, 1, 0x02, 0x11, 0x22, 0x33, 0x44, 0x55][..],
             &[57, 2, 0x05, 0xDC],
@@ -224,7 +209,7 @@ mod tests {
         ] {
             d.extend_from_slice(option).unwrap();
         }
-        // Only now the message type, followed by the terminator.
+        // Then the message type, followed by the terminator.
         d.extend_from_slice(&[53, 1, 1]).unwrap();
         d.push(OPTION_END).unwrap();
         d
@@ -330,8 +315,8 @@ mod tests {
         assert_eq!(offer[243..], ack[243..]);
     }
 
-    /// The box routes nothing and resolves nothing. Offering a gateway the
-    /// phone cannot reach makes it wait on one.
+    /// The box offers no routing or DNS. Offering a gateway the phone cannot
+    /// use would make it wait for one.
     #[test]
     fn no_router_or_dns_option_is_offered() {
         let built = reply(&parse(&discover()).unwrap(), Reply::Offer);

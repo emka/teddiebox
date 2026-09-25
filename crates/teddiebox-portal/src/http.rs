@@ -1,8 +1,8 @@
 //! Just enough HTTP to answer two routes.
 //!
-//! Hand-rolled rather than a server crate because the surface is two paths and
-//! one verb each — and because the box already hand-rolls its HTTP *client* in
-//! `teddiebox-cloud`, so this is the shape the project already reads.
+//! Written by hand rather than with a server crate, because there are only
+//! two routes, and the HTTP client in `teddiebox-cloud` is written the same
+//! way.
 
 use crate::MAX_BODY;
 
@@ -10,8 +10,8 @@ use crate::MAX_BODY;
 pub enum Method {
     Get,
     Post,
-    /// Anything else. Recognised rather than refused, so the caller answers a
-    /// 404 instead of dropping the connection.
+    /// Anything else, so the caller can answer 404 instead of dropping the
+    /// connection.
     Other,
 }
 
@@ -20,12 +20,10 @@ pub enum RequestError {
     /// The headers have not all arrived. Read more and call again.
     Incomplete,
     Malformed,
-    /// `Content-Length` exceeds [`MAX_BODY`] — refused before the body is
-    /// read rather than after.
+    /// `Content-Length` exceeds [`MAX_BODY`], so the body is not read.
     ///
-    /// A statement about the *request*, not about the file inside it. A file
-    /// too long for the box is refused later, by `form::field`, which can say
-    /// so in terms somebody can act on.
+    /// This is about the *request*, not the file inside it. A file that is too
+    /// long is refused later by `form::field`, with a clearer message.
     TooLarge,
 }
 
@@ -34,8 +32,8 @@ pub struct Request<'a> {
     pub method: Method,
     pub path: &'a str,
     pub content_length: usize,
-    /// Bytes up to and including the blank line, so `buf[header_len..]` is as
-    /// much of the body as has arrived.
+    /// Bytes up to and including the blank line, so `buf[header_len..]` is
+    /// the part of the body that has arrived.
     pub header_len: usize,
 }
 
@@ -104,20 +102,17 @@ impl Status {
 
 /// Builds the response head.
 ///
-/// Separate from the body because the body is never assembled: `page` is
-/// streamed piece by piece, and this head carries the length it promised
-/// rather than a length measured off a buffer that does not exist.
+/// Separate from the body, because `page` streams the body in pieces and
+/// never builds it in one buffer.
 ///
-/// `Connection: close` because the portal answers one request per accept: a
-/// keep-alive would have it holding a socket for a phone that has wandered
-/// off, and it only ever has one.
+/// `Connection: close`, because the portal has only one socket and answers
+/// one request per connection.
 pub fn head(status: Status, content_length: usize) -> heapless::Vec<u8, 192> {
     use core::fmt::Write;
 
     let mut out = heapless::String::<192>::new();
-    // Bounded and measured: the fixed text is 111 bytes at the longest status
-    // line, and a `usize` is at most 20 digits — 131. 192 leaves room without
-    // pretending the margin was reasoned about more finely than that.
+    // The fixed text is at most 111 bytes, plus up to 20 digits for a
+    // `usize`: 131. 192 leaves some room.
     let _ = write!(
         out,
         "HTTP/1.1 {}\r\n\
@@ -160,8 +155,8 @@ mod tests {
         assert_eq!(parse(raw).unwrap().content_length, 5);
     }
 
-    /// The socket hands over whatever arrived. Headers split mid-way must read
-    /// as "not yet", never as a malformed request.
+    /// The socket returns whatever has arrived. Headers split in the middle
+    /// mean "not yet", not a malformed request.
     #[test]
     fn headers_still_arriving_are_incomplete_not_malformed() {
         assert_eq!(parse(b"GET / HTT").unwrap_err(), RequestError::Incomplete);
@@ -171,9 +166,9 @@ mod tests {
         );
     }
 
-    /// Headers complete, body still coming: the request parses, and the caller
-    /// compares `content_length` against what it has to decide whether to read
-    /// more. This is the split-across-two-reads case.
+    /// Headers complete, body still arriving: the request parses, and the
+    /// caller compares `content_length` with what it has to decide whether to
+    /// read more.
     #[test]
     fn a_body_still_arriving_parses_so_the_caller_can_wait_for_it() {
         let raw = b"POST /save HTTP/1.1\r\nContent-Length: 20\r\n\r\nconfig=";
@@ -201,10 +196,9 @@ mod tests {
         assert_eq!(parse(raw).unwrap_err(), RequestError::TooLarge);
     }
 
-    /// The cap is on the encoded body, not on the file, and these two pin
-    /// which side of 3088 each one falls. Written as literals rather than as
-    /// `MAX_BODY` and `MAX_BODY + 1` so that moving the constant fails these
-    /// tests instead of following them silently.
+    /// The limit applies to the encoded body, not the file. Written as
+    /// literals rather than `MAX_BODY`, so changing the constant fails these
+    /// tests.
     #[test]
     fn a_body_of_exactly_the_cap_is_accepted() {
         assert_eq!(MAX_BODY, 3088);
@@ -218,14 +212,12 @@ mod tests {
         assert_eq!(parse(raw).unwrap_err(), RequestError::TooLarge);
     }
 
-    /// The bug this cap was split to fix: a 1024-byte file encodes to more
-    /// than 1024 bytes, and used to be refused on the way back in by the very
-    /// constant that said it would fit.
+    /// A 1024-byte file encodes to more than 1024 bytes, and must still be
+    /// accepted.
     #[test]
     fn a_form_encoded_full_size_config_is_no_longer_refused() {
-        // 1024 file bytes at 1.35, the ratio a realistic config encodes at.
-        // Most of that is the line endings: a textarea submits CRLF, and each
-        // pair leaves as the six bytes `%0D%0A`.
+        // 1024 file bytes at 1.35, the ratio for a realistic config. Most of
+        // it is line endings: a textarea sends CRLF, encoded as `%0D%0A`.
         let raw = b"POST /save HTTP/1.1\r\nContent-Length: 1382\r\n\r\n";
         assert_eq!(parse(raw).unwrap().content_length, 1382);
     }
