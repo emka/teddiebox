@@ -1,8 +1,8 @@
 //! Page-indexed I/O.
 //!
-//! Every TAF structure is 4096-aligned, so the only I/O primitive the parser
-//! needs is "give me page N". On device this is a block read from the SD card;
-//! in tests it is a slice index. Nothing above this trait knows the difference.
+//! Every TAF structure is aligned to 4096 bytes, so the parser only needs
+//! "read page N". On the device that reads from the SD card; in tests it
+//! indexes a slice.
 
 use crate::{TafError, PAGE_SIZE};
 
@@ -24,11 +24,8 @@ pub struct SlicePages<'a> {
 impl<'a> SlicePages<'a> {
     /// Fails if `data` cannot hold a complete header page.
     ///
-    /// A short *final* page is fine, and is what a real Toniebox file looks
-    /// like: the stream's last Ogg page runs only as long as it needs to.
-    /// Requiring a whole number of pages rejected every commercial `.taf`.
-    /// Page 0 is different — it is parsed as a full page, so a file that
-    /// cannot even hold it is truncated by any reading.
+    /// A short *last* page is fine; real Toniebox files end that way. Page 0
+    /// is parsed as a full page, so a file shorter than that is truncated.
     pub fn new(data: &'a [u8]) -> Result<Self, TafError> {
         if data.len() < PAGE_SIZE {
             return Err(TafError::TruncatedFile);
@@ -47,10 +44,9 @@ impl PageSource for SlicePages<'_> {
         if start >= self.data.len() {
             return Err(TafError::PageOutOfRange);
         }
-        // The final page may be short. Zero-filling the rest keeps the
-        // fixed-size page the only thing anything above this trait sees, and
-        // is safe because an Ogg page declares its own extent through its
-        // lacing table — no reader reaches past the bytes that exist.
+        // The last page may be short. Fill the rest with zeros, so callers
+        // always get a full page. This is safe because an Ogg page states its
+        // own length in its lacing table.
         let end = (start + PAGE_SIZE).min(self.data.len());
         let present = end - start;
         buf[..present].copy_from_slice(&self.data[start..end]);
@@ -59,7 +55,7 @@ impl PageSource for SlicePages<'_> {
     }
 
     fn page_count(&self) -> u32 {
-        // Rounded up: a short final page is still a page a caller may read.
+        // Rounded up: a short last page can still be read.
         self.data.len().div_ceil(PAGE_SIZE) as u32
     }
 }
@@ -98,11 +94,8 @@ mod tests {
 
     #[test]
     fn accepts_a_file_whose_final_page_is_short() {
-        // What a real Toniebox file looks like: the stream's last Ogg page
-        // is only as long as it needs to be, not padded out to the page
-        // boundary. `toniefile` pads, so every fixture is a whole number of
-        // pages and this shape went unnoticed until a commercial file was
-        // read.
+        // Real Toniebox files end with a short page. `toniefile` pads to a
+        // full page, so the test fixtures do not show this.
         let data = [0u8; PAGE_SIZE + 100];
         let src = SlicePages::new(&data).unwrap();
         assert_eq!(src.page_count(), 2, "the short final page still counts");
@@ -110,11 +103,8 @@ mod tests {
 
     #[test]
     fn reads_a_short_final_page_zero_filled() {
-        // Callers get a whole `[u8; PAGE_SIZE]` whatever the file's length,
-        // so nothing above this trait has to know the last page is short.
-        // Zero-filling is safe rather than merely convenient: an Ogg page
-        // declares its own extent through its lacing table, so no reader
-        // reaches past the bytes that really exist.
+        // Callers always get a full page. Zero-filling is safe because an
+        // Ogg page states its own length.
         let mut data = [0u8; PAGE_SIZE + 3];
         data[PAGE_SIZE..].copy_from_slice(&[0xAB, 0xCD, 0xEF]);
         let mut src = SlicePages::new(&data).unwrap();

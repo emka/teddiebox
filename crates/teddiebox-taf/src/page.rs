@@ -1,13 +1,10 @@
 //! Ogg page structure, restricted to what a TAF file contains.
 //!
-//! This is the only implementation of the lacing walk. It used to be two —
-//! one here and one inlined into `TafReader::next_packet` — which agreed
-//! only because their tests agreed, and had already drifted on what to do
-//! with a dropped fragment.
+//! The only code that walks an Ogg page's lacing table.
 //!
-//! The position is a value rather than an iterator because `TafReader` has
-//! to keep it between calls, and it cannot hold an iterator borrowing its
-//! own page buffer.
+//! The position is a plain value rather than an iterator, because
+//! `TafReader` keeps it between calls and cannot hold an iterator that
+//! borrows its own page buffer.
 
 use crate::{TafError, PAGE_SIZE};
 
@@ -38,16 +35,14 @@ impl PacketCursor {
 
     /// Positions at the first packet of the Ogg page beginning at `offset`.
     ///
-    /// `Ok(None)` means no page begins there. `toniefile` packs the tiny
-    /// OpusHead and OpusTags pages into the same 4096-byte block as the
-    /// start of the audio, so a caller walking a block has to ask this
-    /// question repeatedly, and "nothing more in this block" is a normal
-    /// answer rather than corruption.
+    /// `Ok(None)` means no page begins there. `toniefile` packs the small
+    /// OpusHead and OpusTags pages into the same 4096-byte block as the start
+    /// of the audio, so callers ask this repeatedly, and "nothing more in this
+    /// block" is normal, not corruption.
     ///
-    /// `Err` is reserved for a page that does begin there and then does not
-    /// fit the block. That distinction has to survive: folding it into
-    /// `Ok(None)` would let a corrupt page read as a finished one, which
-    /// fails open.
+    /// `Err` means a page begins there but does not fit the block. This must
+    /// stay separate from `Ok(None)`, or a corrupt page would look like the
+    /// end of the block.
     pub(crate) fn at_page(page: &[u8; PAGE_SIZE], offset: usize) -> Result<Option<Self>, TafError> {
         if offset + MIN_HEADER_LEN > PAGE_SIZE || page[offset..offset + 4] != *CAPTURE_PATTERN {
             return Ok(None);
@@ -61,8 +56,8 @@ impl PacketCursor {
             lacing,
             lacing_end,
             payload: lacing_end,
-            // Bytes 14..18, little-endian, well inside the fixed header the
-            // bounds check above already guaranteed.
+            // Bytes 14..18, little-endian, inside the fixed header checked
+            // above.
             serial: u32::from_le_bytes([
                 page[offset + 14],
                 page[offset + 15],
@@ -74,31 +69,27 @@ impl PacketCursor {
 
     /// Which Ogg stream this page claims to belong to.
     ///
-    /// Read here rather than by the reader poking at raw offsets, so that
-    /// the page layout stays knowledge of this module alone.
+    /// Read here so only this module knows the page layout.
     pub(crate) fn serial(&self) -> u32 {
         self.serial
     }
 
-    /// Offset where this page's remaining payload starts, and so the
-    /// earliest point another page could be packed in behind it.
+    /// Offset where this page's remaining payload starts. Another page packed
+    /// into the same block cannot start before this.
     pub(crate) fn payload_start(&self) -> usize {
         self.payload
     }
 
     /// Yields the next complete packet, advancing past it.
     ///
-    /// `Ok(None)` means this page has no more complete packets. That covers
-    /// a trailing packet whose lacing runs out without a terminator: it
-    /// continues onto a following page, so it is dropped rather than handed
-    /// on truncated — but its declared bytes are still stepped over, because
-    /// they occupy the payload and anything packed in behind starts after
-    /// them.
+    /// `Ok(None)` means this page has no more complete packets. A last packet
+    /// whose lacing has no terminator continues on the next page, so it is
+    /// dropped rather than returned incomplete. Its bytes are still skipped,
+    /// because another page may follow them.
     ///
     /// `Err` means the page declares a packet that overruns the block. The
-    /// cursor is left exhausted so that a caller which ignores the error
-    /// cannot resume from a stale offset and manufacture an in-bounds slice
-    /// that is not a packet.
+    /// cursor is then left exhausted, so a caller that ignores the error
+    /// cannot read garbage from a stale offset.
     pub(crate) fn next<'a>(
         &mut self,
         page: &'a [u8; PAGE_SIZE],
@@ -185,9 +176,8 @@ mod tests {
 
     #[test]
     fn rejects_a_page_whose_segment_table_overruns_the_block() {
-        // A page header that starts 10 bytes before the end of the block:
-        // its segment table cannot fit, so this is corruption rather than
-        // an absent page.
+        // A page header at the very end of the block: its segment table
+        // cannot fit, so this is corruption, not a missing page.
         let mut page = [0u8; PAGE_SIZE];
         let offset = PAGE_SIZE - MIN_HEADER_LEN;
         page[offset..offset + 4].copy_from_slice(CAPTURE_PATTERN);
@@ -223,8 +213,8 @@ mod tests {
 
     #[test]
     fn finds_a_page_packed_in_behind_another() {
-        // What `toniefile` actually writes: OpusHead's page is far smaller
-        // than a block, and the next page starts immediately after it.
+        // As `toniefile` writes it: OpusHead's page is much smaller than a
+        // block, and the next page starts right after it.
         let mut page = ogg_page(&[b"first"]);
         let second = 27 + 1 + 5;
         page[second..second + 4].copy_from_slice(CAPTURE_PATTERN);
@@ -241,9 +231,9 @@ mod tests {
 
     #[test]
     fn drops_a_packet_whose_lacing_runs_out_without_a_terminator() {
-        // A single lacing entry of 255 with no follow-up value below 255:
-        // the packet is not complete within this page, so it must be
-        // dropped rather than handed to the decoder as a truncated packet.
+        // A single lacing entry of 255 with no value below 255 after it: the
+        // packet continues on the next page, so it is dropped rather than
+        // returned incomplete.
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(CAPTURE_PATTERN);
         page[26] = 1;
@@ -251,16 +241,14 @@ mod tests {
 
         let mut cursor = PacketCursor::at_page(&page, 0).unwrap().unwrap();
         assert_eq!(cursor.next(&page), Ok(None));
-        // Terminality: once the lacing table is exhausted, further calls
-        // must keep returning None rather than re-reading stale state.
+        // Once the lacing table is used up, later calls keep returning None.
         assert_eq!(cursor.next(&page), Ok(None));
     }
 
     #[test]
     fn steps_over_a_dropped_fragments_bytes_rather_than_stopping_on_them() {
-        // The dropped packet's 255 bytes are declared and occupy the
-        // payload. A page packed in behind it starts after them, so a
-        // cursor that stops at the fragment's start hides it.
+        // The dropped packet's 255 bytes still take up space. A page packed
+        // in after it starts after them.
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(CAPTURE_PATTERN);
         page[26] = 1;
@@ -273,11 +261,10 @@ mod tests {
 
     #[test]
     fn stops_yielding_after_an_oversized_packet_even_with_lacing_entries_remaining() {
-        // 20 segments: the first 17 (sixteen 255s plus a terminating 1)
-        // declare a 4081-byte packet starting at payload offset 47, which
-        // overruns the 4096-byte page. Three lacing entries remain after
-        // it. A corrupt/malicious page must not let those remaining
-        // entries be interpreted starting from a stale payload offset.
+        // 20 segments: the first 17 (sixteen 255s and a 1) declare a
+        // 4081-byte packet at payload offset 47, which overruns the 4096-byte
+        // page. The three lacing entries after it must not be read from a
+        // stale offset.
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(CAPTURE_PATTERN);
         page[26] = 20;
@@ -291,8 +278,7 @@ mod tests {
 
         let mut cursor = PacketCursor::at_page(&page, 0).unwrap().unwrap();
         assert_eq!(cursor.next(&page), Err(TafError::NotAnOggPage));
-        // Must not resume from a stale `start` and hand back a bogus
-        // in-bounds slice built from the remaining lacing entries.
+        // Must not continue from a stale offset with the remaining entries.
         assert_eq!(cursor.next(&page), Ok(None));
     }
 }

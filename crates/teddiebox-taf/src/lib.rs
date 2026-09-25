@@ -9,9 +9,9 @@ mod varint;
 pub use header::TonieHeader;
 pub use reader::{TafReader, MAX_PACKET};
 
-// The lacing walk is internal to `reader::TafReader`. It stays `pub(crate)`
-// because its `next` reports a corrupt page as an error the caller must
-// handle, and a public version would invite callers who ignore it.
+// Only `reader::TafReader` should walk packets: `PacketCursor::next` reports a
+// corrupt page as an error, and a public version would invite callers to
+// ignore it.
 pub(crate) use page::PacketCursor;
 pub use source::{PageSource, SlicePages};
 
@@ -30,46 +30,33 @@ pub enum TafError {
     NotAnOggPage,
     PageOutOfRange,
     /// A well-formed packet is larger than the buffer the caller supplied.
-    /// Distinct from `NotAnOggPage`: the file is fine, and the packet is
-    /// left unconsumed, so a caller that can supply a *bigger* buffer on
-    /// the next call will get this same packet rather than losing it.
-    /// That promise is about the file and this reader, not about every
-    /// caller: one stuck with a fixed-size buffer has no bigger buffer to
-    /// retry with and must treat this as terminal. See `MAX_PACKET`'s doc
-    /// for why that fixed size was chosen and how much headroom it has.
+    /// The file is fine and the packet is not consumed, so retrying with a
+    /// bigger buffer returns the same packet. A caller with a fixed-size
+    /// buffer must treat this as fatal. See `MAX_PACKET` for how that size
+    /// was chosen.
     BufferTooSmall,
     /// The file is shorter than the header page, or shorter than the stream
-    /// the header declares. Distinct from `MalformedHeader`: this is a
-    /// length problem rather than a content one, and conflating the two
-    /// misdirects debugging when a torn write cuts a file short.
+    /// the header declares. This is a length problem, not a content problem
+    /// like `MalformedHeader`; it is what an interrupted write looks like.
     ///
-    /// Detection is page-granular, which is the limit of a page-indexed
-    /// source: [`PageSource`] reports how many pages exist, not how many
-    /// bytes, so a file cut partway through its *final* page still looks
-    /// complete. Closing that would mean giving the trait a byte length,
-    /// which is a file-system notion this abstraction deliberately does not
-    /// have. A real file's final page is legitimately short, so the length
-    /// alone cannot distinguish the two cases anyway.
+    /// Detection works in whole pages: [`PageSource`] reports how many pages
+    /// exist, not how many bytes. A file cut short inside its *last* page
+    /// still looks complete. The last page of a real file is often short
+    /// too, so a byte length would not tell the two apart anyway.
     TruncatedFile,
     /// A structurally valid Ogg page that belongs to a different stream.
     ///
-    /// Distinct from `NotAnOggPage`, which says the bytes are not a page at
-    /// all. These bytes are a perfectly good page — it is simply not part of
-    /// this file's stream, which is what a torn write leaving a block from a
-    /// previous, longer recording looks like. Nothing about its shape gives
-    /// it away, so without this check it decodes cleanly and the child hears
-    /// the end of the previous story.
+    /// Unlike `NotAnOggPage`, the bytes are a valid page — just not one from
+    /// this file's stream. An interrupted write can leave a block of an older,
+    /// longer recording behind; without this check it would decode fine and
+    /// the child would hear the end of the old story.
     WrongStream,
     /// The [`PageSource`] could not read a page that is within range.
     ///
-    /// Says nothing about the file, only that the medium would not produce
-    /// it: on device this is an SD I/O fault, a CRC failure, or a card
-    /// timeout. Distinct from `PageOutOfRange` and `MalformedHeader`
-    /// because those accuse the file of being wrong, and following that
-    /// accusation is wasted effort when the file is fine and the card is
-    /// not. The source's own error is deliberately not carried here — this
-    /// type is `Copy` and source-agnostic — so a driver with more to say
-    /// should log it before returning.
+    /// The storage failed, not the file: on the device this is an SD read
+    /// error, a CRC failure, or a card timeout. The source's own error is not
+    /// carried here, to keep this type `Copy` and independent of the source,
+    /// so a source with more detail should log it before returning.
     Io,
 }
 

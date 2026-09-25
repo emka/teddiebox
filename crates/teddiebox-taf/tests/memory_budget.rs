@@ -1,14 +1,12 @@
 //! Pins how much RAM the container reader occupies.
 //!
-//! These numbers were measured for the first time at M1's review and nothing
-//! held them there, so a field added in passing could have doubled them
-//! unnoticed. On an ESP32-S3 that matters: the reader is moved by value, and
-//! a few kilobytes is a large fraction of an embassy task stack.
+//! Without this, a new field could double the size unnoticed. On an ESP32-S3
+//! that matters: the reader is moved by value, and a few kilobytes is a large
+//! part of an embassy task stack.
 //!
-//! Measured on a 64-bit host, where every pointer and index is as wide as it
-//! ever gets, so a bound that holds here holds on the 32-bit device too.
-//! The bounds carry headroom deliberately — this is a tripwire against
-//! accidental growth, not a target to optimise against.
+//! Measured on a 64-bit host, where pointers and indices are widest, so a
+//! bound that holds here also holds on the 32-bit device. The bounds leave
+//! some headroom: they catch accidental growth, not small changes.
 
 use teddiebox_taf::{SlicePages, TafReader};
 

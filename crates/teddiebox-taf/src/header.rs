@@ -1,10 +1,9 @@
 //! The TAF header: a big-endian length prefix followed by a protobuf message
 //! that fills the remainder of page 0.
 //!
-//! The message is padded to the page boundary from the inside, by a
-//! zero-filled length-delimited field, rather than by trailing bytes after it.
-//! The generic unknown-field skip handles that field like any other; no
-//! special case is needed or wanted.
+//! The message is padded to the page boundary by a zero-filled field inside
+//! it, not by bytes after it. The normal unknown-field skip handles that
+//! field.
 
 use crate::varint::read_varint;
 use crate::{TafError, MAX_CHAPTERS, PAGE_SIZE};
@@ -19,10 +18,9 @@ pub struct TonieHeader {
     /// Ogg page indices at which each chapter starts.
     ///
     /// **Indices are relative to the Ogg stream, not the file.** Chapter page
-    /// 0 is the first Ogg page, which lives at file page 1 — the header
-    /// occupies file page 0. Confirmed by observation in Task 2: a
-    /// single-chapter fixture carries `[0]`, not `[1]`. Callers that seek must
-    /// add one.
+    /// 0 is the first Ogg page, at file page 1 (the header is file page 0). A
+    /// single-chapter file has `[0]`, not `[1]`. Callers that seek must add
+    /// one.
     pub chapter_pages: Vec<u32, MAX_CHAPTERS>,
 }
 
@@ -82,10 +80,8 @@ impl TonieHeader {
                             .push(v)
                             .map_err(|_| TafError::TooManyChapters)?;
                     }
-                    // A varint whose continuation bytes cross `end` is only
-                    // caught here: `read_varint` itself isn't bounded by
-                    // `end`, so it would otherwise read on into whatever
-                    // follows the packed field instead of being rejected.
+                    // `read_varint` does not stop at `end`, so a varint that
+                    // runs past the packed field is only caught here.
                     if pos != end {
                         return Err(TafError::MalformedHeader);
                     }
@@ -102,10 +98,9 @@ impl TonieHeader {
                         return Err(TafError::MalformedHeader);
                     }
                 }
-                // Fixed-width unknown fields must be bounds-checked like the
-                // length-delimited case. Advancing past the end would leave the
-                // `while pos < body.len()` loop simply false, returning Ok on a
-                // truncated message instead of rejecting it.
+                // Fixed-width fields need a bounds check too. Otherwise
+                // stepping past the end would just end the loop and accept a
+                // truncated message.
                 (_, 5) => {
                     pos = pos.checked_add(4).ok_or(TafError::MalformedHeader)?;
                     if pos > body.len() {
@@ -204,10 +199,8 @@ mod tests {
     #[test]
     fn rejects_a_data_length_that_overflows_u32() {
         // field 2 (data_length), varint 4295024640 (> u32::MAX). `as u32`
-        // would silently truncate this to 57344 instead of rejecting it --
-        // and `data_length` is exactly the value `last_usable_page` is
-        // computed from, so a wrapped value directly changes how much of
-        // the file is treated as real stream content.
+        // would silently wrap this to 57344, and `data_length` decides how
+        // much of the file is read as audio.
         let fields = [0x10, 0x80, 0xC0, 0x83, 0x80, 0x10];
         assert_eq!(
             TonieHeader::parse(&header_page(&fields)),

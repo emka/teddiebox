@@ -1,13 +1,11 @@
-//! Locks down the observed on-disk layout of a real .taf file.
+//! Checks the on-disk layout of a real .taf file.
 //!
 //! These tests do not test our code. They fail if the format assumptions the
-//! parser is built on ever stop holding.
+//! parser relies on stop holding.
 //!
 //! The fixture was generated with `tools/fixturegen` from the `toniefile`
 //! crate (audio_id `0x1234_5678`, 5 s of stereo tone: 440 Hz left, 660 Hz
-//! right, so a channel error is detectable at all). Two of the
-//! four claims in the original plan did not survive contact with the real
-//! file -- see the doc comments below on the two tests that replace them.
+//! right, so a swapped channel can be detected).
 
 use teddiebox_taf::PAGE_SIZE;
 
@@ -26,14 +24,9 @@ fn header_page_starts_with_big_endian_protobuf_length() {
     assert!(len <= PAGE_SIZE - 4);
 }
 
-/// The plan predicted a length-prefixed protobuf blob followed by `0xFF`
-/// filler bytes out to the page boundary, appended *after* the message.
-///
-/// That is not what `toniefile` produces. The observed length prefix is
-/// exactly `PAGE_SIZE - 4` (4092): the protobuf message itself is sized to
-/// consume the whole of page 0, with no bytes left over for external
-/// padding at all. Whatever padding exists lives *inside* the protobuf
-/// message, as the content of its own trailing field -- see
+/// The length prefix is exactly `PAGE_SIZE - 4` (4092): the protobuf message
+/// fills the whole of page 0, with no padding after it. The padding is
+/// inside the message, in its last field. See
 /// `header_tail_is_zero_padded_inside_the_protobuf_message` below.
 #[test]
 fn header_protobuf_message_fills_the_entire_page() {
@@ -46,12 +39,10 @@ fn header_protobuf_message_fills_the_entire_page() {
     );
 }
 
-/// The plan predicted the page-0 filler bytes are `0xFF`. The real fixture
-/// has zero bytes (`0x00`) there instead, running from partway through the
-/// protobuf message's last field (observed to start at file offset 42 for
-/// this fixture) through to the end of the page. This checks a generous,
-/// field-boundary-independent suffix of the page rather than that exact
-/// offset, so it doesn't overfit to this one encoding's varint widths.
+/// The padding in page 0 is zero bytes (`0x00`), not `0xFF`. It runs from
+/// inside the protobuf message's last field (file offset 42 in this fixture)
+/// to the end of the page. The test checks a generous suffix of the page, so
+/// it does not depend on the exact offset.
 #[test]
 fn header_tail_is_zero_padded_inside_the_protobuf_message() {
     let tail = &FIXTURE[PAGE_SIZE - 4000..PAGE_SIZE];
@@ -78,11 +69,8 @@ fn every_page_after_the_header_is_an_ogg_page() {
 /// another inside a single block — carries one stream serial, and it equals
 /// the header's `audio_id`.
 ///
-/// The reader now enforces this too, not just page-to-page agreement: as of
-/// 2026-09-17 three real commercial files from three publishers, 22,110 Ogg
-/// pages total, agreed with this fixture with no exceptions, so
-/// `TafReader::check_stream` rejects a first page whose serial disagrees
-/// with `audio_id` rather than only recording the fact here.
+/// Three real commercial files (22,110 Ogg pages) follow the same rule, and
+/// `TafReader::check_stream` enforces it.
 #[test]
 fn every_ogg_page_carries_the_audio_id_as_its_stream_serial() {
     let mut serials = Vec::new();

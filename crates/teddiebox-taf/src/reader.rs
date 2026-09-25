@@ -4,56 +4,43 @@ use crate::{PacketCursor, PageSource, TafError, TonieHeader, PAGE_SIZE};
 
 /// Buffer size that can hold any packet a TAF file can contain.
 ///
-/// Derived from the container rather than from the codec. Every Ogg page in
-/// a TAF file occupies at most one [`PAGE_SIZE`] block, and a packet lies
-/// entirely within its own page's payload — so no packet can exceed
-/// `PAGE_SIZE` minus the 27-byte page header and its lacing table,
-/// whatever bitrate it was encoded at. A buffer of `PAGE_SIZE` is therefore
-/// provably always enough.
+/// Based on the container, not the codec. Every Ogg page in a TAF file fits
+/// in one [`PAGE_SIZE`] block, and a packet lies entirely within its page, so
+/// no packet can be larger than `PAGE_SIZE`, whatever the bitrate.
 ///
-/// The previous value, 1275, was RFC 6716's maximum *frame* size, and TAF's
-/// 60 ms packets carry several frames each. It happened to hold for both
-/// fixtures, whose packets reach 719 bytes, and its own documentation
-/// flagged that this was not a guarantee. A real Toniebox file settled it:
-/// of 67 107 packets, 179 exceed 1275 bytes and the largest is 4053, so
-/// playback stopped 112 seconds in.
+/// Not RFC 6716's 1275-byte maximum: that is the limit for one Opus *frame*,
+/// and TAF's 60 ms packets hold several frames. Real Toniebox files have
+/// packets up to 4053 bytes.
 ///
-/// A packet larger than the caller's buffer still returns
-/// `TafError::BufferTooSmall` rather than being truncated, and is left
-/// unconsumed so a retry with a bigger buffer gets that same packet. That
-/// remains reachable for a caller that supplies a smaller buffer than this.
+/// A packet larger than the caller's buffer returns
+/// `TafError::BufferTooSmall` and is not consumed, so a retry with a bigger
+/// buffer gets the same packet.
 pub const MAX_PACKET: usize = PAGE_SIZE;
 
 pub struct TafReader<S: PageSource> {
     source: S,
     header: TonieHeader,
-    /// Index of the currently-buffered *container block*, not of a real Ogg
-    /// page: the nested-page scan in `next_packet` can walk several real Ogg
-    /// pages within one buffered block without this changing.
+    /// Index of the buffered 4096-byte *block*, not of an Ogg page: one block
+    /// can hold several Ogg pages, which `next_packet` walks without changing
+    /// this.
     page_index: u32,
     page: [u8; PAGE_SIZE],
-    /// Where the next packet starts within `page`. Held as a value rather
-    /// than an iterator because it has to survive between calls, and this
-    /// struct cannot borrow its own `page`.
+    /// Where the next packet starts within `page`. A value rather than an
+    /// iterator, because it is kept between calls and this struct cannot
+    /// borrow its own `page`.
     cursor: PacketCursor,
-    /// File-page index of the last page the header's `data_length` declares
-    /// as real Ogg stream. Trailing pages beyond this (e.g. benign padding)
-    /// exist in `source` but must not be read as stream content: `next_packet`
-    /// treats reaching past this index as end of stream, the same way it
-    /// treats reaching the end of `source` itself.
+    /// File-page index of the last page that the header's `data_length`
+    /// declares as part of the stream. Pages after it (such as padding) may
+    /// exist in `source` but are not audio; `next_packet` treats them as the
+    /// end of the stream.
     last_usable_page: u32,
-    /// Serial of the Ogg stream this file carries, latched from the first
-    /// page loaded. `None` only during `open`, before that page is read.
+    /// Serial of this file's Ogg stream, taken from the first page loaded.
+    /// `None` only during `open`, before that page is read.
     ///
-    /// Established against the header's `audio_id`, not just self-
-    /// consistently: the first page's serial must equal `audio_id` or
-    /// `check_stream` rejects it there, before it is ever latched. That
-    /// convention was once unconfirmed against real files; it now is —
-    /// three real commercial files from three publishers, 22,110 Ogg pages
-    /// total, every single page's serial equal to `audio_id`, no
-    /// exceptions (2026-09-17) — so a first page that disagrees is not a
-    /// looser format than believed, it is a block that does not belong to
-    /// this file's header at all.
+    /// The first page's serial must equal the header's `audio_id`, or
+    /// `check_stream` rejects it. In real files every page's serial equals
+    /// `audio_id` (checked on three commercial files, 22,110 pages), so a
+    /// page that disagrees does not belong to this file.
     stream_serial: Option<u32>,
 }
 
@@ -67,20 +54,17 @@ impl<S: PageSource> TafReader<S> {
         let header = TonieHeader::parse(&page)?;
 
         // The header declares how many bytes of Ogg stream follow it. Fewer
-        // pages than that means the file was truncated -- decoding the prefix
-        // would just stop the story early with nothing reporting it.
+        // pages means the file was cut short; playing it would silently stop
+        // the story early.
         let declared_pages = header.data_length.div_ceil(PAGE_SIZE as u32);
         let available_pages = source.page_count() - 1;
         if available_pages < declared_pages {
             return Err(TafError::TruncatedFile);
         }
-        // A header declaring zero bytes of stream leaves no page for `open`
-        // to position onto: file page 1, which must hold OpusHead, would be
-        // beyond `last_usable_page` (0). This is a defect in the header's
-        // own declared content, detectable without reference to how many
-        // pages physically exist, so it is `MalformedHeader` rather than
-        // `TruncatedFile` (which flags a mismatch between the declaration
-        // and the physical file).
+        // A header declaring zero bytes of stream leaves no page to open:
+        // file page 1 (OpusHead) would be past `last_usable_page`. This is a
+        // fault in the header itself, so it is `MalformedHeader`, not
+        // `TruncatedFile`.
         if declared_pages == 0 {
             return Err(TafError::MalformedHeader);
         }
@@ -108,17 +92,13 @@ impl<S: PageSource> TafReader<S> {
 
     /// Which chapter the reader is in, zero-based.
     ///
-    /// Asked of the reader rather than remembered by whoever last sought,
-    /// because a story played straight through crosses chapters with nobody
-    /// seeking — and a caller counting from its own last seek would name the
-    /// wrong chapter for the whole rest of the file.
+    /// Computed from the current position, because a story played straight
+    /// through moves into later chapters without any seek.
     ///
     /// The answer is the last chapter start at or before the current page,
-    /// using the same stream-relative-to-file conversion `seek_to_chapter`
-    /// applies, so the two cannot disagree about where a chapter begins. A
-    /// file whose chapter starts do not increase is not rejected here — the
-    /// format does not promise they do — but the answer is only meaningful
-    /// for one that does.
+    /// using the same page conversion as `seek_to_chapter`. It is only
+    /// meaningful if the chapter starts increase, which the format does not
+    /// guarantee.
     pub fn current_chapter(&self) -> usize {
         self.header
             .chapter_pages
@@ -131,18 +111,11 @@ impl<S: PageSource> TafReader<S> {
         if index >= self.source.page_count() {
             return Err(TafError::PageOutOfRange);
         }
-        // Read and validate into a scratch buffer before touching any of the
-        // reader's own state. Committing `self.page` (or `self.page_index`
-        // and the cursors) before `OggPage::parse` succeeds would leave the
-        // buffer holding new, unvalidated bytes while the cursors still
-        // describe the previous, valid page on a validation failure -- a
-        // subsequent `next_packet` would then read the new bytes at offsets
-        // computed for the old page and could silently return nonsense
-        // instead of an error.
+        // Read and check the page in a separate buffer before changing any
+        // state. If the check fails, the reader stays on its previous page,
+        // instead of reading new bytes at offsets meant for the old page.
         let mut candidate = [0u8; PAGE_SIZE];
-        // The range check above already rejected an index the source does not
-        // have, so anything it refuses now is a failure of the medium rather
-        // than of the request.
+        // The index is in range, so a failure here is a storage error.
         self.source
             .read_page(index, &mut candidate)
             .map_err(|_| TafError::Io)?;
@@ -155,14 +128,11 @@ impl<S: PageSource> TafReader<S> {
         Ok(())
     }
 
-    /// Adopts the stream of the first page seen — provided it matches the
-    /// header's own `audio_id` — and rejects any later page that does not
-    /// belong to it.
+    /// Accepts the first page's stream if it matches the header's
+    /// `audio_id`, and rejects any later page from a different stream.
     ///
-    /// Called at every site that positions onto a page, including the scan
-    /// for a page packed in behind another: a stale block is just as
-    /// reachable there, and this is exactly the kind of obligation the two
-    /// packet scanners drifted apart on before they were unified.
+    /// Called wherever the reader moves onto a page, including a page packed
+    /// behind another in the same block.
     fn check_stream(&mut self, serial: u32) -> Result<(), TafError> {
         match self.stream_serial {
             None if serial == self.header.audio_id => {
@@ -185,14 +155,9 @@ impl<S: PageSource> TafReader<S> {
         // Chapter indices are Ogg-stream-relative; file page 0 is the header.
         // Without the +1, chapter 0 would load the header instead of audio.
         let file_page = ogg_page.checked_add(1).ok_or(TafError::PageOutOfRange)?;
-        // Bounded by `last_usable_page`, not just `source.page_count()`
-        // (which `load_page` already checks): a chapter index can point at
-        // a page that physically exists and parses as a real Ogg page --
-        // benign trailing padding may itself be leftover `OggS` pages from
-        // a previous, longer recording -- but which the header's
-        // `data_length` does not declare as part of this stream. Without
-        // this check, such a chapter would seek onto and decode that
-        // undeclared page instead of failing.
+        // Also check against `last_usable_page`: a page after the declared
+        // stream may still be a valid Ogg page left over from an older,
+        // longer recording, and must not be played.
         if file_page > self.last_usable_page {
             return Err(TafError::PageOutOfRange);
         }
@@ -201,23 +166,20 @@ impl<S: PageSource> TafReader<S> {
 
     /// Which container block the reader is on.
     ///
-    /// This is what position memory's exact tier saves. A block index rather
-    /// than an Ogg page index, because that is the unit the reader loads and
-    /// therefore the only one it can be handed back.
+    /// This is what the saved position stores. A block index rather than an
+    /// Ogg page index, because the reader loads whole blocks.
     pub fn current_page(&self) -> u32 {
         self.page_index
     }
 
     /// Positions the reader at a block it reported earlier.
     ///
-    /// Bounded exactly as [`seek_to_chapter`](Self::seek_to_chapter) is: a
-    /// block past `last_usable_page` physically exists but is not declared as
-    /// part of this stream, and file page 0 is the header rather than audio.
+    /// Checked like [`seek_to_chapter`](Self::seek_to_chapter): a block past
+    /// `last_usable_page` is not part of the stream, and file page 0 is the
+    /// header, not audio.
     ///
-    /// A block that begins with the continuation of a packet started on the
-    /// previous one costs the first few tens of milliseconds after the seek.
-    /// That is the accepted price of resuming exactly rather than at a chapter
-    /// boundary, and it is inaudible against a story.
+    /// If the block starts in the middle of a packet, that packet is skipped,
+    /// losing a few tens of milliseconds of audio. This is not noticeable.
     pub fn seek_to_page(&mut self, page: u32) -> Result<(), TafError> {
         if page == 0 || page > self.last_usable_page {
             return Err(TafError::PageOutOfRange);
@@ -229,13 +191,10 @@ impl<S: PageSource> TafReader<S> {
     /// `Ok(None)` means end of stream.
     pub fn next_packet(&mut self, out: &mut [u8]) -> Result<Option<usize>, TafError> {
         loop {
-            // Both failures below must leave the reader exactly as it was:
-            // `BufferTooSmall` promises a retry with a bigger buffer gets
-            // this same packet, and a corrupt page must not let a retry
-            // resume half-advanced and fabricate a packet out of whatever
-            // lacing entries happen to follow. Rewinding to a saved position
-            // states that directly, where an un-advanced local cursor only
-            // implied it.
+            // Both failures below restore the saved position: after
+            // `BufferTooSmall` a retry must get the same packet, and after a
+            // corrupt page a retry must not read garbage from a half-advanced
+            // cursor.
             let saved = self.cursor;
             match self.cursor.next(&self.page) {
                 Ok(Some(packet)) => {
@@ -254,28 +213,21 @@ impl<S: PageSource> TafReader<S> {
                 }
             }
 
-            // This Ogg page is exhausted. A single PAGE_SIZE-byte container
-            // block can hold more than one real Ogg page back to back:
-            // `toniefile` packs the tiny OpusHead and OpusTags pages
-            // together with the start of the audio stream rather than
-            // leaving the rest of the block empty. Look for another page
-            // behind this one before reading a new block from the source.
-            //
-            // Without this, the reader silently drops every packet packed
-            // behind the first page in a block instead of erroring: it
-            // looks like a clean end-of-page and just advances past them.
+            // This Ogg page is finished. One block can hold several Ogg pages
+            // in a row: `toniefile` packs the small OpusHead and OpusTags
+            // pages together with the start of the audio. Look for another
+            // page in this block before reading the next block, or those
+            // packets would be skipped.
             if let Some(nested) = PacketCursor::at_page(&self.page, self.cursor.payload_start())? {
                 self.check_stream(nested.serial())?;
                 self.cursor = nested;
                 continue;
             }
 
-            // No further real Ogg page in this block: advance to the next
-            // container block, or report end of stream. Bounded by
-            // `last_usable_page`, not `source.page_count()`: a page-aligned
-            // truncated file is rejected in `open`, but a file with benign
-            // trailing padding past the declared data must still stop here
-            // rather than reading that padding as stream content.
+            // No more Ogg pages in this block: move to the next block, or
+            // report the end of the stream. Stop at `last_usable_page`, not
+            // at the end of the source, so trailing padding is not read as
+            // audio.
             let next = self.page_index + 1;
             if next > self.last_usable_page {
                 return Ok(None);
@@ -306,11 +258,9 @@ mod tests {
         while r.next_packet(&mut buf).unwrap().is_some() {
             count += 1;
         }
-        // The fixture is 5 s of audio (granule 239_040 at 48 kHz) encoded as
-        // 83 packets of ~60 ms each, plus the two header packets: 85 total,
-        // exactly. Verified independently by walking the raw file bytes.
-        // `> 200` (assuming 20 ms frames) is not achievable against this
-        // fixture at any packet count -- see task-5-report.md.
+        // The fixture is 5 s of audio (granule 239_040 at 48 kHz) in 83
+        // packets of about 60 ms, plus the two header packets: 85 in total,
+        // checked by walking the raw file bytes.
         assert_eq!(count, 85, "expected the fixture's exact packet count");
     }
 
@@ -335,28 +285,17 @@ mod tests {
         assert_eq!(r.header().chapter_pages.as_slice(), &[0]);
     }
 
+    /// Checks that a packet's payload is returned, not a raw page. (The first
+    /// packet of chapter 0 is `OpusHead`, not audio.)
     #[test]
-    // Renamed from `seeking_to_chapter_zero_lands_on_audio_not_the_header`:
-    // that name claimed to distinguish landing on real audio from landing on
-    // a header, but the assertion below only ever checked that the returned
-    // bytes aren't a raw, unparsed page (i.e. that the packet parser skipped
-    // past the page header and lacing table). It says nothing about audio
-    // versus Opus-header packets -- the first packet chapter 0 actually
-    // yields is `OpusHead`, not audio. A misleading name here already misled
-    // a reviewer about unrelated code; this name now matches what the test
-    // checks instead of overstating it.
     fn seeking_to_chapter_zero_returns_packet_payload_not_a_raw_unparsed_page() {
         let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
         r.seek_to_chapter(0).unwrap();
         let mut buf = [0u8; MAX_PACKET];
         let n = r.next_packet(&mut buf).unwrap().expect("a packet");
-        // The off-by-one is already caught above: without the `+1`,
-        // `seek_to_chapter(0)` would load the TAF header page, `OggPage::parse`
-        // would reject it, and the `.unwrap()` on the line above would panic.
-        // This assertion guards a different regression: that the packet
-        // returned is real payload content skipped past the page header and
-        // lacing table, not a raw, unparsed page starting with the page's
-        // own capture pattern.
+        // Without the `+1` in `seek_to_chapter`, the header page would load
+        // and fail, and the `unwrap` above would panic. This assertion checks
+        // that the page header and lacing table were skipped.
         assert!(n > 0);
         assert_ne!(
             &buf[..n.min(4)],
@@ -374,10 +313,9 @@ mod tests {
 
     #[test]
     fn reads_a_packet_as_large_as_a_page_can_hold() {
-        // 4053 bytes is the largest packet measured in a real Toniebox file,
-        // and it is more than three times the old buffer. Nothing in either
-        // fixture comes close — their packets peak at 719 — so only a
-        // synthetic page can pin this.
+        // 4053 bytes is the largest packet seen in a real Toniebox file. The
+        // fixtures' packets are at most 719 bytes, so this uses a synthetic
+        // page.
         //
         // data_length (field 2) = 4096: one Ogg page of stream.
         let packet_len = 4053usize;
@@ -397,21 +335,19 @@ mod tests {
     fn a_packet_too_large_for_the_buffer_can_be_retried_with_a_bigger_one() {
         let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
 
-        // "OpusHead" is 19 bytes; 4 bytes surely doesn't fit.
+        // The OpusHead packet is 19 bytes, so 4 bytes is too small.
         let mut too_small = [0u8; 4];
         assert_eq!(r.next_packet(&mut too_small), Err(TafError::BufferTooSmall));
 
-        // The failed attempt must not have consumed the packet: retrying
-        // with a big-enough buffer gets the very same packet, not the one
-        // after it.
+        // The failed attempt did not consume the packet: a retry gets the
+        // same packet.
         let mut big_enough = [0u8; MAX_PACKET];
         let n = r.next_packet(&mut big_enough).unwrap().unwrap();
         assert_eq!(&big_enough[..n.min(8)], b"OpusHead");
     }
 
-    /// Builds a minimal TAF header page carrying the given protobuf field
-    /// bytes, mirroring `header.rs`'s own test helper (private to that
-    /// module, so duplicated here rather than reused).
+    /// Builds a minimal TAF header page with the given protobuf field bytes.
+    /// A copy of the private helper in `header.rs`.
     fn header_page(fields: &[u8]) -> [u8; PAGE_SIZE] {
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(&(fields.len() as u32).to_be_bytes());
@@ -419,15 +355,13 @@ mod tests {
         page
     }
 
-    /// Assembles a minimal valid Ogg page carrying the given packets,
-    /// mirroring `page.rs`'s own test helper (private to that module, so
-    /// duplicated here rather than reused).
+    /// Builds a minimal valid Ogg page with the given packets. A copy of the
+    /// private helper in `page.rs`.
     fn ogg_page(packets: &[&[u8]]) -> [u8; PAGE_SIZE] {
         ogg_page_with_serial(0, packets)
     }
 
-    /// As `ogg_page`, but stamped with a stream serial. Only the tests that
-    /// care about stream identity need to say which stream a page belongs to.
+    /// Like `ogg_page`, but with a stream serial.
     fn ogg_page_with_serial(serial: u32, packets: &[&[u8]]) -> [u8; PAGE_SIZE] {
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(b"OggS");
@@ -456,17 +390,11 @@ mod tests {
 
     #[test]
     fn a_first_page_whose_serial_disagrees_with_the_header_is_rejected() {
-        // Real commercial files never disagree: three files from three
-        // publishers, 22,110 Ogg pages total, every page's serial equal to
-        // its header's audio_id, checked 2026-09-17. A first page that
-        // disagrees is therefore not this file's stream at all — the same
-        // torn-write failure the self-consistency check already catches for
-        // every *later* page, just not previously enforced at the point the
-        // stream identity is established.
+        // In real files every page's serial equals the header's audio_id, so
+        // a first page that disagrees is not part of this file.
         //
         // data_length (field 2) = 4096 = one page; audio_id (field 3) =
-        // 0xAAAA. The page itself is stamped with a different serial,
-        // 0xBBBB.
+        // 0xAAAA. The page has a different serial, 0xBBBB.
         let mut file = [0u8; PAGE_SIZE * 2];
         file[0..PAGE_SIZE]
             .copy_from_slice(&header_page(&[0x10, 0x80, 0x20, 0x18, 0xAA, 0xD5, 0x02]));
@@ -480,16 +408,13 @@ mod tests {
 
     #[test]
     fn a_block_belonging_to_another_stream_is_rejected_rather_than_decoded() {
-        // The torn-write failure mode: page 2 is a structurally perfect Ogg
-        // page sitting at a perfectly valid offset, left over from a
-        // previous, longer recording. Nothing about its shape gives it away
-        // — only that it belongs to a different stream. Decoding it is how a
-        // child ends up hearing the end of the previous story.
+        // After an interrupted write, page 2 is a valid Ogg page left over
+        // from an older, longer recording. Only its stream serial shows it
+        // does not belong. Playing it would play the end of the old story.
         //
         // data_length (field 2) = 8192, declaring both pages as stream;
-        // audio_id (field 3) = 0xAAAA, matching the first page's serial so
-        // this test still exercises the *second* page's disagreement, not
-        // the header check now enforced on the first.
+        // audio_id (field 3) = 0xAAAA, matching the first page, so only the
+        // second page is wrong.
         let mut file = [0u8; PAGE_SIZE * 3];
         file[0..PAGE_SIZE]
             .copy_from_slice(&header_page(&[0x10, 0x80, 0x40, 0x18, 0xAA, 0xD5, 0x02]));
@@ -506,11 +431,8 @@ mod tests {
 
     #[test]
     fn a_page_packed_behind_another_is_checked_against_the_stream_too() {
-        // The same stale page, but packed in behind a good one inside a
-        // single block rather than starting one. That is a second
-        // positioning site, and it is where the two packet scanners drifted
-        // apart before they were unified — so it gets its own test rather
-        // than trusting that one check covers both.
+        // The same leftover page, but packed behind a good page in the same
+        // block. This is a different code path, so it has its own test.
         //
         // audio_id (field 3) = 0xAAAA, matching the block's first page.
         let mut file = [0u8; PAGE_SIZE * 2];
@@ -535,10 +457,9 @@ mod tests {
 
     #[test]
     fn seeking_onto_a_block_from_another_stream_is_rejected() {
-        // Trailing padding may itself be leftover `OggS` pages from a longer
-        // previous recording, and a chapter index inside the declared range
-        // can point straight at one. `last_usable_page` does not help here:
-        // the page is declared stream, it just isn't this stream's.
+        // A chapter can point at a leftover page from an older recording
+        // inside the declared range, so `last_usable_page` does not catch
+        // it; the stream serial does.
         //
         // data_length = 8192; chapter_pages (field 4, packed) = [0, 1];
         // audio_id (field 3) = 0xAAAA, matching the first page's serial.
@@ -560,11 +481,8 @@ mod tests {
         // chapter 1 at ogg page 1 (file page 2, deliberately not a real Ogg
         // page at all).
         //
-        // data_length (field 2) = 8192 = two pages, declaring both page 1
-        // and page 2 as usable: chapter 1 must fail because page 2 isn't a
-        // real Ogg page, not merely because it's out of the declared range
-        // (that distinct failure mode is covered by the "beyond the
-        // declared stream" tests above).
+        // data_length (field 2) = 8192 = two pages, so chapter 1 fails
+        // because page 2 is not an Ogg page, not because it is out of range.
         let mut file = [0u8; PAGE_SIZE * 3];
         file[0..PAGE_SIZE]
             .copy_from_slice(&header_page(&[0x10, 0x80, 0x40, 0x22, 0x02, 0x00, 0x01]));
@@ -583,27 +501,21 @@ mod tests {
             "chapter 1 points at a page that isn't a real Ogg page"
         );
 
-        // The failed seek must not have clobbered the buffer or the
-        // cursors: the reader should still be exactly where the last
-        // successful read left it, not reading garbage assembled from a
-        // buffer that no longer matches its own position.
+        // The failed seek did not change the reader's position.
         let n2 = r.next_packet(&mut buf).unwrap().unwrap();
         assert_eq!(&buf[..n2], b"BBBB");
     }
 
     #[test]
     fn an_oversized_packet_does_not_leave_stale_state_for_a_retry() {
-        // data_length (field 2) = 4096 = one page, declaring the single Ogg
-        // page below as usable. audio_id is left at its default (0), which
-        // matches the page's own unset serial (also 0) so the header check
-        // has nothing to say about it.
+        // data_length (field 2) = 4096 = one page. audio_id is 0, which
+        // matches the page's serial (also 0).
         let mut file = [0u8; PAGE_SIZE * 2];
         file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
 
-        // 20 segments: the first 17 (sixteen 255s plus a terminating 1)
-        // declare a 4081-byte packet starting at payload offset 47, which
-        // overruns the 4096-byte page. Three lacing entries remain after it
-        // (mirrors page.rs's equivalent test for `OggPage::packets`).
+        // 20 segments: the first 17 (sixteen 255s and a 1) declare a
+        // 4081-byte packet at payload offset 47, which overruns the 4096-byte
+        // page. Three lacing entries follow it (as in the test in `page.rs`).
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(b"OggS");
         page[26] = 20;
@@ -620,20 +532,19 @@ mod tests {
         let mut buf = [0u8; MAX_PACKET];
 
         assert_eq!(r.next_packet(&mut buf), Err(TafError::NotAnOggPage));
-        // A retry must not resume from a stale cursor and fabricate a
-        // packet out of the lacing entries that followed the oversized one.
+        // A retry must not continue from a stale cursor with the remaining
+        // lacing entries.
         assert_eq!(r.next_packet(&mut buf), Err(TafError::NotAnOggPage));
     }
 
     const CHAPTERS_FIXTURE: &[u8] = include_bytes!("../tests/data/chapters.taf");
 
-    /// The fixture's chapter starts, as Ogg-stream page indices. Stated
-    /// literally so these tests can disagree with the parser rather than
-    /// asking it what to expect.
+    /// The fixture's chapter starts, as Ogg-stream page indices. Written as
+    /// literals so the tests can disagree with the parser.
     const CHAPTERS_FIXTURE_PAGES: &[u32] = &[0, 5, 11];
 
-    /// Position memory's exact tier resumes at a page the reader itself
-    /// reported, so what it hands out must be what it takes back.
+    /// A saved position is a page the reader reported, so seeking to it must
+    /// return to the same page.
     #[test]
     fn a_reader_returns_to_the_page_it_reported() {
         let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
@@ -647,17 +558,15 @@ mod tests {
         assert_eq!(r.current_page(), page);
     }
 
-    /// The same bound `seek_to_chapter` applies: a page that physically exists
-    /// but sits beyond what the header declares is padding, not audio, and
-    /// decoding it would produce noise from a previous, longer recording.
+    /// Like `seek_to_chapter`: a page after the declared stream is padding,
+    /// not audio.
     #[test]
     fn a_page_beyond_the_declared_stream_is_refused() {
         let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
         assert_eq!(r.seek_to_page(u32::MAX), Err(TafError::PageOutOfRange));
     }
 
-    /// File page 0 is the header, never audio — the `+1` in `seek_to_chapter`
-    /// exists for exactly this reason.
+    /// File page 0 is the header, not audio.
     #[test]
     fn the_header_page_is_not_a_place_to_resume() {
         let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
@@ -685,11 +594,8 @@ mod tests {
         assert_eq!(r.current_chapter(), 1);
     }
 
-    /// The reason this is asked of the reader rather than tracked by whoever
-    /// last seeked: a story played straight through crosses chapters without
-    /// anybody seeking, and "skip to the next one" is wrong by a whole
-    /// chapter if it counts from the last seek instead of from where the
-    /// stream actually is.
+    /// A story played straight through moves into later chapters without
+    /// any seek, and the reported chapter must follow.
     #[test]
     fn reading_straight_through_reports_each_chapter_in_turn() {
         let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
@@ -705,9 +611,8 @@ mod tests {
         assert_eq!(seen.as_slice(), &[0, 1, 2]);
     }
 
-    /// `seek_to_chapter` promises a failed seek leaves the reader exactly
-    /// where it was. The chapter it reports has to keep that promise too, or
-    /// a skip past the end would silently renumber the story.
+    /// A failed seek leaves the reader where it was, so the chapter must not
+    /// change either.
     #[test]
     fn a_failed_seek_leaves_the_chapter_where_it_was() {
         let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap()).unwrap();
@@ -736,22 +641,10 @@ mod tests {
 
     #[test]
     fn seeking_to_each_chapter_succeeds_and_lands_on_different_audio() {
-        // Regression note: the previous version of this test reused one
-        // reader across iterations and compared every chapter only against
-        // a chapter-0 baseline captured up front. A `seek_to_chapter` that
-        // merely bounds-checked its argument without actually repositioning
-        // would still pass that version, because the shared reader would
-        // already be correctly positioned from whichever seek last actually
-        // ran. This matters beyond the test itself: chapter seeking is what
-        // track-skip compiles down to.
-        //
-        // Strengthened: for each chapter, seek two *independent*, freshly
-        // opened readers to it and require their first packets to agree
-        // (proving the seek is reproducible, not an accident of the
-        // reader's prior position), then require all chapters' first
-        // packets to be pairwise different from each other. A no-op seek
-        // fails this: every chapter would land on the same page the reader
-        // opens onto by default, making all "first packets" identical.
+        // For each chapter, two freshly opened readers seek to it and must
+        // return the same first packet, so the result does not depend on the
+        // reader's earlier position. Then every chapter's first packet must
+        // differ from the others, so a seek that does nothing would fail.
         let chapter_count = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap())
             .unwrap()
             .chapter_count();
@@ -801,10 +694,9 @@ mod tests {
 
     #[test]
     fn a_file_with_fewer_pages_than_the_header_declares_is_rejected_as_truncated() {
-        // sine.taf declares data_length 57344 = 14 pages of Ogg stream
-        // (page_count 15, header included). Slicing to just the first 10
-        // blocks is page-aligned -- so without checking `data_length` this
-        // would otherwise open and decode to a valid, silently shorter file.
+        // sine.taf declares data_length 57344 = 14 pages of Ogg stream (15
+        // with the header). Cut to 10 whole pages, it would otherwise play as
+        // a valid but shorter file.
         let truncated = &FIXTURE[..PAGE_SIZE * 10];
         assert!(matches!(
             TafReader::open(SlicePages::new(truncated).unwrap()),
@@ -832,18 +724,12 @@ mod tests {
 
     #[test]
     fn a_header_declaring_zero_data_length_is_rejected_not_opened() {
-        // sine.taf's data_length varint lives at file offsets 27..30, encoded
-        // canonically as [0x80, 0xC0, 0x03] (57344). Overwrite it with a
-        // non-canonical 3-byte encoding of zero ([0x80, 0x80, 0x00]) so the
-        // field keeps the same byte width and every following field's offset
-        // is undisturbed -- only the decoded value changes.
+        // sine.taf's data_length varint is at file offsets 27..30, encoded as
+        // [0x80, 0xC0, 0x03] (57344). Replace it with a 3-byte encoding of
+        // zero ([0x80, 0x80, 0x00]) so no other field moves.
         //
-        // A header declaring zero bytes of Ogg stream has no page for
-        // `open` to position onto: `last_usable_page` would be 0, meaning
-        // even file page 1 (which must hold OpusHead) is out of bounds.
-        // Before this was enforced, `open` positioned onto page 1
-        // unconditionally and happily decoded it as if it were declared
-        // stream content.
+        // With zero bytes of stream there is no page to open: even file
+        // page 1 (OpusHead) is out of bounds.
         let mut file = [0u8; PAGE_SIZE * 15];
         file.copy_from_slice(FIXTURE);
         file[27..30].copy_from_slice(&[0x80, 0x80, 0x00]);
@@ -856,18 +742,14 @@ mod tests {
 
     #[test]
     fn seeking_to_a_chapter_beyond_the_declared_stream_is_rejected_not_decoded() {
-        // chapters.taf's data_length varint lives at the same file offsets
-        // (27..30), encoded canonically as [0x80, 0x80, 0x04] (65536, 16
-        // pages). Overwrite it with [0x80, 0xC0, 0x01] (24576, 6 pages): a
-        // same-width, still-canonical 3-byte varint, so nothing else in the
-        // header shifts.
+        // chapters.taf's data_length varint is at the same offsets (27..30),
+        // encoded as [0x80, 0x80, 0x04] (65536, 16 pages). Replace it with
+        // [0x80, 0xC0, 0x01] (24576, 6 pages), the same width, so no other
+        // field moves.
         //
-        // Chapter 2 (ogg page 11, file page 12) is a real, valid Ogg page
-        // physically present in the file -- it is genuine leftover stream
-        // data, not zeroed padding -- but with the shrunk data_length it is
-        // no longer part of the declared stream. Seeking there must fail,
-        // not silently decode that undeclared page as if it were this
-        // file's audio.
+        // Chapter 2 (Ogg page 11, file page 12) is a valid Ogg page, but with
+        // the smaller data_length it is no longer part of the stream. Seeking
+        // there must fail.
         let mut file = [0u8; PAGE_SIZE * 17];
         file.copy_from_slice(CHAPTERS_FIXTURE);
         file[27..30].copy_from_slice(&[0x80, 0xC0, 0x01]);
@@ -878,9 +760,8 @@ mod tests {
 
     #[test]
     fn an_extra_all_zero_trailing_block_is_accepted_as_padding_and_ignored() {
-        // Page-aligned padding after the declared data must stay acceptable
-        // (unlike an actually truncated file): a real device may leave
-        // trailing zero blocks from a previous, longer recording.
+        // Whole-page padding after the declared data is allowed: a real card
+        // may have zero blocks left over from an older, longer recording.
         let mut padded = [0u8; PAGE_SIZE * 16];
         padded[..FIXTURE.len()].copy_from_slice(FIXTURE);
         // padded[FIXTURE.len()..] is left all zero by initialization.
@@ -909,15 +790,10 @@ mod tests {
 
     #[test]
     fn a_dropped_fragment_does_not_hide_a_page_packed_in_behind_it() {
-        // One container block holding two real Ogg pages. The first ends
-        // with a lacing entry of 255 and no terminator, so its last packet
-        // continues onto a page that does not exist and gets dropped. Those
-        // 255 bytes are still declared, still occupy the payload, and the
-        // second page starts after them.
-        //
-        // A reader that drops the fragment without stepping over its bytes
-        // looks for the next page at the fragment's own start, does not find
-        // one, and silently loses every packet behind it.
+        // One block holding two Ogg pages. The first ends with a lacing entry
+        // of 255 and no terminator, so its last packet is dropped. Its 255
+        // bytes still take up space, and the second page starts after them.
+        // A reader that did not skip them would miss the second page.
         let mut file = [0u8; PAGE_SIZE * 2];
         file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
 
@@ -939,16 +815,13 @@ mod tests {
         assert_eq!(&buf[..n], b"CCCC");
     }
 
-    /// What a card that is present, correctly sized, and failing looks like:
-    /// every page is in range, but one of them will not read.
+    /// A failing card: every page is in range, but one cannot be read.
     struct FailingPages<'a> {
         inner: SlicePages<'a>,
         unreadable: u32,
     }
 
-    /// A source's own error type, deliberately nothing to do with `TafError`
-    /// — a real one reports CRC failures and timeouts, which this layer has
-    /// no vocabulary for.
+    /// A source's own error type, unrelated to `TafError`, as on a real card.
     #[derive(Debug)]
     struct CardFault;
 
@@ -976,17 +849,14 @@ mod tests {
 
     #[test]
     fn a_page_that_cannot_be_read_is_an_io_error_not_a_range_error() {
-        // Page 1 is well within the file. Reporting this as `PageOutOfRange`
-        // would send anyone debugging it looking for a seek bug in a reader
-        // that is behaving perfectly.
+        // Page 1 is within the file, so this is a storage error, not
+        // `PageOutOfRange`.
         assert_eq!(TafReader::open(failing_at(1)).err(), Some(TafError::Io));
     }
 
     #[test]
     fn a_header_that_cannot_be_read_is_an_io_error_not_a_malformed_header() {
-        // The header may be perfectly well-formed; nobody managed to look at
-        // it. Blaming the file's contents for a failure of the medium sends
-        // debugging after the wrong artefact entirely.
+        // The header may be fine; it just could not be read.
         assert_eq!(TafReader::open(failing_at(0)).err(), Some(TafError::Io));
     }
 }
