@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn the_identifier_is_the_byte_reversed_uid_as_uppercase_hex() {
+    fn the_identifier_is_the_byte_reversed_uid_in_hex() {
         // UID bytes 01 02 03 04 05 06 07 08 reversed is 08 07 06 05 04 03 02 01.
         let req = build(None);
         assert!(
