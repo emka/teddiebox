@@ -1,12 +1,12 @@
-//! One download, driven asynchronously and pumped rather than buffered.
+//! One asynchronous download, streamed rather than buffered.
 //!
-//! [`crate::fetch`] reads a whole body into one buffer, which is right for a
-//! revalidation and impossible for content: a Tonie is tens of megabytes and
-//! the box has half of one. Here the head is parsed into the caller's buffer,
-//! and the body is handed back a bite at a time.
+//! [`crate::fetch`] reads a whole body into one buffer, which cannot work for
+//! a Tonie of tens of megabytes on a box with well under one megabyte of RAM.
+//! Here the head is parsed into the caller's buffer, and the body is returned
+//! piece by piece.
 //!
-//! Nothing here knows what the bytes are for. `build_content_request` and
-//! `parse_head` do the thinking; this file only moves bytes and counts them.
+//! This file only moves and counts bytes; `build_content_request` and
+//! `parse_head` make the decisions.
 
 use crate::{
     build_content_request, build_length_probe, parse_head, CloudError, ContentRequest, ETag,
@@ -37,11 +37,9 @@ pub enum Begun {
 
 /// Reads until the response head is complete, and no further.
 ///
-/// Draining to EOF instead would hand the peer control of when this returns,
-/// and a keep-alive server never hangs up — which would wedge playback rather
-/// than merely the fetch. Answers the head, where the body starts in `buf`,
-/// and how much arrived in total, since the bytes past the head are body that
-/// has already been paid for.
+/// Reading until the server closes would hang with a keep-alive server. Returns
+/// the head, where the body starts in `buf`, and how many bytes arrived in
+/// total (bytes after the head are already part of the body).
 async fn read_head<T: Read + Write>(
     transport: &mut T,
     buf: &mut [u8],
@@ -51,7 +49,7 @@ async fn read_head<T: Read + Write>(
         match parse_head(&buf[..received]) {
             Ok((head, body_at)) => return Ok((head, body_at, received)),
             Err(CloudError::MalformedResponse) if received < buf.len() => {}
-            // A head that will not fit cannot be parsed however long we wait.
+            // A head that does not fit the buffer can never be parsed.
             Err(CloudError::MalformedResponse) => return Err(CloudError::ResponseTooLong),
             Err(e) => return Err(e),
         }
@@ -73,23 +71,21 @@ pub enum Probed {
     Length(u32),
     /// The server has no story for this figure.
     ///
-    /// `410 Gone` as well as `404`: measured against `teddycloud.local` on
-    /// 2026-09-13, a ruid the cloud has never heard of comes back `410` from
-    /// the upstream proxy rather than `404` from teddyCloud. Either way it is
-    /// an answer about the *server*, and no reason to discard a story already
-    /// sitting on the card.
+    /// `410 Gone` as well as `404`: for a ruid the Tonies cloud does not know,
+    /// teddyCloud passes on the cloud's `410`. Either way, this is no reason
+    /// to delete a story already on the card.
     NoContent,
     /// The server answered, and its answer contains no length.
     ///
-    /// Kept apart from a transport failure on purpose. Both mean "do not act",
-    /// but only one of them is worth saying out loud at a bench.
+    /// Separate from a transport failure. Both mean "do nothing", but they
+    /// are logged differently.
     Unstated,
 }
 
 /// Asks how long a file is now, without downloading it.
 ///
-/// Reads exactly as far as the head. The one byte of body a `206` carries is
-/// left in `buf` and ignored — it is a byte of story, not an answer.
+/// Reads only the head. The one byte of body a `206` carries is left in `buf`
+/// and ignored.
 pub async fn probe_length<T: Read + Write>(
     transport: &mut T,
     request: &ContentRequest<'_>,
@@ -106,10 +102,9 @@ pub async fn probe_length<T: Read + Write>(
     let (head, _, _) = read_head(transport, buf).await?;
     Ok(match head.status {
         404 | 410 => Probed::NoContent,
-        // A `206` states the whole length in its `Content-Range`; a `200` is
-        // the whole file, so its `Content-Length` is the same number. This
-        // server answers a zero-offset range with exactly that, which is why
-        // the case is real rather than defensive.
+        // A `206` gives the whole length in its `Content-Range`; a `200` is
+        // the whole file, so its `Content-Length` is the length. teddyCloud
+        // really does answer some ranges with `200`.
         206 => match head.content_range.and_then(|range| range.total) {
             Some(total) => Probed::Length(total),
             None => Probed::Unstated,
@@ -138,10 +133,8 @@ pub async fn begin<T: Read + Write>(
 
 /// Sends already-built request bytes and parses the response head.
 ///
-/// The counterpart to [`begin`] for callers whose request is not a
-/// [`ContentRequest`] — a plain path fetch (`build_path_request`), for one —
-/// so that the status classification below, the `410` handling, and the
-/// `body_end` clamp exist exactly once regardless of what built the request.
+/// Like [`begin`], for requests that are not a [`ContentRequest`], such as a
+/// path fetch (`build_path_request`). Both share the status handling below.
 pub async fn begin_prepared<T: Read + Write>(
     transport: &mut T,
     request_bytes: &[u8],
@@ -157,12 +150,10 @@ pub async fn begin_prepared<T: Read + Write>(
 
     match head.status {
         304 => return Ok(Begun::Unchanged),
-        // `410` as well as `404`. Measured against `teddycloud.local` on
-        // 2026-09-13: a ruid the cloud has never heard of comes back `410
-        // Gone` from the upstream proxy rather than `404` from teddyCloud.
-        // Reported as an unexpected status it reached the box as "the server
-        // could not be reached", which sent a child to look at a network that
-        // was working perfectly.
+        // `410` as well as `404`: for a ruid the Tonies cloud does not know,
+        // teddyCloud passes on the cloud's `410 Gone`. Treating it as an
+        // unexpected status would report a network problem that does not
+        // exist.
         404 | 410 => return Ok(Begun::NotFound),
         200 | 206 => {}
         other => return Err(CloudError::UnexpectedStatus(other)),
@@ -170,21 +161,17 @@ pub async fn begin_prepared<T: Read + Write>(
 
     let body_length = head.content_length.ok_or(CloudError::LengthRequired)?;
 
-    // A 200 answering a range request means the server declined it and sent
-    // the file from the start. Saying so as `offset: 0` is what stops a caller
-    // appending the beginning of the story to the middle of a partial file.
+    // A 200 to a range request means the server sent the whole file from the
+    // start. `offset: 0` stops the caller appending it to a partial file.
     let (offset, total) = match head.content_range {
         Some(range) => (range.first, range.total),
         None => (0, Some(body_length)),
     };
 
-    // `received` may hold bytes beyond the body — a pipelining or keep-alive
-    // peer, or any trailing garbage — and those are never body. Clamping
-    // here, not just in `Body::read`, is what stops them reaching the
-    // caller as if they were content. `saturating_add` rather than a plain
-    // `+`: `body_at + body_length` must not wrap `usize` on a 32-bit target,
-    // where `usize` is the same width as `u32`; the `.min(received)` after
-    // it means a saturated `usize::MAX` still clamps down to `received`.
+    // `received` may hold bytes after the body (from a keep-alive peer, or
+    // garbage). Clamp here so they never reach the caller as content.
+    // `saturating_add` because `body_at + body_length` could overflow on a
+    // 32-bit target; `.min(received)` then clamps it.
     let body_end = body_at.saturating_add(body_length as usize).min(received);
 
     Ok(Begun::Content {
@@ -198,9 +185,8 @@ pub async fn begin_prepared<T: Read + Write>(
 
 /// The remainder of a body, counted down.
 ///
-/// Counting is the whole job: a peer that closes early otherwise looks exactly
-/// like a file that ended, and the difference is a story that stops in the
-/// middle forever.
+/// Counting bytes is what tells a connection that closed early from a file
+/// that ended.
 pub struct Body {
     remaining: u32,
 }
@@ -223,8 +209,8 @@ impl Body {
 
     /// Reads the next bite of the body into `buf`.
     ///
-    /// Never reads past the end of the body, so a peer holding the socket open
-    /// afterwards cannot wedge the caller.
+    /// Never reads past the end of the body, so a server that keeps the
+    /// connection open cannot make the caller hang.
     pub async fn read<T: Read>(
         &mut self,
         transport: &mut T,

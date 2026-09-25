@@ -1,28 +1,26 @@
 //! Builds teddyCloud HTTP requests into a caller-supplied buffer.
 //!
-//! Plain HTTP by design while the server is LAN-local. Nothing here knows how
-//! the bytes reach the network, so adding TLS is a change of transport only.
+//! Nothing here knows how the bytes reach the network; the firmware sends
+//! them over TLS.
 
 use crate::CloudError;
 use core::fmt::Write;
 use heapless::String;
 
-/// Longest ETag we will echo back. Longer ones are dropped, costing a
-/// re-download rather than an error.
+/// Longest ETag we echo back. Longer ones are dropped, which costs a
+/// re-download, not an error.
 pub const MAX_ETAG: usize = 64;
 
 pub type ETag = String<MAX_ETAG>;
 
 /// Reads a server's ETag header value, or `None` if it is unusable.
 ///
-/// The value is echoed back unescaped into `If-None-Match:` and `If-Range:`
-/// request lines by [`write_request`], and written into the `.MET` sidecar, so
-/// the bytes a server puts here land on our own wire. An allow-list of
-/// printable, non-space ASCII is both what RFC 9110 calls an entity-tag and the
-/// cheapest way to keep a `CR`, an `LF` or a space -- the three that would let a
-/// server add a header or a token to the next request -- out of a header value.
+/// The value is copied unescaped into `If-None-Match:` and `If-Range:`
+/// headers by [`write_request`], and into the `.MET` sidecar. Only printable,
+/// non-space ASCII is allowed (what RFC 9110 allows in an entity-tag), so a
+/// server cannot inject a `CR`, `LF` or space into our next request.
 ///
-/// Dropping rather than failing matches the overlong case: the cost is one
+/// An unusable value is dropped, like an overlong one: the cost is one
 /// re-download.
 pub fn parse_etag(value: &str) -> Option<ETag> {
     if !value.bytes().all(|b| b.is_ascii_graphic()) {
@@ -33,8 +31,8 @@ pub fn parse_etag(value: &str) -> Option<ETag> {
 
 /// Everything that varies between one content request and the next.
 ///
-/// A struct rather than a parameter list because resuming adds fields, and a
-/// six-argument function is where a caller silently transposes two of them.
+/// A struct rather than many parameters, so a caller cannot swap two of them
+/// by mistake.
 #[derive(Debug, Clone)]
 pub struct ContentRequest<'a> {
     pub uid: [u8; 8],
@@ -49,31 +47,29 @@ pub struct ContentRequest<'a> {
     pub from: Option<u32>,
     /// The tag's own memory, sent as `Authorization: BD <64 hex>`.
     ///
-    /// teddyCloud never checks this. It forwards it to the tonies cloud when
-    /// it does not already hold the content, and that is what accepts or
-    /// rejects it — so supplying it is the difference between a `403` and a
-    /// story for any figure the server has not already got.
+    /// teddyCloud does not check this itself. It forwards it to the Tonies
+    /// cloud when it does not already have the content, and the cloud
+    /// accepts or rejects it. Without it, a figure the server does not have
+    /// gets a `403`.
     ///
-    /// `None` for content the server holds, which needs no token at all.
+    /// `None` for content the server already has, which needs no token.
     pub auth: Option<&'a [u8; TOKEN_BYTES]>,
 }
 
 /// Length of a tag's authentication token: the whole of its user memory.
 ///
-/// `TONIE_AUTH_TOKEN_LENGTH` in teddyCloud's `include/net_config.h`, and eight
-/// four-byte ICODE SLIX-L blocks at the other end — the two agree, which is
-/// what made "the token is the tag's memory" checkable rather than a guess.
+/// `TONIE_AUTH_TOKEN_LENGTH` in teddyCloud's `include/net_config.h`, which
+/// equals eight four-byte ICODE SLIX-L blocks.
 pub const TOKEN_BYTES: usize = 32;
 
 /// Which of teddyCloud's two content routes to ask.
 ///
-/// [`Route::V2`] is the box's real endpoint and the default. [`Route::V1`]
-/// exists because the teddyCloud this project talks to does not answer on
-/// `/v2` at all — measured 2026-09-03, the connection is accepted and then
-/// nothing comes back, with and without an `Authorization` header, until the
-/// client times out. `/v1` returns the file. Upstream's source has `/v1` pass
-/// `noPassword = TRUE`, which is the likely difference, but the hang itself is
-/// unexplained and this is a way round it rather than a fix for it.
+/// [`Route::V2`] is the stock box's endpoint and the default. [`Route::V1`]
+/// exists because our teddyCloud server does not answer on `/v2`: it accepts
+/// the connection and then sends nothing until the client times out, with or
+/// without an `Authorization` header. `/v1` returns the file. teddyCloud's
+/// source sets `noPassword = TRUE` for `/v1`, which may be the difference;
+/// the hang is not understood, and this only works around it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Route {
     V1,
@@ -92,26 +88,18 @@ impl Route {
 
 /// Writes a GET for the content of `tag` into `out`.
 ///
-/// The path is `/v2/content/<ruid>` — teddyCloud's box-facing content route
-/// (`handleCloudContentV2` in its `server.c`/`handler_cloud.c`), not the
-/// similarly-named `/content/` which is that server's *web admin* API. Hitting
-/// the admin route would be a silent wrong-endpoint bug: same shape of URL,
-/// different handler.
+/// The path is `/v2/content/<ruid>` (or `/v1`, see [`Route`]): teddyCloud's
+/// route for boxes (`handleCloudContentV2` in its `handler_cloud.c`). Not
+/// `/content/`, which is its web admin API.
 ///
-/// `<ruid>` is the UID with its bytes reversed, not the UID itself: teddyCloud
-/// recovers the UID by byte-swapping whatever comes after `/v2/content/`
-/// (`handler_cloud.c`'s `bswap_64` on the parsed ruid), and builds that same
-/// ruid from a UID on its own side by reversing the eight hex-pair bytes
-/// (`handler.c`'s `getContentPathFromUID`). Sending the UID's own hex would
-/// look plausible — same sixteen characters, same charset — while asking the
-/// server for a different, generally nonexistent, tag.
+/// `<ruid>` is the UID with its bytes reversed: teddyCloud byte-swaps it back
+/// (`bswap_64` in `handler_cloud.c`). Sending the UID unreversed would look
+/// valid but ask for a different tag.
 ///
-/// A fresh request with an etag is conditional: an unchanged file answers 304,
-/// which revalidates the cache without interrupting playback. A resumed request
-/// is always a range request — the response is 206 (continue) or 200 (restart),
-/// never 304. This distinction matters: a 304 says nothing about whether the
-/// partial bytes already on the card are still the right prefix of the new
-/// content.
+/// A fresh request with an etag is conditional: an unchanged file gets a
+/// 304. A resumed request is always a range request, answered with 206
+/// (continue) or 200 (start again), never 304, because a 304 would not say
+/// whether the partial file on the card is still valid.
 pub fn build_content_request(
     request: &ContentRequest<'_>,
     out: &mut [u8],
@@ -121,19 +109,15 @@ pub fn build_content_request(
 
 /// Writes a GET for a file at `path` into `out`.
 ///
-/// The sibling `build_content_request` needs: fetching an update means asking
-/// teddyCloud for a path (`/teddiebox.txt`, then an image), not a figure
-/// identifier, and none of the uid, route, or upstream-forwarded token that
-/// shape a content request apply here.
+/// Used for firmware updates, which fetch a path (`/teddiebox.txt`, then an
+/// image) rather than a figure's content, so there is no uid, route or
+/// token.
 ///
-/// `from: Some(n)` asks for an open-ended range from byte `n`, the same way a
-/// resumed content request does. `None` asks for the whole file. There is no
-/// etag parameter: nothing yet needs conditional revalidation for a plain
-/// path fetch, and adding one unused would be speculative.
+/// `from: Some(n)` asks for everything from byte `n`, like a resumed content
+/// request. `None` asks for the whole file. There is no etag, because nothing
+/// needs it yet.
 ///
-/// Buffer discipline, header order, and the `Connection: close` close all
-/// match `build_content_request` exactly, because both are read by the same
-/// server and there is no reason for them to differ.
+/// Header order and `Connection: close` match `build_content_request`.
 pub fn build_path_request(
     buf: &mut [u8],
     path: &str,
@@ -156,23 +140,20 @@ pub fn build_path_request(
 
 /// Which byte a length probe asks for.
 ///
-/// One, not zero. Measured against `teddycloud.local` on 2026-09-13: a range at
-/// offset zero is answered `200` with the whole body and no `Content-Range`,
-/// so it is a download and not a question. Offset one is answered `206` with
-/// `Content-Range: bytes 1-1/<total>` — the number, and one byte of story.
+/// One, not zero. teddyCloud answers a range starting at zero with `200` and
+/// the whole file, without `Content-Range`. A range at one gets `206` with
+/// `Content-Range: bytes 1-1/<total>`, which gives the length.
 const PROBE_AT: u32 = 1;
 
 /// Builds a request for one byte, to learn how long the whole file is.
 ///
-/// **`HEAD` is not available.** The same measurement found `HEAD` answering
-/// `404` on a route whose `GET` answers `200`, so the only way this server
-/// will state a length is in the `Content-Range` of a partial response — which
-/// is the header a resume already parses.
+/// **`HEAD` does not work**: teddyCloud answers it with `404` where `GET`
+/// answers `200`. So the length comes from the `Content-Range` of a partial
+/// response, which the resume code already parses.
 ///
-/// Carries the token for the same reason a fetch does: teddyCloud forwards it
-/// upstream for content it does not already hold, and a probe for a figure the
-/// server has never seen is exactly that case. Sends no conditional header: a
-/// `304` would carry no length at all.
+/// Sends the token like a download does, because teddyCloud forwards it
+/// upstream for content it does not have. Sends no conditional header, since
+/// a `304` has no length.
 pub fn build_length_probe(
     request: &ContentRequest<'_>,
     out: &mut [u8],
@@ -180,10 +161,9 @@ pub fn build_length_probe(
     write_request(request, Ask::Length, out)
 }
 
-/// What a request is for. The two differ only in the `Range` they send, which
-/// is why they are one writer: everything else — the route, the reversed
-/// lower-case ruid, the token, the close — must stay identical, or a probe
-/// would be asking about a different file from the fetch that follows it.
+/// What a request is for. The two differ only in the `Range` header.
+/// Everything else must be identical, or a probe would ask about a different
+/// file than the download that follows it.
 enum Ask {
     Content,
     Length,
@@ -197,9 +177,7 @@ fn write_request(
     let mut buf = SliceWriter { out, used: 0 };
 
     write!(buf, "GET {}", request.route.path()).map_err(|_| CloudError::RequestTooLong)?;
-    // Lower case, deliberately: teddyCloud compares these characters against a
-    // lower-case literal to decide whether the figure is home-made, and marks
-    // the tag `nocloud` for good when they do not match. See the test.
+    // Lower case on purpose: see `the_identifier_is_written_in_lower_case`.
     for b in request.uid.iter().rev() {
         write!(buf, "{b:02x}").map_err(|_| CloudError::RequestTooLong)?;
     }
@@ -236,11 +214,8 @@ fn write_request(
     Ok(buf.used)
 }
 
-/// Formats straight into the caller's buffer.
-///
-/// The request used to be built in a `String<512>` and copied out, which cost
-/// the stack both buffers and capped the request at 512 bytes however large
-/// `out` was. Running out of room is the caller's `RequestTooLong` either way.
+/// Formats straight into the caller's buffer, with no intermediate copy.
+/// Running out of room becomes `RequestTooLong`.
 struct SliceWriter<'a> {
     out: &'a mut [u8],
     used: usize,
@@ -264,10 +239,9 @@ mod tests {
 
     const UID: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
 
-    /// A UID whose reversed hex starts with a leading zero byte, so a naive
-    /// `u64`-arithmetic reversal (bswap-then-format) that drops the leading
-    /// zero digits would be caught: reversed correctly this is
-    /// `0077665544332211`, not `77665544332211`.
+    /// A UID whose reversed hex starts with a zero byte, to catch a reversal
+    /// that drops leading zeros: the result must be `0077665544332211`, not
+    /// `77665544332211`.
     const UID_WITH_LEADING_ZERO_WHEN_REVERSED: [u8; 8] =
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x00];
 
@@ -313,18 +287,15 @@ mod tests {
         heapless::String::try_from(core::str::from_utf8(&out[..n]).unwrap()).unwrap()
     }
 
-    /// Measured against `teddycloud.local` on 2026-09-13, and every line of this
-    /// test is one of those measurements rather than a reading of the RFC:
+    /// Based on how teddyCloud actually responds:
     ///
-    /// - `HEAD` answers **404** on a route whose `GET` answers 200, so the
-    ///   obvious way to ask a file's length is not available.
-    /// - `Range: bytes=0-0` answers **200 with the whole 37 MB body** and no
-    ///   `Content-Range` at all — a zero offset is not a probe, it is a
-    ///   download.
-    /// - `Range: bytes=1-1` answers **206**, `Content-Range: bytes 1-1/37912939`,
-    ///   one byte of body.
+    /// - `HEAD` answers **404** where `GET` answers 200.
+    /// - `Range: bytes=0-0` answers **200 with the whole body** and no
+    ///   `Content-Range`.
+    /// - `Range: bytes=1-1` answers **206** with
+    ///   `Content-Range: bytes 1-1/<total>` and one byte of body.
     ///
-    /// So the probe starts at one, not zero, and closes its range.
+    /// So the probe asks for byte one only.
     #[test]
     fn a_length_probe_asks_for_the_second_byte_and_nothing_else() {
         let request = probe(None);
@@ -332,9 +303,7 @@ mod tests {
         assert!(!request.contains("bytes=0"), "got: {request}");
     }
 
-    /// A probe is not a resume and must never be answered with a `304`: the
-    /// number it came for is in the `Content-Range` of a `206`, and a `304`
-    /// carries no length at all.
+    /// A probe must not get a `304`, which has no length.
     #[test]
     fn a_length_probe_sends_no_conditional_header() {
         let request = probe(None);
@@ -342,9 +311,7 @@ mod tests {
         assert!(!request.contains("If-Range"), "got: {request}");
     }
 
-    /// The same route and the same lower-case ruid as the fetch it may lead
-    /// to. Upper case marks the figure `nocloud` for good, and a probe is
-    /// still a request.
+    /// The same route and lower-case ruid as the download that may follow.
     #[test]
     fn a_length_probe_names_the_same_file_a_fetch_would() {
         let request = probe(None);
@@ -354,9 +321,8 @@ mod tests {
         );
     }
 
-    /// teddyCloud forwards the token upstream when it does not already hold
-    /// the content, and a probe for a figure the server has never fetched is
-    /// exactly that case.
+    /// teddyCloud forwards the token upstream for content it does not have,
+    /// which is likely for a figure being probed.
     #[test]
     fn a_length_probe_carries_the_tag_token_when_there_is_one() {
         let token = [0xABu8; TOKEN_BYTES];
@@ -430,8 +396,7 @@ mod tests {
         assert!(build(None).ends_with("\r\n\r\n"));
     }
 
-    /// The old builder copied through a fixed 512-byte string, so a request
-    /// longer than that failed however much room the caller offered.
+    /// The only size limit is the caller's buffer.
     #[test]
     fn the_request_length_is_bounded_by_the_callers_buffer_alone() {
         let server = "x".repeat(600);
@@ -472,10 +437,9 @@ mod tests {
         assert!(req.contains("Range: bytes=4096-\r\n"), "got: {req}");
     }
 
-    /// `If-None-Match` alongside a `Range` invites a 304, which says nothing
-    /// about whether the partial file on the card is still the right prefix.
-    /// `If-Range` answers exactly the two questions a resume has: continue
-    /// (206), or start again (200).
+    /// `If-None-Match` with a `Range` could get a 304, which does not say
+    /// whether the partial file on the card is still valid. `If-Range` gets
+    /// either 206 (continue) or 200 (start again).
     #[test]
     fn a_resumed_download_validates_with_if_range_not_if_none_match() {
         let etag = ETag::try_from("\"v1\"").unwrap();
@@ -502,18 +466,13 @@ mod tests {
 
     #[test]
     fn a_resume_from_zero_is_still_a_range_request() {
-        // Zero is a legitimate resume point after a sidecar was written but
-        // no body byte ever landed. Treating it as "no range" would send an
-        // unconditional GET and silently discard the etag check.
+        // Zero is a valid resume point if the sidecar was written but no body
+        // byte arrived. Treating it as "no range" would drop the etag check.
         let req = build_from(Some(0), None);
         assert!(req.contains("Range: bytes=0-\r\n"), "got: {req}");
     }
-    /// `/v1` exists because `/v2` does not answer on the teddyCloud this
-    /// project talks to: measured 2026-09-03, `/v2/content/<ruid>` accepts the
-    /// connection and then hangs with zero bytes until the client gives up,
-    /// with and without an Authorization header, while `/v1` returns the file.
-    /// The route is selectable rather than swapped so that the default stays
-    /// the box's real endpoint.
+    /// `/v1` works around a teddyCloud that hangs on `/v2` (see [`Route`]).
+    /// The default stays `/v2`, the stock box's endpoint.
     #[test]
     fn the_v1_route_is_written_when_it_is_asked_for() {
         let mut out = [0u8; 512];
@@ -534,8 +493,7 @@ mod tests {
         );
     }
 
-    /// And the default is unchanged, so selecting a route cannot silently
-    /// move every other caller onto it.
+    /// The default route is `/v2`.
     #[test]
     fn the_default_route_is_still_v2() {
         let mut out = [0u8; 512];
@@ -551,13 +509,11 @@ mod tests {
         let text = core::str::from_utf8(&out[..n]).unwrap();
         assert!(text.starts_with("GET /v2/content/"), "wrote: {text}");
     }
-    /// The header that lets teddyCloud fetch a figure it does not already
-    /// hold. It never checks the token itself — it forwards it to the tonies
-    /// cloud, which is what rejects a bad one — so the box supplying it is the
-    /// difference between a `403` and a story.
+    /// This header lets teddyCloud fetch a figure it does not have: it
+    /// forwards the token to the Tonies cloud, which accepts or rejects it.
     ///
-    /// Upper-case hex, and all thirty-two bytes: `src/server.c` reads
-    /// `TONIE_AUTH_TOKEN_LENGTH` of them after the literal `"BD "`.
+    /// Upper-case hex, all thirty-two bytes: teddyCloud's `src/server.c` reads
+    /// `TONIE_AUTH_TOKEN_LENGTH` bytes after `"BD "`.
     #[test]
     fn a_token_is_written_as_the_authorization_header() {
         let mut out = [0u8; 512];
@@ -584,9 +540,7 @@ mod tests {
         );
     }
 
-    /// No tag on the plate, no header. An empty or absent token must not become
-    /// `Authorization: BD ` with nothing after it, which is a malformed header
-    /// rather than an absent one.
+    /// No token, no header: not an empty `Authorization: BD `.
     #[test]
     fn no_token_means_no_authorization_header() {
         let mut out = [0u8; 512];
@@ -602,22 +556,7 @@ mod tests {
         let text = core::str::from_utf8(&out[..n]).unwrap();
         assert!(!text.contains("Authorization"), "wrote: {text}");
     }
-    /// **Lower case, and it is not cosmetic.** teddyCloud decides whether a tag
-    /// is a "custom tonie" by comparing characters 10 to 15 of the identifier
-    /// against the literal `0304e0` — in lower case, byte by byte
-    /// (`checkCustomTonie` in `handler_cloud.c`). An upper-case `E` fails that
-    /// comparison, the server concludes the figure is home-made, and it *marks
-    /// the tag* `nocloud` in its own metadata. Every later request for that
-    /// figure is then refused with a 404 and no upstream fetch, permanently,
-    /// until someone clears the flag.
-    ///
-    /// So this is a request that quietly damages the server's state rather than
-    /// merely failing. It cost a day of looking at the wrong end of the wire.
-    /// teddyCloud upper-cases the identifier itself when building its on-disk
-    /// path, which is the tell that the wire format was always lower case.
-    /// The existing content request always closes the connection — it never
-    /// sends `keep-alive` — so a path request matches that rather than the
-    /// brief's first draft, which guessed `keep-alive`.
+    /// Like a content request, a path request closes the connection.
     #[test]
     fn a_path_request_asks_for_the_file_and_names_the_host() {
         let mut buf = [0u8; 256];
@@ -655,6 +594,12 @@ mod tests {
         );
     }
 
+    /// **Lower case, and it matters.** teddyCloud decides whether a tag is a
+    /// "custom tonie" by comparing characters 10 to 15 of the identifier with
+    /// `0304e0`, in lower case (`checkCustomTonie` in `handler_cloud.c`). An
+    /// upper-case `E` fails the comparison, and the server marks the tag
+    /// `nocloud` in its metadata. From then on every request for that figure
+    /// gets a 404 with no upstream fetch, until someone clears the flag.
     #[test]
     fn the_identifier_is_written_in_lower_case() {
         let mut out = [0u8; 512];

@@ -43,10 +43,8 @@ pub fn fetch<T: Read + Write>(
         .map_err(|_| CloudError::Transport)?;
     transport.flush().map_err(|_| CloudError::Transport)?;
 
-    // Read only until the head is complete. Draining to EOF instead would
-    // hand control of when this returns to the peer, and a server honouring
-    // keep-alive never hangs up — which would wedge playback, not just the
-    // fetch.
+    // Read only until the head is complete. Reading until the server closes
+    // would hang with a keep-alive server, which never closes.
     let mut received = 0usize;
     let (head, body_at) = loop {
         match parse_head(&buf[..received]) {
@@ -58,14 +56,14 @@ pub fn fetch<T: Read + Write>(
             .read(&mut buf[received..])
             .map_err(|_| CloudError::Transport)?;
         if n == 0 {
-            // Gone before even the head arrived.
+            // The connection closed before the head arrived.
             return Err(CloudError::MalformedResponse);
         }
         received += n;
     };
 
     match head.status {
-        // These carry no body, so there is nothing further to wait for.
+        // These have no body.
         304 => return Ok(Outcome::Unchanged),
         404 => return Ok(Outcome::NotFound),
         200 => {}

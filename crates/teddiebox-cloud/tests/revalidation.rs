@@ -1,5 +1,5 @@
-//! The offline-first contract: revalidation must be cheap, and failure must
-//! never be worse than not having asked.
+//! Offline first: revalidation must be cheap, and a failure must never be
+//! worse than not asking.
 
 use teddiebox_cloud::{fetch, CloudError, ETag, Outcome};
 
@@ -11,9 +11,9 @@ struct Fake {
     read_at: usize,
     written: Vec<u8>,
     fail_on_write: bool,
-    /// Models a peer that keeps the connection open after answering, which a
-    /// keep-alive server may legitimately do. A real socket would block here;
-    /// the test panics instead, so "hangs forever" surfaces as a failure.
+    /// Models a server that keeps the connection open after answering, as a
+    /// keep-alive server may. A real socket would block here; the test panics
+    /// instead, so a hang shows up as a failure.
     block_after_response: bool,
 }
 
@@ -137,8 +137,8 @@ fn a_body_too_large_for_the_buffer_is_refused_up_front() {
 
 #[test]
 fn a_response_without_a_length_is_refused_rather_than_read_to_exhaustion() {
-    // No Content-Length means no way to know where the body ends, and reading
-    // to EOF is what lets a keep-alive peer wedge the firmware.
+    // Without Content-Length the body's end is unknown, and reading until
+    // the server closes would hang with a keep-alive server.
     let mut t = Fake::new(b"HTTP/1.1 200 OK\r\n\r\nDATA");
     let mut buf = [0u8; 1024];
     assert_eq!(
@@ -149,8 +149,8 @@ fn a_response_without_a_length_is_refused_rather_than_read_to_exhaustion() {
 
 #[test]
 fn revalidation_stops_reading_once_the_body_is_complete() {
-    // The peer ignores Connection: close and holds the socket open, as any
-    // HTTP/1.1 server may. Reading to EOF would never return.
+    // The server ignores Connection: close and keeps the socket open, as any
+    // HTTP/1.1 server may. Reading until it closes would never return.
     let mut t = Fake::new(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nDATA");
     t.block_after_response = true;
     let mut buf = [0u8; 1024];

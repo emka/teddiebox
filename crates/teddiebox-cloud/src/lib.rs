@@ -25,12 +25,10 @@ pub enum CloudError {
     BodyTruncated,
     /// The response will not fit the caller's buffer.
     ResponseTooLong,
-    /// A response carrying content gave no `Content-Length`, so there is no
-    /// way to know where the body ends without reading until the peer hangs
-    /// up — which a keep-alive peer never does.
+    /// A response with content has no `Content-Length`, so the body's end is
+    /// unknown. A keep-alive server never closes the connection to mark it.
     LengthRequired,
-    /// The body is chunked, and nothing here strips the chunk framing. Failing
-    /// is the only honest answer: the alternative is handing chunk sizes to
-    /// the Opus decoder as if they were audio.
+    /// The body is chunked, and nothing here removes the chunk framing.
+    /// Without this error, chunk sizes would reach the Opus decoder as audio.
     UnsupportedTransferEncoding,
 }

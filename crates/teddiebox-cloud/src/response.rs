@@ -24,10 +24,9 @@ pub struct ResponseHead {
 
 /// Parses `bytes 4096-27841284/27841285`, or `None` if it is not that shape.
 ///
-/// Returning `None` rather than a partial guess is deliberate: a caller given
-/// `None` refetches from zero, which is slow but correct, while a caller given
-/// a wrong `first` writes the body at the wrong offset and corrupts the file
-/// without any error to show for it.
+/// Returns `None` rather than a partial guess: with `None` the caller
+/// downloads from zero, which is slow but correct, while a wrong `first`
+/// would silently write the body at the wrong offset.
 fn parse_content_range(value: &str) -> Option<ContentRange> {
     let rest = value.strip_prefix("bytes ")?;
     let (range, total) = rest.split_once('/')?;
@@ -46,10 +45,9 @@ fn parse_content_range(value: &str) -> Option<ContentRange> {
 /// Parses the head of a response. Returns the parsed fields and the offset at
 /// which the body starts.
 ///
-/// A `1xx` response is a preamble, not an answer: the real response follows it
-/// in the same stream. Each one is skipped, and since every head consumes at
-/// least its own terminator the search always advances and ends either at a
-/// final status or at a buffer with no complete head left in it.
+/// A `1xx` response is only a preamble; the real response follows it. Each
+/// one is skipped. Every head includes its terminator, so the loop always
+/// advances and ends at a final status or at an incomplete head.
 pub fn parse_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
     let mut consumed = 0;
     loop {
@@ -62,8 +60,8 @@ pub fn parse_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
 }
 
 fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
-    // The body is arbitrary bytes — Opus, not text — so the terminator is
-    // found on the raw slice and only the head is validated as UTF-8.
+    // The body is binary (Opus), so the terminator is found in the raw bytes
+    // and only the head is checked as UTF-8.
     let head_end = buf
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -94,20 +92,20 @@ fn parse_one_head(buf: &[u8]) -> Result<(ResponseHead, usize), CloudError> {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        // Whitespace around the colon is malformed but harmless, and a client
-        // that drops a header over it loses real information for no gain.
+        // Whitespace around the colon is not allowed but harmless, so accept
+        // it.
         let name = name.trim();
         let value = value.trim();
-        // "identity" is the one encoding that leaves the body alone.
+        // "identity" is the only encoding that leaves the body unchanged.
         if name.eq_ignore_ascii_case("transfer-encoding") && !value.eq_ignore_ascii_case("identity")
         {
             return Err(CloudError::UnsupportedTransferEncoding);
         } else if name.eq_ignore_ascii_case("etag") {
-            // The first usable value wins. Assigning unconditionally let a
-            // later unusable copy write `None` straight over a good one.
+            // The first usable value wins, so a later unusable copy cannot
+            // replace a good one with `None`.
             if etag.is_none() {
-                // Too long, or carrying a byte that has no business in a
-                // header value: drop it. The cost is one re-download.
+                // Too long, or containing a byte not allowed in a header
+                // value: drop it. The cost is one re-download.
                 etag = parse_etag(value);
             }
         } else if name.eq_ignore_ascii_case("content-length") && content_length.is_none() {
@@ -135,9 +133,8 @@ mod tests {
 
     use super::*;
 
-    /// A server may answer with `100 Continue` before the real response. Both
-    /// end with a blank line, so a parser that stops at the first one reports
-    /// the preamble's status and points the body at the response that follows.
+    /// A server may send `100 Continue` before the real response. Both end
+    /// with a blank line, so the parser must skip the first one.
     #[test]
     fn an_informational_preamble_is_not_mistaken_for_the_response() {
         let raw = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody";
@@ -147,9 +144,8 @@ mod tests {
         assert_eq!(&raw[body_at..], b"body");
     }
 
-    /// Chunked bodies carry their own framing. Nothing here removes it, so
-    /// accepting one would splice chunk sizes into the Opus stream — a
-    /// corruption that surfaces as noise rather than as an error.
+    /// Chunked bodies contain chunk sizes. Nothing here removes them, so
+    /// accepting one would put chunk sizes into the Opus stream as noise.
     #[test]
     fn a_chunked_body_is_refused_rather_than_decoded_as_audio() {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n";
@@ -179,8 +175,8 @@ mod tests {
 
     #[test]
     fn a_body_that_is_not_text_does_not_make_the_response_malformed() {
-        // Opus data is arbitrary bytes. Validating the body as UTF-8 would
-        // reject every real download.
+        // Opus data is binary; checking it as UTF-8 would reject every real
+        // download.
         let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
         raw.extend_from_slice(&[0xFF, 0x00, 0x80, 0x13]);
 
@@ -227,10 +223,9 @@ mod tests {
         assert_eq!(head.etag, None, "a re-download is better than an error");
     }
 
-    /// The value is written back out into `If-None-Match:` and `If-Range:`
-    /// request lines, and into the `.MET` sidecar, without escaping. A bare
-    /// `CR` survives the `\r\n` split that finds header lines, so a server
-    /// that puts one in an ETag writes a line terminator into our next
+    /// The value is copied without escaping into `If-None-Match:` and
+    /// `If-Range:` headers and into the `.MET` sidecar. A bare `CR` survives
+    /// the `\r\n` split, so a server could inject a line break into our next
     /// request.
     #[test]
     fn an_etag_carrying_a_bare_cr_is_dropped() {
@@ -239,8 +234,8 @@ mod tests {
         assert_eq!(head.etag, None, "a re-download is better than an injection");
     }
 
-    /// Each header was assigned with `.ok()`, so a second copy that failed to
-    /// parse wrote `None` over a value already read correctly.
+    /// A second copy of a header that fails to parse must not replace a good
+    /// first value with `None`.
     #[test]
     fn a_repeated_unusable_header_does_not_erase_the_value_already_parsed() {
         const RAW: &[u8] = b"HTTP/1.1 200 OK\r\n\
@@ -283,9 +278,8 @@ Content-Length: 27837189\r\n\r\nDATA";
         assert_eq!(&raw[body_at..], b"DATA");
     }
 
-    /// A server that cannot say how long the whole file is writes `*`. The
-    /// range is still usable for placing the bytes; only the completeness
-    /// check loses its number, and the caller decides what to do about that.
+    /// A server that does not know the file's length writes `*`. The range
+    /// can still place the bytes; only the total is missing.
     #[test]
     fn an_unknown_total_is_absent_rather_than_an_error() {
         let raw = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/*\r\n\r\nDATA";
@@ -293,10 +287,9 @@ Content-Length: 27837189\r\n\r\nDATA";
         assert_eq!(head.content_range.unwrap().total, None);
     }
 
-    /// A malformed range is dropped rather than half-parsed. A caller that
-    /// sees `None` refetches from zero, which is correct but slow; a caller
-    /// handed a wrong `first` writes the body at the wrong offset, which
-    /// corrupts the file silently.
+    /// A malformed range is dropped, not half-parsed. With `None` the caller
+    /// downloads from zero (slow but correct); a wrong `first` would silently
+    /// corrupt the file.
     #[test]
     fn a_malformed_content_range_is_dropped_rather_than_half_parsed() {
         let raw = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes garbage\r\n\r\n";
