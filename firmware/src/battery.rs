@@ -9,7 +9,8 @@ use esp_hal::analog::adc::Adc;
 use teddiebox_core::power;
 use teddiebox_core::{BatteryConfig, Event};
 
-use crate::{park_task, BENCH, INPUT_EVENTS, PARKED, PLAYING};
+use crate::inputs::INPUT_EVENTS;
+use crate::{park_task, BENCH, PARKED, PLAYING};
 
 /// Set when the box is in setup mode (the portal) instead of normal
 /// operation.
