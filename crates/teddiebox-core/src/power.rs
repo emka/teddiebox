@@ -66,8 +66,8 @@ mod tests {
             charger_present(4095),
             "on the charger, railed at full scale"
         );
-        assert!(!charger_present(1957), "nothing connected, 2026-09-03");
-        assert!(!charger_present(1933), "nothing connected, 2026-09-07");
+        assert!(!charger_present(1957), "nothing connected, first reading");
+        assert!(!charger_present(1933), "nothing connected, second reading");
     }
 
     #[test]
