@@ -15,6 +15,8 @@ const LEFT_HZ: f32 = 440.0;
 const RIGHT_HZ: f32 = 660.0;
 const SECONDS: u32 = 5;
 const CHAPTER_SECONDS: u32 = 2;
+/// The characterisation tests assert this id.
+const AUDIO_ID: u32 = 0x1234_5678;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args()
@@ -36,7 +38,7 @@ fn write_single_chapter(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // `new`, not `new_simple`: new_simple generates a *random* audio id, and
     // the characterisation tests assert a known one.
     let file = File::create(path)?;
-    let mut taf = toniefile::Toniefile::new(file, 0x1234_5678, None)?;
+    let mut taf = toniefile::Toniefile::new(file, AUDIO_ID, None)?;
     taf.encode(&samples)?;
     taf.finalize()?;
 
@@ -55,7 +57,7 @@ fn write_multi_chapter(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let chapter_samples = sine_interleaved(CHAPTER_SECONDS * SAMPLE_RATE);
 
     let file = File::create(path)?;
-    let mut taf = toniefile::Toniefile::new(file, 0x1234_5678, None)?;
+    let mut taf = toniefile::Toniefile::new(file, AUDIO_ID, None)?;
     taf.encode(&chapter_samples)?; // chapter 0, created implicitly by `new`
     taf.new_chapter()?;
     taf.encode(&chapter_samples)?; // chapter 1
