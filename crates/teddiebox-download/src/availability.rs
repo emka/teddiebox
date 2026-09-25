@@ -1,18 +1,14 @@
 //! Whether a figure's story can be played this instant.
 //!
-//! The reducer asks a narrower question than the download path does. It only
-//! needs to know whether to start playing or to ask for a fetch; *how* to
-//! fetch — from zero or from where an interruption left off — stays in
-//! `decide`, called by the download path with the same inputs. Two places
-//! answering that would eventually disagree, and the disagreement would look
-//! like a story restarting from the beginning.
+//! The reducer only needs to know whether to play or to request a download.
+//! *How* to download (from zero, or resuming) is decided by `decide`, which
+//! this also uses, so the two cannot disagree.
 
 use crate::cache::{decide, Cached, Decision};
 
-/// `on_stock_card` is whether the file exists under `CONTENT/`, which is
-/// looked up first and has no sidecar to vouch for it: shipped content is
-/// complete by definition, and consulting it before the cache is what makes
-/// writing to a stock card safe.
+/// `on_stock_card` is whether the file exists under `CONTENT/`. Such files
+/// have no sidecar and are always treated as complete. They are checked
+/// before the cache.
 pub fn playable_now(on_stock_card: bool, cached: &Cached) -> bool {
     if on_stock_card {
         return true;
@@ -47,9 +43,8 @@ mod tests {
         assert!(playable_now(false, &cached));
     }
 
-    /// A partial download is not playable, and deliberately reads the same as
-    /// an absent one: the reducer asks for content either way, and the
-    /// download path decides on its own whether that means resuming.
+    /// A partial download is not playable, the same as a missing one. The
+    /// download code decides whether to resume.
     #[test]
     fn a_partial_download_is_not_playable() {
         let cached = Cached {

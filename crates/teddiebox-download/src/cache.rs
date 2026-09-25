@@ -1,9 +1,8 @@
 //! What to do about a file that may or may not already be on the card.
 //!
-//! Every branch here is one the box will hit: a download interrupted by a
-//! lifted Tonie, by a flat battery, or between the two writes that create a
-//! cache entry. The rules are in one pure function so that all of them can be
-//! stated as tests rather than discovered on a card.
+//! A download can be interrupted by a lifted figure, a flat battery, or a
+//! crash between the two writes that create a cache entry. The rules for each
+//! case are pure functions, so they can all be tested on the host.
 
 use crate::Sidecar;
 use teddiebox_cloud::ETag;
@@ -28,8 +27,8 @@ pub enum Decision {
 }
 
 pub fn decide(cached: &Cached) -> Decision {
-    // No sidecar means nothing vouches for the file's length, and an
-    // unvouched file may be a story that stops in the middle.
+    // Without a sidecar the file's length is unknown, so it may be
+    // incomplete.
     let (Some(sidecar), Some(on_card)) = (&cached.sidecar, cached.length_on_card) else {
         return Decision::Fetch;
     };
@@ -40,9 +39,8 @@ pub fn decide(cached: &Cached) -> Decision {
             from: on_card,
             etag: sidecar.etag.clone(),
         },
-        // Longer than promised cannot come from a correct download. Something
-        // is wrong with one of the two files, and refetching is both cheap and
-        // certain where trusting it is neither.
+        // Longer than expected cannot come from a correct download, so start
+        // again.
         core::cmp::Ordering::Greater => Decision::Fetch,
     }
 }
@@ -52,16 +50,11 @@ pub fn decide(cached: &Cached) -> Decision {
 /// `from` is where this body was written, `written` how much of it landed, and
 /// `total` what the server said the whole file is.
 ///
-/// This exists because "the transfer stopped" and "the story is ready" are not
-/// the same statement, and the firmware used to make the second one whenever
-/// the first was true — announcing a fragment as a finished story. A download
-/// can stop early for reasons that leave a perfectly valid partial file
-/// behind: a figure lifted, a socket dropped, a server that closed the
-/// connection. Only the arithmetic says which happened.
+/// A download that stopped is not necessarily complete: it may have stopped
+/// because the figure was lifted or the connection dropped. Only the byte
+/// count tells.
 ///
-/// A file whose length the server never gave can never be called whole. That
-/// is the same bargain the sidecar makes: nothing is claimed that was not
-/// said.
+/// A file whose length the server never gave is never whole.
 pub fn is_whole(from: u32, written: u32, total: Option<u32>) -> bool {
     match total {
         Some(total) => total != 0 && from.saturating_add(written) == total,
@@ -95,33 +88,24 @@ pub struct Landing {
 
 /// Decides where a body goes, or that it cannot go anywhere.
 ///
-/// Three things can go wrong, and only the first is obvious.
+/// Three things can go wrong:
 ///
-/// A server may **decline the range**, answering `200` with the whole file;
-/// that arrives as `offset: 0`, and appending it to a partial download would
-/// splice the beginning of the story onto its middle. Restarting is the only
-/// correct answer, and the writer has to take it, because by then the request
-/// is long sent.
+/// - The server **ignores the range** and sends the whole file with `200`
+///   (`offset: 0`). Appending it would put the start of the story after its
+///   middle, so the file is restarted.
+/// - The server **sends the requested range of a file that has changed**. The
+///   result would be the end of one file joined to the start of another, at
+///   exactly the expected length, so a length check could not catch it. So
+///   the server's total is compared with the sidecar's: if they differ, the
+///   body is refused (costing a new download).
+/// - The server **sends bytes at the wrong offset**, leaving a gap or an
+///   overlap. Also refused.
 ///
-/// A server may **honour the range against a file that has changed**. Nothing
-/// in the response says so — the offset is exactly what was asked for — and the
-/// result would be the tail of one file appended to the head of another,
-/// finishing at precisely the length the sidecar promised. That is the one
-/// corruption a length check can never catch, so the lengths are compared here
-/// instead: a total that disagrees with what the sidecar recorded means the
-/// bytes in hand belong to a file whose beginning is not on the card. There is
-/// nothing to salvage, because a body starting mid-file cannot be written from
-/// the start; refusing costs a refetch, which is the cheap half of the trade.
-///
-/// A server may simply **place bytes somewhere the file cannot take them**,
-/// leaving a gap or an overlap. Same answer, same reason.
-///
-/// Silence is not evidence: a server that sends no total has said nothing about
-/// whether its copy changed, and refusing on that would make resume impossible
-/// against a server that never sends a length.
+/// If the server sends no total, the file is assumed unchanged; otherwise
+/// resuming would never work with such a server.
 pub fn place(landing: &Landing) -> Placement {
-    // Nothing is spliced when the body is the whole file, so this holds
-    // whether or not the server's copy is still the one that was promised.
+    // The body is the whole file, so it replaces what is there whether or
+    // not the file changed.
     if landing.offset == 0 {
         return Placement::Restart;
     }
@@ -152,22 +136,16 @@ pub enum Freshness {
 
 /// Compares a complete cached file against what the server currently reports.
 ///
-/// **This is a weaker check than it looks, and deliberately so.** The design
-/// this project started from revalidated with `If-None-Match` and a `304`, but
-/// the teddyCloud on this LAN sends **no `ETag`** — nor `Last-Modified`, nor
-/// `Cache-Control` — on any content route. Measured, not assumed. The only
-/// thing it offers to compare is `Content-Length`, so that is what this
-/// compares, and a change that keeps the byte count is invisible to it. For a
-/// figure's audio, which does not change silently, that is a reasonable trade;
-/// stating it here is better than an ETag path that never runs.
+/// **This is a weak check.** teddyCloud sends **no `ETag`**, `Last-Modified`
+/// or `Cache-Control` on its content routes, so the only thing to compare is
+/// the length. A change that keeps the same length is not detected. For
+/// story audio, which rarely changes, that is acceptable.
 ///
-/// **Silence keeps the file.** A server that gives no length has said nothing
-/// about whether ours is stale, and throwing away a good file on no evidence
-/// costs a child their story for as long as the download takes.
+/// **No answer keeps the file.** Without a length from the server there is no
+/// reason to throw away a good file.
 ///
-/// Nothing here fetches. The caller decides whether a probe is worth a round
-/// trip at all — and the design's rule that revalidation must never interrupt
-/// playback means the answer, on the path to a story, is usually no.
+/// This does not fetch anything; the caller decides whether to ask the
+/// server.
 pub fn revalidate(sidecar: &Sidecar, server_length: Option<u32>) -> Freshness {
     match server_length {
         None => Freshness::Unknown,
@@ -180,11 +158,8 @@ pub fn revalidate(sidecar: &Sidecar, server_length: Option<u32>) -> Freshness {
 mod tests {
     use super::*;
 
-    /// A download that stops early still leaves a file on the card, and on
-    /// 2026-09-07 the box announced one such file — 1,089,536 bytes of a
-    /// 38,349,983-byte story — as a finished story and tried to play it. The
-    /// decoder rejected it, which was luck: a fragment that happened to parse
-    /// would have played as a story that stops in the middle.
+    /// A download that stops early still leaves a file on the card; only a
+    /// file that reached the server's length is whole.
     #[test]
     fn a_body_that_reaches_the_servers_length_is_whole() {
         assert!(is_whole(0, 38_349_983, Some(38_349_983)));
@@ -195,16 +170,13 @@ mod tests {
         assert!(!is_whole(0, 1_089_536, Some(38_349_983)));
     }
 
-    /// The common case after an interruption: the file is finished by a body
-    /// that never contained its beginning.
+    /// After an interruption, the resumed body finishes the file.
     #[test]
     fn a_resumed_body_that_finishes_the_file_is_whole() {
         assert!(is_whole(3_145_728, 35_204_255, Some(38_349_983)));
     }
 
-    /// Nothing said how long the file was, so nothing can claim it is all
-    /// there — the same bargain `write_sidecar` makes when it declines to
-    /// vouch for a length the server never gave.
+    /// Without a length from the server, nothing can be called whole.
     #[test]
     fn without_a_length_from_the_server_nothing_is_whole() {
         assert!(!is_whole(0, 38_349_983, None));
@@ -217,8 +189,8 @@ mod tests {
     }
     use teddiebox_cloud::ETag;
 
-    /// A resume that everything agrees about: half a 8192-byte file is there,
-    /// and the server is sending the rest of that same file.
+    /// A normal resume: half of an 8192-byte file is on the card, and the
+    /// server sends the rest of the same file.
     fn agreeing() -> Landing {
         Landing {
             offset: 4096,
@@ -280,10 +252,9 @@ mod tests {
 
     #[test]
     fn a_tail_of_a_file_that_is_no_longer_the_one_promised_is_refused() {
-        // The server honoured the range against a file of a different length,
-        // so these bytes are the middle of something whose beginning is not on
-        // the card. Appending them would leave the file exactly as long as the
-        // sidecar promised, which is the one thing a length check cannot catch.
+        // The server's file now has a different length, so these bytes are
+        // from a different file. Appending them could still give the expected
+        // length, so only this check catches it.
         assert_eq!(
             place(&Landing {
                 total: Some(9000),
@@ -295,8 +266,8 @@ mod tests {
 
     #[test]
     fn a_server_that_gives_no_total_is_taken_at_its_word_about_the_offset() {
-        // Silence is not evidence of a changed file, and refusing on it would
-        // make resume impossible against a server that never sends a length.
+        // No total is not evidence of a change; refusing would make resuming
+        // impossible with such a server.
         assert_eq!(
             place(&Landing {
                 total: None,
@@ -308,8 +279,7 @@ mod tests {
 
     #[test]
     fn a_whole_file_answer_is_a_restart_even_when_the_length_changed() {
-        // Nothing is being spliced: the body starts at zero, so it replaces
-        // whatever was there whether or not it is the same file.
+        // The body starts at zero, so it replaces whatever was there.
         assert_eq!(
             place(&Landing {
                 offset: 0,
@@ -363,9 +333,8 @@ mod tests {
         );
     }
 
-    /// The rule the whole design rests on. A sidecar is the only thing that
-    /// vouches for a file's length; without one, a file that looks complete
-    /// may be a story that stops in the middle, and the box would never know.
+    /// Only a sidecar confirms a file's length. Without one, a file that
+    /// looks complete may be cut short.
     #[test]
     fn a_file_with_no_sidecar_is_incomplete_however_long_it_is() {
         assert_eq!(
@@ -377,7 +346,8 @@ mod tests {
         );
     }
 
-    /// A sidecar with no file is what a crash between the two writes leaves.
+    /// A sidecar with no file is what a crash between the two writes leaves
+    /// behind.
     #[test]
     fn a_sidecar_with_no_file_beside_it_fetches_from_the_start() {
         assert_eq!(
@@ -389,9 +359,8 @@ mod tests {
         );
     }
 
-    /// Longer than promised cannot happen from a correct download, so
-    /// something is wrong with one of the two files. Refetching is cheap and
-    /// certain; trusting it risks handing the decoder a spliced file.
+    /// Longer than expected cannot come from a correct download, so start
+    /// again.
     #[test]
     fn a_file_longer_than_its_sidecar_promises_is_refetched_rather_than_trusted() {
         assert_eq!(
@@ -403,9 +372,8 @@ mod tests {
         );
     }
 
-    /// An empty file plus a sidecar is the ordinary state right after the
-    /// sidecar was written. Resuming from zero keeps the etag check that a
-    /// plain fetch would drop.
+    /// An empty file with a sidecar is normal right after the sidecar was
+    /// written. Resuming from zero keeps the etag check.
     #[test]
     fn an_empty_file_resumes_from_zero_rather_than_starting_over() {
         assert_eq!(
@@ -437,33 +405,27 @@ mod tests {
             }
         );
     }
-    /// The ordinary case: the server still has a file of the length the
-    /// sidecar recorded, so what is on the card stands.
+    /// The server's file still has the length in the sidecar, so the card's
+    /// copy is kept.
     #[test]
     fn a_file_the_length_the_server_still_reports_is_fresh() {
         assert_eq!(revalidate(&sidecar(60975), Some(60975)), Freshness::Fresh);
     }
 
-    /// A different length is the only evidence of change this server offers.
+    /// A different length is the only sign of a change teddyCloud gives.
     #[test]
     fn a_different_length_means_the_cached_file_is_stale() {
         assert_eq!(revalidate(&sidecar(60975), Some(61000)), Freshness::Stale);
         assert_eq!(revalidate(&sidecar(60975), Some(1)), Freshness::Stale);
     }
 
-    /// A server that will not say how long the file is has said nothing about
-    /// whether ours is current — which is not the same as saying it is wrong.
-    /// Discarding a good file on no evidence costs a child their story for the
-    /// length of a download, so silence keeps what is already there.
+    /// No length from the server is not a reason to throw the file away.
     #[test]
     fn a_server_that_gives_no_length_leaves_the_cached_file_alone() {
         assert_eq!(revalidate(&sidecar(60975), None), Freshness::Unknown);
     }
 
-    /// Length is a weak validator and this pins the weakness rather than
-    /// hiding it: an edit that keeps the byte count is invisible here. It is
-    /// what this server makes available, and the alternative was pretending an
-    /// ETag exists.
+    /// A known weakness: a change that keeps the length is not detected.
     #[test]
     fn a_same_length_change_is_not_detectable() {
         let before = sidecar(60975);

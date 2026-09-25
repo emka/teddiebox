@@ -1,12 +1,11 @@
-//! Serving pages that have arrived, and refusing the ones that have not.
+//! Serves pages that have been downloaded, and refuses those that have not.
 //!
-//! Two things live here. The **gate** is what the media loop asks before
-//! decoding another frame; keeping it in the loop rather than inside
-//! `read_page` is what lets [`PageSource`] stay synchronous and `TafReader`
-//! stay untouched. The **window** is a read-ahead batch, and it exists because
-//! `embedded-sdmmc` restarts a file's cluster walk from its first cluster on
-//! any backward seek — so a batch of eight turns one walk per 280 ms of audio
-//! into one per two seconds.
+//! Two parts. The **gate** ([`may_decode`]) is checked by the media loop
+//! before decoding each frame; doing it there keeps [`PageSource`]
+//! synchronous. The **window** reads pages in batches, because
+//! `embedded-sdmmc` walks the file's cluster chain from the start on every
+//! backward seek. A batch of eight means one walk per two seconds of audio
+//! instead of one per 280 ms.
 
 use crate::units::{Bytes, Pages};
 use teddiebox_taf::{PageSource, PAGE_SIZE};
@@ -15,12 +14,11 @@ use teddiebox_taf::{PageSource, PAGE_SIZE};
 ///
 /// `next_page` and `watermark` are both counted in pages (see
 /// [`Window::pages_available`] to convert from the writer's byte count).
-/// `margin` is how many whole pages must be committed beyond the one about to
-/// be read, so that a frame spanning a page boundary does not run into bytes
-/// that have not arrived.
+/// `margin` is how many whole pages must be written beyond the one about to be
+/// read, so a frame that crosses a page boundary has its bytes.
 pub fn may_decode(next_page: Pages, watermark: Pages, margin: Pages, complete: bool) -> bool {
-    // A finished file has nothing left to wait for; gating it would stall the
-    // last frames of every story.
+    // A finished file has nothing to wait for; gating it would stall the last
+    // frames of every story.
     complete || watermark.0 >= next_page.0.saturating_add(margin.0).saturating_add(1)
 }
 
@@ -32,24 +30,20 @@ pub enum WindowError<E> {
     Inner(E),
 }
 
-/// A `PageSource` that serves only what the download has committed, a batch at
-/// a time.
+/// A `PageSource` that serves only pages the download has written, a batch
+/// at a time.
 ///
-/// **This is large.** At `BATCH = 8` the cache alone is 32 KB, which is a
-/// third of what the playback cushion and the decode scratch already cost on a
-/// device with no PSRAM. On the host it lives wherever a test puts it; on the
-/// device it must be constructed *directly into* its final location using an
-/// in-place initialiser such as `StaticCell::init_with(|| Window::new(src))`,
-/// not built on a task's stack. (`new` returns by value, so
-/// `let w = Window::new(src)` materialises 32 KB inline, and return-place
-/// elision is not guaranteed.)
+/// **This is large.** At `BATCH = 8` the cache alone is 32 KB. On the device
+/// it must be built directly in its final place, for example with
+/// `StaticCell::init_with(|| Window::new(src))`, not on a task's stack:
+/// `let w = Window::new(src)` would put 32 KB on the stack.
 pub struct Window<P, const BATCH: usize> {
     inner: P,
     cache: [[u8; PAGE_SIZE]; BATCH],
     /// First page held in `cache`, and how many of them are valid.
     first: u32,
     held: u32,
-    /// Committed bytes, from the writer.
+    /// Bytes written so far, from the writer.
     watermark: u32,
     reads: u32,
     batches: u32,
@@ -68,18 +62,18 @@ impl<P: PageSource, const BATCH: usize> Window<P, BATCH> {
         }
     }
 
-    /// Tells the window how far the download has committed, in bytes.
+    /// Tells the window how many bytes the download has written.
     pub fn set_watermark(&mut self, watermark: Bytes) {
         self.watermark = watermark.0;
     }
 
-    /// Whole pages the download has committed.
+    /// Whole pages the download has written.
     pub fn pages_available(&self) -> Pages {
         Bytes(self.watermark).whole_pages()
     }
 
-    /// How many times the inner source was asked for a page. Test support and
-    /// bench instrumentation.
+    /// How many times the inner source was asked for a page. For tests and
+    /// diagnostics.
     pub fn reads(&self) -> u32 {
         self.reads
     }
@@ -91,10 +85,9 @@ impl<P: PageSource, const BATCH: usize> Window<P, BATCH> {
 
     fn fill_from(&mut self, page: u32) -> Result<(), WindowError<P::Error>> {
         let available = self.pages_available().0;
-        // Never read past what the download committed: those pages hold
-        // whatever the card had there before, which decodes as noise or as the
-        // end of a previous story. Saturating to defend this safety property
-        // locally, not relying on the caller's guard.
+        // Never read past what the download has written: those pages hold old
+        // data from the card. `saturating_sub` keeps this safe even if the
+        // caller did not check.
         let wanted = available.saturating_sub(page).min(BATCH as u32);
         self.held = 0;
         self.first = page;
@@ -140,8 +133,8 @@ impl<P: PageSource, const BATCH: usize> PageSource for Window<P, BATCH> {
 mod tests {
     use super::*;
 
-    /// Pages whose every byte is the page's own index, so a test can tell at a
-    /// glance which page it was handed.
+    /// Every byte of a page is the page's index, so a test can see which page
+    /// it got.
     struct Numbered {
         pages: u32,
         reads: u32,
@@ -176,8 +169,7 @@ mod tests {
         assert_eq!(buf[PAGE_SIZE - 1], 0);
     }
 
-    /// The failure this type exists to prevent: handing the decoder a page of
-    /// zeroes, or of the previous story, because the bytes have not arrived.
+    /// A page that has not been downloaded must not be served.
     #[test]
     fn a_page_beyond_the_watermark_is_refused_rather_than_guessed() {
         let mut w = window(16);
@@ -186,8 +178,7 @@ mod tests {
         assert_eq!(w.read_page(2, &mut buf), Err(WindowError::NotYetDownloaded));
     }
 
-    /// A page is only whole once the watermark has passed all of it. Serving
-    /// a half-written page is the same defect as serving one not started.
+    /// A page is only available once all of it is written.
     #[test]
     fn a_page_only_half_written_is_not_yet_available() {
         let mut w = window(16);
@@ -197,8 +188,8 @@ mod tests {
         assert_eq!(w.read_page(1, &mut buf), Err(WindowError::NotYetDownloaded));
     }
 
-    /// The whole point of the batch: eight sequential pages cost one trip to
-    /// the card, so one backward FAT walk covers ~2 s of audio.
+    /// Eight pages in a row cost one batch, so one backward FAT walk covers
+    /// about 2 s of audio.
     #[test]
     fn eight_sequential_pages_cost_one_trip_to_the_card() {
         let mut w = window(64);
@@ -223,8 +214,8 @@ mod tests {
         assert_eq!(w.batches(), 2);
     }
 
-    /// A batch must never reach past the watermark, or it reads pages that do
-    /// not exist yet and caches whatever the card happens to hold there.
+    /// A batch must stop at the watermark, or it would cache old data from
+    /// the card.
     #[test]
     fn a_batch_stops_at_the_watermark() {
         let mut w = window(64);
@@ -234,8 +225,8 @@ mod tests {
         assert_eq!(w.reads(), 3, "three pages exist; the batch stops there");
     }
 
-    /// Playing a file while it downloads: batch truncated by watermark, then
-    /// watermark advances, then the next page arrives and can be served.
+    /// Playing a file while it downloads: the batch stops at the watermark,
+    /// then the watermark moves on and the next page can be served.
     #[test]
     fn a_batch_truncated_by_watermark_extends_as_watermark_advances() {
         let mut w = window(64);
@@ -286,8 +277,8 @@ mod tests {
 
     // --- the gate ---
 
-    /// Page 4 with a margin of 4 needs pages 0..=8 committed — the page
-    /// itself, plus four whole pages beyond it — so the watermark must be 9.
+    /// Page 4 with a margin of 4 needs pages 0..=8 written (the page plus
+    /// four more), so the watermark must be 9.
     #[test]
     fn decoding_waits_until_the_margin_is_covered() {
         assert!(
@@ -297,8 +288,8 @@ mod tests {
         assert!(may_decode(Pages(4), Pages(9), Pages(4), false));
     }
 
-    /// Once the file is whole there is nothing left to wait for, and gating
-    /// would stall the last frames of every story.
+    /// A complete file is never gated, or the last frames of every story
+    /// would stall.
     #[test]
     fn a_complete_file_is_never_gated() {
         assert!(may_decode(Pages(1000), Pages(0), Pages(4), true));

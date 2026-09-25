@@ -1,66 +1,52 @@
 //! Whether a story already on the card is still the story the server has.
 //!
-//! No ETag has ever been seen on a response to this box, so the question is
-//! answered with the one number the server does state: how long the file is.
-//! Weaker than an ETag and honest about it — a figure's audio does not change
-//! silently, and a re-encode to exactly the same length reads as current.
+//! The check compares the file's length, the one thing teddyCloud reliably
+//! reports. This is weaker than an ETag: a new version with exactly the same
+//! length looks current. Story audio rarely changes, so that is acceptable.
 //!
-//! **"No ETag, ever" is contested and is deliberately not claimed here.** The
-//! TLS design says absent on every route, local or proxied; a later review
-//! says a *forwarded* response carries both `ETag` and `Last-Modified`, and
-//! the client does emit `If-None-Match` and parse a `304`. Nothing measured on
-//! 2026-09-13 settles it: those probes were all for content the server already
-//! held. The length rule needs no answer either way, which is why it is the
-//! rule — but do not repeat either claim as fact without measuring a figure
-//! teddyCloud has to fetch upstream.
+//! teddyCloud sends no ETag for content it already has. Whether it passes one
+//! on for content it fetches from the Tonies cloud has not been measured. The
+//! length check works either way.
 //!
-//! The rule that matters more than the comparison is what happens when there
-//! is no answer. A server that cannot be reached, a figure the cloud has never
-//! heard of, a reply with no length in it: none of those is evidence against
-//! a file that is sitting on the card and plays. Revalidation may never make a
-//! working box worse than it was offline.
+//! Most important: when there is no answer (server unreachable, figure
+//! unknown to the cloud, no length in the reply), the file on the card is
+//! kept. Revalidation must never make a working box worse than being offline.
 
 use crate::Sidecar;
 use teddiebox_cloud::Probed;
 
 /// How many figures are remembered as asked-about since boot.
 ///
-/// A session is one child and the figures within reach of them. Eight is
-/// generous for that, and the cost of overflowing is one extra probe on the
-/// ninth figure — a few hundred bytes and a radio that was about to be raised
-/// anyway.
+/// Eight is plenty for one play session. Going over only costs one extra
+/// check for the ninth figure.
 pub const REMEMBERED: usize = 8;
 
 /// Whether the cached file is out of date and must be fetched again.
 ///
-/// Only a length the server actually *stated*, and which differs from what the
-/// sidecar promised, makes a file stale. Everything else is `false`, which
-/// means the cached copy plays.
+/// Only a length the server actually *gave*, and that differs from the
+/// sidecar's, makes a file stale. Anything else returns `false`, and the
+/// cached copy plays.
 pub fn is_stale(cached: &Sidecar, probed: Probed) -> bool {
     match probed {
         Probed::Length(total) => total != cached.length,
-        // The server has no story for this figure at all. That is an answer
-        // about the *server*, and a reason to keep what is on the card rather
-        // than to throw it away — the card copy may be the last one in
-        // existence.
+        // The server has no story for this figure. Keep the card's copy; it
+        // may be the only one left.
         Probed::NoContent => false,
-        // It answered, and said nothing about length. Nothing was contradicted.
+        // The server answered without a length, so nothing is contradicted.
         Probed::Unstated => false,
     }
 }
 
 /// Which figures have already been asked about since the box booted.
 ///
-/// Asking costs the radio, which is the largest consumer on this pack and adds
-/// seconds before a story starts. The box switches itself off after five idle
-/// minutes, so one boot is roughly one session, and once per session per
-/// figure is the cadence. It also needs no clock, which this box does not
-/// have.
+/// Asking uses Wi-Fi, which uses the most battery and delays the start of a
+/// story by seconds. The box switches off after five idle minutes, so one
+/// boot is roughly one play session, and each figure is checked once per
+/// session. This also needs no clock, which the box does not have.
 ///
-/// A figure is remembered when its answer *arrives*, whatever the answer was.
-/// A server that was unreachable a moment ago is unreachable for the rest of a
-/// five-minute session, and asking it again on the next placement spends the
-/// radio to be told the same thing.
+/// A figure is remembered when its answer *arrives*, whatever the answer. A
+/// server that was just unreachable will probably stay unreachable for the
+/// rest of the session.
 #[derive(Debug, Default)]
 pub struct Asked {
     /// Ruids, oldest first. The oldest is evicted when a ninth arrives.
@@ -78,8 +64,8 @@ impl Asked {
         self.ruids.iter().any(|&seen| seen == ruid)
     }
 
-    /// Records that this figure has been asked about. Asking twice is not an
-    /// error and does not push anything else out.
+    /// Records that this figure has been asked about. Recording it twice does
+    /// not push anything else out.
     pub fn remember(&mut self, ruid: u64) {
         if self.contains(ruid) {
             return;
@@ -92,8 +78,8 @@ impl Asked {
 
     /// Forgets everything, so the next placement asks again.
     ///
-    /// Exists for the console: a bench that has just changed a file on the
-    /// server needs to see the box notice, without power-cycling it first.
+    /// For the console: after changing a file on the server, this makes the
+    /// box ask again without a power cycle.
     pub fn forget_all(&mut self) {
         self.ruids.clear();
     }
@@ -101,24 +87,19 @@ impl Asked {
 
 /// How long a figure waits on the server before the box plays what it has.
 ///
-/// The question costs an association, and an association that is *not* going
-/// to happen costs the longest: a box carried out of range of its network
-/// still tries, and the DHCP wait alone is 20 s. A child holding a figure whose
-/// story is already on the card must not be made to wait that out.
+/// Asking needs a Wi-Fi connection. Out of range, the box still tries, and
+/// the DHCP wait alone is 20 s. A child whose story is already on the card
+/// should not wait that long.
 ///
-/// Measured on 2026-09-14: a successful probe takes 6.9 s (3.1 s to associate
-/// and lease, 3.8 s for TLS and the request), so this leaves 3.1 s of margin
-/// over the good case — tighter than it should be, and recorded rather than
-/// changed.
+/// A successful check takes a few seconds, well within this limit.
 pub const PATIENCE_MS: u64 = 10_000;
 
 /// What the server said about a figure's length, reduced to what the box can
 /// act on.
 ///
-/// `Nothing` is every answer that is not a stated length — no story, no
-/// length, unreachable, the radio would not come up, the patience ran out.
-/// The box does the same with each of them: plays the card. The console keeps
-/// the difference, printed where it is known.
+/// `Nothing` covers every answer that is not a length: no story, no length,
+/// unreachable, Wi-Fi failed, or the time ran out. The box does the same for
+/// all of them: plays the card. The console logs which one it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
     Length(u32),
@@ -138,14 +119,12 @@ enum State {
     Asking { ruid: u64, asked_ms: u64 },
 }
 
-/// The conversation between the task that owns the card and the task that
-/// asks the server, as one question at a time.
+/// The exchange between the task that owns the card and the task that asks
+/// the server, one question at a time.
 ///
-/// **Each question settles at most once.** That is the whole of its safety:
-/// an answer that arrives after the patience ran out, or after an earlier
-/// answer already settled the question, comes back as `None` and never
-/// reaches the code that would act on it. The rule used to be spread across
-/// two tasks writing the same statics, and a late "stale" slipped through it.
+/// **Each question is settled at most once.** An answer that arrives after
+/// the time ran out, or after the question was already settled, returns
+/// `None`, so nothing acts on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Revalidation {
     state: State,
@@ -162,8 +141,8 @@ impl Revalidation {
         Self { state: State::Idle }
     }
 
-    /// A question has been put about this figure, at `now_ms`. Replaces any
-    /// question still open: the reducer only ever waits on one figure.
+    /// A question was asked about this figure at `now_ms`. Replaces any open
+    /// question: the reducer only waits on one figure at a time.
     pub fn asked(&mut self, ruid: u64, now_ms: u64) {
         self.state = State::Asking {
             ruid,
@@ -171,19 +150,17 @@ impl Revalidation {
         };
     }
 
-    /// The figure being asked about has left the plate. Ends the question
-    /// without settling it: nobody is waiting for the answer any more, and one
-    /// that arrives afterwards is late — even if the same figure is back by
-    /// then, because it will be asked about afresh.
+    /// The figure was lifted. Ends the question without settling it; a later
+    /// answer is ignored, even if the same figure is back, because it will be
+    /// asked about again.
     pub fn withdrawn(&mut self) {
         self.state = State::Idle;
     }
 
     /// The clock has been read with no answer yet.
     ///
-    /// Takes the reading rather than an interval, for the reason
-    /// [`crate::Handshake::polled`] does: a caller cannot know how long its
-    /// own wait took.
+    /// Takes the current time rather than an interval, like
+    /// [`crate::Handshake::polled`].
     pub fn polled(&mut self, now_ms: u64) -> Option<Settled> {
         let State::Asking { ruid, asked_ms } = self.state else {
             return None;
@@ -220,8 +197,8 @@ mod tests {
         Sidecar { length, etag: None }
     }
 
-    /// The real numbers from 2026-09-13: `1d2e3f50500304e0` is 37,912,939
-    /// bytes on the server and the same on the card.
+    /// Real numbers: `1d2e3f50500304e0` is 37,912,939 bytes on the server and
+    /// on the card.
     #[test]
     fn a_length_that_matches_is_current() {
         assert!(!is_stale(&sidecar(37_912_939), Probed::Length(37_912_939)));
@@ -233,8 +210,8 @@ mod tests {
         assert!(is_stale(&sidecar(37_912_939), Probed::Length(1_024)));
     }
 
-    /// The case that decides whether this feature is safe to ship. A box
-    /// carried out of range of its server must keep playing what it has.
+    /// The most important case: a figure the server has no story for keeps
+    /// the story on the card.
     #[test]
     fn a_server_with_no_story_never_discards_the_one_on_the_card() {
         assert!(!is_stale(&sidecar(37_912_939), Probed::NoContent));
@@ -245,9 +222,7 @@ mod tests {
         assert!(!is_stale(&sidecar(37_912_939), Probed::Unstated));
     }
 
-    /// An etag on the sidecar is not consulted: this server sends none, and a
-    /// stale etag left over from an earlier design must not outvote a length
-    /// that was measured this minute.
+    /// An etag in the sidecar is ignored; only the length counts.
     #[test]
     fn the_recorded_etag_does_not_enter_into_it() {
         let with_etag = Sidecar {
@@ -277,9 +252,8 @@ mod tests {
         assert!(asked.contains(2));
     }
 
-    /// The ninth figure of a session costs the first one its place, and the
-    /// cost of that is one extra probe. Losing the *newest* instead would
-    /// re-ask the figure currently in a child's hand, every time.
+    /// The ninth figure pushes out the oldest, not the newest (which is
+    /// probably the one on the plate).
     #[test]
     fn a_ninth_figure_pushes_out_the_oldest() {
         let mut asked = Asked::new();
@@ -292,8 +266,8 @@ mod tests {
         assert!(asked.contains(99));
     }
 
-    /// A bench that has just replaced a file on the server needs the box to
-    /// notice without a power cycle.
+    /// After replacing a file on the server, the box can be made to ask
+    /// again without a power cycle.
     #[test]
     fn forgetting_makes_every_figure_ask_again() {
         let mut asked = Asked::new();
@@ -332,10 +306,8 @@ mod tests {
         );
     }
 
-    /// The defect this machine exists for. Before it, a real answer arriving
-    /// after the patience ran out still reached `freshness_of`, which armed
-    /// the stale flag for a figure already playing its card copy — and the
-    /// next download of that file then started from zero, truncating it.
+    /// A late answer must be ignored. Otherwise it could mark a playing
+    /// card copy stale, and the next download would truncate it.
     #[test]
     fn an_answer_after_patience_ran_out_is_ignored() {
         let mut r = Revalidation::new();
@@ -344,8 +316,8 @@ mod tests {
         assert_eq!(r.answered(FIGURE, Answer::Length(1_024)), None);
     }
 
-    /// A figure lifted and put back mid-question raises a second probe; the
-    /// first answer settles the question and the second belongs to nobody.
+    /// A figure lifted and put back during a question causes a second check.
+    /// The first answer settles the question; the second is ignored.
     #[test]
     fn an_answer_after_the_question_settled_is_ignored() {
         let mut r = Revalidation::new();
@@ -391,12 +363,8 @@ mod tests {
         );
     }
 
-    /// Found in review, 2026-09-23. A figure lifted and put back within one
-    /// pass of the media loop, as its answer arrives: the answer was settled
-    /// against the figure already back on the plate, remembered and judged —
-    /// arming the stale flag — before the reducer had even heard it was back.
-    /// The reducer then played the card copy straight away, because the figure
-    /// now counted as asked. A lift ends the question, so that answer is late.
+    /// A lift ends the question, so an answer after it is ignored, even if
+    /// the figure is put back before the answer arrives.
     #[test]
     fn an_answer_after_the_figure_was_lifted_is_ignored() {
         let mut r = Revalidation::new();
@@ -405,9 +373,7 @@ mod tests {
         assert_eq!(r.answered(FIGURE, Answer::Length(1_024)), None);
     }
 
-    /// Nobody is waiting for a lifted figure, so its patience running out is
-    /// not news — and printing it sent a bench reader looking at a figure that
-    /// was no longer there.
+    /// Nobody waits for a lifted figure, so it does not time out.
     #[test]
     fn a_lifted_figure_never_runs_out_of_patience() {
         let mut r = Revalidation::new();
@@ -430,10 +396,8 @@ mod tests {
         assert_eq!(r.polled(1_000_000), None);
     }
 
-    /// The media loop is where this is polled, and a pass takes as long as
-    /// whatever blocked the executor. Measured on 2026-09-23: a 10 ms timer
-    /// came back every ~106 ms under a story. The patience must be wall clock
-    /// whatever the gap.
+    /// The media loop polls this, and under a story its 10 ms timer fires
+    /// only every ~106 ms (measured). The limit must be real time regardless.
     #[test]
     fn the_patience_is_wall_clock_however_slowly_the_caller_polls() {
         const GAP_MS: u64 = 106;

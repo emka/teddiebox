@@ -1,14 +1,12 @@
-//! Bytes and pages are both `u32`, and a download's write head moves in one
-//! while the decoder's read gate moves in the other. Nothing at the type
-//! level stops the byte count from being handed to something expecting a
-//! page count — a page is 4096 bytes, so the mistake compiles, runs, and
-//! either stalls the decoder or lets it read audio that has not arrived.
-//! These newtypes make that swap a type error instead of a silent one.
+//! Separate types for bytes and pages.
+//!
+//! The download writer counts bytes; the decoder's limit counts pages. Both
+//! would otherwise be `u32`, so mixing them up would compile and either stall
+//! the decoder or let it read audio that has not arrived.
 
 use teddiebox_taf::PAGE_SIZE;
 
-/// A count of bytes, as the writer counts what has been committed to the
-/// card.
+/// A count of bytes, as the writer counts what has been written to the card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Bytes(pub u32);
 
@@ -19,10 +17,8 @@ pub struct Pages(pub u32);
 impl Bytes {
     /// Whole pages these bytes cover.
     ///
-    /// Truncates: a page that has only partly arrived is not readable,
-    /// because the download must have passed *all* of a page before that
-    /// page can be decoded. Rounding up would tell the gate a page is there
-    /// when only its first byte is.
+    /// Rounds down: a page that has only partly arrived cannot be decoded
+    /// yet.
     pub const fn whole_pages(self) -> Pages {
         Pages(self.0 / PAGE_SIZE as u32)
     }

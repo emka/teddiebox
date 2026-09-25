@@ -1,12 +1,11 @@
 #![no_std]
 
-//! What a download decides, separated from how its bytes move.
+//! The decisions a download makes, separate from moving its bytes.
 //!
-//! Nothing here does I/O. The firmware supplies the card and the socket; this
-//! crate owns the questions that have right and wrong answers — whether a file
-//! on the card is whole, where a resumed download continues, how far ahead of
-//! the decoder the writer has got — so that all of them can be tested without
-//! a box.
+//! Nothing here does I/O. The firmware provides the card and the socket. This
+//! crate answers questions like whether a file on the card is complete, where
+//! a resumed download continues, and how far ahead of the decoder the writer
+//! is, so all of them can be tested on the host.
 
 mod availability;
 mod cache;
@@ -36,7 +35,7 @@ pub use writer::{ContentSink, Writer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadError {
-    /// The sidecar is unreadable, which means the content beside it cannot be
-    /// trusted to be complete. Treated as no sidecar at all.
+    /// The sidecar cannot be read, so the content file cannot be trusted to
+    /// be complete. Treated as no sidecar.
     MalformedSidecar,
 }
