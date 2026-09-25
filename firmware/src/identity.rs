@@ -1,24 +1,19 @@
 //! The box's own certificate and key, read from the `cert` partition.
 //!
-//! **Why not the card.** The SD card is the one surface of this box that comes
-//! out and goes into other machines; a private key does not belong there. Flash
-//! stays with the board, is written once per box by `just identity`, and is
-//! untouched by a firmware flash because an app write never reaches a data
-//! partition.
+//! **Why not the SD card.** The card is removed and put into other computers;
+//! a private key does not belong there. Flash stays in the box, is written
+//! once per box by `just identity`, and is not touched by firmware updates,
+//! which never write data partitions.
 //!
-//! **Read at boot, not at mount.** The card is mounted lazily — often first by
-//! a network command — so an identity read from it happened at a time nothing
-//! chose. This runs before the card is involved at all.
+//! **Read at boot**, before the card is used at all.
 use esp_bootloader_esp_idf::partitions::{self, PARTITION_TABLE_MAX_LEN};
 use teddiebox_identity::{parse_header, verify, IdentityError, HEADER};
 
 use crate::flash;
 use crate::tls;
 
-/// The format's cap and the buffers it lands in must be the same number.
-///
-/// A length the laptop accepted and the box could not hold would fail after
-/// provisioning looked successful, which is the worst moment to find out.
+/// The format's size limit and these buffers must match, or an identity the
+/// laptop accepted could fail on the box.
 const _: () = assert!(
     teddiebox_identity::MAX_BODY == tls::CERT_BYTES,
     "teddiebox-identity::MAX_BODY and tls::CERT_BYTES must agree"
@@ -26,15 +21,14 @@ const _: () = assert!(
 
 /// The partition's label in `partitions.csv`.
 ///
-/// Matched by label rather than by subtype: an unnamed data partition carries
-/// `Undefined`, which any future one would match too.
+/// Matched by label, not subtype: its subtype is `Undefined`, which a future
+/// partition could share.
 const LABEL: &str = "cert";
 
 /// Reads the identity out of flash and publishes it.
 ///
-/// Every failure is reported and none is fatal: a box with no identity plays
-/// everything on its card and cannot fetch, which is the same shape as a box
-/// with no CA.
+/// Failures are reported but not fatal: without an identity the box still
+/// plays everything on its card, but cannot download.
 pub fn load() {
     let mut flash = flash::flash();
     let mut table_buffer = [0u8; PARTITION_TABLE_MAX_LEN];
@@ -102,10 +96,9 @@ pub fn load() {
         return;
     }
 
-    // Before publishing anything: a torn write leaves a header that parses
-    // perfectly over bodies that never arrived, and publishing those would
-    // print the line that means success and then fail every handshake with
-    // nothing tying the two together.
+    // Check before publishing: an interrupted write can leave a valid header
+    // over bodies that never arrived, which would report success and then
+    // fail every TLS handshake.
     if let Err(trouble) = verify(
         &held,
         &certificate[..held.certificate_len],

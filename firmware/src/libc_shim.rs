@@ -1,29 +1,25 @@
-//! The three C library symbols libopus's fatal path needs.
+//! The C library symbols that libopus's hardening checks need.
 //!
-//! libopus is built with hardening on, which is deliberate: the decoder parses
-//! files off an SD card, and a check that stops on a malformed one is worth
-//! keeping. Hardening makes `celt_fatal` reachable from the decode path, so it
-//! has to link, and it reaches for `fprintf`, `abort` and — through `stderr` —
-//! newlib's `__getreent`.
+//! libopus is built with hardening on, on purpose: the decoder reads files
+//! from an SD card, and stopping on a malformed one is worth it. Hardening
+//! makes `celt_fatal` reachable, which needs `fprintf`, `abort` and (through
+//! `stderr`) newlib's `__getreent`; `_FORTIFY_SOURCE` adds the `__*_chk`
+//! functions.
 //!
-//! Linking newlib to satisfy them was tried and is the wrong trade: it drags
-//! `malloc`, stdio and a tail of unimplemented syscall stubs into a `no_std`
-//! image, for a function that should never run. `esp-rtos` only wires
-//! `__getreent` into a ROM syscall table, and only with its `alloc` feature,
-//! so it does not supply the symbol either.
+//! Linking newlib instead would pull `malloc`, stdio and unimplemented
+//! syscall stubs into a `no_std` image. `esp-rtos` does not provide
+//! `__getreent` either (only with its `alloc` feature, via a ROM table).
 //!
-//! Supplying them here keeps newlib out and makes the failure *better* than
-//! libopus intended: instead of `abort()`, a hardening failure becomes a Rust
-//! panic, which on this box means `esp-backtrace` prints a backtrace over the
-//! console.
+//! Defining them here also improves the failure: instead of `abort()`, a
+//! hardening failure becomes a Rust panic, and `esp-backtrace` prints a
+//! backtrace on the console.
 
 use core::ffi::{c_char, c_int, c_void};
 
 /// Where libopus ends up if a hardening check fails.
 ///
-/// Reaching this means the decoder found an internal invariant broken — in
-/// practice, a corrupt or malicious file. Panicking says so and leaves a
-/// backtrace; `abort()` would just stop.
+/// Reaching this means the decoder found a broken internal invariant, in
+/// practice a corrupt or malicious file. Panicking leaves a backtrace.
 #[unsafe(no_mangle)]
 extern "C" fn abort() -> ! {
     panic!("libopus aborted: a hardening check failed while decoding");
@@ -31,24 +27,22 @@ extern "C" fn abort() -> ! {
 
 /// Enough of newlib's reentrancy block for `stderr` to be read out of it.
 ///
-/// `stderr` expands to `__getreent()->_stderr`, so the pointer this returns is
-/// dereferenced before `fprintf` is ever called. Only the first few words are
-/// read — `_stdin`, `_stdout` and `_stderr` sit at the front of the struct —
-/// and they read as null, which the `fprintf` below then ignores.
+/// `stderr` expands to `__getreent()->_stderr`, so this pointer is read
+/// before `fprintf` is called. Only the first few words (`_stdin`, `_stdout`,
+/// `_stderr`) are read; they are null, and `fprintf` below ignores them.
 static mut REENT: [usize; 32] = [0; 32];
 
 #[unsafe(no_mangle)]
 extern "C" fn __getreent() -> *mut c_void {
-    // Only ever read, and only on a path that panics immediately afterwards,
-    // so no aliasing or ordering question arises.
+    // Only read, and only just before a panic, so there are no aliasing
+    // issues.
     core::ptr::addr_of_mut!(REENT) as *mut c_void
 }
 
 /// Swallows the message libopus would print before aborting.
 ///
-/// Declared without varargs, which C's calling convention tolerates here
-/// because nothing reads the arguments: the very next thing `celt_fatal` does
-/// is call [`abort`], which panics with a message of its own.
+/// Declared without varargs, which works because the arguments are never
+/// read: `celt_fatal` calls [`abort`] next, which panics.
 #[unsafe(no_mangle)]
 extern "C" fn fprintf(_stream: *mut c_void, _format: *const c_char) -> c_int {
     0
@@ -56,9 +50,7 @@ extern "C" fn fprintf(_stream: *mut c_void, _format: *const c_char) -> c_int {
 
 /// `memcpy` with the destination size known, from `_FORTIFY_SOURCE`.
 ///
-/// Implemented rather than stubbed: the bounds check *is* the hardening, and a
-/// version that skipped it would quietly turn a caught overflow back into the
-/// corruption the check exists to prevent.
+/// Implemented, not stubbed: the bounds check *is* the hardening.
 ///
 /// # Safety
 ///

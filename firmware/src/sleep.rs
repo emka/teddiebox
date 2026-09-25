@@ -1,10 +1,8 @@
-//! Deep sleep, and the two rules that make it wakeable.
+//! Deep sleep, and how to wake up from it.
 //!
-//! Everything here is register behaviour rather than policy: what this chip
-//! needs in order to stop, and what it needs in order to start again. When to
-//! stop, and what to say first, is `teddiebox_core`'s business and is tested
-//! there. Nothing in this file can be exercised on a host, so it is kept to
-//! the smallest surface the job allows.
+//! Only the hardware steps are here. When to sleep is decided in
+//! `teddiebox_core`, where it is tested. This file cannot be tested on the
+//! host, so it is kept small.
 
 use esp_hal::gpio::{Event as GpioEvent, Input, WakeupConfig};
 use esp_hal::peripherals::LPWR;
@@ -12,24 +10,19 @@ use esp_hal::rtc_cntl::sleep::{LowPower, RtcSleepConfig};
 
 /// Arms the ear/wake line as the only wake source.
 ///
-/// **One level group on purpose.** esp-hal's own wakeup module is explicit
-/// that a pad which continues to work while the high-performance GPIO
-/// peripheral is powered down needs a *low-power* path, and that deep sleep
-/// always powers that peripheral down. On this chip the low-power group takes
-/// one level for the whole pad mask, so a second wake source of the opposite
-/// polarity would fall to a path that keeps the low-power domain alive — which
-/// is the current this exists to save. The charger is exactly that opposite
-/// polarity, which is why it is not a wake source.
+/// **Only one wake level.** Deep sleep powers down the normal GPIO block, so
+/// the wake pin needs the *low-power* path (per esp-hal's wakeup module). On
+/// this chip that path uses one level for all its pins. A second source of
+/// the opposite level would need a mode that keeps more of the chip powered,
+/// using the current sleep is meant to save. The charger has the opposite
+/// level, so it is not a wake source.
 ///
-/// **Both calls are needed.** `listen` sets the wake *condition* — a pin that
-/// does not listen is not a wakeup source at all — and the wakeup config sets
-/// the *path* that survives the sleep. Either alone does nothing.
+/// **Both calls are needed.** `listen` sets the wake *condition*, and the
+/// wakeup config sets the *path* that works during sleep.
 ///
-/// The line must be released first. A level-triggered wake on a pad already at
-/// its wake level ends the sleep the instant it begins, and an ear holds this
-/// line down for as long as it is held, so the press that asked for sleep has
-/// to be over before this is called. Refused rather than waited out here,
-/// because the waiting belongs to the caller that can still print.
+/// The line must be released first: if the pin is already at its wake level,
+/// the chip wakes immediately. A held ear keeps the line low, so this returns
+/// an error rather than waiting; the caller does the waiting.
 pub fn arm(wake: &mut Input<'static>) -> Result<(), &'static str> {
     if wake.is_low() {
         return Err("the wake line is still held down");
@@ -41,12 +34,11 @@ pub fn arm(wake: &mut Input<'static>) -> Result<(), &'static str> {
 
 /// Enters deep sleep and does not return.
 ///
-/// The caller must have quietened the codec and released the rails, and must
-/// have armed a wake source with [`arm`]: `sleep_deep` *panics* when no source
-/// is enabled, and a panic here leaves a box that never wakes and says nothing
-/// about why. The pull-up the wake line is configured with is what holds the
-/// pad away from its wake level through the sleep; sleep adds no resistor of
-/// its own, and a floating pad wakes the chip immediately and every time.
+/// The caller must have silenced the codec, released the rails, and armed a
+/// wake source with [`arm`]: `sleep_deep` *panics* without one, leaving a box
+/// that never wakes. The wake line's pull-up keeps the pin away from its wake
+/// level during sleep; without it the pin would float and wake the chip at
+/// once.
 pub fn enter(lpwr: LPWR<'static>) -> ! {
     LowPower::new(lpwr).sleep_deep(RtcSleepConfig::deep())
 }

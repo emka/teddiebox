@@ -1,14 +1,12 @@
 //! The TRF7962A reader, and the tags on the plate.
 //!
-//! Bench step 10. The driver is `trf7962a`, host-tested against recorded bus
-//! transactions; what is here is the pins, the bus and the bench commands.
+//! The driver is `trf7962a`, tested on the host. This file has the pins, the
+//! bus and the console commands.
 //!
-//! **A locked tag looks exactly like a broken reader.** Tonie figures sit in
-//! ICODE SLIX privacy mode and do not answer inventory at all until they are
-//! unlocked, so silence proves nothing on its own. That is why the reader's
-//! configuration registers are read back at start-up: a link that answers
-//! turns "no tag" into a statement about the plate rather than about the
-//! wiring.
+//! **A locked tag looks like a broken reader.** Tonie figures are in ICODE
+//! SLIX privacy mode and do not answer inventory until unlocked. So the
+//! reader's registers are read back at start-up: if they answer, "no tag"
+//! is about the plate, not the wiring.
 
 use embassy_time::Duration;
 use embedded_hal_bus::spi::ExclusiveDevice;
@@ -20,16 +18,15 @@ use teddiebox_console::MAX_MEMORY_BLOCKS;
 use trf7962a::{Trf7962a, INIT_SEQUENCE};
 
 /// The reader takes up to 2 Mbit/s (SLOS757C §5.12). Half that is plenty for
-/// register pokes and a twelve-byte FIFO, and leaves margin on a bench wire.
+/// register access and a twelve-byte FIFO.
 const BUS_RATE_KHZ: u32 = 1_000;
 
 /// How many times the link is configured and read back before giving up.
 ///
-/// **Measured on this board: it answers on the second attempt**, every boot.
-/// The first one lands while the rail this shares with the card has only just
-/// been raised. Twenty is a second, which is ample, and bounded rather than
-/// endless because a genuinely miswired reader must still reach the message
-/// that says so rather than hanging the task that would print it.
+/// **On this board it answers on the second attempt**, every boot: the first
+/// comes just after its power rail (shared with the card) is turned on.
+/// Twenty attempts is one second. Limited, so a miswired reader is reported
+/// instead of hanging the task.
 const LINK_ATTEMPTS: u8 = 20;
 /// Room for the readback of every register `INIT_SEQUENCE` writes.
 const MAX_INIT_REGISTERS: usize = 4;
@@ -38,9 +35,7 @@ const _: () = assert!(
     "INIT_SEQUENCE has outgrown the readback buffer, and zip would drop the rest in silence"
 );
 
-/// How long between those attempts. Twenty of these is a second, which is far
-/// longer than any settling this part is documented to need and still short
-/// enough that a real fault is reported while somebody is still watching.
+/// Time between those attempts.
 const LINK_RETRY_MS: u32 = 50;
 
 type Blocking = esp_hal::Blocking;
@@ -58,8 +53,8 @@ pub struct Reader {
 impl Reader {
     /// Brings the reader up and proves the link before any tag is involved.
     ///
-    /// The storage rail must already be on: gate 47 feeds the reader as well
-    /// as the card, and powering it is the console loop's business.
+    /// The storage rail must already be on: gate 47 powers the reader and the
+    /// card, and the console loop turns it on.
     pub async fn open(
         spi: Spi<'static, Blocking>,
         cs: Output<'static>,
@@ -70,26 +65,16 @@ impl Reader {
             ExclusiveDevice::new(spi, cs, delay).map_err(|_| "chip select would not drive")?;
         let mut trf = Trf7962a::new(device, delay, irq);
 
-        // Configure, then read back what was written, and keep trying until
-        // the two agree. This is the reader's equivalent of the codec's
-        // power-flags register: it separates "asked wrongly" from "not
-        // listening", and it is the only check here that does not depend on a
-        // tag being present.
+        // Configure, read back what was written, and retry until they match.
+        // This checks the link without needing a tag.
         //
-        // **Retried because the answer changes with time.** The reader shares
-        // gate 47 with the card, and a box that polls the plate from boot
-        // opens it as soon as that rail is raised — where every register
-        // reads back 0x00 and the readback reports "suspect SPI" against a
-        // part that is merely still coming up. The same reader answers
-        // perfectly a few seconds later. A fixed settling delay would only be
-        // a guess at a number nobody has measured; this waits for the thing
-        // that actually matters, and stops as soon as it is true.
+        // **Retried** because right after its power rail comes on, the reader
+        // reads back 0x00 from every register, and answers correctly a little
+        // later. Retrying waits exactly as long as needed.
         let mut agreed = false;
         let mut attempts = 0;
-        // What the last attempt actually read. The outcome is printed from
-        // these rather than from a second round of reads, so what the console
-        // shows is what the decision was made on — and so a register is read
-        // once per attempt instead of twice.
+        // What the last attempt read, printed below, so the console shows
+        // exactly what the decision was based on.
         let mut seen = [None; MAX_INIT_REGISTERS];
         while attempts < LINK_ATTEMPTS && !agreed {
             attempts += 1;
@@ -112,8 +97,7 @@ impl Reader {
             }
         }
 
-        // Printed once the outcome is settled, so a box that takes three
-        // attempts does not fill the console with the two that failed.
+        // Printed once at the end, not for every failed attempt.
         for (slot, &(register, expected)) in seen.iter().zip(INIT_SEQUENCE) {
             match slot {
                 Some(actual) if *actual == expected => {
@@ -129,8 +113,7 @@ impl Reader {
         if agreed {
             esp_println::println!("teddiebox: nfc reader answers, field on ({attempts} attempts)");
         } else {
-            // Not fatal: the bench should still be allowed to try a tag, and
-            // seeing both results is more useful than refusing to continue.
+            // Not fatal: trying a tag anyway can still give useful results.
             esp_println::println!(
                 "teddiebox: nfc link is not answering as written after {attempts} attempts \
                  — suspect SPI"
@@ -140,7 +123,7 @@ impl Reader {
         Ok(Self { trf })
     }
 
-    /// Bench step 10a: whatever is on the plate, if it answers unlocked.
+    /// Reads whatever is on the plate, if it answers without unlocking.
     pub fn inventory(&mut self) {
         match self.trf.inventory() {
             Ok(Some(uid)) => report_uid("tag", &uid),
@@ -163,20 +146,16 @@ impl Reader {
     ///
     /// With the field off, register 0x0F reports the RF amplitude *arriving*
     /// at the antenna (SLOS757C Table 6-18: "RF amplitude during RF-off
-    /// state"). That turns the reader into a field detector, which is the only
-    /// way to ask whether the antenna is connected without involving a tag.
+    /// state"). This can check whether the antenna is connected, without a
+    /// tag.
     pub fn set_field(&mut self, on: bool) {
-        // Not simply clearing rf_on. SLOS757C Table 6-2 defines bit 5 as
-        // "transmitter on, receivers on", so clearing it alone silences the
-        // receiver too and the measurement reads zero whatever the antenna is
-        // doing. Bit 1, `rec_on`, exists for precisely this case: "receiver
-        // activated for external field measurement — forces enabling of
-        // receiver and TX oscillator".
+        // Not just clearing rf_on: bit 5 is "transmitter on, receivers on"
+        // (SLOS757C Table 6-2), so clearing it also turns the receiver off.
+        // Bit 1, `rec_on`, is for this case: "receiver activated for external
+        // field measurement — forces enabling of receiver and TX oscillator".
         const REC_ON: u8 = 0x02;
-        // Bit 0 selects the supply range, and turning the transmitter off is
-        // no reason to change it. Taken from the driver's own word rather
-        // than restated, so the two cannot disagree about which rail this
-        // board has.
+        // Bit 0 selects the supply range and must not change. Taken from the
+        // driver's constant.
         const SUPPLY: u8 = 0x01;
         let listen = REC_ON | (trf7962a::regs::CHIP_STATUS_RF_ON & SUPPLY);
         let value = if on {
@@ -204,39 +183,31 @@ impl Reader {
 
     /// Says whether the reader heard anything at all.
     ///
-    /// Silence has three quite different causes — no tag in the field, a tag
-    /// of the wrong family, or a reply the driver could not parse — and they
-    /// are worth telling apart before anyone moves an antenna. The interrupt
-    /// status register is the one that knows: it latches whether a reception
-    /// even started.
+    /// No answer can mean no tag, a tag of the wrong type, or a reply the
+    /// driver could not parse. The interrupt status register shows whether a
+    /// reception even started.
     ///
-    /// Reading it clears it, so this runs once, immediately after the attempt.
+    /// Reading it clears it, so this runs once, right after the attempt.
     fn diagnose(&mut self) {
-        // The interrupt status first, and read the way SPI mode requires
-        // (address 0x6C plus a dummy byte, SLOS757C §6.12.6). Read as an
-        // ordinary register it never clears, so a stale or empty value here
-        // says nothing about whether the reader transmitted — and "the reader
-        // never transmits" is exactly the conclusion this bench has been
-        // drawing from it.
+        // The interrupt status first, read the way SPI mode requires (address
+        // 0x6C plus a dummy byte, SLOS757C §6.12.6). Read as an ordinary
+        // register, it never clears.
         match self.trf.read_irq_status() {
             Ok(value) => esp_println::println!("teddiebox: nfc   irq status {value:#04x} (0x6C)"),
             Err(_) => esp_println::println!("teddiebox: nfc   irq status unreadable"),
         }
 
-        // The line, separately from the register. They disagree in the one
-        // case worth naming: an interrupt the reader latched and the wiring
-        // never delivered, which is a wrong GPIO rather than a dead reader.
+        // The line, separately from the register: if they disagree, the
+        // interrupt is not reaching the GPIO.
         match self.trf.irq_asserted() {
             Ok(true) => esp_println::println!("teddiebox: nfc   irq line high"),
             Ok(false) => esp_println::println!("teddiebox: nfc   irq line low"),
             Err(_) => esp_println::println!("teddiebox: nfc   irq line unreadable"),
         }
 
-        // 0x0F is the RSSI register (SLOS757C §6.14.1.3.3); the driver has no
-        // name for it because nothing in the protocol needs it, but at a bench
-        // it says whether there is any energy coming back. 0x1D and 0x1E are
-        // the transmit length the driver just wrote: read back, they say
-        // whether the transmit setup reached the part at all.
+        // 0x0F is the RSSI register (SLOS757C §6.14.1.3.3): whether any signal
+        // is coming back. 0x1D and 0x1E are the transmit length just written:
+        // they show whether the transmit setup reached the chip.
         for (name, register) in [
             ("chip status 0x00", 0x00u8),
             ("iso control 0x01", 0x01),
@@ -252,17 +223,13 @@ impl Reader {
         }
     }
 
-    /// Bench step 10b: unlock a Tonie's privacy mode, then read it.
+    /// Unlocks a Tonie's privacy mode, then reads it.
     ///
-    /// GET RANDOM NUMBER is asked first, on its own. A SLIX in privacy mode
-    /// refuses inventory but *does* answer this — that is what makes the
-    /// unlock possible at all — so its answer separates the two silences that
-    /// otherwise look identical: a locked tag sitting on the plate, and no tag
-    /// in the field at all. Without it, a wrong password and an empty plate
-    /// report the same thing.
+    /// GET RANDOM NUMBER is sent first on its own. A locked SLIX ignores
+    /// inventory but answers this, so it tells a locked tag from an empty
+    /// plate.
     ///
-    /// The random number it spends is not the one the unlock uses; the driver
-    /// fetches its own, immediately before masking the password with it.
+    /// The unlock fetches its own random number; this one is not reused.
     pub fn unlock(&mut self, password: u32) {
         match self.trf.get_random_number() {
             Ok(random) => esp_println::println!(
@@ -287,8 +254,8 @@ impl Reader {
             Ok(None) => esp_println::println!(
                 "teddiebox: nfc still silent after unlock — wrong password, or still locked"
             ),
-            // A SLIX that refuses the password says so, rather than going
-            // quiet: ISO 15693-3 §7.4, an error response carrying a code.
+            // A SLIX can refuse with an error response carrying a code
+            // (ISO 15693-3 §7.4).
             Err(trf7962a::Error::TagError(code)) => {
                 esp_println::println!("teddiebox: nfc tag refused the password (error {code:#04x})")
             }
@@ -297,21 +264,11 @@ impl Reader {
         }
     }
 
-    /// Whatever is on the plate right now, unlocked if it needs to be —
-    /// quietly.
+    /// The most interrupt polls any answered exchange has needed, and that
+    /// time in microseconds.
     ///
-    /// The poll loop's instrument: `unlock` prints for a person reading a
-    /// console, and a reading taken several times a second has no person
-    /// reading it. Delegates to the same `inventory_unlocked` and the same
-    /// password list `unlock` builds, so the two paths cannot silently
-    /// disagree about which passwords a poll is willing to try.
-    /// The most interrupt polls any answered exchange has needed, and what
-    /// that is in microseconds at the driver's poll interval.
-    ///
-    /// The number the reply window should be sized against. It is read out
-    /// when polling stops rather than printed as it changes, because a figure
-    /// on the plate is polled several times a second and the interesting value
-    /// is the worst one across a whole run.
+    /// Used to size the reply window. Read out when polling stops, since the
+    /// worst case over a whole run is what matters.
     pub fn slowest_reply(&self) -> (u32, u32) {
         let polls = self.trf.slowest_reply_polls();
         (polls, polls * trf7962a::IRQ_POLL_INTERVAL_US)
@@ -319,52 +276,44 @@ impl Reader {
 
     /// Whether anything is on the plate, without unlocking it.
     ///
-    /// The one question a Tonie in privacy mode answers (SL2S5002 §1.3), and
-    /// the reason the poller can afford to run at all: an empty plate costs one
-    /// unanswered exchange here instead of two, and a locked figure is noticed
-    /// without the password exchange that identifying it would need.
+    /// The only command a locked Tonie answers (SL2S5002 §1.3). An empty
+    /// plate costs one unanswered exchange, and a locked figure is noticed
+    /// without the password exchange.
     ///
-    /// A bus fault reads as "nothing there", which is the same answer the
-    /// poller would reach anyway and keeps this off the error path of a loop
-    /// that runs several times a second.
+    /// A bus error counts as "nothing there".
     pub fn tag_present(&mut self) -> bool {
         self.trf.tag_present().unwrap_or(false)
     }
 
     /// The UID of a tag that is already out of privacy mode, quietly.
     ///
-    /// Once a figure has been unlocked it stays unlocked until its field is
-    /// cycled, so for the whole time it sits on the plate this answers on the
-    /// first try with no password exchange at all. Re-reading the UID rather
-    /// than remembering it is what lets one figure being swapped for another
-    /// be noticed.
+    /// An unlocked figure stays unlocked until its field is turned off, so
+    /// while it is on the plate this needs no password. Reading the UID each
+    /// time (rather than remembering it) notices a figure being swapped.
     pub fn identify(&mut self) -> Option<[u8; 8]> {
         self.trf.inventory().ok()?
     }
 
+    /// Whatever is on the plate, unlocked if needed, without printing.
+    ///
+    /// For the poll loop. Uses the same password list as `unlock`.
     pub fn inventory_unlocked(&mut self, password: u32) -> Option<[u8; 8]> {
         self.trf.inventory_unlocked(&passwords(password)).ok()?
     }
 
-    /// Bench instrument: put SET PASSWORD on the air whatever the tag's state.
+    /// Test command: sends SET PASSWORD whatever the tag's state.
     ///
-    /// `unlock` cannot reach it on a tag that is already out of privacy mode,
-    /// because the inventory it tries first answers and it stops there — and
-    /// a SLIX stays out of privacy mode until something puts it back, which
-    /// this driver has no command to do. That leaves the eight-byte password
-    /// exchange, the longest frame the reader sends and the only one a tag
-    /// can refuse, unreachable at the bench.
+    /// `unlock` never sends it to an already unlocked tag, because the
+    /// inventory it tries first succeeds. This tests the eight-byte password
+    /// exchange, the longest frame the reader sends.
     ///
-    /// The registers are read out afterwards whatever happens, because the
-    /// question this exists to answer is what state a refused exchange leaves
-    /// the reader in.
+    /// The registers are printed afterwards in every case, to show the
+    /// reader's state.
     pub fn force_unlock(&mut self, password: u32) {
-        // The two exchanges are run separately rather than through
-        // `unlock_privacy`, because silence from each means something quite
-        // different — a tag that will not give a random number is not
-        // answering at all, while one that gives a random number and then
-        // ignores the password is answering selectively — and the bundled
-        // call reports both as the same timeout.
+        // The two exchanges run separately, not through `unlock_privacy`,
+        // because no answer means different things for each: no random
+        // number means no tag, while no answer to the password means the tag
+        // refused it.
         let random = match self.trf.get_random_number() {
             Ok(random) => random,
             Err(trf7962a::Error::ReceiveError(flags)) => {
@@ -379,9 +328,8 @@ impl Reader {
             }
         };
 
-        // Nothing is printed between the two exchanges. A console line is
-        // milliseconds at 115200, and putting one here is a delay disguised
-        // as a diagnostic — the exact variable under test.
+        // Nothing is printed between the two exchanges: a console line takes
+        // milliseconds at 115200 baud, which would change the timing.
         let outcome = self.trf.set_password(password, random);
         esp_println::println!("teddiebox: nfc   GET RANDOM NUMBER -> {random:#06x}");
         match outcome {
@@ -391,11 +339,9 @@ impl Reader {
             }
             Err(trf7962a::Error::ReceiveError(flags)) => report_receive_error(flags),
             Err(trf7962a::Error::Timeout) => {
-                // Silence means the tag does not hold this password, and it
-                // now ignores everything until its field is cycled. Reset it
-                // here so the next attempt can be typed straight away —
-                // needing `rb` to un-stick a tag was only ever a side effect
-                // of rebooting dropping the reader's rail.
+                // No answer means a wrong password, and the tag now ignores
+                // everything until its field is turned off. Reset it so the
+                // next attempt works.
                 esp_println::println!("teddiebox: nfc   SET PASSWORD -> silent, resetting the tag");
                 if self.trf.reset_tags().is_err() {
                     esp_println::println!("teddiebox: nfc   could not cycle the field");
@@ -406,19 +352,15 @@ impl Reader {
         self.diagnose();
     }
 
-    /// Bench: put the tag back into privacy mode.
+    /// Test command: puts the tag back into privacy mode.
     ///
-    /// A figure arrives locked and the stock firmware re-locks it after
-    /// reading, so this is what restores a bench tag to a realistic state.
-    /// It is also the only command here that makes a tag harder to read, so
-    /// it reports the UID it is about to lock away.
+    /// Figures come locked and the stock firmware re-locks them after
+    /// reading, so this restores a test tag to that state.
     pub fn lock(&mut self, password: u32) {
         match self.trf.enable_privacy(password) {
             Ok(()) => {
                 esp_println::println!("teddiebox: nfc tag is in privacy mode again");
-                // Proof rather than assertion: a locked tag stops answering
-                // inventory, so the same command that reads it also confirms
-                // the lock took.
+                // Check: a locked tag stops answering inventory.
                 match self.trf.inventory() {
                     Ok(Some(uid)) => report_uid("still readable — lock did NOT take", &uid),
                     Ok(None) => {
@@ -440,38 +382,15 @@ impl Reader {
         }
     }
 
-    /// Bench instrument: read a tag's memory out, one block at a time.
-    ///
-    /// This is what settles where the teddyCloud auth token lives. teddyCloud
-    /// relays the box's `Authorization: BD <64 hex>` upstream verbatim and
-    /// never validates it, and revvox's protocol analysis calls that value the
-    /// memory content of the tag — so the reader already on this board can
-    /// read it. Measured on a figure on 2026-09-03: the token is the whole
-    /// user memory, blocks 0 to 7, and block 8 onward does not answer.
-    ///
-    /// **Deliberately does not unlock first**, which is what let this settle
-    /// the second question: a figure in privacy mode is silent to every block,
-    /// exactly as it is to inventory, so `pw` and `slix` are a precondition
-    /// for reading the token rather than an optional step. Keeping the unlock
-    /// out of here is also what makes the two states comparable at all.
-    ///
-    /// Blocks are read singly rather than through `read_memory` because that
-    /// stops at the first failure and does not say which block failed — and
-    /// which block first refuses is the measurement wanted here.
-    ///
-    /// The bytes this prints are a credential. They belong on a bench console
-    /// and not in a bug report.
     /// Reads the tag's whole user memory, which is its cloud token.
     ///
-    /// Eight blocks of four bytes: thirty-two, the length teddyCloud reads
-    /// after `Authorization: BD `. All or nothing — a token assembled from the
-    /// blocks that happened to answer would be silently wrong, and the server
-    /// that rejects it is two network hops away from the cause.
+    /// Eight blocks of four bytes: 32, the length teddyCloud reads after
+    /// `Authorization: BD `. All or nothing: a partial token would be wrong.
     ///
-    /// **Does not unlock.** A privacy-locked tag is silent to every block, so
-    /// `pw` and `slix` come first, exactly as for `mem`.
+    /// **Does not unlock.** A locked tag does not answer, so use `pw` and
+    /// `slix` first, as for `mem`.
     ///
-    /// **What this returns is a credential.** It is deliberately not printed.
+    /// **The result is a credential** and is not printed.
     pub fn read_token(&mut self) -> Option<[u8; 32]> {
         let mut token = [0u8; 32];
         for block in 0..8u8 {
@@ -481,6 +400,20 @@ impl Reader {
         Some(token)
     }
 
+    /// Test command: prints a tag's memory, one block at a time.
+    ///
+    /// The token teddyCloud forwards as `Authorization: BD <64 hex>` is the
+    /// tag's memory: blocks 0 to 7 of a Tonie. Block 8 onward does not
+    /// answer.
+    ///
+    /// **Does not unlock first**: a locked figure does not answer any block,
+    /// so use `pw` and `slix` first.
+    ///
+    /// Reads blocks one by one, rather than with `read_memory`, to show which
+    /// block fails first.
+    ///
+    /// The printed bytes are a credential; do not paste them into bug
+    /// reports.
     pub fn dump_memory(&mut self, first: u8, count: u8) {
         let mut whole = [0u8; 4 * MAX_MEMORY_BLOCKS as usize];
         let mut read = 0usize;
@@ -501,10 +434,8 @@ impl Reader {
                     whole[read..read + 4].copy_from_slice(&data);
                     read += 4;
                 }
-                // A tag that refuses says so rather than going quiet
-                // (ISO 15693-3 §7.4), and reading past the last block is
-                // exactly how that refusal is provoked. This is a result, not
-                // a fault.
+                // A tag may refuse with an error response (ISO 15693-3 §7.4),
+                // for example past its last block. A result, not a fault.
                 Err(trf7962a::Error::TagError(code)) => {
                     esp_println::println!(
                         "teddiebox: nfc mem {block:02X} refused (error {code:#04x})"
@@ -527,9 +458,8 @@ impl Reader {
             }
         }
 
-        // Only a run with no gap in it is printed whole. A dump assembled from
-        // the blocks that happened to answer would read exactly like a
-        // complete one, which is the mistake worth spending a branch on.
+        // Only print the whole run if no block failed; otherwise it would
+        // look complete.
         if !complete {
             esp_println::println!(
                 "teddiebox: nfc mem — run incomplete, so not printed whole; \
@@ -552,21 +482,17 @@ impl Reader {
 
 /// The passwords to try on a tag, in the order they are expected.
 ///
-/// The Toniebox's own first, since that is what a figure holds. NXP's factory
-/// default second, so a plain SLIX-L off the reel — the sort of tag used to
-/// test this without risking a figure — reads too. A wrong password costs a
-/// field reset rather than an error, so the fallback is cheap and only
-/// happens on tags the first password does not fit.
+/// The Toniebox password first, since figures use it. NXP's factory default
+/// second, so a new, blank SLIX-L (useful for testing) can be read too. A
+/// wrong password only costs a field reset.
 fn passwords(tonie: u32) -> [u32; 2] {
     [tonie, trf7962a::slix::VENDOR_DEFAULT_PASSWORD]
 }
 
 /// Names the reader's own reason for rejecting a reception.
 ///
-/// SLOS757G Table 6-29, B4 to B1. A reply that arrives and fails CRC is a
-/// different problem from one the decoder could not frame at all, and at a
-/// bench that difference decides whether to look at the antenna or at the
-/// protocol settings.
+/// SLOS757G Table 6-29, B4 to B1. A CRC error and a framing error have
+/// different causes, so each is named.
 fn report_receive_error(flags: u8) {
     esp_println::println!("teddiebox: nfc reader rejected the reply ({flags:#04x}):");
     for (bit, meaning) in [
@@ -583,9 +509,8 @@ fn report_receive_error(flags: u8) {
 
 /// Prints a UID both ways round.
 ///
-/// ISO 15693 sends a UID least-significant byte first, while everything that
-/// writes one down — teddyCloud, the moulding on a figure — shows it the other
-/// way. Printing both saves guessing which one is being looked at.
+/// ISO 15693 sends a UID least-significant byte first; teddyCloud and the
+/// figure itself show it the other way round.
 fn report_uid(what: &str, uid: &[u8; 8]) {
     esp_println::println!(
         "teddiebox: nfc {what} UID {:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X} (as sent)",

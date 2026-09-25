@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
-# Its own workspace: the device dependency tree is pinned to release
-# candidates and must not reach the host lockfile.
+# A separate workspace: the device dependencies are pinned to release
+# candidates and must not affect the host lockfile.
 [workspace]
 
 [dependencies]
@@ -17,9 +17,9 @@ teddiebox-wifikey = { path = "../crates/teddiebox-wifikey" }
 lis3dh = { path = "../crates/lis3dh" }
 tlv320dac3100 = { path = "../crates/tlv320dac3100" }
 esp-hal = { version = "1.2.0-rc.0", features = ["esp32s3", "unstable", "rt"] }
-# `esp-radio` turns on the esp-radio-rtos-driver integration: without it the
-# radio stack has no scheduler to run its worker threads on. `esp-alloc` hands
-# those allocations to the same heap the radio uses.
+# `esp-radio` enables the esp-radio-rtos-driver integration; without it the
+# Wi-Fi stack has no scheduler for its threads. `esp-alloc` makes those
+# allocations use the same heap as the Wi-Fi stack.
 esp-rtos = { version = "0.4", features = [
     "esp32s3",
     "embassy",
@@ -30,24 +30,22 @@ esp-rtos = { version = "0.4", features = [
 # arena here breaks the build.
 embassy-executor = "0.10"
 embassy-time = "0.5"
-# `Signal`, to hand the poll loop's latest plate reading to whichever task
-# asks for it without a queue neither side can size.
+# `Signal`, to pass the latest plate reading to whichever task wants it,
+# without a queue.
 embassy-sync = "0.8"
-# Guards the bench-typed credentials shared between the console loop and the
-# radio task. Already in the tree under esp-hal; named here because this crate
-# reaches for it directly.
+# Protects the credentials typed at the console, shared between the console
+# loop and the Wi-Fi task. Already used by esp-hal; listed because this crate
+# uses it directly.
 critical-section = "1"
-# Pinned to the same 0.8 the workspace crates use: `teddiebox_config::Config`
-# is built from these strings, and a different heapless major would make
-# `String<32>` a different type.
+# The same 0.8 the workspace crates use: `teddiebox_config::Config` is built
+# from these strings, and a different major version would make `String<32>` a
+# different type.
 heapless = { version = "0.8", default-features = false }
-# default-features off: the default `auto` feature picks USB Serial/JTAG
-# over UART0 once a USB host has been seen, and GPIO19 (USB D-) is wired as
-# the red LED here. The design specifies UART0 unconditionally, so `uart`
-# is selected explicitly instead. `critical-section` is kept (esp-println
-# needs a lock to print from more than one task); `colors` is dropped along
-# with the rest of default — it only adds ANSI escapes to the output and a
-# bench UART session doesn't need them.
+# Default features off: the default `auto` feature picks USB Serial/JTAG
+# over UART0 once a USB host is seen, but GPIO19 (USB D-) is the red LED on
+# this board. So `uart` is selected explicitly. `critical-section` is kept
+# (needed to print from more than one task); `colors` is dropped (it only
+# adds ANSI escapes).
 esp-println = { version = "0.18", default-features = false, features = [
     "esp32s3",
     "uart",
@@ -55,57 +53,47 @@ esp-println = { version = "0.18", default-features = false, features = [
 ] }
 esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
-# Named directly only to turn `critical-section` back on. `esp-storage` is
-# already here underneath `esp-bootloader-esp-idf`, which declares it
-# `default-features = false` — and `critical-section` is in esp-storage's
-# default set, so it arrives *off*.
+# Listed only to turn `critical-section` on. `esp-bootloader-esp-idf` pulls
+# in `esp-storage` with default features off, which turns `critical-section`
+# off.
 #
-# With it off, `maybe_with_critical_section` compiles to a bare call and the
-# ROM's erase and write run with interrupts live. The ROM turns the cache off
-# to invalidate it, so the next timer interrupt whose handler lives in flash
-# cannot be fetched — and neither can the fault handler. The box stops dead,
-# silently, with the LED frozen mid-colour. Measured on 2026-09-16: the first
-# `otaw` did exactly that and needed a power cycle.
+# Without it, flash erase and write run with interrupts enabled. The ROM
+# turns the cache off during them, so an interrupt handler in flash cannot
+# be loaded, and neither can the fault handler: the box freezes silently and
+# needs a power cycle.
 #
-# Cargo unifies features across the graph, so enabling it here enables it for
-# the `esp-bootloader-esp-idf` path too. Verify with
-# `cargo tree -i esp-storage -e features`, which is how its absence was found.
+# Cargo merges features across the dependency graph, so this applies to
+# `esp-bootloader-esp-idf` too. Check with
+# `cargo tree -i esp-storage -e features`.
 esp-storage = { version = "0.10.0", features = ["critical-section"] }
 embedded-sdmmc = { version = "0.10", default-features = false }
 
-# TLS, because the teddyCloud on this LAN speaks TLS 1.2 and nothing else.
-# `embedded-tls` is TLS 1.3 only and cannot reach it at all; this crate (once
-# `esp-mbedtls`) is published, carries no `esp-hal` dependency, and speaks the
-# same `embedded-io-async` 0.7 that `embassy-net` and `teddiebox-cloud` already
-# do, so it drops between them without an adapter.
+# TLS, because teddyCloud only speaks TLS 1.2. `embedded-tls` only supports
+# TLS 1.3. This crate has no `esp-hal` dependency and uses the same
+# `embedded-io-async` 0.7 as `embassy-net` and `teddiebox-cloud`, so no
+# adapter is needed.
 #
-# The features name the one handshake this server offers —
-# ECDHE-RSA-AES256-GCM-SHA384 over secp256r1, TLS 1.2 — because everything
-# named here is C that has to fit in flash beside the decoder. Hardware
-# acceleration is on by default; the `nohook-*` features would turn it off.
+# The features describe the one handshake the server offers
+# (ECDHE-RSA-AES256-GCM-SHA384 over secp256r1, TLS 1.2), because all of this
+# is C code that must fit in flash next to the decoder. Hardware acceleration
+# is on by default; the `nohook-*` features would turn it off.
 #
-# What this list cannot do is take anything away. `mbedtls-rs` names
-# `tls-core`, `tls-server` and `tls-proto-tls13` in its own dependency on
-# `mbedtls-rs-sys` rather than behind optional features, so TLS 1.3, the server
-# side and ECDHE-ECDSA are compiled in whatever is written here — an earlier
-# version of this comment claimed the opposite, and editing the list to act on
-# that claim produces a build that changes nothing at all, quietly. A define
-# has to be removed where the crate is materialised instead; both
-# `scripts/vendor-mbedtls-rs-sys.sh` and `scripts/vendor-mbedtls-rs.sh` exist
-# for exactly that. The entries that genuinely decide something here are
-# `use-gcc`, `esp32s3`, `kex-ecdhe-rsa`, `alg-rsa`, `alg-sha512` and the two
-# content lengths; the rest are already on, and are kept because the list is
-# also the record of what this box needs.
+# This list cannot remove anything: `mbedtls-rs` always enables `tls-core`,
+# `tls-server` and `tls-proto-tls13` in `mbedtls-rs-sys`, so TLS 1.3, the
+# server side and ECDHE-ECDSA are always compiled in. Removing them needs a
+# change in the vendored crate (`scripts/vendor-mbedtls-rs-sys.sh` and
+# `scripts/vendor-mbedtls-rs.sh`). The entries that actually change something
+# are `use-gcc`, `esp32s3`, `kex-ecdhe-rsa`, `alg-rsa`, `alg-sha512` and the
+# two content lengths; the rest are on anyway and listed as a record of what
+# the box needs.
 #
-# The content lengths are the reason this is worth reviewing: they size
-# mbedtls's record buffers, which come from the same heap that was carved out
-# of the decoder's stack. 16384 is the default and does not fit — measured: the
-# handshake's RSA private operation then dies for want of heap. Nor can 8192 be
-# left to face a 16 KB record, which is why the box asks for a smaller one; see
-# `scripts/vendor-mbedtls-rs.sh` for both measurements.
+# The content lengths size mbedtls's record buffers, which use the heap.
+# The default, 16384, does not fit: the handshake's RSA operation then runs
+# out of heap. 8192 cannot receive a 16 KB record, so the box asks the server
+# for smaller records; see `scripts/vendor-mbedtls-rs.sh`.
 mbedtls-rs = { version = "0.2", default-features = false, features = [
-    # Build the C with the Xtensa GCC the flake already provides for libopus;
-    # the default is clang, which this shell does not carry.
+    # Build the C with the Xtensa GCC the Nix flake provides for libopus; the
+    # default is clang, which the dev shell does not include.
     "use-gcc",
     "esp32s3",
     "tls-core",
@@ -138,22 +126,18 @@ teddiebox-audio = { version = "0.1.0", path = "../crates/teddiebox-audio" }
 teddiebox-taf = { version = "0.1.0", path = "../crates/teddiebox-taf" }
 portable-atomic = "1.15.0"
 trf7962a = { version = "0.1.0", path = "../crates/trf7962a" }
-# "unstable": `AccessPointConfig::with_max_connections` is gated behind it in
-# the pinned esp-radio — `max_connections` carries `#[builder_lite(unstable)]`
-# upstream, so the setter does not exist without this feature. esp-hal's own
-# `unstable` is already on above, which is what `esp-radio/unstable` in turn
-# requires.
+# "unstable": needed for `AccessPointConfig::with_max_connections` in the
+# pinned esp-radio. It requires esp-hal's `unstable`, which is on above.
 esp-radio = { version = "1.0.0-beta.0", features = ["esp32s3", "wifi", "unstable"] }
-# The radio stack allocates; nothing else in this firmware does. See the heap
-# comment in src/main.rs.
+# Only the Wi-Fi stack allocates. See the heap comment in src/main.rs.
 esp-alloc = "0.11"
 embassy-net = { version = "0.9.1", features = [
     "dhcpv4",
     "dns",
     "proto-ipv4",
     "tcp",
-    # The setup portal's DHCP *server*. `dhcpv4` above is the client, and
-    # smoltcp has no server, so the box answers leases itself over UDP.
+    # For the setup portal's DHCP *server*: `dhcpv4` above is the client, and
+    # smoltcp has no server, so the box answers DHCP itself over UDP.
     "udp",
     "medium-ethernet",
 ] }
@@ -161,19 +145,15 @@ teddiebox-config = { path = "../crates/teddiebox-config" }
 teddiebox-cloud = { path = "../crates/teddiebox-cloud" }
 teddiebox-download = { path = "../crates/teddiebox-download" }
 teddiebox-portal = { path = "../crates/teddiebox-portal" }
-# The OTA decisions and the flash sector bookkeeping. Brought in for the
-# bench spikes so they drive the shipping arithmetic rather than a parallel
-# copy written for the bench; the firmware half will want it regardless.
+# OTA decisions and flash sector bookkeeping.
 teddiebox-ota = { path = "../crates/teddiebox-ota" }
 
-# esp-radio is only published as 1.0.0-beta.0, which wants esp-hal ~1.1.0 and
-# esp-radio-rtos-driver 0.3 — neither compatible with the esp-hal 1.2.0-rc.0
-# this firmware is built and bench-tested on. The whole family lives in one
-# repository, so it is taken from the commit that released esp-rtos 0.4.0:
-# there esp-radio wants esp-hal ~1.2.0-rc.0 and the versions below are the
-# ones already pinned here. They are patched rather than given `git` keys so
-# that esp-radio's in-repo path dependency on esp-hal resolves to the same
-# package as ours, instead of linking a second copy of the HAL.
+# esp-radio is only published as 1.0.0-beta.0, which needs esp-hal ~1.1.0
+# and esp-radio-rtos-driver 0.3, incompatible with the esp-hal 1.2.0-rc.0
+# used here. So these crates come from the esp-hal repository at the commit
+# that released esp-rtos 0.4.0, where they match. They are patched rather
+# than given `git` keys, so esp-radio's path dependency on esp-hal resolves
+# to the same package and the HAL is not linked twice.
 #
 # Drop this block once esp-radio 1.0.0-beta.1 publishes against esp-hal 1.2.
 [patch.crates-io]
@@ -183,35 +163,33 @@ esp-radio = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f4
 esp-alloc = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
 esp-rom-sys = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
 
-# `mbedtls-rs-sys` 0.2.0 declares `esp-hal = "~1.1.0"`, which excludes the
-# 1.2.0-rc.0 above, so the `esp32s3` feature — the whole of the hardware
-# acceleration — cannot resolve against it. Nothing else is in the way: all
-# nine `esp-hal` APIs the hooks use exist unchanged in 1.2. So the patch is the
-# published crate with that one bound widened, materialised by
-# `scripts/vendor-mbedtls-rs-sys.sh` (run by `just vendor`, which every gate
-# that builds this crate depends on) rather than committed, because 8.8 MB of
-# upstream C in the history is a lot to carry for eleven characters.
+# `mbedtls-rs-sys` 0.2.0 requires `esp-hal = "~1.1.0"`, which excludes
+# 1.2.0-rc.0, so its `esp32s3` feature (hardware acceleration) cannot
+# resolve. The esp-hal APIs it uses are unchanged in 1.2, so the patch is the
+# published crate with that version bound widened. It is created by
+# `scripts/vendor-mbedtls-rs-sys.sh` (run by `just vendor`) rather than
+# committed, to keep 8.8 MB of C out of git.
 #
-# `firmware/vendor/` is gitignored, so a fresh clone needs `just vendor` — or
-# any `just` recipe that builds — before a bare `cargo build` will resolve.
+# `firmware/vendor/` is gitignored, so a fresh clone needs `just vendor` (or
+# any `just` recipe that builds) before a plain `cargo build` works.
 #
 # Drop this line once mbedtls-rs-sys widens the bound upstream.
 mbedtls-rs-sys = { path = "vendor/mbedtls-rs-sys" }
 
-# `mbedtls-rs` 0.2.0 never calls `mbedtls_ssl_conf_max_frag_len` and keeps the
-# `mbedtls_ssl_config` private, so nothing downstream can tell the server how
-# large a record this box can take. It has to be told: the input buffer above
-# cannot hold CycloneSSL's 16 KB records, and cannot be grown to, because that
-# heap is what the handshake's RSA private operation needs.
-# `scripts/vendor-mbedtls-rs.sh` adds the one call, and explains the measurements.
+# `mbedtls-rs` 0.2.0 never calls `mbedtls_ssl_conf_max_frag_len` and keeps
+# `mbedtls_ssl_config` private, so the box cannot ask the server for smaller
+# records. It must: the input buffer above cannot hold teddyCloud's 16 KB
+# records, and cannot grow, because the handshake's RSA operation needs that
+# heap. `scripts/vendor-mbedtls-rs.sh` adds the call and explains the
+# measurements.
 #
 # Drop this line once mbedtls-rs exposes the setting.
 mbedtls-rs = { path = "vendor/mbedtls-rs" }
 
-# smoltcp 0.13.1 silences its whole neighbor cache for a second after any ARP
-# request, so resolving the gateway for DNS held back resolving teddyCloud on
-# the same link: 1.03 s of every first connection. `scripts/vendor-smoltcp.sh`
-# applies `scripts/smoltcp-per-address-arp.patch`, which makes the silence per
+# smoltcp 0.13.1 pauses all ARP requests for a second after any ARP request,
+# so looking up the gateway for DNS delayed looking up teddyCloud, adding
+# 1.03 s to every first connection. `scripts/vendor-smoltcp.sh` applies
+# `scripts/smoltcp-per-address-arp.patch`, which makes the pause per
 # address. Drop this line once upstream smoltcp does the same.
 smoltcp = { path = "vendor/smoltcp" }
 

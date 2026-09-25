@@ -71,23 +71,18 @@ use tlv320dac3100::Tlv320Dac3100;
 use crate::index::CardIndex;
 use crate::pins::BoardPins;
 
-/// Bytes of heap handed to the radio stack.
+/// Bytes of heap for the Wi-Fi stack, which mbedtls shares (see `tls.rs`).
 ///
-/// A guess, not a measurement, and the one number here most worth replacing
-/// with one. `ControllerConfig::default()` asks the driver for 10 static RX
-/// buffers of roughly 1.6 KB each, plus 32 dynamic RX and 32 dynamic TX
-/// buffers, so 72 KiB is inside the plausible band and near the bottom of it.
-/// Named rather than written inline so that the device plan's measurement has
-/// exactly one place to land.
+/// Estimated, not measured. `ControllerConfig::default()` asks the driver for
+/// 10 static RX buffers of about 1.6 KB each, plus 32 dynamic RX and 32
+/// dynamic TX buffers; mbedtls adds its record buffers and cipher contexts.
 const RADIO_HEAP: usize = 88 * 1024;
 
-// The ESP-IDF-style bootloader identifies an app by this descriptor. Without
-// it the image links but no flashing tool will accept it — a failure a build
-// gate cannot see.
+// The ESP-IDF bootloader identifies an app by this descriptor. Without it the
+// image still links, but flashing tools reject it.
 //
-// The version is stamped by build.rs from `git describe`, not taken from
-// CARGO_PKG_VERSION — which is "0.1.0" and has never changed, so an update
-// decided against it would compare a constant with itself for ever.
+// The version comes from build.rs (`git describe`), not CARGO_PKG_VERSION,
+// which never changes and so could not trigger an update.
 esp_bootloader_esp_idf::esp_app_desc!(
     env!("TEDDIEBOX_VERSION"),
     env!("CARGO_PKG_NAME"),
@@ -100,20 +95,11 @@ esp_bootloader_esp_idf::esp_app_desc!(
     esp_bootloader_esp_idf::SECURE_VERSION
 );
 
-/// Reboots into the ROM's UART download mode.
+/// Reboots into the application.
 ///
-/// The ROM checks a bit in the RTC's OPTION1 register as well as the GPIO0
-/// strapping pin, so the firmware can ask for download mode on the next reset
-/// — no J100 short, no cold power cycle.
-///
-/// The rails go down first. This is the one reset path the firmware controls,
-/// so it is the one that can be tidy about the strapping pin, whatever the
-/// board does on the paths it cannot control.
-/// Reboots straight back into the application.
-///
-/// The rails go down first, same as the download path. Exists so a laptop can
-/// restart the box without `esptool`, which takes exclusive hold of the serial
-/// port and so cannot run while anything is watching the console.
+/// The power rails go down first, as for download mode. Lets a laptop
+/// restart the box without `esptool`, which needs exclusive use of the serial
+/// port.
 fn reboot(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_println::println!("teddiebox: rebooting");
     drain_console();
@@ -123,28 +109,32 @@ fn reboot(board: &mut BoardPins, gates: &mut Gates) -> ! {
 
 /// Lets the last words out before the reset swallows them.
 ///
-/// `software_reset` does not wait for the UART, so everything printed on the
-/// way out arrives truncated or not at all — which is exactly the part of a
-/// reboot worth reading when something goes wrong during it. Blocking rather
-/// than awaiting, because the callers of this never return.
+/// `software_reset` does not wait for the UART, so the last lines printed
+/// would be cut off. Blocking, because the callers never return.
 fn drain_console() {
     esp_hal::delay::Delay::new().delay_millis(20);
 }
 
+/// Reboots into the ROM's UART download mode.
+///
+/// The ROM checks a bit in the RTC's OPTION1 register as well as the GPIO0
+/// strapping pin, so the firmware can ask for download mode on the next
+/// reset, without shorting J100 (see HARDWARE.md) or a power cycle.
+///
+/// The power rails go down first, so GPIO45 (a strapping pin) is low at
+/// reset.
 fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_println::println!("teddiebox: rebooting into download mode");
     drain_console();
     board.apply_all(&gates.release_for_reset());
 
-    // Hand the USB pads back before rebooting.
+    // Re-enable the USB pads before rebooting.
     //
     // GPIO19 is the chip's USB D- line, and esp-hal disables the USB pads when
-    // that pin becomes the red LED output. `USB_DEVICE.conf0()` survives a
-    // software system reset, and the ROM's download mode initialises USB
-    // Serial/JTAG as well as UART0 — it announces itself as
-    // `DOWNLOAD(USB/UART0)` — so it would come up against pads torn out from
-    // under it. Leaving them disabled panics the ROM immediately after
-    // `waiting for download`, which is what the first attempt at this did.
+    // it becomes the red LED output. `USB_DEVICE.conf0()` survives a software
+    // reset, and download mode starts USB Serial/JTAG as well as UART0
+    // (`DOWNLOAD(USB/UART0)`). With the pads disabled, the ROM panics right
+    // after `waiting for download`.
     esp_hal::peripherals::USB_DEVICE::regs()
         .conf0()
         .modify(|_, w| {
@@ -159,52 +149,38 @@ fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_hal::system::software_reset()
 }
 
-/// Everything the child did to the box, waiting for the reducer to be told
-/// about it — an ear edge or a slap, not only ears.
+/// Input events (ear presses and slaps) waiting for the reducer.
 ///
 /// A channel rather than a `Signal` like [`PLATE_TAG`], because these are
-/// edges and not a state. `Core` pairs each `EarDown` with its `EarUp` to tell
-/// a tap from a hold, so a lost press turns the next release into a long one
-/// and a lost release leaves an ear held for ever. A signal keeps only the
-/// last write, and both ears can settle inside one pass of the media loop.
+/// events, not a state, and none may be lost: `Core` pairs each `EarDown`
+/// with its `EarUp`. A signal keeps only the last value.
 ///
-/// Eight is far more than the two ears (and now the accelerometer) can
-/// produce between two drains — the media task drains this once per pass
-/// *and* once per decoded frame — so a full queue means something else is
-/// wrong, and it says so rather than silently dropping an event that would
-/// mislead the reducer.
+/// Eight is far more than the inputs produce between two reads (the media
+/// task reads this every pass and every decoded frame), so a full queue means
+/// something is wrong, and it is reported.
 static INPUT_EVENTS: Channel<CriticalSectionRawMutex, Event, 8> = Channel::new();
 
 /// What the reducer last decided the LED should say.
 ///
-/// The reducer runs in the media task; the LED belongs to the console loop,
-/// which owns the LEDC channels. One byte between them, the same seam shape as
-/// `OUTPUT_REQUEST` and `VOLUME_REQUEST` — and a state rather than a colour,
-/// because which colour stands for which state is
-/// `teddiebox_core::led::colour_for`'s business and is tested there.
+/// The reducer runs in the media task; the LED belongs to the console loop.
+/// One byte passes between them, like `OUTPUT_REQUEST` and `VOLUME_REQUEST`.
+/// It holds a state, not a colour; `teddiebox_core::led::colour_for` maps
+/// states to colours.
 static LED_REQUEST: AtomicU8 = AtomicU8::new(LedState::Booting.code());
 
-/// Reports settled presses on the ears and the wake line.
-///
-/// Also counts the raw flips seen while each change settled: bench step 2 wants
-/// the bounce duration of these particular switches measured, and a flip count
-/// beside a known poll interval is the cheapest way to see it.
 #[embassy_executor::task]
-/// The wake line, polled.
+/// Polls the wake line (button and charger) and prints its changes.
 ///
-/// The ears left this task on 2026-09-14 for [`ear`], which the GPIO hardware
-/// wakes rather than a 2 ms sample. The wake line stays polled because `Core`
-/// has no event for it: it is the button and the charger, nothing but this
-/// print depends on it, and a sample missed under load costs a log line rather
-/// than a chapter.
+/// Polled, unlike the ears (see [`ear`]), because only this log line depends
+/// on it. Also counts the raw changes while each change settles, to measure
+/// switch bounce.
 async fn inputs(wake: Input<'static>) {
     const POLL_MS: u64 = 2;
 
     let mut button = Debounced::released();
-    // Raw flips seen since the last settled edge. Counted on the raw line
-    // because counting polls that merely disagree with the settled state
-    // yields DEBOUNCE_MS / POLL_MS every single time, which looks like data
-    // and is not.
+    // Raw changes since the last settled edge, counted on the raw line
+    // (counting polls that differ from the settled state would always give
+    // DEBOUNCE_MS / POLL_MS).
     let mut transitions = 0u32;
     let mut last_raw = false;
 
@@ -214,10 +190,9 @@ async fn inputs(wake: Input<'static>) {
             park_task().await;
         }
 
-        // The wake line is wanted by whoever is ending the session. Handed
-        // over, and then parked *still holding it*: a task that returns drops
-        // its pin, and a dropped `Input` does not leave a pad the way a
-        // sleeping box needs it.
+        // The sleep code needs the wake line. Hand it over, then park rather
+        // than return: a returning task drops its pin, which would leave the
+        // pad in the wrong state for sleep.
         if SLEEP_WANTED.load(Ordering::Relaxed) {
             break;
         }
@@ -236,9 +211,8 @@ async fn inputs(wake: Input<'static>) {
                 Edge::Pressed => "pressed",
                 Edge::Released => "released",
             };
-            // One transition is the change itself; anything above that is
-            // bounce. Sampled every POLL_MS, so bounce faster than that is
-            // invisible here and reads as a clean edge.
+            // One transition is the change itself; more is bounce. Bounce
+            // faster than POLL_MS is not seen.
             esp_println::println!("teddiebox: wake {label}, {transitions} raw transitions");
             transitions = 0;
         }
@@ -252,29 +226,22 @@ async fn inputs(wake: Input<'static>) {
     park_task().await;
 }
 
-/// One ear, held by the GPIO hardware instead of watched by a poll.
+/// One ear, watched with GPIO interrupts rather than polling.
 ///
-/// The poll this replaces sampled every 2 ms and still lost about one tap in
-/// three while a story played. Measured at the bench on 2026-09-14: six
-/// presses, five reported, twice over, and never a hold — a hold is long
-/// enough to survive any gap. Decode takes 69% of real time and a card read
-/// blocks for up to 13 ms, so this task could go tens of milliseconds without
-/// running, and a press that began and ended inside one of those gaps left no
-/// sample behind for `Debounced` to settle.
+/// Polling every 2 ms lost about one tap in three while a story played:
+/// decoding and card reads can keep this task from running for tens of
+/// milliseconds, and a short press could start and end in between.
 ///
-/// **The waits are on levels, not edges, and that is the whole point.**
-/// `wait_for` clears any pending interrupt as it arms — see `unlisten_and_clear`
-/// in esp-hal's `gpio/asynch.rs` — so an *edge* that happened while this task
-/// was starved is already gone by the time it asks about one. A *level*
-/// interrupt asserts immediately if the pin is holding that level, so a press
-/// that happened during a gap completes the wait the instant it is armed. The
-/// hardware keeps the fact and this task only has to turn up eventually, which
-/// is the same bargain the accelerometer's click engine makes for a slap.
+/// **The waits are on levels, not edges.** `wait_for` clears any pending
+/// interrupt when it arms (see `unlisten_and_clear` in esp-hal's
+/// `gpio/asynch.rs`), so an *edge* that happened while this task was not
+/// running would be lost. A *level* interrupt fires at once if the pin is
+/// already at that level.
 #[embassy_executor::task(pool_size = 2)]
 async fn ear(which: Ear, name: &'static str, mut pin: Input<'static>) {
     loop {
-        // Parked still holding the pin. A task that returns drops its `Input`,
-        // and a dropped pad is not the one a sleeping box needs.
+        // Park rather than return: returning drops the pin, which would leave
+        // the pad in the wrong state for sleep.
         if PARKED.load(Ordering::Relaxed) || SLEEP_WANTED.load(Ordering::Relaxed) {
             park_task().await;
         }
@@ -284,21 +251,17 @@ async fn ear(which: Ear, name: &'static str, mut pin: Input<'static>) {
         esp_println::println!("teddiebox: {name} pressed");
         send_input(Event::EarDown(which, down_at));
 
-        // Bounce on the way down needs nothing of its own: a release only
-        // counts once the line has held high for `DEBOUNCE_MS`, so a press
-        // that rattles fails that confirmation and goes on being a press.
+        // Bounce needs no extra handling: a release only counts once the
+        // line has stayed high for `DEBOUNCE_MS`.
         //
-        // The wait for that release is also where a hold is noticed. This task
-        // is the only thing awake at the moment a press *becomes* one — the
-        // reducer sees events rather than time, and its tick is rate-limited
-        // to once a second — so it says so, and the chapter changes with the
-        // ear still down instead of when the child gives up and lets go.
+        // A hold is also detected here: the reducer only sees events and
+        // ticks once a second, so it cannot notice the moment a press becomes
+        // a hold. This lets the chapter change while the ear is still held.
         let mut bounces = 0u32;
         let mut held = false;
         loop {
             if !held {
-                // Measured from the press, not from this iteration: a press
-                // that rattled has already spent some of its 600 ms.
+                // Measured from the press, not from this loop iteration.
                 let so_far = Instant::now().as_millis().saturating_sub(down_at);
                 let remaining = u64::from(input::LONG_PRESS_MS).saturating_sub(so_far);
                 if with_timeout(Duration::from_millis(remaining), pin.wait_for_high())
@@ -306,11 +269,9 @@ async fn ear(which: Ear, name: &'static str, mut pin: Input<'static>) {
                     .is_err()
                 {
                     held = true;
-                    // A box told `ears_skip = no` has stock's ears: volume and
-                    // nothing else. The hold is still noticed and still
-                    // reported, so a bench can see the press was long — it
-                    // simply is not announced to the reducer, and the release
-                    // that follows steps the volume like any other press.
+                    // With `ears_skip = no` the ears only change the volume.
+                    // The hold is still printed but not sent to the reducer,
+                    // and the release changes the volume like any press.
                     if ears_skip() {
                         esp_println::println!("teddiebox: {name} held");
                         send_input(Event::EarHeld(which, Instant::now().as_millis()));
@@ -334,11 +295,8 @@ async fn ear(which: Ear, name: &'static str, mut pin: Input<'static>) {
             bounces += 1;
         }
 
-        // Dated when it happened rather than when it was confirmed. The
-        // confirmation costs `DEBOUNCE_MS` by construction, and charging that
-        // to the press would stretch every one of them by 20 ms — 3% of
-        // `long_press_ms`, all of it in the direction that turns a tap into a
-        // chapter skip.
+        // Timestamped when the release happened, not when it was confirmed
+        // `DEBOUNCE_MS` later.
         let up_at = Instant::now()
             .as_millis()
             .saturating_sub(u64::from(input::DEBOUNCE_MS));
@@ -349,31 +307,27 @@ async fn ear(which: Ear, name: &'static str, mut pin: Input<'static>) {
 
 /// Hands one input event to the reducer, or says why it could not.
 ///
-/// A full queue means something else is wrong: the media task drains it once
-/// per pass *and* once per decoded frame, and eight is far more than two ears
-/// and an accelerometer produce in between. So it is reported rather than
-/// dropped quietly, because a lost release leaves an ear held for ever.
+/// A full queue means something is wrong (see [`INPUT_EVENTS`]), so it is
+/// reported rather than dropped silently: a lost release would leave an ear
+/// held forever.
 fn send_input(event: Event) {
     if INPUT_EVENTS.try_send(event).is_err() {
         esp_println::println!("teddiebox: ear queue full — {event:?} dropped");
     }
 }
 
-/// Set when the box has entered the setup portal instead of becoming a teddy
-/// bear.
+/// Set when the box is in setup mode (the portal) instead of normal
+/// operation.
 ///
-/// Read by [`sense`], which is the one task setup mode keeps. Everything that
-/// would consume what `sense` produces — the reducer, the LED loop, the
-/// shutdown — lives below the branch that sets this and is never reached, so
-/// the readings have a console to go to and nowhere else.
+/// Read by [`sense`], the one task that also runs in setup mode. In setup
+/// mode nothing else uses its readings, so they only go to the console.
 static SETUP_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Reports the pack and charger voltages.
 ///
-/// Bench step 3 compares these against a multimeter across a real charge and
-/// discharge; until it has, treat them as indicative. The conversion is a
-/// straight line through the nominal endpoints and the ESP32-S3's ADC is not
-/// linear.
+/// The conversion is calibrated at one point only (see
+/// `teddiebox_core::power`), and the ESP32-S3's ADC is not linear, so treat
+/// the values as approximate.
 #[embassy_executor::task]
 async fn sense(
     mut adc: Adc<'static, esp_hal::peripherals::ADC1<'static>, esp_hal::Blocking>,
@@ -386,11 +340,9 @@ async fn sense(
         esp_hal::peripherals::ADC1<'static>,
     >,
 ) {
-    // The LED reads the pack, so unplugging a charger should change the colour
-    // while the hand is still on the cable.
+    // Often enough that the LED changes soon after the charger is unplugged.
     const SAMPLE_EVERY: Duration = Duration::from_secs(2);
-    // Printed on a bench image only, where a capture is what reads it. A
-    // release image has nobody on the other end of the cable.
+    // Only printed on development builds.
     const PRINT_EVERY: u8 = 5;
     let mut since_printed = 0u8;
     let mut batlog_ticks: u8 = 0;
@@ -401,19 +353,16 @@ async fn sense(
             park_task().await;
         }
 
-        // Raw counts as well as millivolts. The conversion rests on an
-        // assumed attenuation and on GPIO9 measuring the pack rather than
-        // something downstream of it, and a millivolt figure alone cannot
-        // tell a wrong assumption from a flat battery.
+        // Raw counts as well as millivolts, since the conversion is based on
+        // assumptions that could be wrong.
         let pack_raw = adc.read_blocking(&mut battery);
         let charger_raw = adc.read_blocking(&mut charger);
         let pack_mv = power::battery_mv(pack_raw);
         let charger_mv = power::charger_mv(charger_raw);
 
-        // Published for the one reader that cannot wait for the reducer: a
-        // box deciding, before it powers anything up, whether the wake it just
-        // had is worth answering. The counter is what makes a *fresh* reading
-        // distinguishable from the same one read twice.
+        // Published for boot, which must decide whether the battery is good
+        // enough before powering anything up. The counter shows whether a
+        // reading is new.
         PACK_MV.store(pack_mv, Ordering::Relaxed);
         PACK_SAMPLES.store(
             PACK_SAMPLES.load(Ordering::Relaxed).wrapping_add(1),
@@ -455,15 +404,13 @@ async fn sense(
             );
         }
 
-        // One line, no judgement. The header is printed when the log is armed
-        // so a capture can be pasted straight into a plotter.
+        // One CSV line with raw values. The header is printed when the log
+        // starts, so a capture can go straight into a plotting tool.
         let every = BATLOG_EVERY.load(Ordering::Relaxed);
         if every > 0 {
             batlog_ticks += 1;
-            // SAMPLE_EVERY.as_millis() is u64, so the comparison is done in
-            // u64 throughout. A `seconds` that is not a multiple of the 2 s
-            // sample period rounds up to the next tick — coarser than asked
-            // for, never finer, and that is fine for a bench capture.
+            // Compared in u64. An interval that is not a multiple of the 2 s
+            // sample period rounds up to the next sample.
             if u64::from(batlog_ticks) * SAMPLE_EVERY.as_millis() >= u64::from(every) * 1_000 {
                 batlog_ticks = 0;
                 esp_println::println!(
@@ -480,16 +427,15 @@ async fn sense(
 
 /// Scans the I2C bus once and names what answers.
 ///
-/// Bench step 4. Every device here sits behind power gate 2, so this runs
-/// after that rail is up or it finds an empty bus.
+/// Every device here is behind power gate 2, so run this after that rail is
+/// on.
 fn scan_i2c(i2c: &mut I2c<'_, esp_hal::Blocking>) {
     esp_println::println!("teddiebox: scanning I2C");
     let mut found = 0;
 
     for address in bus::FIRST_ADDRESS..=bus::LAST_ADDRESS {
-        // A zero-length write addresses the device and stops. Anything that
-        // acknowledges is present; anything else is not, and the distinction
-        // between "absent" and "bus fault" is not one this can draw.
+        // A zero-length write only addresses the device. An acknowledgement
+        // means it is present; this cannot tell "absent" from a bus fault.
         if i2c.write(address, &[]).is_ok() {
             found += 1;
             match bus::describe(address) {
@@ -504,19 +450,17 @@ fn scan_i2c(i2c: &mut I2c<'_, esp_hal::Blocking>) {
     }
 }
 
-/// Identifies the accelerometer, then streams its axes, runs the part's
-/// click engine, and raises [`Event::Slap`] when a click lands on the axis
-/// `board::side_for_click` maps to a side.
+/// Brings up the codec, then finds the accelerometer, runs its click
+/// detection, and sends [`Event::Slap`] when a click is on the axis
+/// `board::side_for_click` maps to a side. Also handles codec requests from
+/// other tasks, since this task owns the shared I2C bus.
 ///
-/// Both candidate addresses are tried because 0x18 is shared with the audio
-/// codec, which acknowledges and answers something that is not an identity
-/// register.
+/// Both accelerometer addresses are tried, because 0x18 is shared with the
+/// audio codec, which also answers there.
 #[embassy_executor::task]
 async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>) {
-    // Release the codec from reset before anything on this bus is believed.
-    // Held first, deliberately: the part may already be running from a previous
-    // boot, and a device half-configured by an earlier session is worse than
-    // one that has just come up.
+    // Reset the codec first: it may still be running, half-configured, from
+    // before the last reboot.
     let hold = board::dac_reset(true);
     let run = board::dac_reset(false);
     reset.set_level(if hold.high { Level::High } else { Level::Low });
@@ -526,8 +470,8 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
 
     let mut bus = i2c;
 
-    // The codec first: it is a one-shot configuration, after which the bus
-    // goes back to the accelerometer, which needs it continuously.
+    // The codec first: it is configured once, then the bus goes to the
+    // accelerometer, which uses it continuously.
     let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
     let mut dac_delay = esp_hal::delay::Delay::new();
     match dac
@@ -538,26 +482,15 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             esp_println::println!("teddiebox: codec configured");
             CODEC_READY.store(true, Ordering::Relaxed);
 
-            // A bring-up listening level, not a design decision — real volume
-            // belongs to `teddiebox_core::VolumeModel` and the ears, once
-            // there is a box to drive them from.
-            //
-            // -12 dB was tuned against the test tone, which peaks at half
-            // scale. Real content runs to full scale and carries far more
-            // spectral energy than a sine, and the first Tonie played through
-            // this was, in the listener's words, "120% of the max volume".
-            // The codec goes to -63.5 dB, so erring quiet costs nothing and
-            // is the right way to err beside someone's head.
+            // The start-up volume, matching the reducer's starting step (see
+            // `BOOT_VOLUME_DB`).
             if dac.set_volume_db(BOOT_VOLUME_DB).is_err() {
                 esp_println::println!("teddiebox: codec volume not set");
             }
 
-            // What it says it did, rather than what we asked for. A silent
-            // output with every configuration register correct is exactly the
-            // case this separates: asked wrongly, or declined.
-            // Read after `init` has waited out the drivers' ramp. Read before
-            // it, HPL reports itself unpowered for 304 ms — measured — which
-            // is what "step 6's headphone half is unproven" rested on.
+            // What actually powered up, not what was requested. Read after
+            // `init` has waited for the drivers' ramp; before that, HPL reads
+            // as off for 304 ms.
             match dac.power_flags() {
                 Ok(f) => esp_println::println!(
                     "teddiebox: codec powered dac_l={} dac_r={} class_d_l={} class_d_r={} hpl={}",
@@ -594,39 +527,28 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
 
     esp_println::println!("teddiebox: LIS3DH at {address:#04x}");
     let mut accel = Lis3dh::new(bus, address);
-    // Starts full: the first pass should read the register rather than wait
-    // three, so a box that boots with a jack already in does not spend ~600 ms
-    // with `HEADPHONES_IN` still saying nothing is plugged in — the codec
-    // bring-up that follows this task reads that static.
+    // Starts at the limit, so the first pass reads the headset register at
+    // once: a box that boots with headphones in should know within the first
+    // pass, not after ~600 ms.
     let mut since_detect: u32 = HEADSET_DETECT_EVERY;
-    // Starts in agreement with `HEADPHONES_IN`, so a box that boots with
-    // nothing plugged in raises no event at all. Kept here rather than read
-    // back from the static because `hp 1` writes that one, and a forced
-    // routing must survive every poll that reads the same register value it
-    // read before — which is the whole escape hatch if this jack turns out
-    // not to reach the codec's detect pin.
+    // Starts matching `HEADPHONES_IN`, so booting with nothing plugged in
+    // sends no event. Kept here rather than read from the static, because
+    // `hp 1` sets the static, and a forced routing must not be undone by
+    // polls that read an unchanged register.
     let mut last_detect = false;
-    // Logged on transition, not on every poll, for the same reason the slap
-    // threshold below is: this console is the box's only user interface, and a
-    // codec that failed bring-up would otherwise bury everything else on it.
+    // Only logged when it changes, not on every poll, so a failed codec does
+    // not flood the console.
     let mut detect_failed = false;
-    // Same reason again: with no card mounted nothing drains `INPUT_EVENTS`,
-    // so once it fills the send below fails on every poll that has a change to
-    // deliver — and it keeps having one, because the retry is the point.
+    // Also only logged once: with no card mounted nothing reads
+    // `INPUT_EVENTS`, so the send below would fail on every poll.
     let mut detect_dropped = false;
-    // `armed_threshold` always tracks the last value a write was *attempted*
-    // with; `armed` is only set by a write that actually succeeded. Guarding
-    // the re-arm below on `armed` — not just on the threshold changing — is
-    // what lets a failed boot arm be recovered later: a failed write leaves
-    // `armed` false, so the next pass (or the operator re-typing the very
-    // same threshold the failure message names) still retries, instead of
-    // comparing equal to a value that was only ever hoped for.
+    // `armed_threshold` is the last value a write was *attempted* with;
+    // `armed` is only set by a successful write. The re-arm below checks
+    // `armed`, not just a changed threshold, so a failed write is retried.
     //
-    // `confirmed_threshold` is a separate, narrower fact: the last value a
-    // write actually landed at, for display only. It must never be set from
-    // an attempt — only from a success — because the click print reads it as
-    // "what the part is running", and during a failed re-arm window
-    // `armed_threshold` holds a number the part never accepted.
+    // `confirmed_threshold` is the last value a write actually succeeded
+    // with, for printing only. Only set on success, because the click print
+    // shows it as the value the chip is using.
     let mut armed_threshold = SLAP_THRESHOLD.load(Ordering::Relaxed);
     let mut armed = false;
     let mut failure_reported = false;
@@ -638,17 +560,8 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         return;
     }
 
-    // All three axes, because which one a slap lands on is unmeasured; the
-    // board decides which of them means a side, and discards the rest.
     match accel.enable_click(ClickConfig {
-        // Y and Z, not X. Measured upright at the bench 2026-09-13: standing
-        // as a child uses it, the box reads `accel -16000 256 64` — gravity
-        // entirely on X, so X is the VERTICAL axis and a side slap cannot
-        // produce it. Every X click recorded before this came from the box
-        // lying tipped, or from a vertical shock. The PCB sits at 45 degrees
-        // to the slap axis, so a side slap lands on Y and Z together and the
-        // part latches whichever crosses first. X stays off so setting the
-        // box down is not a chapter skip.
+        // Y only; see `SLAP_AXES` and `board::side_for_click`.
         axes: SLAP_AXES,
         threshold: armed_threshold,
         time_limit: SLAP_TIME_LIMIT.load(Ordering::Relaxed),
@@ -662,9 +575,8 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 "teddiebox: LIS3DH would not take a click config — \
                  slaps will not be detected until the threshold is set from the console"
             );
-            // Already told the operator once, for this threshold; the loop
-            // below retries every pass without repeating itself until either
-            // the write succeeds or a different threshold is asked for.
+            // Reported once; the loop below retries quietly until the write
+            // succeeds or a different threshold is set.
             failure_reported = true;
         }
     }
@@ -710,18 +622,11 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             let bus = dac.release();
             accel = Lis3dh::new(bus, address);
             match reading {
-                // Four separate facts, printed apart on purpose. `detect` is
-                // register 67: D7 set is detection switched on, and D6-D5 name
-                // the last headset it saw — which it keeps naming long after
-                // that headset is gone, so it cannot answer "is one in now".
-                // `status` is register 46, whose D4 is the jack itself, and
-                // that is what the box reads. They are printed side by side
-                // because their disagreement is the normal case and reading
-                // only one of them is how a removal went missing on
-                // 2026-09-22. Detection off makes both a constant 00, which
-                // is also what an empty jack looks like — D7 in `detect` is
-                // what separates them. The routing is the box's own belief,
-                // which `hp 1` can set without either register moving.
+                // `detect` is register 67: D7 means detection is on, and D6-D5
+                // show the last headset type, even after it is removed.
+                // `status` is register 46, whose D4 shows whether a plug is in
+                // now; this is what the box uses. The routing is the box's own
+                // state, which `hp 1` can force.
                 Ok((detect, status)) => esp_println::println!(
                     "teddiebox: headset detect {:#04x} status {:#04x}, says {}, routing to {}",
                     detect,
@@ -788,8 +693,7 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             continue;
         }
         if CODEC_REINIT.swap(false, Ordering::Relaxed) {
-            // Down first, so every run starts from the same place and what is
-            // heard is a start-up rather than a re-configuration.
+            // Power down first, so every run is a real start-up.
             let bus = accel.release();
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
             let _ = dac.power_down(&mut dac_delay);
@@ -816,8 +720,7 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             continue;
         }
         if CODEC_SHUTDOWN.load(Ordering::Relaxed) {
-            // The bus went to the accelerometer for good once the codec was
-            // configured, so taking the codec down means taking it back.
+            // The accelerometer holds the bus, so take it back for the codec.
             let bus = accel.release();
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
             match dac.power_down(&mut dac_delay) {
@@ -828,29 +731,19 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 Err(_) => esp_println::println!("teddiebox: codec would not power down"),
             }
             CODEC_QUIET.store(true, Ordering::Relaxed);
-            // Nothing follows a shutdown but the reset, and the accelerometer
-            // no longer owns the bus.
+            // Only the reset follows a shutdown.
             return;
         }
         match accel.take_click() {
             Ok(Some(click)) => {
-                // Printed unconditionally: a click is rare, and this is the
-                // instrument the bench calibrates with. `raw` is here because
-                // the datasheet does not pin CLICK_SRC's bits down.
-                // More than one axis bit set means `take_click`'s X-then-Y-
-                // then-Z priority picked one and dropped the rest. Harmless
-                // for skipping a chapter — only one axis maps to a side — but
-                // a trap for calibration, which is here to find out WHICH axis
-                // a slap lands on and would read X every time. Say so out
-                // loud rather than leaving it in the raw byte to be noticed.
+                // Always printed: clicks are rare, and this is used to
+                // calibrate. `raw` is included because the datasheet is unclear
+                // about CLICK_SRC's bits. With more than one axis bit set,
+                // `take_click` picks X, then Y, then Z, so MULTI-AXIS is
+                // printed to show that others were dropped.
                 let axes_set = (click.raw & 0b111).count_ones();
-                // The threshold printed here is `confirmed_threshold`, not
-                // `armed_threshold`: during a failed re-arm window the two
-                // disagree, and this line is what a calibration log is read
-                // back against after the session, once the "NOT applied"
-                // line has long since scrolled away. A click before any
-                // write has ever succeeded — only possible if the part is
-                // arming inconsistently — says so rather than guessing.
+                // Prints `confirmed_threshold`, the value the chip is using,
+                // not `armed_threshold`, which may have failed to apply.
                 match confirmed_threshold {
                     Some(threshold) => esp_println::println!(
                         "teddiebox: click {:?} {} raw {:#04x} threshold {}{}",
@@ -875,9 +768,8 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 };
                 if let Some(side) = board::side_for_click(axis, click.negative) {
                     if slap_refractory > 0 {
-                        // Printed, not silent: during calibration the rebounds
-                        // are the measurement — they say whether the window is
-                        // long enough and the threshold low enough.
+                        // Printed, because during calibration the rebounds
+                        // show whether the window and threshold are right.
                         esp_println::println!("teddiebox: slap ignored, within refractory");
                     } else {
                         slap_refractory = SLAP_REFRACTORY_POLLS;
@@ -896,20 +788,13 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         let wanted = SLAP_THRESHOLD.load(Ordering::Relaxed);
         let wanted_limit = SLAP_TIME_LIMIT.load(Ordering::Relaxed);
         if !armed || wanted != armed_threshold || wanted_limit != armed_limit {
-            // A different threshold being asked for is itself news, worth a
-            // fresh failure line even if the last attempt already reported
-            // one — otherwise typing a new value while the part is stuck
-            // looks like it was ignored rather than retried.
+            // A new value gets its own failure line even if the last one was
+            // already reported, so it does not look ignored.
             let threshold_changed = wanted != armed_threshold || wanted_limit != armed_limit;
             armed_threshold = wanted;
             armed_limit = wanted_limit;
-            // `armed` only becomes true on a confirmed write: the bench
-            // trusts the success line to mean the part is actually running at
-            // `wanted`, and a discarded error here would print a success the
-            // box never delivered. Clearing it on failure also means the next
-            // pass tries again rather than believing it is done — including
-            // when the retry asks for the exact value the failure message
-            // named.
+            // `armed` is only set when the write succeeds, so the success line
+            // is true and a failed write is retried on the next pass.
             match accel.enable_click(ClickConfig {
                 axes: SLAP_AXES,
                 threshold: wanted,
@@ -927,10 +812,8 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
                 }
                 Err(_) => {
                     armed = false;
-                    // Logged on transition, not on every attempt: this loop
-                    // retries every 200 ms, and the console is the box's only
-                    // user interface. Repeating the failure every pass would
-                    // bury the click prints calibration depends on.
+                    // Logged once, not on every 200 ms retry, so it does not
+                    // bury the click prints.
                     if !failure_reported || threshold_changed {
                         esp_println::println!(
                             "teddiebox: slap threshold {wanted} NOT applied, LIS3DH write failed"
@@ -944,8 +827,8 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
         since_detect += 1;
         if since_detect >= HEADSET_DETECT_EVERY {
             since_detect = 0;
-            // The bus goes back to the accelerometer before anything is
-            // decided, so a full input queue cannot leave the codec holding it.
+            // Give the bus back to the accelerometer before acting on the
+            // result, so a full input queue cannot leave the codec holding it.
             let bus = accel.release();
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
             let reading = dac.headphones_connected();
@@ -954,15 +837,10 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
             match reading {
                 Ok(now) if now != last_detect => {
                     detect_failed = false;
-                    // The two halves of this advance at different moments on
-                    // purpose. `HEADPHONES_IN` is the routing the codec
-                    // bring-up reads, so it is stored the moment the register
-                    // moves and nothing downstream can lose it. `last_detect`
-                    // is what makes a change worth reporting at all, so it may
-                    // only move once the reducer has actually been told:
-                    // advancing it on a send that failed would leave the box
-                    // routed one way and the reducer playing the other, with
-                    // no later poll left to notice the disagreement.
+                    // `HEADPHONES_IN`, which the codec bring-up reads, is
+                    // stored at once. `last_detect` only changes once the
+                    // event is sent, so a failed send is retried on the next
+                    // poll instead of leaving the reducer out of step.
                     HEADPHONES_IN.store(now, Ordering::Relaxed);
                     if INPUT_EVENTS.try_send(Event::Headphones(now)).is_err() {
                         if !detect_dropped {
@@ -1000,9 +878,8 @@ async fn motion(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>
 
 /// Applies the start-up sequence with any console overrides in place.
 ///
-/// Both the boot path and `cinit` go through this, so what the bench hears
-/// when it re-runs the sequence is what the box will do on its next start —
-/// a rig that diverged from the real thing would be worse than no rig.
+/// Used both at boot and by the console `cinit` command, so re-running it
+/// from the console does exactly what the next start will do.
 fn codec_bring_up<I2C, E, D>(
     dac: &mut Tlv320Dac3100<I2C>,
     delay: &mut D,
@@ -1020,63 +897,54 @@ where
 
 /// How often the accelerometer is read.
 ///
-/// Short because this loop is also where a shutdown and a codec re-init are
-/// noticed, and a reboot waiting on a two-second nap feels broken.
+/// Short, because this loop also handles shutdown and codec requests, and
+/// those should not wait long.
 const ACCEL_POLL_MS: u64 = 200;
 
-/// `CLICK_THS`, live so the bench can sweep it without a reflash.
+/// `CLICK_THS`, settable from the console without a reflash.
 ///
-/// **40, measured 2026-09-13**: one step is 62 mg at the +/-8 g full scale
-/// `init` selects, so about 2.5 g. Eight slaps — four on each face — were
-/// caught eight times with the correct direction every time. It is the
-/// sensitive end of a bracket: 48 was silent through handling but missed a
-/// slap and mis-signed another, while 40 lets roughly one handling knock per
-/// session through. 40 was chosen, favouring the gesture
-/// working over the occasional lost place.
+/// One step is 62 mg at the +/-8 g range `init` selects, so 40 is about
+/// 2.5 g. At 40, eight slaps (four on each side) were all caught with the
+/// right direction, but about one knock from handling per session also counts
+/// as a slap. At 48, handling was ignored, but one slap was missed and another
+/// read as the wrong side. 40 was chosen so the gesture works reliably.
 static SLAP_THRESHOLD: AtomicU8 = AtomicU8::new(40);
-/// Polls to ignore clicks for after accepting a slap, at `ACCEL_POLL_MS` each:
-/// two is 400 ms, the refractory window the deleted `GestureConfig` carried.
+/// How many polls to ignore clicks for after a slap, at `ACCEL_POLL_MS` each:
+/// two is 400 ms.
 ///
-/// One physical slap is not one click. The box rocks back off the hit, and at a
-/// threshold low enough to catch the slap through the PCB's 45-degree mounting
-/// the rebound crosses too — in the OPPOSITE sign, so it reads as a slap on the
-/// other side and skips the wrong way. Measured at the bench 2026-09-13: five
-/// slaps on one side gave two correct skips and one backwards one.
+/// One slap is not one click. The box rocks back after the hit, and the
+/// rebound also crosses the threshold with the OPPOSITE sign, so it reads as
+/// a slap on the other side. Without this window, five slaps on one side gave
+/// two correct skips and one backwards one.
 ///
-/// The latch is still read and cleared during the window; only the action is
-/// suppressed. Leaving it unread would hold a stale click for the next slap.
+/// The click is still read and cleared during the window; only the action is
+/// skipped. Leaving it unread would keep a stale click for the next slap.
 const SLAP_REFRACTORY_POLLS: u8 = 2;
 
-/// Which axes the click engine watches. See the note at the boot-time arm.
+/// Which axes the click detection watches: Y only. Upright, gravity is on X,
+/// so X is vertical and a side slap does not show on it; leaving X off also
+/// stops setting the box down from counting as a slap.
 const SLAP_AXES: ClickAxes = ClickAxes {
     x: false,
     y: true,
     z: false,
 };
-/// `TIME_LIMIT`, in ODR periods: 3 is 60 ms at the 50 Hz `init` sets.
+/// `TIME_LIMIT`, in sample periods: 4 is 10 ms at the 400 Hz `init` sets.
 static SLAP_TIME_LIMIT: AtomicU8 = AtomicU8::new(4);
 
 /// How loud the box plays until an ear says otherwise.
 ///
-/// No longer a number chosen at the bench: it is the level of the step
-/// `VolumeModel` starts a box on, so the codec's initial state and the
-/// reducer's belief about it are one number rather than two that happen to
-/// agree. Without that, the first tap would step from a level the ladder does
-/// not contain.
-///
-/// It is still deliberately quiet — see `teddiebox_core::db_for` for what the
-/// ladder is anchored on, which is the same listening that set the -35 dB this
-/// replaces.
+/// The level of the step `VolumeModel` starts on, so the codec and the reducer
+/// agree on the starting volume. Otherwise the first ear press would step from
+/// a level that is not on the volume scale. See `teddiebox_core::db_for` for
+/// how the scale is set.
 const BOOT_VOLUME_DB: i8 = db_for(AudioOutput::Speaker, Volume(MAX_VOLUME / 2));
 
 /// What the console has asked the media task to do.
 ///
-/// One word rather than a flag each, because the tone, the card walk and WAV
-/// playback all contend for the same two pieces of hardware — the I2S
-/// peripheral and the SD bus — and a task that owns both is the honest way to
-/// say that. None of them runs at boot: the tone is loud, the walk powers a
-/// rail shared with the NFC reader, and the box is usually sitting next to
-/// whoever is working on it.
+/// One value rather than a flag each, because all of these need the same
+/// hardware (the I2S peripheral and the SD bus), which the media task owns.
+/// None of them runs at boot.
 static REQUEST: AtomicU8 = AtomicU8::new(REQUEST_NONE);
 const REQUEST_NONE: u8 = 0;
 const REQUEST_TONE: u8 = 1;
@@ -1103,21 +971,19 @@ const NFC_READ_TOKEN: u8 = 6;
 
 /// The tag's memory, kept to spend on a download.
 ///
-/// RAM only, gone at the next reset, and never printed — the same treatment the
-/// SLIX password and the Wi-Fi passphrase get, for the same reason. It is what
-/// the tonies cloud accepts in place of proof that this box owns this figure.
+/// Kept in RAM only, lost at reset, and never printed, like the SLIX password
+/// and the Wi-Fi passphrase: the cloud accepts it as proof that this box owns
+/// the figure.
 ///
-/// Written only by the console `token` command, and read only by the console
-/// `get` command, at the moment it builds its own [`FetchRequest`]. The
-/// plate's fetch never touches this static: its token travels with its ruid
-/// in [`FETCH_REQUEST`] instead, so a `token` typed at the bench in between
-/// cannot attach itself to a fetch it was never read for.
+/// Written only by the console `token` command and read only by the console
+/// `get` command. A figure placed on the plate sends its own token inside
+/// [`FETCH_REQUEST`], so a console `token` cannot be attached to it.
 static TAG_TOKEN: CsMutex<RefCell<Option<[u8; 32]>>> = CsMutex::new(RefCell::new(None));
 
 /// Set when the console asks the radio for a scan.
 ///
-/// Its own signal rather than a variant of `NFC_REQUEST`: the radio and the
-/// reader share nothing but the console that drives them.
+/// Separate from `NFC_REQUEST`, because the radio and the reader share no
+/// hardware.
 static NET_REQUEST: AtomicU8 = AtomicU8::new(REQUEST_NONE);
 const NET_SCAN: u8 = 1;
 const NET_UP: u8 = 2;
@@ -1132,44 +998,34 @@ const NET_PRIME: u8 = 7;
 
 /// A figure's identifier and the token that authorises fetching its story.
 ///
-/// The two travel together for the same reason [`Seen::Figure`] keeps
-/// its uid and token in one variant rather than two statics: sent as a pair,
-/// "this figure's fetch, that figure's token" has no representation. Split
-/// into a ruid static beside a token static, it would — a write to one
-/// between the other's write and the fetch reading both is exactly how one
-/// figure's fetch went out authorised with a different figure's token.
+/// Kept together, like [`Seen::Figure`], so a fetch can never be sent for one
+/// figure with another figure's token. With two separate statics, a write to
+/// one between the other's write and the fetch could mix them.
 #[derive(Debug, Clone, Copy)]
 struct FetchRequest {
-    /// The identifier in the byte order `get`'s command line and the fetch's
-    /// request line both use — the reverse of the order the reader hands a
-    /// UID over in.
+    /// The identifier in the byte order the console `get` command and the
+    /// request line use: the reverse of the order the reader reports.
     ruid: u64,
     token: Option<[u8; 32]>,
     /// Whether this is a question rather than a download.
     ///
-    /// A probe borrows the whole of the fetch's machinery — the same request,
-    /// the same route, the same token, the radio raised and dropped the same
-    /// way — and differs only in what it asks for and what it does with the
-    /// answer. Carrying the difference here rather than in a second request
-    /// keeps one association lifecycle instead of two, and makes it
-    /// impossible for a probe and a fetch to be queued at the same time.
+    /// A probe uses the same request, token and radio handling as a fetch,
+    /// and only asks for less. Marking it here, rather than with a second
+    /// request type, means a probe and a fetch can never be queued at once.
     probe: bool,
 }
 
 /// The fetch about to be raised on [`NET_GET`], written whole in one go.
 ///
-/// Two writers — the console `get` command and the plate's `RequestContent`
-/// action — and each writes its own [`FetchRequest`] immediately before
-/// raising the request, never touching the other's fields separately.
+/// Written by the console `get` command and by the plate's `RequestContent`
+/// action, each as a whole [`FetchRequest`] just before raising the request.
 static FETCH_REQUEST: CsMutex<RefCell<Option<FetchRequest>>> = CsMutex::new(RefCell::new(None));
 
 /// The net task's answer to a probe, and the figure it is about, as one value.
 ///
-/// One value rather than a flag, a length and a ruid in three atomics, so a
-/// reader can never see an answer without knowing whose it is, or a length
-/// from one answer beside the flag of another. The figure is carried for the
-/// same reason the fetch outcome carries one: an answer that arrives after the
-/// figure was lifted or swapped belongs to nobody.
+/// One value, not several atomics, so the answer and its figure are always
+/// read together. The figure is included so an answer that arrives after the
+/// figure was lifted or swapped can be ignored.
 static PROBE_ANSWER: CsMutex<RefCell<Option<(u64, teddiebox_download::Answer)>>> =
     CsMutex::new(RefCell::new(None));
 
@@ -1190,19 +1046,17 @@ fn answer_waiting() -> bool {
 
 /// A cached file the server has contradicted, as `CACHE/<dir>/<file>`.
 ///
-/// Armed when a probe comes back stale, and read once by the download that
-/// answers it. Nothing else is touched: the story stays playable until the
-/// refetch actually starts writing, because a box that discards what it has
-/// the moment it hears of something newer has a story fewer either way the
-/// download goes.
+/// Set when a probe says the cached copy is out of date, and read once by the
+/// download that replaces it. The old story stays playable until that
+/// download starts writing, so a failed download does not lose it.
 static STALE_DIR: AtomicU32 = AtomicU32::new(0);
 static STALE_FILE: AtomicU32 = AtomicU32::new(0);
 static STALE_ARMED: AtomicBool = AtomicBool::new(false);
 
 /// Whether this cache entry is the one a probe has just contradicted.
 ///
-/// Consumed: a plan that has read it has answered it, and a second download of
-/// the same file has no reason to start from zero again.
+/// Clears the mark, so a second download of the same file does not start from
+/// zero again.
 fn take_stale(dir: u32, file: u32) -> bool {
     if !STALE_ARMED.load(Ordering::Relaxed)
         || STALE_DIR.load(Ordering::Relaxed) != dir
@@ -1216,18 +1070,17 @@ fn take_stale(dir: u32, file: u32) -> bool {
 
 /// The question the box is waiting on the server for, if any.
 ///
-/// Touched only by the media task — `perform` asks, the loop settles — so it
-/// has one writer. It is a static rather than a loop local for the same reason
-/// `ASKED` is: `perform` is reached through `apply` from eight places, and
-/// threading it through all of them buys nothing.
+/// Used only by the media task: `perform` starts the question and the loop
+/// settles it. A static rather than a local, because `perform` is reached
+/// through `apply` from many places.
 static REVALIDATION: CsMutex<RefCell<teddiebox_download::Revalidation>> =
     CsMutex::new(RefCell::new(teddiebox_download::Revalidation::new()));
 
 /// Which figures have been asked about since the box booted.
 ///
-/// RAM, like the position slots, and lost on every reset — which is the whole
-/// cadence: one boot is roughly one session, because the box switches itself
-/// off after five idle minutes.
+/// Kept in RAM and cleared on every reset, which sets how often figures are
+/// checked: the box turns itself off after five idle minutes, so one boot is
+/// about one session.
 static ASKED: CsMutex<RefCell<teddiebox_download::Asked>> =
     CsMutex::new(RefCell::new(teddiebox_download::Asked::new()));
 
@@ -1238,14 +1091,13 @@ pub(crate) fn already_asked(tag: TagUid) -> bool {
 
 /// Bytes waiting to move from the network to the card.
 ///
-/// The two ends run in different tasks and neither may wait for the other: a
-/// media loop that awaited the network would underrun the moment the server
-/// paused, and a network task that awaited the card would stall the socket
-/// behind a decode. This absorbs the difference.
+/// The two ends run in different tasks and neither may wait for the other:
+/// the media task would stop playing whenever the server paused, and the
+/// network task would stall the socket during a decode.
 ///
-/// Sized against the measured download rate. At ~47 KB/s the media task's idle
-/// poll leaves about 4.7 KB between drains, so eight kibibytes keeps the socket
-/// moving even when a drain is late. A full pipe is back-pressure, not a fault.
+/// Sized from the measured download rate: at ~47 KB/s about 4.7 KB arrive
+/// between the media task's reads, so 8 KiB leaves room when a read is late.
+/// A full pipe just slows the download; it is not an error.
 const DOWNLOAD_PIPE_BYTES: usize = 8192;
 static DOWNLOAD_PIPE: CsMutex<RefCell<Pipe<DOWNLOAD_PIPE_BYTES>>> =
     CsMutex::new(RefCell::new(Pipe::new()));
@@ -1271,23 +1123,21 @@ static DOWNLOAD_FILE: AtomicU32 = AtomicU32::new(0);
 /// How often the producer looks for an answer while a handshake is in
 /// progress.
 ///
-/// Finer than [`teddiebox_download::RETRY_MS`] on purpose: this is how long a
-/// figure waits past the moment the card actually answers, and the card
-/// answering is the common case. The re-ask cadence and the deadline are the
-/// download crate's to decide.
+/// Shorter than [`teddiebox_download::RETRY_MS`], because this is the delay
+/// between the card answering and the producer noticing. When to ask again,
+/// and when to give up, are decided by the download crate.
 ///
-/// **A floor, not a period.** While a story plays the media task blocks the
-/// executor for hundreds of milliseconds at a time, so this timer comes back
-/// every ~106 ms — measured on the box on 2026-09-23. That is why the
-/// handshake is handed [`Instant::now`] rather than this number.
+/// **A minimum, not a period.** While a story plays, the media task blocks the
+/// executor for long stretches, so this timer fires only about every 106 ms
+/// (measured). That is why the handshake is given [`Instant::now`] rather
+/// than a count of polls.
 const HANDSHAKE_POLL_MS: u64 = 10;
 
 /// What the card said, as [`CardSays::as_offset`] encodes it.
 ///
-/// Written by the card's owner during [`DOWNLOAD_PREPARING`] and read by the
-/// producer, which cannot touch the card itself. Encoded and decoded by the
-/// download crate rather than here, so the sentinel and the reason it is safe
-/// sit next to the tests that hold them.
+/// Written by the media task (which owns the card) during
+/// [`DOWNLOAD_PREPARING`] and read by the producer. The encoding lives in the
+/// download crate, next to its tests.
 static DOWNLOAD_FROM: AtomicU32 = AtomicU32::new(0);
 
 /// What the sidecar says a resume should be validated against.
@@ -1299,8 +1149,8 @@ static DOWNLOAD_ON_CARD: AtomicU32 = AtomicU32::new(0);
 
 /// How long the sidecar promised the whole file would be, or zero for none.
 ///
-/// Kept so the writer can tell a resume of *this* file from a resume against a
-/// file the server has since replaced, which is otherwise indistinguishable.
+/// Lets the writer tell a resume of *this* file from one against a file the
+/// server has since replaced.
 static DOWNLOAD_EXPECT: AtomicU32 = AtomicU32::new(0);
 
 /// Where the server said this body belongs. Zero means it declined the range.
@@ -1308,8 +1158,8 @@ static DOWNLOAD_AT: AtomicU32 = AtomicU32::new(0);
 
 /// How long the server says the whole file is, or zero for "it did not say".
 ///
-/// The card's owner writes the sidecar and is on the far side of the pipe from
-/// the response head, so the length has to be left here for it to find.
+/// Left here for the media task, which writes the sidecar but never sees the
+/// response headers.
 static DOWNLOAD_TOTAL: AtomicU32 = AtomicU32::new(0);
 
 /// What a later resume can be validated against, when the server offered one.
@@ -1319,24 +1169,21 @@ static DOWNLOAD_ETAG: CsMutex<RefCell<Option<teddiebox_cloud::ETag>>> =
 /// wedging against a pipe nobody is draining.
 static DOWNLOAD_ABORT: AtomicBool = AtomicBool::new(false);
 
-/// Which figure the fetch that is running — or that most recently ended — is
-/// for.
+/// The figure of the fetch that is running, or that most recently ended.
 ///
-/// Set once, from the [`FetchRequest`] that was read to start it, at the same
-/// moment [`DOWNLOAD_DIR`] and [`DOWNLOAD_FILE`] are set. Read by
-/// [`fetch_ended`] so an outcome always carries the identity of the fetch
-/// that produced it, never whatever the newest queued request happens to be.
+/// Set from the [`FetchRequest`] that started it, together with
+/// [`DOWNLOAD_DIR`] and [`DOWNLOAD_FILE`]. [`fetch_ended`] reads it, so an
+/// outcome is always labelled with the fetch that produced it, not with a
+/// newer queued request.
 static FETCH_ACTIVE_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 
 /// What the last download came to, for whoever asked for it.
 ///
-/// The fetch runs in the network task and ends on the card in the media task,
-/// while the only thing that can decide what to do about it — the reducer —
-/// lives in the media task's loop. So the answer is left here rather than
-/// returned: it crosses two task boundaries and neither can call the other.
+/// The fetch runs in the network task and finishes writing in the media task,
+/// where the reducer decides what to do about it. Tasks cannot call each
+/// other, so the result is left here.
 ///
-/// Deliberately coarse. `Unavailable` has two words for failure and the
-/// console keeps the real one; this carries only what the reducer can act on.
+/// Only as detailed as the reducer needs; the console prints the exact error.
 static FETCH_OUTCOME: AtomicU8 = AtomicU8::new(FETCH_NOTHING);
 /// No download has ended since the last one was read.
 const FETCH_NOTHING: u8 = 0;
@@ -1351,10 +1198,8 @@ const FETCH_REFUSED: u8 = 4;
 
 /// The byte that carries one of the reducer's reasons between the two tasks.
 ///
-/// Exhaustive on purpose: a reason added to [`Unavailable`] and not given a
-/// byte here is a compile error rather than a figure that silently announces
-/// the wrong fault. That is the whole reason this is a function and not a
-/// match written out at each of the two call sites.
+/// An exhaustive match, so a new [`Unavailable`] reason without a byte here
+/// fails to compile instead of being reported as the wrong fault.
 const fn outcome_for(why: Unavailable) -> u8 {
     match why {
         Unavailable::Unreachable => FETCH_UNREACHABLE,
@@ -1365,25 +1210,21 @@ const fn outcome_for(why: Unavailable) -> u8 {
 
 /// Which figure [`FETCH_OUTCOME`] belongs to.
 ///
-/// Set alongside it, by the same call, so the media task can tell its own
-/// fetch's answer apart from a console `get` that happened to finish while a
-/// figure — the same one or a different one — sits on the plate.
+/// Set together with it, so the media task can tell the result of its own
+/// fetch from that of a console `get` that finished while a figure was on the
+/// plate.
 static FETCH_OUTCOME_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 
 /// Records how a download ended, once.
 ///
-/// A download ends in one of several places — before the request, in the
-/// fetch, or at the card — and every one of them has to leave the same
-/// answer, attributed to [`FETCH_ACTIVE_RUID`]: whichever fetch was actually
-/// running when it happened.
+/// A download can end before the request, during the fetch, or at the card;
+/// each records its result here, labelled with [`FETCH_ACTIVE_RUID`].
 ///
-/// The outcome and the figure it belongs to are two atomics, so they are
-/// written together under a critical section and [`take_fetch_outcome`] reads
-/// them the same way. Nothing today can land between the two stores — one
-/// executor, one core, no await in here — but "an outcome attributed to the
-/// wrong figure" is the exact bug the identity was added to prevent, and
-/// pairing them costs a critical section on a path that runs once per
-/// download.
+/// The outcome and its figure are two atomics, so they are written under one
+/// critical section, and [`take_fetch_outcome`] reads them the same way. With
+/// one core and no await here nothing could run between the two stores
+/// anyway, but the lock makes that explicit and costs little, as it runs once
+/// per download.
 fn fetch_ended(outcome: u8) {
     critical_section::with(|_| {
         FETCH_OUTCOME_RUID.store(FETCH_ACTIVE_RUID.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -1393,15 +1234,13 @@ fn fetch_ended(outcome: u8) {
 
 /// Records how a download ended, unless something already has.
 ///
-/// Two paths reach the end of the same fetch — the net task's, which knows
-/// *why* it failed, and the media task's, which only knows the file stopped
-/// short. The first to speak wins: overwriting `NoContent` with the coarser
-/// `Unreachable` would throw away the difference between a server that has no
-/// story and one that could not be reached, which is the difference between
-/// the two things the box can say out loud.
+/// Both the net task, which knows *why* a fetch failed, and the media task,
+/// which only knows the file stopped short, can report the same fetch. The
+/// first report wins, so a precise `NoContent` is not overwritten by
+/// `Unreachable`; the box announces those two differently.
 ///
-/// Returns whether it said anything, and takes the same critical section as
-/// [`fetch_ended`], so the check and the store cannot be separated.
+/// Returns whether it recorded anything. Uses the same critical section as
+/// [`fetch_ended`], so the check and the store happen together.
 fn fetch_ended_if_silent(outcome: u8) -> bool {
     critical_section::with(|_| {
         if FETCH_OUTCOME.load(Ordering::Relaxed) != FETCH_NOTHING {
@@ -1425,32 +1264,29 @@ fn take_fetch_outcome() -> (u8, u64) {
     })
 }
 
-/// Records that a probe is over and taught the box nothing.
+/// Records that a probe ended without learning anything.
 ///
-/// **Silence is the one answer a question may not have.** The reducer holds a
-/// placed figure without playing anything until it hears back, so a probe that
-/// ends without publishing leaves the box quiet with a story sitting on its
-/// card — which is exactly the failure revalidation was not allowed to cause.
-/// Every net-task path that can end a probe without an answer calls this. A
-/// `Nothing` about a question that has already settled is dropped by
-/// [`teddiebox_download::Revalidation`], so calling it twice is harmless.
+/// **A probe must always answer.** The reducer waits for the answer before
+/// playing a placed figure, so a probe that ends silently would leave the box
+/// quiet even though the story is on the card. Every net-task path that ends
+/// a probe without an answer calls this. Calling it twice is harmless:
+/// [`teddiebox_download::Revalidation`] ignores a `Nothing` for a question
+/// already settled.
 fn probe_ended(ruid: u64) {
     post_answer(ruid, teddiebox_download::Answer::Nothing);
 }
 
-/// Which of the reducer's two words a failed fetch deserves.
+/// Turns a failed fetch into one of the reducer's two reasons.
 ///
-/// A `404` or a `403` means the server answered and has no story for this
-/// figure; teddyCloud's `403` is what a request without a usable token gets,
-/// which is the same thing from the box's point of view. Everything else —
-/// the name, the socket, the handshake, a fault of the server's own — means
-/// the server was not reached, whatever the reason. The console keeps the
-/// reason; this is only what the box can say out loud.
+/// A `404` or `403` means the server answered but has no story for this
+/// figure (teddyCloud answers `403` to a request without a usable token).
+/// Anything else (name lookup, socket, handshake, server error) counts as
+/// "not reached". The console prints the exact error.
 ///
-/// [`tls::Error::Abandoned`] never reaches here — it is answered before this is
-/// called, because a transfer that was told to stop is not a story that could
-/// not be obtained. If that arm is ever removed, the catch-all below will turn
-/// every lifted figure into an announced network fault.
+/// [`tls::Error::Abandoned`] is handled before this is called, because a
+/// transfer that was told to stop is not a failure. If that handling were
+/// removed, the catch-all below would report every lifted figure as a
+/// network fault.
 fn why_unavailable(error: &tls::Error) -> Unavailable {
     match error {
         tls::Error::NoContent
@@ -1463,11 +1299,10 @@ fn why_unavailable(error: &tls::Error) -> Unavailable {
 
 /// What a probe's answer means for the story on the card.
 ///
-/// The same shape as [`why_unavailable`]: a fact from the network turned into
-/// the one word the reducer can act on. Every path that is not "the server
-/// stated a different length" answers `Current`, because none of them is
-/// evidence against a file that is sitting on the card and plays — and
-/// revalidation may never make a working box worse than it was offline.
+/// Only "the server gave a different length" counts as `Stale`. Everything
+/// else answers `Current`, because none of it is evidence against a file that
+/// is on the card and plays: checking must never make the box worse than it
+/// would be offline.
 fn freshness_of(
     answer: teddiebox_download::Answer,
     tag: TagUid,
@@ -1477,8 +1312,7 @@ fn freshness_of(
         return Freshness::Current;
     };
     let Some(card) = card else {
-        // No card is not a judgement about the file; it is the reason this
-        // question cannot be answered at all.
+        // Without a card there is nothing to compare against.
         return Freshness::Current;
     };
     let Some(sidecar) = CardIndex::new(card).sidecar(tag) else {
@@ -1490,8 +1324,7 @@ fn freshness_of(
             tag.ruid(),
             sidecar.length
         );
-        // Armed here, where the contradiction is known, and consumed by the
-        // download the reducer is about to ask for.
+        // Read by the download the reducer is about to request.
         let path = teddiebox_download::content_path(tag.0);
         STALE_DIR.store(path.directory, Ordering::Relaxed);
         STALE_FILE.store(path.file, Ordering::Relaxed);
@@ -1507,25 +1340,22 @@ static PLAYING: AtomicBool = AtomicBool::new(false);
 
 /// How far ahead the download is of whatever is waiting on it.
 ///
-/// Nothing streams yet: `get` fetches a file nobody is playing, so no decoder
-/// can run out and the honest answer is "nobody is waiting". Saying that in the
-/// throttle's own vocabulary — an unreachable lead — keeps one concept rather
-/// than adding a second. When playback and download meet on the same file this
-/// becomes the watermark minus the decoder's position, and the thresholds below
-/// start earning their keep.
+/// The download is not told how far playback has got, so it always reports
+/// "nobody is waiting", expressed as a lead that can never be reached. Once
+/// playback shares its position, this becomes the written length minus the
+/// decoder's position, and the thresholds below take effect.
 const NOTHING_WAITING: Pages = Pages(u32::MAX);
 /// Fetch again once the decoder is within this many pages of the write head.
 const RESUME_BELOW: Pages = Pages(8);
-/// Stop once it is this far ahead. The gap between the two is what stops the
-/// radio starting and stopping on every page the decoder consumes.
+/// Stop once it is this far ahead. The gap between the two keeps the radio
+/// from switching on and off for every page the decoder reads.
 const PAUSE_ABOVE: Pages = Pages(32);
 
 /// A download being written to the card.
 ///
-/// The card is deliberately not in here. It is handed to `service_download`
-/// for one call at a time, so that a download in flight never holds a borrow
-/// the media loop needs for anything else; what has to outlive a call is the
-/// counting, and that is all this keeps.
+/// The card is not stored here. It is passed to `service_download` for one
+/// call at a time, so a running download never holds a borrow the media loop
+/// needs elsewhere. Only the counters are kept between calls.
 struct CacheWrite {
     file: embedded_sdmmc::RawFile,
     writer: Writer,
@@ -1546,11 +1376,9 @@ impl ContentSink for CardFile<'_> {
     }
 
     fn flush(&mut self) -> Result<(), &'static str> {
-        // Reported rather than returned. A failed flush is not fatal to the
-        // download — the bytes are on the card, only the recorded length is
-        // behind — so it costs a longer resume rather than a broken file, and
-        // returning it would stop a download that is still perfectly able to
-        // continue.
+        // Printed, not returned. The bytes are on the card and only the
+        // recorded length is behind, so a failed flush just means a longer
+        // resume later. Returning it would stop a download that can continue.
         if let Err(reason) = self.card.flush(self.file) {
             esp_println::println!("teddiebox: get flush failed — {reason}");
         }
@@ -1560,23 +1388,20 @@ impl ContentSink for CardFile<'_> {
 
 /// How much of a download may be in flight before it is made durable.
 ///
-/// This is what makes an interrupted download worth resuming rather than
-/// merely worth deleting: `embedded-sdmmc` only makes a file's recorded length
-/// truthful at a flush, so bytes written since the last one are invisible to
-/// the next boot however safely they reached the card. Without this the answer
-/// to "how far did we get" is always zero.
+/// This is what makes an interrupted download resumable: `embedded-sdmmc`
+/// only updates a file's recorded length at a flush, so bytes written since
+/// the last flush are invisible after a reboot.
 ///
-/// A megabyte is roughly twenty-four seconds at the rate this box downloads —
-/// little enough to lose, seldom enough not to spend the card's life on flushes.
+/// A megabyte is about 24 seconds of download: little to lose, and few enough
+/// flushes not to wear the card.
 const FLUSH_EVERY: u32 = 1 << 20;
 
 /// Asks the card what it already has, and leaves the answer for the producer.
 ///
-/// This runs here because only this task may touch the card, and it runs
-/// *before* the request because what the card holds is what the request has to
-/// ask for. A box with no card plans a whole download: the failure then comes
-/// from the write, which says so, rather than from a resume against a file
-/// nobody could read.
+/// Runs in the media task, because only it may touch the card, and *before*
+/// the request, because the request depends on what the card holds. With no
+/// card it plans a full download, so the failure comes from the write, which
+/// reports it clearly.
 fn plan_download(card: Option<&storage::Mounted>) -> CardSays {
     let dir = DOWNLOAD_DIR.load(Ordering::Relaxed);
     let file = DOWNLOAD_FILE.load(Ordering::Relaxed);
@@ -1590,12 +1415,9 @@ fn plan_download(card: Option<&storage::Mounted>) -> CardSays {
         let length_on_card = card.cache_length(dir, file);
         on_card = length_on_card.unwrap_or(0);
 
-        // **A sidecar the server has contradicted vouches for nothing.** Read
-        // as it stands, it says the file is complete and the whole download
-        // turns into "the card already holds all of it" — which would play the
-        // very copy the probe just found stale. Dropping it needs no new rule:
-        // a file nothing vouches for is refetched from zero, truncating what
-        // is there, which is exactly what a stale file deserves.
+        // **Ignore the sidecar of a file the server found out of date.** It
+        // would say the file is complete, and the stale copy would be played
+        // again. Without a sidecar the file is fetched again from zero.
         let contradicted = take_stale(dir, file);
         let mut buffer = [0u8; teddiebox_download::MAX_SIDECAR];
         let sidecar = (!contradicted)
@@ -1628,11 +1450,9 @@ fn plan_download(card: Option<&storage::Mounted>) -> CardSays {
 
 /// Records how long the file beside it is meant to be.
 ///
-/// Best effort on purpose. A content file with no sidecar is incomplete by
-/// definition, so a failure here costs a refetch — where a download that
-/// pressed on and later *looked* complete would cost a story that stops in the
-/// middle. Silence when the server gave no length is the same bargain: nothing
-/// is claimed that was not said.
+/// Best effort. A content file with no sidecar counts as incomplete, so a
+/// failure here only costs a refetch later, never a story that stops in the
+/// middle. When the server gave no length, no sidecar is written.
 fn write_sidecar(card: &storage::Mounted, dir: u32, file: u32) {
     let length = DOWNLOAD_TOTAL.load(Ordering::Relaxed);
     if length == 0 {
@@ -1648,10 +1468,9 @@ fn write_sidecar(card: &storage::Mounted, dir: u32, file: u32) {
 
 /// Moves whatever the network has produced onto the card.
 ///
-/// Called from the media task's idle poll, and it **never waits**: it writes
-/// what is in the pipe and returns. That is what keeps the card's owner free to
-/// answer a play request while a download is in flight — the thing that makes
-/// downloading and playing at the same time possible at all.
+/// Called from the media task's idle poll, and **never waits**: it writes
+/// what is in the pipe and returns, so the media task can still play while a
+/// download runs.
 ///
 /// Returns whether a download is still in flight, so the caller can poll
 /// faster while one is.
@@ -1659,19 +1478,18 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
     let state = DOWNLOAD_STATE.load(Ordering::Relaxed);
     match state {
         DOWNLOAD_IDLE => return false,
-        // Both are brief and neither writes anything: one answers the
-        // producer, the other waits for a response head that has not arrived.
-        // Reported as busy so the loop keeps its fast cadence across them.
+        // Both are brief and write nothing: one answers the producer, the
+        // other waits for the response headers. Reported as busy so the loop
+        // keeps polling fast.
         DOWNLOAD_PREPARING => {
             let says = plan_download(card);
             DOWNLOAD_FROM.store(says.as_offset(), Ordering::Relaxed);
-            // Only answers a question still being asked. Reading the card can
-            // take longer than the producer is prepared to wait, and an answer
-            // stored after it has given up would leave this state machine in
-            // `DOWNLOAD_PLANNED` with nobody left to move it on — the media
-            // loop then polls at its fast download cadence for ever. The same
-            // rule `Handshake::card_answered` applies at the other end, for
-            // the same reason.
+            // Only answers if the producer is still asking. Reading the card
+            // can take longer than the producer waits, and an answer stored
+            // after it gave up would leave the state stuck in
+            // `DOWNLOAD_PLANNED`, with the media loop polling fast for ever.
+            // `Handshake::card_answered` applies the same rule at the other
+            // end.
             let _ = DOWNLOAD_STATE.compare_exchange(
                 DOWNLOAD_PREPARING,
                 DOWNLOAD_PLANNED,
@@ -1685,9 +1503,9 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
     }
 
     if write.is_none() {
-        // A request that failed before the head arrived handed over nothing.
-        // Opening the file here would create — or truncate — a cache entry on
-        // behalf of a download that never asked the server for a byte.
+        // A request that failed before the headers arrived sent nothing.
+        // Opening the file would create or truncate a cache entry for no
+        // reason.
         if state == DOWNLOAD_ENDED && DOWNLOAD_SENT.load(Ordering::Relaxed) == 0 {
             DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
             return false;
@@ -1695,17 +1513,15 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
 
         let dir = DOWNLOAD_DIR.load(Ordering::Relaxed);
         let file = DOWNLOAD_FILE.load(Ordering::Relaxed);
-        // Where the server put this body decides whether the partial file on
-        // the card is continued or thrown away, and getting that backwards
-        // splices the start of a story onto its middle at exactly the right
-        // length for nothing downstream to notice.
+        // The offset the server sent decides whether the partial file is
+        // continued or replaced. Getting it wrong would join the start of a
+        // story onto its middle, at a length that looks correct.
         let expected = DOWNLOAD_EXPECT.load(Ordering::Relaxed);
         let total = DOWNLOAD_TOTAL.load(Ordering::Relaxed);
         let placement = teddiebox_download::place(&Landing {
             offset: DOWNLOAD_AT.load(Ordering::Relaxed),
             length_on_card: DOWNLOAD_ON_CARD.load(Ordering::Relaxed),
-            // Zero is this firmware's "nothing was said", which is what the
-            // crate spells `None`.
+            // Zero here means "not given", which the crate calls `None`.
             expected: (expected != 0).then_some(expected),
             total: (total != 0).then_some(total),
         });
@@ -1726,32 +1542,26 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
                     ),
                     _ => {
                         esp_println::println!("teddiebox: get writing /CACHE/{dir:08X}/{file:08X}");
-                        // Only when starting over. A resumed download is
-                        // continuing the file this sidecar already vouches
-                        // for, and rewriting it would claim the server said
-                        // something about a file it was only asked for part of.
+                        // Only when starting over. A resumed download
+                        // continues the file the existing sidecar describes.
                         write_sidecar(card, dir, file);
                     }
                 }
                 *write = Some(CacheWrite {
                     file: handle,
-                    // From zero even for a resume: what this counts is
-                    // measured against what the producer has sent this time
-                    // round, not against the length of the file on the card.
+                    // From zero even for a resume: it counts what the producer
+                    // sends this time, not the length of the file on the card.
                     writer: Writer::resuming(0, FLUSH_EVERY),
                     crc: teddiebox_core::checksum::Crc32::new(),
                 });
             }
             Err(reason) => {
-                // Abort rather than let the pipe fill: a producer waiting on a
-                // sink nobody drains never returns, and the box would look
-                // hung rather than broken.
+                // Abort rather than let the pipe fill, or the producer would
+                // wait for ever and the box would look hung.
                 esp_println::println!("teddiebox: get cannot write — {reason}");
-                // The story cannot be obtained, which is all the reducer has a
-                // word for. Which of the two it is told is a judgement: a card
-                // that will not take the bytes is not the server's fault, but
-                // "reached and has nothing" would be a lie, and `Unreachable`
-                // at least sends the box back to the network next time.
+                // Reported as `Unreachable`: a card problem is not the
+                // server's fault, but "reached and has nothing" would be
+                // wrong, and `Unreachable` makes the box try again next time.
                 fetch_ended(FETCH_UNREACHABLE);
                 DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
                 DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
@@ -1783,13 +1593,13 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         active.crc.update(&buf[..taken]);
     }
 
-    // Done only when the producer has stopped *and* everything it handed over
-    // has reached the card. Stopping at the first of those would truncate the
-    // file by whatever was still in the pipe.
+    // Done only when the producer has stopped *and* everything it sent has
+    // reached the card; otherwise the file would lose what was still in the
+    // pipe.
     let sent = DOWNLOAD_SENT.load(Ordering::Relaxed);
     if state == DOWNLOAD_ENDED && active.writer.watermark() >= Bytes(sent) {
-        // Whatever this reports the sink has already said; there is nothing
-        // here that could act on it.
+        // Any error was already printed by the sink, and nothing here could
+        // act on it.
         let _ = active.writer.finish(&mut sink);
         let written = active.writer.watermark().0;
         esp_println::println!(
@@ -1800,15 +1610,10 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         card.close_file(active.file);
         *write = None;
 
-        // A transfer that stopped and a story that is ready are not the same
-        // statement, and this used to make the second whenever the first was
-        // true: an aborted or failed download was announced as complete, and
-        // the reducer opened a fragment. On 2026-09-07 that was 1,089,536
-        // bytes of a 38,349,983-byte story, saved from playing only because
-        // the decoder refused it.
-        //
-        // The arithmetic decides instead — where this body went, plus what
-        // landed, against what the server said the file is.
+        // A transfer that stopped is not necessarily a complete story: an
+        // aborted or failed download must not be reported as complete, or
+        // the reducer would open a fragment. So compare where this body
+        // started plus what was written against the length the server gave.
         let whole = teddiebox_download::is_whole(
             DOWNLOAD_AT.load(Ordering::Relaxed),
             written,
@@ -1818,10 +1623,8 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
             },
         );
         if whole {
-            // Here rather than where the fetch returned: a story is ready when
-            // it is on the card, not when the last byte left the socket.
-            // Playing on the earlier answer would open a file the writer has
-            // not finished.
+            // Reported here, not where the fetch returned: a story is ready
+            // once it is on the card, not when the last byte arrived.
             fetch_ended(FETCH_COMPLETED);
         } else {
             esp_println::println!(
@@ -1829,9 +1632,8 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
                 DOWNLOAD_AT.load(Ordering::Relaxed).saturating_add(written),
                 DOWNLOAD_TOTAL.load(Ordering::Relaxed)
             );
-            // Not if the download was abandoned: a figure that has been
-            // lifted is not owed an explanation, and the reducer has already
-            // moved on to having no figure at all.
+            // Not if the download was abandoned: the figure was lifted, and
+            // the reducer has already moved on.
             if !DOWNLOAD_ABORT.load(Ordering::Relaxed) {
                 fetch_ended_if_silent(FETCH_UNREACHABLE);
             }
@@ -1843,32 +1645,24 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
     true
 }
 
-/// Whether a command that exists to take a box apart may run.
+/// Whether this image has the full console, or only `dl`.
 ///
-/// These reach the box over UART0 with no gate beyond having the case open,
-/// and the worst of them — `otaboot` onto a blank slot — leaves a box that
-/// only a J100 cold boot recovers. That is an acceptable risk at a bench and a
-/// pointless one in a box on a shelf, so the `bench` feature decides, and the
-/// refusal says which build the box is running rather than looking like a
-/// parse failure.
+/// The console reaches the box over UART0 with no protection beyond opening
+/// the case, and some commands can break it: `otaboot` onto a blank slot
+/// leaves a box that only a cold boot recovers. That is fine for development
+/// but not for a finished box, so release images leave the console out.
 ///
-/// Whether this image carries the console at all, beyond `dl`.
+/// On unless `TEDDIEBOX_RELEASE` is set, so `just firmware` and `just flash`
+/// build a development image. `build.rs` turns that variable into the `bench`
+/// cfg and rebuilds when it changes. It is an environment variable rather
+/// than a Cargo feature, like the language, the SLIX password and the version.
 ///
-/// On unless `TEDDIEBOX_RELEASE` asks otherwise, so an ordinary `just
-/// firmware` or `just flash` builds what a bench session wants and nothing
-/// about a working day changes. `build.rs` turns that variable into the `bench`
-/// cfg and already knows to rebuild when it changes; the environment rather
-/// than a cargo feature because that is how this build takes its other three
-/// decisions — the language, the SLIX password and the version.
-///
-/// A `const` rather than a `#[cfg]`, so the dispatch below stays one match and
-/// stays exhaustive: a command added later still has to be wired up or the
-/// build fails. It has to be a `const` and not a function returning the same
-/// answer — a function is called from the one place either way, but only a
-/// constant lets the optimiser drop the arms behind it. Measured: a helper
-/// function made the release build *larger* than the bench one, and gating
-/// eleven arms individually saved 3,928 bytes where gating the dispatch saves
-/// 18,848.
+/// A `const` rather than a `#[cfg]`, so the dispatch below stays one
+/// exhaustive match: a new command must be handled or the build fails. It
+/// must be a `const`, not a function: only a constant lets the optimiser drop
+/// the code behind it. Measured: gating the whole dispatch this way saves
+/// 18,848 bytes, gating eleven commands one by one saved only 3,928, and a
+/// helper function made the release build larger than the bench one.
 const BENCH: bool = cfg!(bench);
 
 /// Says why a command did nothing, so a release box does not look like it
@@ -1879,19 +1673,19 @@ fn not_in_this_build() {
     );
 }
 
-/// The box's settings: what the card said, and what the bench typed over it.
+/// The box's settings: what the card says, and what was typed at the console
+/// to override it.
 ///
-/// Anything typed here is RAM only, gone at the next reset — the same treatment
-/// the SLIX password gets and for the same reason: a credential belongs neither
-/// in the image nor in the repository. The precedence rule between the two
-/// sources lives in [`teddiebox_config::Settings`], where it is tested without
-/// a box; this static is only the lock around it.
+/// Anything typed is kept in RAM only and lost at reset, so no credential
+/// ends up in the image or the repository. Which source wins is decided in
+/// [`teddiebox_config::Settings`], where it is tested; this is only the lock
+/// around it.
 static SETTINGS: CsMutex<RefCell<Settings>> = CsMutex::new(RefCell::new(Settings::new()));
 
 /// How long to wait for a DHCP lease before calling it a failure.
 ///
-/// Association succeeding and addressing failing are different faults with
-/// different causes, so they are waited for — and reported — separately.
+/// Joining the network and getting an address can fail for different
+/// reasons, so they are waited for and reported separately.
 const DHCP_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn set_ssid(value: String<MAX_SSID>) {
@@ -1904,17 +1698,17 @@ fn set_password(value: String<MAX_PASSPHRASE>) {
 
 /// Publishes what the card said.
 ///
-/// The media task owns the card and calls this once at boot; the console
-/// writes over it afterwards, which is what makes a mistyped card
-/// diagnosable at the bench without pulling it.
+/// The media task owns the card and calls this once at boot. The console can
+/// override it later, so a mistyped card can be worked around without
+/// removing it.
 fn set_configuration(value: Config) {
     critical_section::with(|cs| SETTINGS.borrow_ref_mut(cs).take_card(value));
 }
 
 /// The credentials shaped the way the radio wants them.
 ///
-/// `None` if either half is missing, because handing the driver an empty
-/// string would fail association in a way that looks like a wrong password.
+/// `None` if either the name or the password is missing, because an empty
+/// string would fail in a way that looks like a wrong password.
 fn credentials() -> Option<Config> {
     critical_section::with(|cs| SETTINGS.borrow_ref(cs).credentials().cloned())
 }
@@ -1925,67 +1719,52 @@ fn set_ears_skip(value: bool) {
 
 /// Whether a held ear should skip a chapter, as the card last said.
 ///
-/// Read per press rather than held in a local, because the card is mounted
-/// lazily: an ear pressed before the first mount would otherwise pin this
-/// task to the boot default for the rest of the session.
+/// Read on each press rather than once, because the card is mounted later:
+/// an ear pressed before that would otherwise keep the default for the whole
+/// session.
 fn ears_skip() -> bool {
     critical_section::with(|cs| SETTINGS.borrow_ref(cs).config().ears_skip)
 }
 
 /// Access points one scan will report.
 ///
-/// **16 is a measured ceiling, not a preference.** Raising it to 48 on
-/// 2026-09-03 wedged the scan permanently: `scan_async` was entered and never
-/// returned, on every attempt. The other tasks kept running — the heartbeat
-/// never missed — so only the radio task was lost, which is what made it look
-/// at first like the whole box had died. 16 has scanned cleanly many times
-/// either side of that experiment. The boundary between them has not been
-/// looked for, and `RADIO_HEAP` is the first thing to suspect: this is the
-/// only code that allocates, and 72 KiB was always a guess.
+/// **16 is a tested limit.** At 48, `scan_async` never returned, on every
+/// attempt; the other tasks kept running, so only the radio task was stuck.
+/// 16 has always worked. Where the limit lies between the two is unknown;
+/// `RADIO_HEAP` is the first suspect.
 ///
-/// The cost of 16 is real. The driver fills the quota **in channel order, not
-/// by signal strength**, so in a crowded band it can stop before reaching a
-/// high channel — at this bench it filled up across channels 1 to 8 and never
-/// reached channel 11, where the access point the box was sitting next to at
-/// -29 dBm lives. A truncated list is therefore reported as truncated, because
-/// a survey that silently omits the strongest signal in the room is worse than
-/// one that admits it stopped early.
+/// The driver fills the list **in channel order, not by signal strength**, so
+/// in a busy area it can stop before the high channels (in one test it filled
+/// up on channels 1 to 8 and missed a strong access point on channel 11). A
+/// cut-off list is therefore reported as cut off.
 const SCAN_LIMIT: usize = 16;
 
 /// How long a scan may take before it is called a failure.
 ///
-/// `scan_async` waits for the driver to raise `ScanDone`, and a radio that
-/// never initialises raises nothing. `net.rs` deliberately holds no timeouts,
-/// so the bench command owns this one.
+/// `scan_async` waits for the driver's `ScanDone` event, which a radio that
+/// failed to start never sends. `net.rs` has no timeouts of its own, so the
+/// console command sets this one.
 ///
-/// **It bounds less than it looks like it does.** Racing it with `select`
-/// only helps while the scan future actually yields: `select` re-checks the
-/// timer when the task is polled, so a future that blocks *inside* its own
-/// `poll` is never interrupted by it. That is exactly the failure seen at
-/// `SCAN_LIMIT` 48 — the timer expired and nothing was printed, because the
-/// task never came back to look. This catches a scan that waits forever for
-/// an event; it cannot catch one that never yields.
+/// **It does not catch everything.** `select` only checks the timer when the
+/// task is polled, so a scan that blocks *inside* its own `poll` is never
+/// interrupted. That is what happened at `SCAN_LIMIT` 48. This catches a scan
+/// that waits for ever for an event, not one that never yields.
 const SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The SLIX privacy password baked in at build time, or zero for none.
 ///
-/// From `TEDDIEBOX_SLIX_PASSWORD` in the build environment — `.envrc.local`
-/// on the bench, a repository secret in CI — and never from the repository
-/// itself. The same `option_env!` treatment `TEDDIEBOX_LANGUAGE` gets, and
-/// `build.rs` declares both so that changing one is not silently ignored by a
-/// cached build.
+/// From `TEDDIEBOX_SLIX_PASSWORD` in the build environment (`.envrc.local`
+/// locally, a repository secret in CI), never from the repository itself.
+/// `build.rs` declares it, so changing it triggers a rebuild.
 ///
-/// **This does put a credential in the image**, which the console-only
-/// arrangement it replaces deliberately did not: anybody holding a built
-/// binary can read it back out. Chosen anyway, on 2026-09-14, because the
-/// alternative was worse in practice — a password that has to be typed every
-/// session is one an unattended box does not have, and a tag whose password
-/// is missing is *silent*, which looks exactly like an empty plate, a wrong
-/// password and a broken antenna. It nearly sank the first autonomous fetch.
+/// **This puts a credential in the image**: anyone with a built binary can
+/// read it. Accepted, because the alternative is typing it every session, and
+/// a box without it cannot read any figure. A tag with the wrong or missing
+/// password is *silent*, which looks just like an empty plate or a broken
+/// antenna.
 ///
-/// An unset or empty variable leaves this zero, which is what a build without
-/// the secret gets and exactly how the box behaved before: nothing is
-/// unlocked until somebody types `pw`.
+/// An unset or empty variable gives zero: nothing is unlocked until someone
+/// types `pw`.
 const BUILT_IN_PASSWORD: u32 = match option_env!("TEDDIEBOX_SLIX_PASSWORD") {
     None => 0,
     Some(text) => {
@@ -1994,8 +1773,8 @@ const BUILT_IN_PASSWORD: u32 = match option_env!("TEDDIEBOX_SLIX_PASSWORD") {
         } else {
             match teddiebox_console::hex::u32_from_hex(text.as_bytes()) {
                 Some(value) => value,
-                // A build is the right place to find this out. The bench's
-                // way of finding out is a tag that says nothing at all.
+                // Fail the build: on the box, a bad password only shows up
+                // as a tag that never answers.
                 None => panic!("TEDDIEBOX_SLIX_PASSWORD must be exactly eight hex digits"),
             }
         }
@@ -2004,37 +1783,27 @@ const BUILT_IN_PASSWORD: u32 = match option_env!("TEDDIEBOX_SLIX_PASSWORD") {
 
 /// The SLIX privacy password in force.
 ///
-/// Starts as [`BUILT_IN_PASSWORD`] and is replaced by whatever `pw` types, so
-/// a bench can still work with a tag the image was not built for. RAM only:
-/// it is never written to the card.
+/// Starts as [`BUILT_IN_PASSWORD`] and can be replaced with the console `pw`
+/// command, to work with other tags. RAM only; never written to the card.
 static NFC_PASSWORD: AtomicU32 = AtomicU32::new(BUILT_IN_PASSWORD);
 
 /// The block range a pending `mem` carries: first block in the high byte,
 /// block count in the low one.
 ///
-/// Packed into one word rather than kept in two, so the reader task cannot
-/// observe a first block from one command beside a count from the next.
+/// One word rather than two, so the reader task cannot see the first block of
+/// one command with the count of the next.
 static NFC_MEM_RANGE: AtomicU32 = AtomicU32::new(0);
 
 /// Whether the reader polls the plate on its own. On at boot.
 ///
-/// **The default is what a child's box does**, because a box that ignores
-/// every figure until somebody types at it is not a box. It used to be off,
-/// to keep a poller that unlocks tags by itself from contaminating a bench
-/// measurement — and `plate off` still buys exactly that, for the session
-/// that asks. What made the old default untenable is that a release image
-/// answers no command but `dl`, so this was the one setting a finished box
-/// could never reach: it played its jingle and then ignored every figure for
-/// ever.
+/// **On by default**, because a release image only accepts `dl` on the
+/// console, so it could never switch polling on. `plate off` switches it off
+/// for one session, to keep automatic tag unlocking out of a measurement.
 ///
-/// Switching it on by default was gated on a measurement. Polling an *empty*
-/// plate cost 49 DMA restarts in 70 s against 0 with the poller off — worse
-/// than the radio — and the bench note of 2026-09-07 said not to change this
-/// default until that path was made cheap. It was, the same day: 49 -> 5, and
-/// 0 with a figure present. The remaining 5 belong to an empty plate, and
-/// lifting a figure now pauses the story (`Playback::on_tag_absent`), so an
-/// empty plate no longer coincides with anything playing — which is the only
-/// condition under which a restart can be heard.
+/// Polling an empty plate causes about 5 audio DMA restarts in 70 s, and none
+/// with a figure present. Lifting the figure pauses the story
+/// (`Playback::on_tag_absent`), so nothing is playing while the plate is
+/// empty, and the restarts cannot be heard.
 static PLATE_POLLING: AtomicBool = AtomicBool::new(true);
 /// Asks the reader task to print the slowest reply it has seen. Set when
 /// polling is switched off, because that is when a run is over.
@@ -2042,43 +1811,38 @@ static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
 
 /// What is on the plate right now — the current state, not a queue of edges.
 ///
-/// A `Signal` rather than a channel because the media task can be away for as
-/// long as a decode takes, and a queue would need a depth nobody can justify.
-/// Holding the latest state instead is idempotent and cannot overflow; the
-/// cost is that a figure placed and lifted inside one media pass is invisible,
-/// which is the right answer anyway.
+/// A `Signal` rather than a channel, because the media task can be busy for a
+/// long time and a queue would need an arbitrary depth. Keeping only the
+/// latest state cannot overflow; a figure placed and lifted within one media
+/// pass is never seen, which is fine.
 static PLATE_TAG: Signal<CriticalSectionRawMutex, Seen> = Signal::new();
 
 /// Set when the box is about to stop being able to write the card.
 ///
-/// The console loop decides to shut down; the media task owns the card. This
-/// is the one bit between them, and the shutdown waits briefly for it to clear
-/// rather than taking the place down with it.
+/// The console loop decides to shut down, but the media task owns the card.
+/// The shutdown sets this and waits briefly for the media task to clear it
+/// after saving the position.
 static FLUSH_PLACE: AtomicBool = AtomicBool::new(false);
 
 /// The place a figure was lifted from, before the card knows about it.
 ///
-/// The policy itself lives in [`PendingPlace`], where the host can drive it:
-/// which lift displaces which, and which ending clears the slot, are decided
-/// by rules that had two defects found by re-reading them. What is left here
-/// is the shared-access wrapper and the card, neither of which a test can have.
+/// The rules live in [`PendingPlace`], where host tests cover them; this is
+/// only the lock around it.
 static PENDING_PLACE: CsMutex<RefCell<PendingPlace>> =
     CsMutex::new(RefCell::new(PendingPlace::new()));
 
 /// Where the next story should start.
 ///
-/// Written by `perform` when the reducer decides to play, taken by the media
-/// task when it opens the file. Taken rather than read: a story the console
-/// starts after one a figure started must not inherit the figure's place.
+/// Written by `perform` when the reducer decides to play, and taken (cleared)
+/// by the media task when it opens the file, so a story started later from
+/// the console does not start at the figure's position.
 static PLAY_FROM: CsMutex<RefCell<Position>> = CsMutex::new(RefCell::new(Position::Start));
 
 /// The language this box speaks, from `TEDDIEBOX_LANGUAGE` in `.envrc.local`.
 ///
-/// Chosen at build time rather than read off the card: it is a property of the
-/// box, and the card carries all four languages regardless. An unset value
-/// takes the German sounds; a value that is not a language fails the build,
-/// because a box quietly speaking the wrong language to a child is not a
-/// failure anyone would look for.
+/// Chosen at build time rather than read from the card, which holds all four
+/// languages anyway. Unset means German; an unknown value fails the build,
+/// because nobody would notice a box quietly using the wrong language.
 const LANGUAGE: Language = match option_env!("TEDDIEBOX_LANGUAGE") {
     Some(name) => match Language::from_name(name) {
         Some(language) => language,
@@ -2096,17 +1860,15 @@ const NO_SOUND: u32 = u32::MAX;
 
 /// Set while a sound the box asked for is still being played.
 ///
-/// Owned by the playback it names, which is why the two statics below travel
-/// with it: the flag used to be cleared by whichever playback happened to end
-/// next. A story running when the pack went critical would clear it on its own
-/// ending, and the shutdown then dropped the rails a fraction of a second into
-/// the sentence that was still being spoken — the common path, because a pack
-/// reaches the cutoff while playing far more often than while idle.
+/// Only cleared by the playback of that sound, which is identified by
+/// [`ANNOUNCING_DIRECTORY`] and [`ANNOUNCING_FILE`]. Otherwise a story ending
+/// while the "battery critical" message plays would clear it, and the
+/// shutdown would cut the message off.
 static ANNOUNCING: AtomicBool = AtomicBool::new(false);
 
-/// Set once the power-on jingle has been asked for. With [`ANNOUNCING`] clear
-/// again afterwards, it means the jingle is over — the earliest the radio may
-/// come up without competing with the speaker.
+/// Set once the power-on jingle has been requested. Once [`ANNOUNCING`] is
+/// clear again, the jingle is over and the radio may start without disturbing
+/// the sound.
 static STARTUP_SOUNDED: AtomicBool = AtomicBool::new(false);
 
 /// Which `CONTENT/<dir>/<file>` [`ANNOUNCING`] is about, so the playback that
@@ -2116,12 +1878,10 @@ static ANNOUNCING_FILE: AtomicU32 = AtomicU32::new(NO_SOUND);
 
 /// The level the codec should be playing at, in whole dB, or [`NO_VOLUME`].
 ///
-/// The codec lives in the task that shares its I2C bus with the accelerometer,
-/// and the reducer lives in the media task, so this is the same kind of seam
-/// `OUTPUT_REQUEST` and `SPEAKER_REQUEST` already are. It carries dB rather
-/// than a step because dB is the codec's own language: which step that came
-/// from is the reducer's business and nothing the codec task should have an
-/// opinion about.
+/// The codec is driven by the task that shares its I2C bus with the
+/// accelerometer, while the reducer runs in the media task, so the request
+/// passes through here, like `OUTPUT_REQUEST` and `SPEAKER_REQUEST`. It is in
+/// dB, the codec's unit; volume steps are the reducer's concern.
 static VOLUME_REQUEST: AtomicI8 = AtomicI8::new(NO_VOLUME);
 
 /// No level is waiting. Outside the codec's -63.5..=+24 dB range, so it can
@@ -2130,74 +1890,57 @@ const NO_VOLUME: i8 = i8::MIN;
 
 /// Set once the codec is configured and would be heard if it were driven.
 ///
-/// The start-up jingle waits on this. `init` spends 400 ms letting the output
-/// drivers ramp, and a jingle that begins before then loses its first second
-/// to a codec that is not listening yet.
+/// The start-up jingle waits for this. `init` waits 400 ms for the output
+/// drivers to ramp up, and a jingle started before then loses its start.
 static CODEC_READY: AtomicBool = AtomicBool::new(false);
 
 /// Set once the card has been mounted for the first time this boot.
 ///
-/// Card mount is lazy — the ordinary boot only does it once the start-up
-/// jingle asks to play — so this is the second half `ota::mark_valid` waits
-/// on, alongside `CODEC_READY`.
+/// The card is only mounted when the start-up jingle is played, so this and
+/// `CODEC_READY` are what `ota::mark_valid` waits for.
 ///
-/// Setup mode's own card-open path deliberately never sets this — see the
-/// branch below that mounts the card for `portal::run`. That is what lets a
-/// bench session force the revert path on purpose, without ever flashing a
-/// broken image. The same absence has a cost outside the bench: holding both
-/// ears to enter setup mode shortly after a genuinely good update landed —
-/// say, to fix Wi-Fi credentials — leaves that update's slot unconfirmed, and
-/// it gets reverted on the next boot even though nothing was wrong with it.
-/// Accepted rather than fixed, because it self-heals via the next
-/// revalidation or download, and because setup mode existing at all is
-/// already an emergency recovery path.
+/// Setup mode mounts the card for `portal::run` without setting this. That
+/// allows testing the revert path without flashing a broken image. The
+/// downside: entering setup mode straight after a good update (to fix Wi-Fi
+/// credentials, say) leaves the update unconfirmed, and it is reverted on the
+/// next boot. Accepted, because setup mode is already a recovery path and the
+/// update is simply downloaded again.
 static CARD_MOUNTED: AtomicBool = AtomicBool::new(false);
 
 /// Set when the box has said it is turning off, and must therefore do it.
 ///
-/// `BatteryCritical` is not a warning, it is an announcement — "battery is
-/// critical, turning off now" — so it is the one sound with an obligation
-/// attached. A box that says this and keeps playing has told a child
-/// something untrue, which is worse than saying nothing.
+/// The `BatteryCritical` sound says "battery is critical, turning off now",
+/// so after playing it the box must actually turn off.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Set once the box has actually parked — rails down, nothing left to say.
 ///
-/// Every periodic task reads this and stops for good. Until it existed the
-/// box parked only in the sense that a child could not see or hear it: the
-/// heartbeat went on printing once a second, `sense` went on converting two
-/// ADC channels every two seconds, and the reducer went on being ticked, all
-/// on a pack the park exists to save. Measured at the bench on 2026-09-08,
-/// three minutes of a parked box cost 125 heartbeat lines and 13 ADC rounds.
+/// Every periodic task checks this and stops for good, so a parked box does
+/// not keep draining the battery with the heartbeat, battery sampling and
+/// reducer ticks.
 ///
-/// Set after the card flush and after the rails go down, because the tasks
-/// this stops are the ones that carry those out.
+/// Set after the card flush and after the power rails go down, because the
+/// tasks it stops are the ones that do those.
 static PARKED: AtomicBool = AtomicBool::new(false);
 
-/// Set by `awake on`, to hold the idle timeout off for a bench session.
+/// Set by `awake on`, to keep the box from turning off when idle.
 ///
-/// Reported to the reducer as use, rather than checked at the point of
-/// shutdown: the reducer owns the policy, and a second place that could
-/// veto a park would be a second thing to reason about when one of them
-/// gets it wrong.
+/// Reported to the reducer as activity, rather than checked at shutdown, so
+/// the reducer stays the only place that decides.
 ///
-/// Off at boot and lost on every reset — a box that stays awake because a
-/// previous session said so is measuring the wrong thing. Unlike
-/// `PLATE_POLLING`, whose default is what a child's box does, there is no
-/// child's box that wants this on.
+/// Off at boot and cleared on every reset.
 static STAY_AWAKE: AtomicBool = AtomicBool::new(false);
 
 /// The most recent pack reading, in millivolts, and how many have been taken.
 ///
-/// Zero samples means the sense task has not answered yet, which is not the
-/// same as a flat pack and must not be read as one.
+/// Zero samples means no reading yet, which is not the same as a flat pack.
 static PACK_MV: AtomicU32 = AtomicU32::new(0);
 static PACK_SAMPLES: AtomicU32 = AtomicU32::new(0);
 
 /// Whether the pack is too low to spend radio time nobody asked for.
 ///
-/// No reading yet is not a low pack: the sense task samples every two seconds
-/// and has long answered by the time the jingle is over.
+/// No reading yet counts as not low. The sense task samples every two seconds,
+/// so there is normally a reading long before the jingle ends.
 fn pack_too_low_to_prime() -> bool {
     PACK_SAMPLES.load(Ordering::Relaxed) > 0
         && PACK_MV.load(Ordering::Relaxed) < u32::from(BatteryConfig::default().low_mv)
@@ -2205,16 +1948,14 @@ fn pack_too_low_to_prime() -> bool {
 
 /// Waits for fresh pack readings and answers whether they agree it is empty.
 ///
-/// **Two, not the four `readings_to_agree` asks for.** Four exists to stop one
-/// implausible sample *moving the level* — the first pack reading this project
-/// ever took was 9453 mV from three NiMH cells — and two consecutive readings
-/// already kill that. Four of them is eight seconds of a box sitting dark
-/// while a child holds an ear, and the cost of being wrong here is small: the
-/// box goes back to sleep and the next press asks again.
+/// **Two readings, not the four of `readings_to_agree`.** Agreement guards
+/// against one implausible sample (a reading of 9453 mV from three NiMH cells
+/// has been seen), and two consecutive readings are enough for that. Four
+/// would keep the box dark for eight seconds while a child holds an ear, and
+/// a wrong answer here only costs a return to sleep.
 ///
-/// `None` as soon as a reading is at or above the cutoff, and `None` if the
-/// sense task says nothing at all — booting normally is the safe answer to a
-/// question that was never answered.
+/// `None` as soon as a reading is at or above the cutoff, and `None` if no
+/// reading arrives: without an answer, booting normally is the safe choice.
 async fn pack_says_empty() -> Option<u32> {
     const READINGS_TO_AGREE: u8 = 2;
     let cutoff = u32::from(BatteryConfig::default().cutoff_mv);
@@ -2242,48 +1983,36 @@ async fn pack_says_empty() -> Option<u32> {
 
 /// Whether the end of a session is deep sleep rather than a park.
 ///
-/// **On by default since 2026-09-14, when the wake was proven on hardware.**
-/// The box slept on command, stayed silent, and came back on an ear press
-/// reporting `rst:0x5 (DSLEEP)`. That settles which of the two endings is the
-/// right default, and it is not the park: a parked box answers nothing but the
-/// switch — it ignored `dl` and cost a power cycle twice, once that same
-/// morning — while a sleeping one answers an ear, which is the thing a child
-/// has.
+/// **On by default.** A sleeping box wakes on an ear press (and reports
+/// `rst:0x5 (DSLEEP)`), while a parked box only responds to a power cycle,
+/// not even to `dl`.
 ///
-/// Sleep current is still unmeasured, and deliberately not a reason to wait.
-/// A park draws tens of milliamps; whatever sleep draws, it is not *more*, and
-/// it is wakeable. The measurement decides how good this is, not whether it
-/// beats parking.
+/// Sleep current has not been measured, but a park draws tens of milliamps
+/// and sleep does not draw more.
 ///
-/// `autosleep off` turns it back into a park for one session — for a bench
-/// that wants a box which cannot disappear mid-measurement. Lost on every
-/// reset, like `PLATE_POLLING` and `STAY_AWAKE`, so the default is what a
-/// child's box does.
+/// `autosleep off` makes the box park instead, for one session, so it cannot
+/// disappear during a measurement. Reset to on at every boot.
 static AUTO_SLEEP: AtomicBool = AtomicBool::new(true);
 
 /// Asks the task that polls the wake line to hand the pin over.
 ///
-/// The ending belongs to the console loop — it owns the rails, the codec and
-/// the `LPWR` peripheral — but the pin belongs to `inputs`, which polls it.
-/// Arming and entering have to happen close together and in one task: esp-hal
-/// treats a level interrupt as single-shot and clears the same bit sleep entry
-/// reads, so an ear pressed between the two turns a wakeable sleep into a
-/// panic. Moving the pin is cheaper than splitting the job.
+/// The console loop enters sleep (it owns the rails, the codec and the `LPWR`
+/// peripheral), but the pin belongs to `inputs`, which polls it. Arming the
+/// wake and entering sleep must happen together in one task: esp-hal clears
+/// a level interrupt when it fires, and that is the same bit sleep entry
+/// reads, so an ear pressed in between would cause a panic.
 static SLEEP_WANTED: AtomicBool = AtomicBool::new(false);
 
 /// Where the wake line waits between the two tasks.
 ///
-/// `inputs` stops polling the moment it puts the pin here and parks with the
-/// ears still held, so nothing drops a pin the sleep depends on. Put back by
-/// [`sleep_now`] whenever the sleep does not happen, so `sleep` can be typed
-/// again once whoever was holding an ear lets go.
+/// `inputs` stops polling as soon as it puts the pin here. [`sleep_now`] puts
+/// it back if sleep fails, so `sleep` can be tried again.
 static WAKE_LINE: CsMutex<RefCell<Option<Input<'static>>>> = CsMutex::new(RefCell::new(None));
 
 /// Takes the wake line, arms it, and enters deep sleep. Returns only on
 /// failure, and then the box is still awake and still dark.
 ///
-/// The caller has already gone dark: this says nothing a child can hear and
-/// nothing they can see.
+/// The caller has already turned off sound and lights.
 async fn sleep_now(lpwr: &mut Option<LPWR<'static>>) -> Result<(), &'static str> {
     SLEEP_WANTED.store(true, Ordering::Relaxed);
     let mut held = None;
@@ -2298,10 +2027,9 @@ async fn sleep_now(lpwr: &mut Option<LPWR<'static>>) -> Result<(), &'static str>
         return Err("the wake line never arrived");
     };
 
-    // A level wake on a line already at its wake level ends the sleep the
-    // instant it begins, and an ear holds this line down for as long as it is
-    // held — so the press that asked for this has to be over first. Bounded,
-    // because a line held for ten seconds is a fault and not a slow finger.
+    // A held ear keeps the line at its wake level, which would end the sleep
+    // at once, so wait for it to be released. Limited to ten seconds; longer
+    // is a fault.
     for _ in 0..200 {
         if wake.is_high() {
             break;
@@ -2309,10 +2037,8 @@ async fn sleep_now(lpwr: &mut Option<LPWR<'static>>) -> Result<(), &'static str>
         Timer::after(Duration::from_millis(50)).await;
     }
 
-    // Said before arming, not after. The line has to reach the UART before the
-    // chip stops clocking it, and that wait is dead time in which an ear press
-    // can clear the very bit sleep entry reads — so the waiting happens while
-    // nothing is armed yet, and arming is the last thing before entering.
+    // Printed before arming: the message needs time to leave the UART, and
+    // an ear press during that wait must not happen while the wake is armed.
     esp_println::println!("teddiebox: sleeping — press an ear to wake");
     Timer::after(Duration::from_millis(50)).await;
 
@@ -2333,16 +2059,13 @@ async fn sleep_now(lpwr: &mut Option<LPWR<'static>>) -> Result<(), &'static str>
 
 /// Everything a child can see or hear, off, in the order the hardware needs.
 ///
-/// One sequence, because there are two ways to reach it — the box deciding to
-/// stop, and a bench asking it to — and two copies of an order that matters
-/// would eventually stop matching.
+/// Shared by the box turning itself off and the console asking it to, so the
+/// order is only written once.
 async fn go_dark(board: &mut BoardPins<'_>, gates: &mut Gates, rgb: Option<&led::Rgb<'_>>) {
     quieten_codec().await;
-    // Before the rail goes down, not after. The LED is held by LEDC, which
-    // keeps driving its three channels with no processor involvement, and
-    // `Gates::led` refuses once the peripherals rail is down — so dropping the
-    // rail first left the parked box showing a steady green, seen at the bench
-    // on 2026-09-08.
+    // Before the rail goes down, not after. LEDC keeps driving the LED on its
+    // own, and `Gates::led` refuses once the peripherals rail is down, so
+    // doing this second would leave the LED lit.
     if let Some(rgb) = rgb {
         if let Ok(dark) = gates.led(board::Colour::Off) {
             rgb.apply(&dark, board::LED_DUTY);
@@ -2354,12 +2077,9 @@ async fn go_dark(board: &mut BoardPins<'_>, gates: &mut Gates, rgb: Option<&led:
 
 /// Stops the calling task for the rest of this power-on.
 ///
-/// `pending` never completes, so the executor never schedules the task again
-/// — no timer, no poll, no wakeup at all. Deliberately not a `return`: that
-/// would drop the pins and buses the task owns, and a dropped `Input` does
-/// not necessarily leave its pin the way a parked box wants it. Holding them
-/// in a future that never finishes keeps every pin exactly as the park left
-/// it.
+/// `pending` never completes, so the task is never scheduled again. Not a
+/// `return`, which would drop the pins and buses the task owns and might
+/// change their state; this keeps every pin as the park left it.
 async fn park_task() {
     core::future::pending::<()>().await;
 }
@@ -2376,11 +2096,9 @@ static BATLOG_EVERY: AtomicU8 = AtomicU8::new(0);
 
 /// Asked for before the rails go down, answered when the codec is quiet.
 ///
-/// The class-D amplifier is powered and unmuted for the whole of a session,
-/// and `rb` cut its supply out from under it — which is a click into the
-/// speaker beside a child's head. The codec can take itself down cleanly, but
-/// only over I2C, and that bus belongs to `motion`; hence a request rather
-/// than a call.
+/// The class-D amplifier stays powered during a session, and cutting its
+/// supply makes the speaker click. The codec can power down cleanly, but only
+/// over I2C, which `motion` owns, so this is a request rather than a call.
 static CODEC_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static CODEC_QUIET: AtomicBool = AtomicBool::new(false);
 
@@ -2393,26 +2111,21 @@ static CODEC_POWER_DOWN: AtomicBool = AtomicBool::new(false);
 /// What is plugged into the headphone jack, as far as the box knows.
 ///
 /// **The only place the firmware records this.** The detect poll in `motion`
-/// writes it, `hp 1` / `hp 0` overwrite it, and the codec bring-up reads it.
-/// `Action::SetOutput` deliberately does not: that action drives
-/// `SPEAKER_REQUEST` and nothing else, because two statics that can disagree
-/// about one fact is the shape the 2026-09-18 review objected to once.
+/// writes it, `hp 1` / `hp 0` override it, and the codec bring-up reads it.
+/// `Action::SetOutput` does not write it; it only drives `SPEAKER_REQUEST`, so
+/// there are never two copies that could disagree.
 static HEADPHONES_IN: AtomicBool = AtomicBool::new(false);
 
-/// Ask the motion task to read the headset-detect register and say what it
-/// says. A request rather than a print here, because the codec is on the
-/// motion task's bus and nothing else may touch it.
+/// Ask the motion task to read and print the headset-detect registers. A
+/// request, because the codec is on the motion task's bus.
 static HEADPHONE_REPORT: AtomicBool = AtomicBool::new(false);
 
 /// Full passes of the `motion` loop between headset-detect reads.
 ///
-/// The loop naps `ACCEL_POLL_MS`, so three passes is about 600 ms; plug to
-/// silence is that plus the codec's 128 ms debounce. Full passes, not
-/// iterations: the request handlers above `continue`, which skips the timer,
-/// so counting every iteration would poll far faster than this says.
-///
-/// Not worth making faster. Polling harder is the wrong reflex on this box —
-/// an empty plate's polling already costs more than the radio does.
+/// Each pass waits `ACCEL_POLL_MS`, so three passes is about 600 ms; plugging
+/// in takes effect after that plus the codec's 128 ms debounce. Counted in
+/// full passes, not iterations: the request handlers `continue`, which skips
+/// the wait.
 const HEADSET_DETECT_EVERY: u32 = 3;
 
 /// A pending speaker change: 0 nothing, 1 mute, 2 unmute, 3 resume.
@@ -2421,27 +2134,24 @@ const SPEAKER_MUTE: u8 = 1;
 const SPEAKER_UNMUTE: u8 = 2;
 /// Power the class-D amplifier if it is not already up, then unmute it.
 ///
-/// Distinct from `SPEAKER_UNMUTE`, which moves only the driver's mute bit.
-/// A story that began with headphones in never powered the amplifier — that
-/// click is deliberately not paid at the start of such a story — so the
-/// unplug has to power it before there is anything to unmute into. Kept apart
-/// from the plain unmute because `spk 1` exists so a bench can hear powering
-/// and unmuting separately, and folding them together would take that
-/// instrument away.
+/// Unlike `SPEAKER_UNMUTE`, which only clears the mute bit. A story started
+/// with headphones in never powered the amplifier (powering it clicks), so
+/// unplugging must power it first. Kept separate so the console `spk 1`
+/// command can still test unmuting on its own.
 const SPEAKER_RESUME: u8 = 3;
 
 /// A pending output power change: 0 nothing, 1 down, 2 up.
 ///
-/// Written through [`request_output`] only, so the task that acts on it is
-/// woken rather than left to find it after its nap.
+/// Only written through [`request_output`], which also wakes the task that
+/// acts on it.
 static OUTPUT_REQUEST: AtomicU8 = AtomicU8::new(0);
 const OUTPUT_DOWN: u8 = 1;
 const OUTPUT_UP: u8 = 2;
 
 /// Ends the `motion` task's nap early.
 ///
-/// Measured 2026-09-24: a story's output waited up to 132 ms for that nap to
-/// end, on the path from placing a figure to hearing it.
+/// Without it, starting a story's output waited up to 132 ms (measured) for
+/// the nap to end.
 static CODEC_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Asks for the codec's output to be powered up or down, now.
@@ -2452,11 +2162,8 @@ fn request_output(request: u8) {
 
 /// Register overrides applied to the codec's start-up sequence.
 ///
-/// The table and its three rules live in `tlv320dac3100`, where they are
-/// tested without a box; this is the lock around one. It was an array of
-/// packed `AtomicU32` here, lock-free so a console write and a codec bring-up
-/// could not collide — which bought nothing a critical section around six
-/// `Option`s does not, and cost the rules a form anything could test.
+/// The table and its rules live in `tlv320dac3100`, where they are tested;
+/// this is only the lock around it.
 static CODEC_OVERRIDES: CsMutex<RefCell<tlv320dac3100::Overrides>> =
     CsMutex::new(RefCell::new(tlv320dac3100::Overrides::new()));
 
@@ -2482,9 +2189,8 @@ fn codec_apply_overrides<'a>(
 
 /// How long a reboot waits for the codec before going ahead regardless.
 ///
-/// Going ahead is the right failure: a box that will not reboot is worse than
-/// one that clicks, and the bench needs `rb` to work even when the codec does
-/// not answer.
+/// A click is better than a box that will not reboot, so `rb` must work even
+/// when the codec does not answer.
 const CODEC_SHUTDOWN_TIMEOUT_MS: u64 = 800;
 
 /// Asks the codec to go quiet, and waits until it has or the wait runs out.
@@ -2500,40 +2206,23 @@ async fn quieten_codec() {
     }
 }
 
-/// Owns the I2S peripheral and the SD bus, and serves the bench commands that
-/// need them.
-///
-/// One task for three jobs because they contend for the same two pieces of
-/// hardware. The card is mounted once and kept, so `sd` and `wav` do not each
-/// re-identify it and re-raise the bus clock.
-///
-/// The tone and WAV playback are both terminal: each takes the I2S peripheral
-/// and does not give it back — the tone by design, since it repeats forever,
-/// and playback because its DMA buffer is a `static` claimed once whose
-/// pre-fill state this does not re-derive. `rb` restarts the box, which is the
-/// documented way to run another.
 /// How much room the card's configuration file is given.
 ///
-/// A read that fills this is refused rather than parsed — see
-/// [`teddiebox_config::Config::parse_read`] — so this is the file-size limit,
-/// not a hint. The file as written is under a kilobyte; the rest is room for
-/// somebody to add comments without the box quietly disagreeing about what
-/// they configured.
+/// A file that fills this is refused rather than parsed (see
+/// [`teddiebox_config::Config::parse_read`]), so this is the file-size limit.
+/// A typical file is under a kilobyte; the rest leaves room for comments.
 const CONFIG_BUFFER: usize = 2048;
 
 /// Reads the card's copy of the certificate authority, so the server can be
 /// verified even on a box whose identity is missing or invalid.
 ///
-/// The box's own certificate and key are not read here, or anywhere off the
-/// card: they come from flash, read once at boot in [`identity::load`].
+/// The box's own certificate and key are never read from the card: they come
+/// from flash, read once at boot in [`identity::load`].
 fn read_anchor(card: &storage::Mounted) {
     let mut certificate = [0u8; tls::CERT_BYTES];
 
-    // `ca`, not `identity`: the box's own certificate and key come from flash
-    // and report under `identity`, and these two used to be one function. A
-    // console whose worth is that every line means something should not use
-    // one word for both the box proving who it is and the box checking who it
-    // is talking to.
+    // Printed as `ca`, not `identity`, which is used for the box's own
+    // certificate and key, so the two are not confused.
     match card.read_certificate("TCCA.DER", &mut certificate) {
         Ok(n) if tls::set_anchor(&certificate[..n]) => {
             esp_println::println!("teddiebox: ca {n} bytes — the server is checked against it")
@@ -2549,14 +2238,11 @@ fn read_anchor(card: &storage::Mounted) {
 /// Reads `CONFIG.TXT` the first time the card is available, and says what it
 /// found.
 ///
-/// **A card that cannot be configured does not stop the box.** Everything
-/// already on it still plays; only the network stays down. A typo in a text
-/// file must never cost a child their story, and the box is a toy before it is
-/// a network client.
+/// **A bad configuration file does not stop the box.** Everything on the card
+/// still plays; only the network stays down.
 ///
-/// It says so twice, because the two audiences are different: a line on the
-/// console for whoever has a cable, and the box's own words for whoever does
-/// not.
+/// The problem is reported both on the console and as a spoken sound, for
+/// people without a cable.
 fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
     if *done {
         return;
@@ -2568,8 +2254,8 @@ fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
     let mut buffer = [0u8; CONFIG_BUFFER];
     match card.read_config(&mut buffer) {
         Ok(config) => {
-            // The passphrase is not printed, here or anywhere. Its length is
-            // enough to tell a truncated card from a wrong one.
+            // The passphrase is never printed; its length is enough to spot
+            // a truncated one.
             esp_println::println!(
                 "teddiebox: config ssid {}, server {}, passphrase {} chars",
                 config.ssid,
@@ -2590,8 +2276,8 @@ fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
 
 /// Holds a figure's place in RAM, writing the previous one out if it must.
 ///
-/// The card is written for the *outgoing* figure only: its place is about to
-/// become unreachable, and this is the last moment anything knows it.
+/// Only the displaced figure's place is written to the card, because it is
+/// about to be dropped from RAM.
 fn remember_in_ram(index: &CardIndex<'_>, tag: TagUid, page: u32) {
     let displaced =
         critical_section::with(|cs| PENDING_PLACE.borrow_ref_mut(cs).remember(tag, page));
@@ -2606,25 +2292,24 @@ fn remember_in_ram(index: &CardIndex<'_>, tag: TagUid, page: u32) {
 
 /// What RAM is holding for this figure, if anything.
 ///
-/// Asked before the card, because the slot is newer by construction: it is
-/// written the moment a figure comes off, and the card only learns later.
+/// Checked before the card, because it is always newer: it is written as soon
+/// as a figure is lifted, and the card only later.
 pub(crate) fn held_place(tag: TagUid) -> Option<u32> {
     critical_section::with(|cs| PENDING_PLACE.borrow_ref(cs).held(tag))
 }
 
 /// Drops a story's held place, by the path it lives at.
 ///
-/// Called where the place has stopped meaning anything — a story that reached
-/// its end. Taking the ruid rather than the tag because the media task knows
-/// where it is playing from and not which figure asked.
+/// Called when a story reaches its end. Takes the ruid rather than the tag,
+/// because the media task knows the file it plays, not which figure asked.
 fn forget_place(ruid: u64) {
     critical_section::with(|cs| PENDING_PLACE.borrow_ref_mut(cs).forget(ruid));
 }
 
 /// Puts whatever RAM is holding onto the card.
 ///
-/// Called where the slot is about to be lost for good. Idempotent by
-/// construction: the slot is emptied, so a second call writes nothing.
+/// Called when RAM is about to be lost. The slot is emptied, so a second call
+/// writes nothing.
 fn flush_place(index: &CardIndex<'_>, why: &str) {
     let held = critical_section::with(|cs| PENDING_PLACE.borrow_ref_mut(cs).take());
     if let Some((tag, page)) = held {
@@ -2644,22 +2329,17 @@ fn write_place(index: &CardIndex<'_>, tag: TagUid, page: u32, why: &str) {
 
 /// Carries out one of the reducer's decisions.
 ///
-/// Every arm reaches a path a console command already takes, by setting the
-/// same statics that command sets. Nothing new is built here: what this adds
-/// is that the box can now reach those paths without anybody typing.
+/// Most actions set the same statics as the matching console command.
 ///
-/// `token` is the credential that came with the figure currently on the
-/// plate, kept by the caller rather than in a shared static — see
-/// [`FetchRequest`] for why splitting it from the tag it belongs to is the
-/// mistake this whole path exists to avoid.
+/// `token` is the credential of the figure currently on the plate, passed in
+/// rather than kept in a shared static; see [`FetchRequest`] for why.
 fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
     match action {
         Action::Play { tag, from } => {
             let path = teddiebox_download::content_path(tag.0);
-            // A shipped story lives under `CONTENT/` and a downloaded one under
-            // `CACHE/`, and neither request looks in the other's directory. The
-            // index has just answered this very question to decide the story
-            // was there at all; asking it again is what turns that into a path.
+            // A story that came with the card is under `CONTENT/`, a
+            // downloaded one under `CACHE/`, and each request only looks in
+            // its own directory.
             let request = if index.on_stock_card(path.directory, path.file) {
                 REQUEST_CONTENT
             } else {
@@ -2678,33 +2358,30 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             );
             CONTENT_DIRECTORY.store(path.directory, Ordering::Relaxed);
             CONTENT_FILE.store(path.file, Ordering::Relaxed);
-            // The storage rail is already up, or the card would not be mounted.
-            // The codec's output stage is a different matter: `play <16 hex>`
-            // leaves raising it to whoever typed it, and nobody typed this.
+            // The storage rail is already on, or the card would not be
+            // mounted, but the codec's output must be powered here; the
+            // console `play` command leaves that to the user.
             request_output(OUTPUT_UP);
             REQUEST.store(request, Ordering::Relaxed);
         }
 
-        // Pausing and stopping are the same act here. Nothing remembers where a
-        // story got to, so a pause that could be resumed does not yet exist.
+        // Both just stop playback. Where the story got to is saved separately,
+        // by `SavePosition`.
         Action::Pause | Action::Stop => {
             esp_println::println!("teddiebox: plate stopping");
             audio::STOP.store(true, Ordering::Relaxed);
         }
 
-        // The parental ceiling, the stepping and which ladder a step is on are
-        // all the reducer's; the dB arrives already said in the codec's units.
+        // Limits and steps are handled by the reducer; this only passes on
+        // the level in dB.
         Action::SetVolume { step, db } => {
             esp_println::println!("teddiebox: volume step {} — {db} dB", step.0);
             VOLUME_REQUEST.store(db, Ordering::Relaxed);
         }
 
-        // Muting the class-D driver, and nothing else. In particular not
-        // `HEADPHONES_IN`: what is plugged in has one writer, and two statics
-        // that can disagree about one fact is the shape the 2026-09-18 review
-        // objected to. Muted rather than powered down because powering an
-        // output stage is what clicks, measured by ear, whether or not the
-        // driver in front of it is muted.
+        // Only mutes or unmutes the class-D driver; `HEADPHONES_IN` is left
+        // to the detect poll. Muted rather than powered down, because
+        // powering an output stage clicks even when it is muted.
         Action::SetOutput(output) => {
             esp_println::println!(
                 "teddiebox: output {}",
@@ -2713,11 +2390,9 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                     AudioOutput::Headphones => "headphones",
                 }
             );
-            // `SPEAKER_RESUME` rather than a plain unmute: a story that began
-            // with headphones in never powered the class-D amplifier, so the
-            // unmute would have nothing to unmute into. Powering it is
-            // audible, and this is the moment to pay for it — somebody has
-            // just pulled a plug out.
+            // `SPEAKER_RESUME` rather than a plain unmute: a story started
+            // with headphones in never powered the amplifier. The click of
+            // powering it is acceptable just after a plug was pulled.
             SPEAKER_REQUEST.store(
                 match output {
                     AudioOutput::Speaker => SPEAKER_RESUME,
@@ -2727,9 +2402,8 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             );
         }
 
-        // Which chapter is playing, and what the ends of the story mean, are
-        // the decoder's — it is the only thing that knows either. This says
-        // only which way.
+        // Only the direction is given; the decoder knows the chapters and
+        // what to do at either end of the story.
         Action::NextTrack => {
             esp_println::println!("teddiebox: skip forward");
             audio::SKIP.store(audio::SKIP_FORWARD, Ordering::Relaxed);
@@ -2748,8 +2422,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         Action::RequestContent(tag) => {
             let ruid = tag.ruid();
             esp_println::println!("teddiebox: plate fetching {ruid:016X}");
-            // Written whole, in the one call: see `FetchRequest` for why the
-            // ruid and the token it authorises never travel separately.
+            // Written as one value; see `FetchRequest`.
             critical_section::with(|cs| {
                 *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest {
                     ruid,
@@ -2780,19 +2453,17 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
 
         Action::PlayPrompt(prompt) => match Sound::for_prompt(prompt) {
             Some(sound) => SOUND_REQUEST.store(sound.file(), Ordering::Relaxed),
-            // No file on this card has been identified for this sentence, and
-            // substituting another would have the box say something true about
-            // the wrong thing. The console hears it; the child hears nothing.
+            // No sound file is known for this message, and playing another
+            // would say the wrong thing, so only the console is told.
             None => esp_println::println!(
                 "teddiebox: plate no sound identified for {prompt:?} — saying nothing"
             ),
         },
 
         Action::SavePosition { tag, pos } => {
-            // Into RAM, not onto the card. A child lifts a figure and puts it
-            // back over and over, and each of those is a place worth keeping
-            // but not a place worth a card write — the card only has to know
-            // once the box is about to forget.
+            // Kept in RAM, not written to the card: figures are lifted and put
+            // back often, and the card only needs the place when RAM is about
+            // to be lost.
             if let Position::Exact { page } = pos {
                 remember_in_ram(index, tag, page);
             }
@@ -2800,16 +2471,10 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
 
         Action::SetLed(state) => LED_REQUEST.store(state.code(), Ordering::Relaxed),
 
-        // The one place the box decides to stop. It used to be decided twice —
-        // here in the reducer's words, where nothing acted on it, and again by
-        // a second model of the pack in the console loop, which is what
-        // actually happened. The console loop now only samples.
-        //
-        // Raised rather than acted on directly: the console loop owns the
-        // rails, the codec and the card's last write, and it waits for the
-        // announcement raised alongside this to finish before it acts. Said
-        // here rather than there, because this is the only place that knows
-        // which of the two authorities decided.
+        // The only place the box decides to turn off. It is only flagged
+        // here: the console loop owns the rails, the codec and the last card
+        // write, and waits for the announcement to finish before acting. The
+        // reason is printed here, because only this place knows it.
         Action::PowerOff(reason) => {
             esp_println::println!(
                 "teddiebox: plate powering off — {}",
@@ -2818,22 +2483,19 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                     PowerOffReason::Idle => "nothing has used the box",
                 }
             );
-            // A pack below the cutoff must stop being driven, and a story left
-            // running drives it for another half hour — which is the discharge
-            // the cutoff exists to prevent, on cells with no protection
-            // circuit. Safe for the announcement queued alongside this: every
-            // playback clears `STOP` before its first frame.
+            // Stop the story: the cells have no protection circuit, and a
+            // story left running would drain them for another half hour. The
+            // announcement still plays, because every playback clears `STOP`
+            // before its first frame.
             //
-            // A stop is not an ending. `play_taf` answers `Finish::Stopped`,
-            // and the completion path — which clears the story's place and
-            // tells the reducer it ended — is reached only on `Finish::Ended`,
-            // so the child's place survives being switched off.
+            // A stop is not an ending: `play_taf` returns `Finish::Stopped`,
+            // and only `Finish::Ended` clears the story's place, so the place
+            // survives the power-off.
             audio::STOP.store(true, Ordering::Relaxed);
             SHUTTING_DOWN.store(true, Ordering::Relaxed);
         }
 
-        // The rest are not reachable, and saying what was wanted is the
-        // honest half of that.
+        // Any other action is not handled; print it.
         other => esp_println::println!("teddiebox: plate not wired — {other:?}"),
     }
 }
@@ -2841,19 +2503,16 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
 /// Drains the reader's signal into what the media task believes is on the
 /// plate.
 ///
-/// All that is left here is the signal, which is the part a host test cannot
-/// have; the figure and its token are replaced together by [`Placed::observe`]
-/// where a test can drive it. They are two halves of one identity, and letting
-/// them drift apart is the bug [`FetchRequest`] exists to make unrepresentable.
+/// The figure and its token are updated together by [`Placed::observe`],
+/// which has host tests; only the signal is handled here.
 ///
-/// Called from two places — once per pass of the media loop, and once per
-/// frame while a story plays — because a loop pass is a whole story long and a
-/// figure lifted during one must not wait for it to end.
+/// Called once per pass of the media loop and once per frame while a story
+/// plays, because one loop pass lasts a whole story and a lift must be seen
+/// before it ends.
 fn take_plate_event(placed: &mut Placed) -> Option<Event> {
     let event = placed.observe(PLATE_TAG.try_take()?);
-    // A lift ends any question about the figure, here where the lift is first
-    // seen. Settled later in the same pass, an answer would be judged against
-    // a figure already put back — before the reducer has heard it is back.
+    // A lift cancels any open question about the figure, as soon as it is
+    // seen. Later in the pass, the figure might already be back on the plate.
     if event == Event::TagAbsent {
         critical_section::with(|cs| REVALIDATION.borrow_ref_mut(cs).withdrawn());
     }
@@ -2862,14 +2521,12 @@ fn take_plate_event(placed: &mut Placed) -> Option<Event> {
 
 /// Hands the reducer every ear edge that has settled since it was last asked.
 ///
-/// Drained rather than read one at a time, because `Core` pairs a press with
-/// its release and leaving half a pair in the queue is what turns the next tap
-/// into a hold.
+/// Drains the whole queue, because `Core` pairs a press with its release, and
+/// leaving half a pair behind would turn the next tap into a hold.
 ///
-/// Needs the card only because `Core::handle` takes an index for every event,
-/// not because an ear does. A box whose card would not mount has nothing to
-/// play and so nothing to turn down, which is what makes that acceptable
-/// rather than merely convenient.
+/// Needs the card only because `Core::handle` takes an index for every event.
+/// Without a card there is nothing to play, so ears not working then does
+/// not matter.
 fn apply_ear_events(reducer: &mut Core, card: &storage::Mounted, token: Option<[u8; 32]>) {
     while let Ok(event) = INPUT_EVENTS.try_receive() {
         apply(reducer, card, event, token);
@@ -2878,14 +2535,11 @@ fn apply_ear_events(reducer: &mut Core, card: &storage::Mounted, token: Option<[
 
 /// Tells the reducer what happened and carries out what it decides.
 ///
-/// The index is built here and dropped at the end: it borrows the card, and
-/// the rest of the media loop needs the card unborrowed — which is the whole
-/// reason it is this cheap to construct.
+/// The index is built here and dropped at the end, because it borrows the
+/// card, which the rest of the media loop needs. It is cheap to build.
 fn apply(reducer: &mut Core, card: &storage::Mounted, event: Event, token: Option<[u8; 32]>) {
-    // Reported on every event rather than once a second with the tick: this is
-    // what decides whether a press is ambiguous, and a press arriving in the
-    // second after `ears skip off` was typed must not be judged by the old
-    // answer. Reading it costs a critical section and no card access.
+    // Updated on every event, not once a second with the tick, so a press
+    // right after `ears skip off` already uses the new setting. It is cheap.
     reducer.note_ears_skip(ears_skip());
     let index = CardIndex::new(card);
     for action in reducer.handle(event, &index) {
@@ -2895,12 +2549,10 @@ fn apply(reducer: &mut Core, card: &storage::Mounted, event: Event, token: Optio
 
 /// The core's only clock, fed at most once a second.
 ///
-/// Called from both the top of the media loop and the per-frame `attend`
-/// closure inside a playing story, so there has to be one rate limit rather
-/// than two: a tick per frame would be a tick every few milliseconds, and this
-/// project has measured audible DMA restarts from far less extra work than
-/// that in the media loop. A second is far finer than a five-minute timeout
-/// needs.
+/// Called from the top of the media loop and from the per-frame `attend`
+/// closure while a story plays, so it limits itself: a tick every frame would
+/// add enough work to cause audible DMA restarts. Once a second is plenty for
+/// a five-minute timeout.
 fn feed_tick(
     reducer: &mut Core,
     card: &storage::Mounted,
@@ -2910,12 +2562,9 @@ fn feed_tick(
     let now = Instant::now().as_millis();
     if now.saturating_sub(*last_fed) >= 1_000 {
         *last_fed = now;
-        // Reported beside the clock it guards, because the reducer's state
-        // answers for figures on the plate and nothing else. A console `play`
-        // or `taf` runs with it sitting at `Idle`, and a `batlog` run is hours
-        // of deliberate use during which the box may make no sound at all —
-        // both of which the idle timeout would otherwise cut short. The fact
-        // is reported here; the policy is the reducer's.
+        // The reducer only knows about figures on the plate. Console
+        // playback, a `batlog` run or `awake on` also count as use, or the
+        // idle timeout would cut them short.
         reducer.note_in_use(
             PLAYING.load(Ordering::Relaxed)
                 || BATLOG_EVERY.load(Ordering::Relaxed) > 0
@@ -2925,6 +2574,13 @@ fn feed_tick(
     }
 }
 
+/// Owns the I2S peripheral and the SD card, runs the reducer, plays stories
+/// and sounds, writes downloads to the card, and serves the console commands
+/// that need this hardware.
+///
+/// The card is mounted once and kept. The test tone and WAV playback keep the
+/// I2S peripheral until the box restarts; story playback gives it back when
+/// it ends.
 #[embassy_executor::task]
 async fn media(
     spi: Spi<'static, esp_hal::Blocking>,
@@ -2933,62 +2589,49 @@ async fn media(
     mut tone_buffer: esp_hal::dma::DmaLoopBuf,
     wav_buffer: esp_hal::dma::DmaTxStreamBuf,
 ) {
-    // Exactly one cycle of a sine, looped by the DMA forever.
-    //
-    // A stream buffer was tried first and underran: the transfer starts as
-    // soon as it is created, ran off the end of an empty buffer before the
-    // first sample was pushed, and never restarted. A fixed repeating waveform
-    // wants a buffer the DMA repeats rather than one the CPU refills.
+    // Exactly one cycle of a sine, repeated by the DMA for ever. A loop
+    // buffer, not a stream buffer: a stream transfer starts at once and
+    // underruns before the first sample is written.
     for (i, sample) in tone::SINE.iter().enumerate() {
         let bytes = sample.to_le_bytes();
-        // Interleaved stereo, the same sample in both slots. The codec takes
-        // its speaker path from the left channel and its headphones from both,
-        // so a single channel would make the result depend on which output is
-        // being listened to.
+        // The same sample in both stereo channels: the speaker uses the left
+        // channel and the headphones use both.
         tone_buffer[i * 4] = bytes[0];
         tone_buffer[i * 4 + 1] = bytes[1];
         tone_buffer[i * 4 + 2] = bytes[0];
         tone_buffer[i * 4 + 3] = bytes[1];
     }
 
-    // Every one of these is claimed once and not returned, so each is held in
-    // an Option and taken when its command arrives.
+    // Each is held in an Option and taken when a command needs it; the tone
+    // and WAV playback never give theirs back.
     let mut card: Option<storage::Mounted> = None;
-    // The card is read for configuration once. A second read would undo a
-    // bench override typed since, which is the opposite of what the console
-    // commands are for.
+    // The configuration is read from the card only once, so a later read
+    // does not undo settings typed at the console.
     let mut configured = false;
     let mut bus = Some((spi, cs));
     let mut i2s_tx = Some(i2s_tx);
     let mut tone_buffer = Some(tone_buffer);
     let mut wav_buffer = Some(wav_buffer);
-    // The tone's transfer stops when it is dropped, so it is parked here for
-    // as long as the tone should play — which is until the box restarts.
+    // The tone stops when its transfer is dropped, so it is kept here until
+    // the box restarts.
     let mut _tone_transfer = None;
 
     let mut download: Option<CacheWrite> = None;
 
-    // The thing that decides what a figure on the plate means. It lives here
-    // because the only question it asks — what is on the card — can only be
-    // answered by the task that owns the card.
+    // Decides what to do with a figure on the plate. It lives here because it
+    // needs to know what is on the card, and this task owns the card.
     let mut reducer = Core::new(CoreConfig::default());
-    // Which figure the box is currently answering for, or none. A download
-    // ends elsewhere and says only that it ended; this is what turns that into
-    // an event about a particular story. `None` is also the test for "nobody
-    // is waiting any more", which is what makes a fetch that finishes after
-    // the figure was lifted harmless.
-    // The token it arrived with is held in the same value rather than in a
-    // shared static: it is read exactly once, when the reducer actually asks
-    // for a fetch, and bundled with that figure's ruid into one
-    // `FetchRequest` write — so nothing typed at the console between now and
-    // then can attach itself to this figure's fetch.
+    // The figure on the plate, if any, with its token. Used to match a
+    // finished download or probe to the figure it was for; with no figure, a
+    // late result is ignored. The token is kept here rather than in a shared
+    // static, so nothing typed at the console can be attached to this
+    // figure's fetch.
     let mut placed = Placed::empty();
-    // The last millisecond a `Tick` was fed to the reducer, so `feed_tick` can
-    // rate-limit itself across both call sites — the top of this loop and the
-    // per-frame `attend` closure inside a playing story.
+    // When a `Tick` was last fed to the reducer, shared by both `feed_tick`
+    // call sites.
     let mut last_tick_fed: u64 = 0;
-    // Whether this boot has asked the net task to prime the connection; see
-    // `NET_PRIME`. Once per boot, whatever came of it.
+    // Whether this boot has asked the net task to prime the connection (see
+    // `NET_PRIME`). Only tried once per boot.
     let mut primed = false;
 
     loop {
@@ -2997,12 +2640,11 @@ async fn media(
             park_task().await;
         }
 
-        // Fed before the request is read, so a `Play` decided here is picked
-        // up on the same pass rather than the next one.
+        // Events are handled before the request is read, so a `Play` decided
+        // here starts in the same pass.
         let mut events: [Option<Event>; 3] = [None, None, None];
 
-        // Asked before anything else, because the answer is only useful while
-        // the card is still writable.
+        // Checked first, because the card is about to become unwritable.
         if FLUSH_PLACE.swap(false, Ordering::Relaxed) {
             if let Some(card) = card.as_ref() {
                 flush_place(&CardIndex::new(card), "the box is stopping");
@@ -3011,15 +2653,13 @@ async fn media(
 
         events[0] = take_plate_event(&mut placed);
 
-        // A download has ended somewhere this task cannot see. Read every pass
-        // so a stale answer cannot arrive later attached to a different figure.
+        // A download ended in another task. Read every pass so an old result
+        // cannot later be matched to a different figure.
         let (outcome, outcome_ruid) = take_fetch_outcome();
         if outcome != FETCH_NOTHING {
             match placed.answering(outcome_ruid) {
-                // The figure this outcome was for is still on the plate: the
-                // reducer's guard checks the same identity again before
-                // acting, but the event it sees is at least about the right
-                // figure.
+                // The figure it was for is still on the plate. (The reducer
+                // checks the identity again before acting.)
                 Answering::TheFigure(tag) => {
                     events[1] = match outcome {
                         FETCH_COMPLETED => Some(Event::ContentReady(tag)),
@@ -3033,37 +2673,29 @@ async fn media(
                         _ => unreachable!("outcome != FETCH_NOTHING was just checked"),
                     };
                 }
-                // A figure is on the plate, but this outcome belongs to a
-                // different one — a console `get` that finished while
-                // something else sits here. Attributing it to the figure on
-                // the plate is exactly the bug this identity exists to
-                // prevent, so the reducer never sees it.
+                // A different figure is on the plate, for example after a
+                // console `get`. Not passed to the reducer.
                 Answering::AnotherFigure => esp_println::println!(
                     "teddiebox: plate ignoring a fetch outcome for {outcome_ruid:016X} — \
                      not the figure on the plate"
                 ),
-                // Nobody is waiting. Already the harmless case this read
-                // exists to guarantee.
+                // Nobody is waiting; nothing to do.
                 Answering::NoFigure => {}
             }
         }
 
         // The server has answered a question about a cached story. Read every
-        // pass, and guarded by identity for the same reason the fetch outcome
-        // is: an answer that arrives after the figure was lifted or swapped
-        // belongs to nobody.
-        // Each call into the machine is its own short critical section, and
-        // nothing prints inside one: a console line at 115200 baud is
-        // milliseconds with interrupts off.
+        // pass and matched to the figure, like the fetch outcome. Each call is
+        // its own short critical section, with no printing inside: a console
+        // line at 115200 baud would keep interrupts off for milliseconds.
         let mut settled = None;
         if let Some((ruid, answer)) = take_answer() {
             settled =
                 critical_section::with(|cs| REVALIDATION.borrow_ref_mut(cs).answered(ruid, answer));
             if settled.is_none() {
-                // An answer to a question that is already over — the patience
-                // ran out, or an earlier answer settled it. Acting on it is
-                // what once armed the stale flag for a figure playing its card
-                // copy, so it goes no further than the console.
+                // The question is already over: it timed out, or an earlier
+                // answer settled it. Acting on it could mark a story stale
+                // that is already playing, so it is only printed.
                 esp_println::println!("teddiebox: plate ignoring a late answer about {ruid:016X}");
             }
         }
@@ -3087,10 +2719,9 @@ async fn media(
         {
             match placed.answering(probed_ruid) {
                 Answering::TheFigure(tag) => {
-                    // Remembered whatever the answer was. A server that was
-                    // unreachable a moment ago is unreachable for the rest of
-                    // a five-minute session, and asking it again on the next
-                    // placement spends the radio to be told the same thing.
+                    // Remembered whatever the answer: a server that was just
+                    // unreachable will likely stay so for the session, and
+                    // asking again wastes the radio.
                     critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
                     events[2] = Some(Event::Revalidated(
                         tag,
@@ -3105,10 +2736,10 @@ async fn media(
             }
         }
 
-        // Once the jingle is over, with nothing on the plate, the first ask's
-        // slow work is done ahead of it. A figure already on the plate has
-        // its own ask doing the same work, and one placed while this runs is
-        // served on the same association.
+        // Once the jingle is over and the plate is empty, do the slow part of
+        // the first network request in advance. A figure already on the plate
+        // does this work itself, and one placed during priming uses the same
+        // connection.
         if !primed
             && configured
             && placed.figure().is_none()
@@ -3132,21 +2763,15 @@ async fn media(
             }
         }
 
-        // Every pass, not only when a figure moved: a tap has nothing to do
-        // with the plate and must not wait for one.
+        // Every pass, not only when a figure moved: ear presses are
+        // independent of the plate.
         if let Some(mounted) = card.as_ref() {
             apply_ear_events(&mut reducer, mounted, placed.token());
         }
 
-        // The core's only clock. Withheld until now because `Core` emits
-        // `PowerOff` on a tick once the idle timeout passes and nothing acted
-        // on it — so feeding it did nothing, and wiring it without the arm in
-        // `perform` would have been a shutdown nobody could see coming.
-        //
-        // This alone would not be enough: a story plays for the whole length
-        // of `play_taf`, below, so a tick fed only here would go stale for as
-        // long as half an hour. `feed_tick` is called again from inside that
-        // call's `attend` closure for exactly that reason.
+        // The reducer's only clock; it turns the box off after the idle
+        // timeout. A story plays inside `play_taf` below, for up to half an
+        // hour, so `feed_tick` is also called from its `attend` closure.
         if let Some(mounted) = card.as_ref() {
             feed_tick(&mut reducer, mounted, placed.token(), &mut last_tick_fed);
         }
@@ -3158,9 +2783,8 @@ async fn media(
                         apply(&mut reducer, mounted, event, placed.token());
                     }
                 }
-                // A figure answered with nothing at all is the failure this
-                // whole feature exists to remove, so it is at least said out
-                // loud on the one channel that is left.
+                // Without a card the figure cannot be handled; at least say
+                // so on the console.
                 None => esp_println::println!(
                     "teddiebox: plate no card mounted — the figure cannot be answered"
                 ),
@@ -3169,19 +2793,18 @@ async fn media(
 
         let request = REQUEST.swap(REQUEST_NONE, Ordering::Relaxed);
         if request == REQUEST_NONE {
-            // Serviced here rather than in a branch of its own, so a download
-            // makes progress in the gaps without ever owning the loop.
+            // Serviced when idle, so a download progresses in the gaps without
+            // blocking the loop.
             let downloading = service_download(card.as_ref(), &mut download);
-            // A late drain stalls the socket, so poll hard while bytes are
-            // moving and idle politely when they are not.
+            // A late drain stalls the socket, so poll fast while downloading.
             let gap = if downloading { 5 } else { 100 };
             Timer::after(Duration::from_millis(gap)).await;
             continue;
         }
 
-        // The console loop raised the storage rail before setting the request.
-        // Devices need their supply settled before they answer — a scan against
-        // an unsettled rail is what invented an I2C device at 0x09 in step 4.
+        // The console loop switched the storage rail on before setting the
+        // request; wait briefly for the supply to settle before using the
+        // card.
         if matches!(
             request,
             REQUEST_WALK
@@ -3205,8 +2828,8 @@ async fn media(
                     card = Some(mounted)
                 }
                 Err(reason) => {
-                    // The bus was consumed by the attempt, so nothing needing
-                    // the card can be retried without a restart.
+                    // The attempt used up the bus, so the card cannot be
+                    // retried without a restart.
                     esp_println::println!("teddiebox: sd failed — {reason}");
                     continue;
                 }
@@ -3266,10 +2889,8 @@ async fn media(
                 let Some(card) = card.as_ref() else {
                     continue;
                 };
-                // Checked before anything is taken. Building a tuple of takes
-                // and matching on it afterwards drops whichever resource did
-                // come back when the other did not — which quietly destroyed
-                // the DMA buffer a later command still needed.
+                // Checked before taking either: taking both and then matching
+                // would drop one if the other was missing.
                 if i2s_tx.is_none() || wav_buffer.is_none() {
                     esp_println::println!(
                         "teddiebox: the audio hardware is already claimed — rb to run another"
@@ -3280,18 +2901,14 @@ async fn media(
                     continue;
                 };
 
-                // A stop typed before the first frame must not be waiting for
-                // the next playback to start. Nor must a skip: an ear held
-                // down with nothing playing would otherwise lose the first
-                // chapter of whatever is played next.
+                // Clear any stop or skip left over from before, or it would
+                // act on this playback.
                 audio::STOP.store(false, Ordering::Relaxed);
                 audio::SKIP.store(audio::SKIP_NONE, Ordering::Relaxed);
 
-                // Raised around every path that feeds the DMA, so the
-                // download knows to leave the radio alone. Cleared on the way
-                // out whatever happened — a download paused for ever because
-                // playback failed would be a worse bug than the glitch this
-                // avoids.
+                // Set while feeding the DMA, so the download leaves the radio
+                // alone. Always cleared afterwards, even on failure, or the
+                // download would pause for ever.
                 PLAYING.store(true, Ordering::Relaxed);
                 if request == REQUEST_WAV {
                     if let Err(reason) = audio::play_first_wav(card, tx, buffer).await {
@@ -3309,27 +2926,10 @@ async fn media(
                         },
                         _ => audio::Source::First,
                     };
-                    // Answered on every frame, because a story is one pass of
-                    // this loop and can be half an hour long. Without it the
-                    // plate is not read again until the story ends by itself,
-                    // and lifting the figure does nothing — the reducer never
-                    // sees the departure, so it never asks for the stop.
-                    //
-                    // The ears are here for the same reason and it is the
-                    // whole point of them: turning a story down while it plays
-                    // is when anybody reaches for an ear at all.
-                    //
-                    // The tick is here too, rate-limited by `feed_tick` to
-                    // once a second: without it the idle clock goes stale for
-                    // the whole length of the story, since the top-of-loop
-                    // tick never runs while this call is still awaiting.
-                    // Only a story the box can name has a place worth keeping.
-                    // A root `.TAF` played from the console arrives here too,
-                    // as `Source::First`, and `CONTENT_DIRECTORY` then holds
-                    // whatever the last real story left behind — so without
-                    // this guard a console `taf` would write its chapter into
-                    // some other figure's file, and reaching its end would
-                    // wipe that figure's place entirely.
+                    // Only a story with a known path has a position to keep.
+                    // A console `taf` plays `Source::First`, and
+                    // `CONTENT_DIRECTORY` then still names the previous story,
+                    // so without this check its position would be overwritten.
                     let identified = matches!(request, REQUEST_CONTENT | REQUEST_CACHE);
                     let stock = request == REQUEST_CONTENT;
                     let dir = CONTENT_DIRECTORY.load(Ordering::Relaxed);
@@ -3337,11 +2937,14 @@ async fn media(
                     let from = match critical_section::with(|cs| {
                         core::mem::replace(&mut *PLAY_FROM.borrow_ref_mut(cs), Position::Start)
                     }) {
-                        // Taken either way, so a figure's place cannot be
-                        // inherited by whatever plays next.
+                        // Cleared either way, so the next story does not
+                        // start at this figure's position.
                         from if identified => from,
                         _ => Position::Start,
                     };
+                    // Called on every frame, because a story is one pass of
+                    // this loop and can last half an hour: lifting the figure,
+                    // ear presses and the idle clock must still be handled.
                     let mut attend = || {
                         if let Some(event) = take_plate_event(&mut placed) {
                             apply(&mut reducer, card, event, placed.token());
@@ -3349,15 +2952,14 @@ async fn media(
                         apply_ear_events(&mut reducer, card, placed.token());
                         feed_tick(&mut reducer, card, placed.token(), &mut last_tick_fed);
 
-                        // Free, and the only thing keeping the reducer's idea
-                        // of the position true: it is what gets written when
-                        // the figure comes off.
+                        // Keeps the reducer's position current; it is what
+                        // gets saved when the figure is lifted.
                         reducer.note_position(Position::Exact {
                             page: audio::PAGE.load(Ordering::Relaxed),
                         });
                     };
-                    // The hardware comes back, so playing again needs no
-                    // reboot — which is what makes stopping worth anything.
+                    // The hardware is returned, so another story can play
+                    // without a reboot.
                     let (outcome, tx, buffer) =
                         audio::play_taf(card, tx, buffer, source, from, &mut attend).await;
                     if let Err(reason) = outcome {
@@ -3365,29 +2967,25 @@ async fn media(
                     }
                     if matches!(outcome, Ok(audio::Finish::Ended)) {
                         if identified {
-                            // A finished story is not a paused one. Zero
-                            // rather than a deletion: `storage` has no
-                            // delete, and page 0 is the header rather than
-                            // audio, so "no file" and "page zero" already
-                            // mean the same thing.
+                            // A finished story starts again from the
+                            // beginning next time. Written as page 0 rather
+                            // than deleted: `storage` cannot delete, and page 0
+                            // is the header, so it means the same as no file.
                             let mut out = [0u8; MAX_POSITION];
                             let len = position::render(0, &mut out);
                             let _ = card.write_position(stock, dir, file, &out[..len]);
-                            // And whatever RAM was holding for it, which
-                            // would otherwise outrank the card that was just
-                            // cleared.
+                            // Also drop the RAM copy, which would otherwise
+                            // win over the card.
                             forget_place(((dir as u64) << 32) | file as u64);
                         }
-                        // The reducer has no other way to learn this: the
-                        // only other exit from playing is the figure being
-                        // lifted. Fed for every ended story, identified or
-                        // not — a console `play` running out must leave the
-                        // reducer idle too, not just a story tied to a figure.
+                        // The reducer cannot learn this any other way. Sent
+                        // for every story that ends, including console
+                        // playback, so the reducer returns to idle.
                         apply(&mut reducer, card, Event::PlaybackEnded, placed.token());
                     }
-                    // Cleared only by the playback the flag names, and
-                    // whatever the outcome: a failed announcement that left it
-                    // set would be a shutdown nothing could ever reach.
+                    // Cleared only by the announcement's own playback, but
+                    // whatever the outcome, or a failed announcement would
+                    // block the shutdown for ever.
                     if dir == ANNOUNCING_DIRECTORY.load(Ordering::Relaxed)
                         && file == ANNOUNCING_FILE.load(Ordering::Relaxed)
                     {
@@ -3395,12 +2993,10 @@ async fn media(
                     }
                     i2s_tx = Some(tx);
                     wav_buffer = Some(buffer);
-                    // Nothing is playing now, so the speaker has no business
-                    // being driven — unless something has already asked for
-                    // the next thing to play, in which case it raised the
-                    // output when it asked and lowering it here would silence
-                    // it. It also spares the stage a power cycle it would
-                    // otherwise click through.
+                    // Nothing is playing, so power the output down, unless
+                    // something is already queued: that powered the output up
+                    // when it asked, and powering down would silence it (and
+                    // click).
                     if REQUEST.load(Ordering::Relaxed) == REQUEST_NONE {
                         request_output(OUTPUT_DOWN);
                     }
@@ -3413,16 +3009,15 @@ async fn media(
     }
 }
 
-/// Brings the NFC reader up on first use and answers the bench commands.
+/// Joins the network, gets an address, and serves network requests until
+/// asked to stop, or, unless `stay_up`, until one fetch is done.
 ///
-/// Waits for a request rather than starting at boot: the reader shares the
-/// Associates, takes a lease, and stays up until asked down.
+/// The whole connection lives inside one call because `acquire` lends the
+/// session and the link from the radio: they cannot outlive it, and the link
+/// must be polled the whole time. So being connected is time spent inside
+/// this function, not a state it returns.
 ///
-/// The whole association lives inside one call because `acquire` lends the
-/// session and the link out of the radio: they cannot outlive it, and the link
-/// has to be polled for the entire time the session is wanted. So "up" is not
-/// a state this returns to the caller — it is a stretch of time spent inside
-/// here, ending only when the console asks for it to end.
+/// Returns why the connection failed, or `None` if it worked.
 async fn bring_up(
     radio: &mut net::Radio<'_>,
     tls: Option<&tls::Client>,
@@ -3433,9 +3028,8 @@ async fn bring_up(
         esp_println::println!(
             "teddiebox: net no credentials — type `net ssid <name>` then `net pw <passphrase>`"
         );
-        // Not `Refused`: nothing was refused, because nothing was asked. A box
-        // with no credentials at all already said `ConfigError` out loud when
-        // it failed to read the card, so this stays the general word.
+        // Not `Refused`, because nothing was tried. A box without credentials
+        // already played `ConfigError` when reading the card failed.
         return Some(Unavailable::Unreachable);
     };
 
@@ -3464,13 +3058,13 @@ async fn bring_up(
         }
     );
 
-    // Association is mostly waiting on the access point, so the key's one-off
-    // setup runs inside it rather than inside the first handshake — once the
-    // request is out, which is what the yield is for. See `tls::Client::warm`.
+    // Joining is mostly waiting for the access point, so the key's one-time
+    // setup runs during it, after the join request is sent (hence the yield).
+    // See `tls::Client::warm`.
     //
-    // Not while audio plays: the setup holds this executor for up to 3.5 s
-    // while the radio competes for the CPU (measured), which the decoder
-    // cannot ride out. Skipped, the first handshake pays it as it always did.
+    // Not while audio plays: the setup blocks the executor for up to 3.5 s
+    // (measured), which would interrupt playback. Then the first handshake
+    // does it instead.
     let associate = async {
         let (connected, ()) = embassy_futures::join::join(session.connect(), async {
             embassy_futures::yield_now().await;
@@ -3486,17 +3080,17 @@ async fn bring_up(
         connected
     };
 
-    // The runner has to be polled throughout, not awaited first: it never
-    // returns, and nothing else here makes progress without it.
+    // The runner must be polled the whole time: it never returns, and nothing
+    // else makes progress without it.
     match select(link.run(), associate).await {
         Either::First(_) => unreachable!("the runner never returns"),
         Either::Second(Err(e)) => {
-            // The console keeps the driver's own reason; the reducer gets the
-            // one word it can act on, and the two words send a person to
-            // different places — the card, or the router.
+            // The console prints the driver's error; the reducer only learns
+            // whether the password was refused (check the card) or not (check
+            // the router).
             let refused = net::refused_credentials(&e);
-            // Refused on the passphrase too, so the stored key was refused
-            // first: it is not a key for this network either way.
+            // The passphrase was refused after the stored key was, so the
+            // stored key is wrong too.
             if refused && stored.is_some() {
                 wifikey::forget();
             }
@@ -3512,9 +3106,8 @@ async fn bring_up(
             });
         }
         Either::Second(Ok(net::JoinedWith::GivenKey)) if stored.is_some() => {}
-        // Only a join that used the passphrase proves it worth keeping — and
-        // one that needed it after the stored key was refused also proves
-        // that key stale.
+        // A join with the passphrase proves it worth storing a key for, and,
+        // if a stored key was refused first, that the stored key is stale.
         Either::Second(Ok(_)) => {
             if stored.is_some() {
                 wifikey::forget();
@@ -3525,9 +3118,8 @@ async fn bring_up(
     esp_println::println!("teddiebox: net associated — asking for an address");
 
     let stack = session.stack();
-    // Associated and addressed are different things and fail for different
-    // reasons; a box that joins the network and never gets a lease should say
-    // so rather than report success.
+    // Joining and getting an address fail for different reasons; a box that
+    // joins but gets no address must report that, not success.
     match select(
         link.run(),
         select(stack.wait_config_up(), Timer::after(DHCP_TIMEOUT)),
@@ -3541,33 +3133,28 @@ async fn bring_up(
                 DHCP_TIMEOUT.as_secs()
             );
             net::release(session, link);
-            // Associated, so the passphrase was right; the network is simply
-            // not answering. That is the router's end, not the card's.
+            // The passphrase was right; the network is not answering.
             return Some(Unavailable::Unreachable);
         }
         Either::Second(Either::First(())) => report_address(&stack),
     }
 
-    // Up. Stay here, polling the stack, until the console says otherwise —
-    // dropping the runner between requests would stall the very thing that
-    // keeps the lease alive.
+    // Connected. Stay here, polling the stack, until told to stop: dropping
+    // the runner between requests would stall the connection.
     let until_down = async {
         loop {
             match NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
                 NET_DOWN => break,
                 NET_STATUS => report_address(&stack),
-                // The probe runs here rather than in the outer task because it
-                // needs the stack, and the stack only exists between
-                // `acquire` and `release`. It is awaited inline, so the runner
-                // beside it keeps polling for its whole length — a handshake
-                // is several round trips and would stall without it.
+                // Runs here because it needs the stack, which only exists
+                // between `acquire` and `release`. Awaited inline, so the
+                // runner beside it keeps being polled.
                 NET_GET => {
                     match tls {
                         None => {
                             esp_println::println!("teddiebox: tls context unavailable");
-                            // A probe waiting on this would otherwise never be
-                            // answered, and the figure on the plate would stay
-                            // silent for as long as it sat there.
+                            // Answer a waiting probe, or the figure on the
+                            // plate would stay silent.
                             if let Some(FetchRequest {
                                 ruid, probe: true, ..
                             }) = critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs))
@@ -3604,9 +3191,8 @@ async fn bring_up(
                                             teddiebox_download::Answer::Length(total),
                                         );
                                     }
-                                    // Every remaining case plays what is on the
-                                    // card. They are told apart here, where a
-                                    // bench can read them, and nowhere else.
+                                    // Every other case plays what is on the
+                                    // card; only the console tells them apart.
                                     Ok(other) => {
                                         esp_println::println!(
                                             "teddiebox: ask {requested:016X} learned nothing — {other:?}"
@@ -3626,14 +3212,12 @@ async fn bring_up(
                                 token,
                                 probe: false,
                             }) => {
-                                // Attributed up front, from the pair this fetch was
-                                // raised with — see `FetchRequest` — rather than read
-                                // from a shared static later, when a `token` typed at
-                                // the console in the meantime could have moved on.
+                                // Recorded now, from this fetch's own request (see
+                                // `FetchRequest`).
                                 FETCH_ACTIVE_RUID.store(requested, Ordering::Relaxed);
                                 let ruid = requested.to_be_bytes();
-                                // `content_path` takes the UID and reverses it itself,
-                                // and what the console typed is already reversed.
+                                // `content_path` reverses the UID itself, and the
+                                // ruid is already reversed, so undo that first.
                                 let mut uid = ruid;
                                 uid.reverse();
                                 let path = teddiebox_download::content_path(uid);
@@ -3644,22 +3228,18 @@ async fn bring_up(
                                 critical_section::with(|cs| {
                                     *DOWNLOAD_PIPE.borrow_ref_mut(cs) = Pipe::new()
                                 });
-                                // The card is the only thing that knows what is
-                                // already downloaded, and only its owner may ask it. So
-                                // the request waits here until it has been told what to
-                                // ask for — a resume asks for the rest, and asking for
-                                // the whole file again is a quarter of an hour thrown
-                                // away with the story still not playing.
+                                // Only the card knows what is already downloaded,
+                                // and only the media task may read it, so the
+                                // request waits for its answer. A resume asks only
+                                // for the rest, instead of downloading the whole
+                                // file again.
                                 DOWNLOAD_FROM.store(0, Ordering::Relaxed);
                                 DOWNLOAD_AT.store(0, Ordering::Relaxed);
 
-                                // The conversation with the card's owner. Re-asking is
-                                // the point of it: the media task only runs
-                                // `service_download` between requests, and `attend` —
-                                // what it calls while a sound or a story is playing —
-                                // does not, so the first ask lands unheard whenever a
-                                // figure is placed during a prompt, which is most of
-                                // the time.
+                                // Asks the media task, and asks again if needed: it
+                                // only runs `service_download` between requests, not
+                                // while a sound or story plays, so a first ask made
+                                // during a prompt goes unanswered.
                                 let mut handshake = Handshake::new();
                                 let mut step = handshake.requested(Instant::now().as_millis());
                                 let settled = loop {
@@ -3670,9 +3250,9 @@ async fn bring_up(
                                         settled => break settled,
                                     }
                                     Timer::after(Duration::from_millis(HANDSHAKE_POLL_MS)).await;
-                                    // The answer is looked for before the clock is
-                                    // read, so one that has already landed is never
-                                    // buried under a re-ask.
+                                    // Check for an answer before the clock, so an
+                                    // answer that already arrived is not replaced by
+                                    // a new ask.
                                     step = if DOWNLOAD_STATE.load(Ordering::Relaxed)
                                         == DOWNLOAD_PLANNED
                                     {
@@ -3689,18 +3269,14 @@ async fn bring_up(
                                         esp_println::println!(
                                             "teddiebox: get the card already holds all of it"
                                         );
-                                        // Nothing to fetch is still an answer, and it is
-                                        // the good one: whoever asked can play now.
+                                        // Nothing to fetch: the story can play now.
                                         fetch_ended(FETCH_COMPLETED);
                                         DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
                                         None
                                     }
-                                    // **Not a fetch from zero.** That was the old
-                                    // fallback, and it truncates the partial file it
-                                    // lands on — so a card that was merely too busy to
-                                    // answer lost the quarter of an hour it had already
-                                    // spent downloading. Saying so and stopping leaves
-                                    // what is cached intact for the next attempt.
+                                    // **Not a fetch from zero**, which would truncate
+                                    // the partial file. Stopping keeps what is cached
+                                    // for the next attempt.
                                     Step::GiveUp => {
                                         esp_println::println!(
                                             "teddiebox: get the card did not answer in {} s — \
@@ -3742,9 +3318,8 @@ async fn bring_up(
                                         )
                                     };
                                     let mut into_pipe = |bytes: &[u8]| -> usize {
-                                        // Nobody is draining. Swallow the rest so the
-                                        // download ends and reports, rather than blocking
-                                        // forever on a pipe that will never empty.
+                                        // Nobody is reading the pipe. Discard the rest so
+                                        // the download ends instead of blocking for ever.
                                         if DOWNLOAD_ABORT.load(Ordering::Relaxed) {
                                             return bytes.len();
                                         }
@@ -3764,17 +3339,16 @@ async fn bring_up(
                                         from: (from > 0).then_some(from),
                                         etag: resume_etag.as_ref(),
                                     };
-                                    // Raised here rather than before the request. Until the
-                                    // head arrives there is nothing to write and nothing to
-                                    // write it with — and opening the file any earlier
-                                    // truncates a partial download on behalf of a request
-                                    // that may yet fail before asking for a byte.
+                                    // Set when the response headers arrive, not before
+                                    // the request: opening the file earlier could
+                                    // truncate a partial download for a request that
+                                    // then fails.
                                     let mut on_head = |head: tls::Head<'_>| {
                                         DOWNLOAD_TOTAL
                                             .store(head.total.unwrap_or(0), Ordering::Relaxed);
-                                        // Where the body actually belongs, which is not
-                                        // always where it was asked to start: a server
-                                        // that declined the range says so with zero.
+                                        // Where the body actually starts, which may differ
+                                        // from what was asked: zero if the server ignored
+                                        // the range.
                                         DOWNLOAD_AT.store(head.offset, Ordering::Relaxed);
                                         critical_section::with(|cs| {
                                             *DOWNLOAD_ETAG.borrow_ref_mut(cs) = head.etag.cloned();
@@ -3790,33 +3364,30 @@ async fn bring_up(
                                         &mut may_fetch,
                                     )
                                     .await;
-                                    // Ended either way: the consumer must stop waiting for
-                                    // bytes that are never coming.
+                                    // Ended either way, so the media task stops waiting
+                                    // for more bytes.
                                     DOWNLOAD_STATE.store(DOWNLOAD_ENDED, Ordering::Relaxed);
 
                                     match outcome {
-                                        // Not reported ready here. The bytes are still
-                                        // travelling through the pipe to the card, and
-                                        // the media task says so when they land.
+                                        // Not reported as ready yet: the bytes are still
+                                        // in the pipe, and the media task reports when
+                                        // they are on the card.
                                         Ok(got) => esp_println::println!(
                                             "teddiebox: get received {} bytes, crc32 {:08X}, {} s",
                                             got.bytes,
                                             got.crc32,
                                             got.seconds
                                         ),
-                                        // Not a failure, and not the reducer's
-                                        // business: it learned the figure was gone
-                                        // before this loop did, and that is what
-                                        // told this loop to stop. Saying
-                                        // "unreachable" now would have the box
-                                        // announce a network fault for a story
-                                        // nobody is waiting for.
+                                        // Not a failure: the figure was lifted, and
+                                        // the reducer already knows. Reporting
+                                        // "unreachable" would announce a network
+                                        // fault for a story nobody wants.
                                         Err(tls::Error::Abandoned) => esp_println::println!(
                                             "teddiebox: get abandoned — nobody is waiting for it"
                                         ),
                                         Err(e) => {
-                                            // The console keeps the real code; the
-                                            // reducer gets the one word it can act on.
+                                            // The console gets the exact error; the
+                                            // reducer only the reason it acts on.
                                             esp_println::println!("teddiebox: get failed — {e:?}");
                                             fetch_ended(outcome_for(why_unavailable(&e)));
                                         }
@@ -3825,11 +3396,8 @@ async fn bring_up(
                             }
                         },
                     }
-                    // An association raised for one story goes down with
-                    // it. Asking here rather than at the top of the loop
-                    // keeps the radio up for the whole of the fetch,
-                    // including the part that happens after the last byte
-                    // leaves the socket.
+                    // A connection made for one story ends with it, after the
+                    // whole fetch is done.
                     if !stay_up {
                         break;
                     }
@@ -3848,8 +3416,7 @@ async fn bring_up(
                             }
                         }
                     }
-                    // A figure placed while this ran is served on this
-                    // association rather than a new one.
+                    // A figure placed while this ran uses this connection.
                     if !stay_up && NET_REQUEST.load(Ordering::Relaxed) != NET_GET {
                         break;
                     }
@@ -3876,8 +3443,7 @@ async fn bring_up(
 
     net::release(session, link);
     esp_println::println!("teddiebox: net down");
-    // It came up. Whatever happened to the fetch after that was reported by
-    // whoever was doing it, and is not this function's to name.
+    // The connection worked. Any fetch result has already been reported.
     None
 }
 
@@ -3895,10 +3461,9 @@ fn report_address(stack: &embassy_net::Stack<'_>) {
 
 /// Brings the radio up on demand and reports what it hears.
 ///
-/// The radio has never run on this board, so this exists before anything that
-/// associates: a scan needs no credentials, no card and no network stack, and
-/// so separates "the radio does not work" from "the password is wrong" once
-/// and for all.
+/// Also serves the console `net` commands. A scan needs no credentials, card
+/// or network stack, so it tells "the radio does not work" apart from "the
+/// password is wrong".
 #[embassy_executor::task]
 async fn net(
     wifi: esp_hal::peripherals::WIFI<'static>,
@@ -3907,12 +3472,10 @@ async fn net(
     aes: esp_hal::peripherals::AES<'static>,
 ) {
     let mut radio = net::Radio::new(wifi);
-    // Built once, before anything associates. mbedtls keeps global state, and
-    // the statics behind this can only be filled once — so a failure here is
-    // permanent for this boot rather than something to retry per connection.
-    // The three crypto peripherals come along because the hooks that route
-    // mbedtls onto them have to be registered before this call builds the
-    // first mbedtls context; see `tls::init`.
+    // Built once, before any connection. mbedtls keeps global state that can
+    // only be set up once, so a failure lasts until reboot. The crypto
+    // peripherals are passed in because mbedtls must be connected to them
+    // before its first context is built; see `tls::init`.
     let tls = tls::init(sha, rsa, aes);
     if tls.is_none() {
         esp_println::println!("teddiebox: tls could not be initialised");
@@ -3920,9 +3483,8 @@ async fn net(
     let mut schedule = teddiebox_wifikey::schedule::Schedule::new();
 
     loop {
-        // One read of the request, dispatched once. Two reads would race: the
-        // first would consume a request the second was meant to handle, and
-        // `net up` would be swallowed by the scan's test and silently lost.
+        // Read the request once. Reading it twice would let the first read
+        // swallow a request meant for the second.
         match NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
             NET_SCAN => {
                 esp_println::println!("teddiebox: net scanning");
@@ -3945,9 +3507,8 @@ async fn net(
                             );
                         }
                         esp_println::println!("teddiebox: net {found} access points");
-                        // Hitting the quota means the driver stopped collecting,
-                        // not that the band holds exactly this many — and what it
-                        // dropped is whatever sits on the highest channels.
+                        // A full list means the driver stopped collecting; the
+                        // highest channels were left out.
                         if found == SCAN_LIMIT {
                             esp_println::println!(
                                 "teddiebox: net   list is truncated at {SCAN_LIMIT} — \
@@ -3958,34 +3519,30 @@ async fn net(
                     Either::First(Err(e)) => {
                         esp_println::println!("teddiebox: net scan failed — {e:?}")
                     }
-                    // Nothing came back at all. The driver raises `ScanDone` even
-                    // for an empty scan, so silence points at the radio never
-                    // having started rather than at an empty band.
+                    // No answer at all. The driver sends `ScanDone` even when it
+                    // finds nothing, so this means the radio never started.
                     Either::Second(()) => esp_println::println!(
                         "teddiebox: net scan timed out after {} s — the radio never answered",
                         SCAN_TIMEOUT.as_secs()
                     ),
                 }
             }
-            // The console asked, and the console is reading the log: the
-            // reason is printed inside, and there is no figure waiting to be
-            // told anything.
+            // From the console: any failure is printed inside, and no figure
+            // is waiting for the result.
             NET_UP => {
                 let _ = bring_up(&mut radio, tls.as_ref(), &mut schedule, true).await;
             }
-            // `net status` and `net down` are answered inside `bring_up` while
-            // it is running. Reaching them here means it is not.
             NET_PRIME => {
                 esp_println::println!("teddiebox: net coming up to prime the first ask");
-                // Put back for the association's own loop, as a fetch is.
+                // Put back for `bring_up`'s loop to serve, as with a fetch.
                 NET_REQUEST.store(NET_PRIME, Ordering::Relaxed);
                 if bring_up(&mut radio, tls.as_ref(), &mut schedule, false)
                     .await
                     .is_some()
                 {
-                    // It never reached the loop that takes the request. Only
-                    // the prime is dropped: a figure's ask that replaced it
-                    // while the radio tried stays queued and is answered next.
+                    // It never reached the loop that serves the request. Only
+                    // the prime is dropped; a figure's request that replaced
+                    // it in the meantime stays queued.
                     let _ = NET_REQUEST.compare_exchange(
                         NET_PRIME,
                         REQUEST_NONE,
@@ -3994,21 +3551,21 @@ async fn net(
                     );
                 }
             }
+            // These are served inside `bring_up` while connected; reaching
+            // them here means the network is down.
             NET_STATUS | NET_DOWN | NET_TLS => {
                 esp_println::println!("teddiebox: net is down")
             }
-            // A story to fetch with the radio down. The radio comes up for
-            // it and goes down again with it: this box cannot hold a figure
-            // reliably while the radio works, and it has no other reason to be
-            // associated — so an association is something a download borrows
-            // rather than a state the box sits in.
+            // A fetch or probe with the radio off. The radio is switched on
+            // for it and off again afterwards: the plate is read less reliably
+            // while the radio runs, and there is no other reason to stay
+            // connected.
             NET_GET => match critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs)) {
                 None => {
                     esp_println::println!("teddiebox: get has no request queued — nothing to fetch")
                 }
                 Some(FetchRequest { ruid, probe, .. }) => {
-                    // Attributed before anything can end the fetch, the same as
-                    // every other path that ends one.
+                    // Recorded before anything can end the fetch.
                     FETCH_ACTIVE_RUID.store(ruid, Ordering::Relaxed);
                     esp_println::println!(
                         "teddiebox: net coming up {}",
@@ -4018,28 +3575,20 @@ async fn net(
                             "for a story"
                         }
                     );
-                    // Put back for the association's own loop to serve: it was
-                    // taken out of the request by the read at the top of this
-                    // one, and it is the whole reason for associating.
+                    // Put back for `bring_up`'s loop to serve; the read at the
+                    // top of this loop took it out.
                     NET_REQUEST.store(NET_GET, Ordering::Relaxed);
                     let gave_up = bring_up(&mut radio, tls.as_ref(), &mut schedule, false).await;
-                    // The pre-arm above is only ever consumed by `bring_up`'s
-                    // own inner loop, reached after a successful association —
-                    // every early return happens before that loop starts. Left
-                    // uncleared here, this exact request would still be
-                    // sitting in `NET_REQUEST` on this task's next iteration,
-                    // and it would retry the identical fetch forever: on a
-                    // network that keeps refusing, that competed with
-                    // playback for the executor every failed attempt and
-                    // measurably glitched the audio (up to 291 DMA restarts
-                    // over 263 s, 2026-09-17).
+                    // If `bring_up` failed before its loop, the request is
+                    // still queued. Clear it, or the same fetch would be
+                    // retried for ever, and the retries interrupt playback (up
+                    // to 291 audio DMA restarts in 263 s, measured).
                     if gave_up.is_some() {
                         NET_REQUEST.store(REQUEST_NONE, Ordering::Relaxed);
                     }
-                    // A question that reaches here unanswered is answered now,
-                    // whatever went wrong. The reducer holds the figure silent
-                    // until it hears back, and a radio that would not come up
-                    // is not a reason to refuse a story that is on the card.
+                    // Answer a probe that is still unanswered: the reducer
+                    // keeps the figure silent until it hears back, and a
+                    // network failure is no reason not to play the card's copy.
                     if probe {
                         if !answer_waiting() {
                             esp_println::println!(
@@ -4048,13 +3597,10 @@ async fn net(
                             probe_ended(ruid);
                         }
                     }
-                    // `bring_up` answers a fetch it could not start — no
-                    // credentials, no association, no lease — by returning
-                    // without serving the request. Nobody else will, so
-                    // whoever asked is told here rather than left waiting,
-                    // and told which of the two faults it was: a figure whose
-                    // story cannot be fetched because the passphrase is wrong
-                    // should not send anybody to look at a working router.
+                    // If `bring_up` could not connect (no credentials, join
+                    // failed, no address), nobody else reports it, so report
+                    // it here, with the right reason: a wrong passphrase
+                    // should not be announced as a network fault.
                     else if DOWNLOAD_STATE.load(Ordering::Relaxed) == DOWNLOAD_IDLE
                         && fetch_ended_if_silent(outcome_for(
                             gave_up.unwrap_or(Unavailable::Unreachable),
@@ -4064,15 +3610,19 @@ async fn net(
                     }
                 }
             },
-            // Idle, radio down: the one time a derivation slice or a flash
-            // write costs nobody a join.
+            // Idle with the radio off: the only time deriving the Wi-Fi key or
+            // writing it to flash does not delay a connection.
             _ => wifikey::pass(&mut schedule, credentials, PLAYING.load(Ordering::Relaxed)),
         }
         Timer::after(Duration::from_millis(100)).await;
     }
 }
 
-/// storage rail, and raising that rail is the console loop's decision.
+/// Brings the NFC reader up on first use, polls the plate, and serves the
+/// console `nfc` commands.
+///
+/// Waits for a request rather than starting at boot: the reader shares the
+/// storage rail, and switching that rail on is the console loop's decision.
 #[embassy_executor::task]
 async fn nfc_reader(
     spi: Spi<'static, esp_hal::Blocking>,
@@ -4085,8 +3635,7 @@ async fn nfc_reader(
         Timer::after(Duration::from_millis(100)).await;
     }
 
-    // The rail was raised by the console loop; give it the same settling time
-    // the card and the I2C devices get.
+    // The console loop switched the rail on; let it settle, as for the card.
     Timer::after(Duration::from_millis(50)).await;
 
     let mut reader = match nfc::Reader::open(spi, cs, irq, esp_hal::delay::Delay::new()).await {
@@ -4098,17 +3647,17 @@ async fn nfc_reader(
     };
 
     let mut presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
-    // Whether polling was on last time round, so switching it on can start
-    // from a clean sheet. See where it is used.
+    // Whether polling was on in the last pass, so switching it on can start
+    // fresh (see below).
     let mut was_polling = false;
-    // When the plate is next read. Held as a time rather than counted in
-    // passes of this loop, because a pass is only nominally 100 ms.
+    // When the plate is next read. A time rather than a count of passes,
+    // because a pass can take much longer than 100 ms.
     let mut next_poll = Instant::now();
-    // Consecutive unanswered polls against a figure believed present.
+    // Consecutive polls that found nothing.
     let mut misses: u16 = 0;
-    // Whether the last poll found a figure. Chooses which question the next
-    // poll asks first; a wrong guess costs one extra unanswered exchange and
-    // corrects itself on the following poll, which `MISSES_TO_LEAVE` absorbs.
+    // Whether the last poll found a figure. Decides what the next poll asks
+    // first; a wrong guess costs one extra exchange and is corrected on the
+    // next poll.
     let mut believed_present = false;
 
     loop {
@@ -4121,11 +3670,10 @@ async fn nfc_reader(
             NFC_INVENTORY => {
                 reader.inventory();
 
-                // Is the antenna even connected? With our own field off, the
-                // RSSI register reports RF arriving from outside, so an
-                // external source proves the coil is coupled to the chip.
-                // Nothing else here can tell a disconnected antenna from an
-                // empty plate.
+                // Checks the antenna is connected. With our own field off, the
+                // RSSI register shows RF from outside, such as a phone, which
+                // proves the coil reaches the chip. Nothing else can tell a
+                // disconnected antenna from an empty plate.
                 esp_println::println!(
                     "teddiebox: nfc listening for an external field for 6 s — \
                      hold an NFC phone against the plate"
@@ -4191,8 +3739,8 @@ async fn nfc_reader(
             _ => {}
         }
 
-        // Read out when polling stops, so a whole run is summarised by its
-        // worst reply rather than by whichever poll happened to print last.
+        // Printed when polling stops, summarising the run by its slowest
+        // reply.
         if PLATE_REPORT.swap(false, Ordering::Relaxed) {
             let (polls, micros) = reader.slowest_reply();
             esp_println::println!(
@@ -4203,19 +3751,12 @@ async fn nfc_reader(
         }
 
         let polling = PLATE_POLLING.load(Ordering::Relaxed);
-        // **Switching polling on forgets what the plate used to hold.**
-        // `Presence` reports changes, not states: a figure it already believes
-        // is present, fed again, is not an arrival — correctly, because
-        // nothing happened. But polling that stops and starts is not nothing
-        // happening, and the figure may have been swapped or taken in between,
-        // with no poll running to notice.
-        //
-        // Without this, `plate on` with a figure already sitting there
-        // announces nothing at all and its story never starts, while the
-        // reader answers perfectly — which is exactly what it looks like from
-        // a console, and cost an afternoon on 2026-09-14 being mistaken for a
-        // blind reader. The `nfc` command reading the same tag instantly is
-        // not a contradiction: it was never the reader that was quiet.
+        // **Switching polling on forgets what the plate held.** `Presence`
+        // reports changes, not states, so a figure it already believes present
+        // is not reported again. While polling was off the figure may have
+        // been swapped or removed, so start fresh. Otherwise `plate on` with a
+        // figure already on the plate reports nothing and the story never
+        // starts, even though the reader works.
         if polling && !was_polling {
             presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
             believed_present = false;
@@ -4227,40 +3768,31 @@ async fn nfc_reader(
         if polling && Instant::now() >= next_poll {
             let password = NFC_PASSWORD.load(Ordering::Relaxed);
 
-            // Which question is cheap depends on what was there last time,
-            // and the difference is not small: measured on 2026-09-07, a
-            // poller that always asked the full question cost 49 DMA
-            // restarts in 70 s of playback against 0 with polling off,
-            // because every unanswered exchange blocks this task for the
-            // whole `IRQ_POLL_ATTEMPTS` window.
+            // Which request is cheapest depends on what was there last time.
+            // Always sending the full unlock caused 49 audio DMA restarts in
+            // 70 s of playback, against 0 with polling off, because every
+            // unanswered exchange blocks this task for the whole
+            // `IRQ_POLL_ATTEMPTS` window.
             let seen = if believed_present {
-                // A figure identified once stays out of privacy mode until
-                // its field is cycled, so a plain inventory answers on the
-                // first try. It also re-reads the UID, which is what
-                // notices one figure being swapped for another.
+                // An unlocked figure stays unlocked until its field is
+                // switched off, so a plain inventory answers. It also re-reads
+                // the UID, which notices a figure being swapped.
                 reader.identify()
             } else if reader.tag_present() {
-                // Something is there but has not been identified yet. This
-                // is the only poll that pays for the password exchange.
+                // Something is there but not yet identified. Only this case
+                // sends the password.
                 reader.inventory_unlocked(password)
             } else {
-                // The state the box sits in almost all the time: one
-                // unanswered exchange and nothing else.
+                // The usual case: one unanswered exchange and nothing else.
                 None
             };
-            // How many polls in a row have found nothing. `MISSES_TO_LEAVE`
-            // turns four of these into a departure, and on 2026-09-07 the
-            // radio produced 23 false departures in ten minutes — so
-            // whether the misses come in ones and twos or in long runs
-            // decides whether tolerating more of them is a fix or a
-            // plaster.
+            // Counts polls in a row that found nothing, and prints the run
+            // length when a figure answers again. The radio can cause false
+            // departures (23 in ten minutes were seen), and the run lengths
+            // show whether allowing more misses would help.
             //
-            // Counted on `seen` alone, deliberately. An earlier version of
-            // this gated the count on `believed_present`, which is the
-            // *previous* poll's answer and is already false by the second
-            // miss — so it could never count past one, which was the whole
-            // question. A miss is a poll that saw nothing, whatever the
-            // poller expected to see.
+            // Based on `seen` only, not `believed_present`, which is the
+            // previous poll's result and would stop the count at one.
             if seen.is_none() {
                 misses = misses.saturating_add(1);
             } else {
@@ -4277,10 +3809,8 @@ async fn nfc_reader(
             next_poll =
                 Instant::now() + Duration::from_millis(u64::from(presence.poll_again_in_ms()));
             if let Some(event) = event {
-                // The poller's own view of the plate, which until now was
-                // visible only through whatever the reducer decided to do
-                // about it: a tag lost while nothing was playing left no
-                // trace at all.
+                // Printed, so the plate's state is visible even when the
+                // reducer does nothing about it.
                 match event {
                     TagEvent::Arrived(TagUid(uid)) => esp_println::println!(
                         "teddiebox: plate tag arrived {:016X}",
@@ -4292,11 +3822,9 @@ async fn nfc_reader(
                 }
                 match event {
                     TagEvent::Arrived(TagUid(uid)) => {
-                        // Read the token in the same session that found
-                        // the tag: it is only readable while the figure
-                        // is on the plate and unlocked, and it is needed
-                        // when teddyCloud has to go upstream for the
-                        // story.
+                        // Read the token now: it is only readable while the
+                        // figure is on the plate and unlocked, and teddyCloud
+                        // needs it to fetch the story from the cloud.
                         let token = reader.read_token();
                         PLATE_TAG.signal(Seen::Figure { uid, token });
                     }
@@ -4321,48 +3849,36 @@ async fn nfc_reader(
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
 
-    // Clear the ROM's force-download-boot request. It lives in the RTC domain
-    // and survives a reset — that is what makes `dl` work — so leaving it set
-    // would send every future reset back into download mode. Clearing it here
-    // means the box can only ever be one reset away from running again.
+    // Clear the ROM's force-download-boot request. It survives a reset (that
+    // is how `dl` works), so leaving it set would send every later reset into
+    // download mode.
     //
-    // Ahead of the OTA check below on purpose: that check can itself reboot
-    // (a Revert), and a Revert before this bit is cleared would send the box
-    // into download mode instead of the other slot.
+    // Before the OTA check below, which can reboot to revert: with this bit
+    // still set, that reboot would go into download mode instead.
     esp_hal::peripherals::LPWR::regs()
         .option1()
         .modify(|_, w| w.force_download_boot().clear_bit());
 
-    // Before anything else — including the stack paint below — because this
-    // is the check that catches an image which crashed on its *previous*
-    // boot before reaching mark_valid. Nothing above this line has run yet
-    // on the attempt that is being judged, so nothing above it can be the
-    // thing that failed last time.
+    // Before anything else, including the stack paint below: this catches an
+    // image that crashed on its *previous* boot before reaching `mark_valid`,
+    // and nothing above this line can have been the cause.
     ota::confirm_boot_or_revert();
 
-    // esp-radio allocates. The rest of this firmware does not, and libopus in
-    // particular must not — its hardening path is the only thing that ever
-    // reaches libc, and it panics rather than allocating. This heap belongs to
-    // the radio stack alone.
+    // Paint the stack before anything uses it deeply, so the `stack` command
+    // can measure how much was used.
     //
-    // It is taken out of the main task's stack, not out of spare memory.
-    // `esp-hal`'s linker script puts `.stack` at the top of DRAM running down
-    // to wherever `.bss` ends, so the stack is whatever the static data leaves
-    // behind: adding this heap moved `_stack_start - _stack_end` from 219_788
-    // bytes to 137_104. That is the number a bench measures, not the heap
-    // size, because it is the one that decides whether the box still boots.
-    // Before anything has had a chance to go deep. Everything below this
-    // frame is free right now, and whatever is used before this point is
-    // invisible to the measurement afterwards.
-    //
-    // Bracketed by prints because the first version of this trapped on the
-    // stack canary and the box came back **silent** — no console, no panic,
-    // nothing to say which line did it, and a J100 recovery to undo. A pair of
-    // lines costs nothing and turns that into a bisect of one.
+    // Surrounded by prints, because a fault in the paint leaves the box
+    // silent, with no panic message; the prints show whether it got there.
     esp_println::println!("teddiebox: painting the stack");
     stack::paint();
     esp_println::println!("teddiebox: stack painted");
 
+    // Only the radio stack (esp-radio and TLS) allocates; libopus must not
+    // (it panics instead of allocating).
+    //
+    // The heap is a static, so it comes out of the stack: `esp-hal` places
+    // the stack between the end of `.bss` and the top of DRAM. Check the
+    // stack size, not the heap size, to know whether the box still boots.
     esp_alloc::heap_allocator!(size: RADIO_HEAP);
 
     let timg0 = TimerGroup::new(p.TIMG0);
@@ -4371,21 +3887,17 @@ async fn main(spawner: Spawner) {
     let mut board = BoardPins::new(p.GPIO45, p.GPIO47);
     let mut gates = Gates::at_reset();
 
-    // Held until something asks the box to stop for good. Deep sleep consumes
-    // it, so it is parked in an `Option` the way the other single-use
-    // peripherals are rather than being taken at the point of use.
+    // Deep sleep consumes this peripheral, so it is held in an `Option` until
+    // then, like other single-use peripherals.
     let mut lpwr = Some(p.LPWR);
 
-    // The LED is on this rail, so it has to come up before anything —
-    // including the setup portal below — can paint it.
+    // The LED is on this rail, so switch it on before anything, including the
+    // setup portal below, uses the LED.
     board.apply(gates.power(Rail::Peripherals, true));
 
-    // The controller and its timer are bound here, ahead of everything else
-    // that used to be the first thing built after the rail, because the
-    // setup branch below needs a controller to paint through and never
-    // reaches the loop that owns one for every other mode. The channels
-    // borrow the timer, so it has to outlive them; `main` never returns,
-    // which is exactly long enough regardless of where in it this sits.
+    // Set up here, before the setup branch below, because setup mode also
+    // uses the LED. The channels borrow the timer; `main` never returns, so
+    // it lives long enough.
     let ledc = led::controller(p.LEDC);
     let timer = led::timer(&ledc);
     let rgb = match timer.as_ref() {
@@ -4402,37 +3914,32 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    // Ears and wake are all active low, so they are read with a pull-up: an
-    // unconnected input then reads as "not pressed" rather than floating into
-    // phantom presses.
+    // The ears are active low, so they use a pull-up: an unconnected input
+    // reads as "not pressed" instead of floating.
     let up = InputConfig::default().with_pull(Pull::Up);
     let larger = Input::new(p.GPIO20, up);
     let smaller = Input::new(p.GPIO21, up);
 
-    // Spawned above the setup branch, not below it, because setup mode is the
-    // one mode that needs it most: an access point beacons for as long as it
-    // is up, and this pack has gone flat while still reporting itself healthy.
-    // Everything else below is deliberately left until after the branch.
+    // Started before the setup branch, because setup mode needs battery
+    // monitoring too: its access point runs the radio the whole time. Other
+    // tasks are started after the branch.
     let mut adc_config = AdcConfig::new();
     let battery = adc_config.enable_pin(p.GPIO9, Attenuation::_11dB);
     let charger = adc_config.enable_pin(p.GPIO8, Attenuation::_11dB);
     spawner.spawn(sense(Adc::new(p.ADC1, adc_config), battery, charger).unwrap());
 
-    // Both ears held through a power-on asks for the setup portal. Read
-    // before `net` is spawned — that task is the only other claim on
-    // `p.WIFI` — and before the rest of the boot, because setup mode is the
-    // *absence* of almost every task below: no decoder, no codec, no NFC, no
-    // media loop.
+    // Both ears held at power-on start the setup portal. Checked before
+    // `net` is started (the only other user of `p.WIFI`) and before the rest
+    // of the boot, because setup mode runs almost none of the tasks below:
+    // no decoder, codec, NFC or media loop.
     //
-    // **That absence does not pay for the portal's memory, and an earlier
-    // version of this comment claimed it did.** What the portal costs is
-    // `.bss`, not stack: its buffers are held across `await` points, so they
-    // size this task's future, and `esp-hal` gives the stack whatever `.bss`
-    // leaves. Not starting the decoder frees no `.bss` at all — see the
-    // measurements in `portal.rs`, which are of the linker's own symbols.
+    // Skipping those tasks does not make room for the portal: its buffers
+    // are held across `await` points, so they are part of this task's future
+    // in `.bss`, and the stack gets whatever `.bss` leaves. See the
+    // measurements in `portal.rs`.
     //
-    // Active low, so held is low. The ears are the gesture and not a
-    // control: once this branch is taken they are never read again.
+    // Active low, so held reads low. In setup mode the ears are not read
+    // again.
     if larger.is_low() && smaller.is_low() {
         esp_println::println!("teddiebox: both ears held — setup portal");
 
@@ -4451,11 +3958,8 @@ async fn main(spawner: Spawner) {
         board.apply(gates.power(Rail::Storage, true));
         Timer::after(Duration::from_millis(50)).await;
 
-        // The main loop below is what paints `LED_REQUEST` for every other
-        // mode; this branch never reaches it, so painting happens straight
-        // onto the controller built above instead. Built once and handed
-        // down rather than stored anywhere, because nothing outside this
-        // branch and `portal::run` ever needs to ask for a colour again.
+        // In other modes the main loop below shows `LED_REQUEST`. This branch
+        // never reaches that loop, so it sets the LED directly.
         let paint = |state: LedState| {
             if let Some(rgb) = rgb.as_ref() {
                 if let Ok(lit) = gates.led(colour_for(state)) {
@@ -4464,12 +3968,10 @@ async fn main(spawner: Spawner) {
             }
         };
 
-        // Claimed before the card is even mounted, because the failure path
-        // below parks — and parking is an `await`, so anything alive at that
-        // point is a field of this task's future and therefore of `.bss`.
-        // Asking for the scratch first keeps the 812-byte `Mounted` out of
-        // it: by the time the card exists, the only remaining `await` in this
-        // branch is the one that has already handed the card away.
+        // Taken before the card is mounted, because the failure path below
+        // parks, which is an `await`: anything alive across it becomes part
+        // of this task's future, in `.bss`. Doing this first keeps the
+        // 812-byte `Mounted` out of the future.
         let Some(scratch) = audio::take_scratch_bytes() else {
             esp_println::println!(
                 "teddiebox: portal cannot have the decode scratch — it is in use"
@@ -4478,12 +3980,9 @@ async fn main(spawner: Spawner) {
             portal::park().await
         };
 
-        // The access point goes up whether or not the card does. A loose or
-        // dead card is exactly the box somebody is holding both ears on, and
-        // painting it red with no network to join leaves them nowhere to go:
-        // the page says what is wrong instead, and only the *save* is
-        // refused. The console keeps the specific reason; the page only needs
-        // to say there is no card.
+        // The access point starts even without a card: the page then says
+        // what is wrong, and only saving is refused. The console prints the
+        // exact reason.
         let card = match Spi::new(p.SPI2, storage::init_config()) {
             Ok(spi) => {
                 let spi = spi
@@ -4509,25 +4008,22 @@ async fn main(spawner: Spawner) {
 
         let seed = net::seed();
 
-        // Setup mode runs out of the decoder's scratch. `portal::run`'s
-        // future — every socket buffer, the card, and the radio's
-        // `StackResources` — is built on the stack here and immediately moved
-        // into the 51,712 bytes `audio::SCRATCH` is holding for a decoder
-        // this mode never starts, so what stays in *this* task's future is a
-        // pointer. That is what keeps the linker's stack region where it was
-        // before the portal existed; `portal::place` carries the numbers.
+        // Setup mode reuses the decoder's scratch memory. `portal::run`'s
+        // future (socket buffers, the card and the radio's `StackResources`)
+        // is moved into the 51,712 bytes of `audio::SCRATCH`, which the
+        // decoder does not use in this mode, so only a pointer stays in this
+        // task's future. That keeps the stack as large as without the portal;
+        // `portal::place` has the numbers.
         //
-        // The claim above goes through the same gate the decoder's does, so
-        // the two cannot both have it: a box that somehow got here with audio
-        // running raises no access point and says why, rather than aliasing
-        // the buffer the decoder is writing into.
+        // The scratch is taken through the same check the decoder uses, so
+        // both can never have it at once.
         let Some(portal) = portal::place(
             scratch,
             portal::run(p.WIFI, p.UART0, p.GPIO44, card, seed, paint),
         ) else {
-            // `place` has already said what would not fit. Park rather than
-            // reset, for the reason `portal::run` parks: the ears are still
-            // held, so a reset comes straight back here.
+            // `place` has already printed what did not fit. Park rather than
+            // reset: the ears may still be held, so a reset would come
+            // straight back here.
             portal::park().await
         };
         portal.await
@@ -4535,54 +4031,40 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(net(p.WIFI, p.SHA, p.RSA, p.AES).unwrap());
 
-    // One task per ear, each held by its own pin: the GPIO hardware reports a
-    // press whenever this box next gets around to asking, which a 2 ms poll
-    // could not do under a decoder using 69% of real time.
+    // One task per ear, each waiting on its pin's edge: the GPIO hardware
+    // latches a press until it is read, which a 2 ms poll could not
+    // guarantee while the decoder uses 69% of the CPU.
     spawner.spawn(ear(Ear::Larger, "larger ear", larger).unwrap());
     spawner.spawn(ear(Ear::Smaller, "smaller ear", smaller).unwrap());
     spawner.spawn(inputs(Input::new(p.GPIO7, up)).unwrap());
 
-    // UART0's receive half. esp-println keeps the transmit half.
-    // Let the console drain before UART0 is reconfigured below.
-    //
-    // Every boot line printed since reset is still queued in UART0's transmit
-    // FIFO at this point, and `UartRx::new` reprograms the peripheral out from
-    // under it — so the last line or two arrives truncated and spliced into
-    // whatever prints next. That is the corruption in front of the command
-    // list that every boot has shown for months: `teddieb 0x1teddiebox: dl rb`
-    // is `stack painted` being cut off mid-word. At 115200 the queue is a few
-    // hundred microseconds, and `drain_console` already waits exactly this way
-    // for exactly this reason on the way out of a reboot.
+    // Let the console output finish before UART0 is reconfigured below.
+    // Otherwise the last boot lines still in the transmit FIFO arrive cut off
+    // and mixed into the next line.
     drain_console();
 
+    // UART0's receive half. esp-println keeps the transmit half.
     let mut console = UartRx::new(p.UART0, UartConfig::default().with_baudrate(115200))
         .expect("UART0 receive")
         .with_rx(p.GPIO44);
     let mut watch = CommandWatch::new();
-    // Cleared the moment it is asked for, so a jingle is a start-up event and
-    // not something that can happen twice.
+    // Cleared when the jingle is requested, so it only plays once.
     let mut startup_pending = true;
-    // Separate from startup_pending: the jingle only needs the codec, but
-    // confirming an update needs the card too, and the card mounts lazily
-    // on whichever request happens to need it first.
+    // Separate from `startup_pending`: the jingle only needs the codec, but
+    // confirming an update also needs the card, which is mounted later.
     let mut boot_confirmed = false;
     esp_println::println!(
         "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off | reval"
     );
 
-    // Deliberately not up by `ota::confirm_boot_or_revert()`, where nothing
-    // else depends on it: `stack::paint()` fills every unused byte of stack
-    // with a pattern, including whatever a print from just before it hadn't
-    // finished draining out the UART yet, and that print was the corpse.
-    // Moving this below both the paint and the console banner is what keeps
-    // it out of that memory — pulling it back up there garbles the line
-    // again. `flash::flash()` lends one handle at a time: this takes it and
-    // gives it back inside the call.
+    // Here rather than next to `ota::confirm_boot_or_revert()`: loaded before
+    // `stack::paint()`, its console output was overwritten by the paint and
+    // came out garbled. `flash::flash()` lends one handle at a time; each call
+    // takes it and gives it back.
     //
-    // It also sits below the both-ears-held branch above, which diverges
-    // with `-> !` and never reaches here: setup mode never loads the
-    // identity. Inert today — the portal makes no outbound TLS connection —
-    // but it is a real narrowing, and this is the only place it is recorded.
+    // Setup mode never reaches this line, so it never loads the identity.
+    // That does not matter now, because the portal makes no outgoing TLS
+    // connection.
     identity::load();
     wifikey::load();
 
@@ -4591,8 +4073,7 @@ async fn main(spawner: Spawner) {
     // CS 34, created at the specification's 400 kHz initialisation rate;
     // storage.rs raises it once the card has identified itself.
     //
-    // Both go to one task: the tone, the checksum walk and WAV playback all
-    // contend for these two peripherals.
+    // Both go to the media task, which serves everything that needs them.
     match (
         I2s::new(
             p.I2S0,
@@ -4615,15 +4096,13 @@ async fn main(spawner: Spawner) {
                 .with_sck(p.GPIO35)
                 .with_mosi(p.GPIO38)
                 .with_miso(p.GPIO36);
-            // Idle high: on SPI a card watches for its select line to fall, and
-            // one that starts low is addressed before anything is ready to talk
-            // to it.
+            // Starts high (not selected): a card is selected when this line
+            // goes low.
             let cs = Output::new(p.GPIO34, Level::High, OutputConfig::default());
 
             let tone_buffer = esp_hal::dma_loop_buffer!(tone::SINE.len() * 4);
-            // Roughly 170 ms of audio at 48 kHz stereo 16-bit. Design §5 wants
-            // the cushion sized from measurement rather than estimate, and this
-            // is the buffer whose low-water mark provides that measurement.
+            // About 170 ms of audio at 48 kHz stereo 16-bit. Its low-water
+            // mark is measured to check the size.
             let wav_buffer = esp_hal::dma_tx_stream_buffer!(audio::BUFFER_BYTES);
 
             spawner.spawn(media(spi, cs, i2s_tx, tone_buffer, wav_buffer).unwrap());
@@ -4638,15 +4117,10 @@ async fn main(spawner: Spawner) {
                         .with_miso(p.GPIO3);
                     let nfc_cs = Output::new(p.GPIO1, Level::High, OutputConfig::default());
                     let nfc_irq = Input::new(p.GPIO13, InputConfig::default());
-                    // Gate 47 feeds the reader as well as the card, so a box
-                    // that polls the plate from boot has to raise it here.
-                    // `plate on` does exactly this before setting the flag;
-                    // until the default changed, that command was the only
-                    // way the reader was ever started, and the rail came with
-                    // it. Raised before the spawn rather than in the loop
-                    // below, because the task settles for 50 ms and then
-                    // talks — which is a race against a rail nobody has
-                    // raised, and it reads as "suspect SPI".
+                    // The storage rail (gate 47) also powers the reader, so
+                    // switch it on here when polling is on from boot, as
+                    // `plate on` does. Before the spawn, because the task
+                    // waits only 50 ms before talking to the reader.
                     if PLATE_POLLING.load(Ordering::Relaxed) {
                         board.apply(gates.power(Rail::Storage, true));
                     }
@@ -4659,13 +4133,12 @@ async fn main(spawner: Spawner) {
         (_, Err(_)) => esp_println::println!("teddiebox: SPI would not configure"),
     }
 
-    // Devices need a moment after their rail comes up before they answer.
-    // Without this the accelerometer misses the scan and then answers the
-    // probe a few milliseconds later, which reads as a bus that is lying.
+    // Devices need a moment after their rail comes up. Without this the
+    // accelerometer misses the scan but answers a few milliseconds later.
     Timer::after(Duration::from_millis(50)).await;
 
-    // The codec and the accelerometer are both on the rail brought up above,
-    // so the bus is only worth scanning now.
+    // The codec and the accelerometer are on the rail switched on above, so
+    // scan the bus only now.
     match I2c::new(p.I2C0, I2cConfig::default()) {
         Ok(i2c) => {
             let mut i2c = i2c.with_sda(p.GPIO5).with_scl(p.GPIO6);
@@ -4676,28 +4149,21 @@ async fn main(spawner: Spawner) {
         Err(_) => esp_println::println!("teddiebox: I2C would not configure"),
     }
 
-    // The LED holds one colour until the reducer decides on another, so this
-    // loop only has to repaint often enough that a decision is seen promptly.
-    // The waveform is held by the LEDC peripheral either way; the software PWM
-    // this replaced woke four hundred times a second and could not keep its
-    // own period once anything else wanted the executor.
+    // The LEDC peripheral holds the colour, so this loop only has to update
+    // it often enough that a change shows promptly.
     const LED_STEP: Duration = Duration::from_millis(20);
 
-    // What the LED is showing now, so a loop pass with no new decision repaints
-    // the same colour rather than going dark.
+    // What the LED shows now, so a pass without a new request keeps the same
+    // colour.
     let mut shown = LedState::Booting;
 
-    // Asked on a wake, before the codec, the card, the radio or the jingle.
-    // Speaking costs a codec power-up, the amplifier, a card read and a decode
-    // — seconds of near-full-power draw on a pack that has nothing left, every
-    // time a child presses an ear, and driving these unprotected cells that
-    // far down is the thing the cutoff exists to prevent. Red is milliamps and
-    // is still an answer, and "red means plug me in" is learnable.
+    // On a wake with an empty pack, show red and go back to sleep before the
+    // codec, card, radio or jingle start. Speaking would draw near-full power
+    // for seconds on every ear press, draining the unprotected cells below
+    // the cutoff; red costs only milliamps.
     //
-    // Only on a wake from deep sleep. A cold boot on a flat pack still boots
-    // and still speaks: that path is how a box says what is wrong to somebody
-    // who just switched it on, and it has not slept, so nothing here knows
-    // sleep works on this board.
+    // Only on a wake from deep sleep. A cold boot on a flat pack still starts
+    // and announces the problem.
     if reset_reason(Cpu::ProCpu) == Some(SocResetReason::CoreDeepSleep) {
         if let Some(mv) = pack_says_empty().await {
             esp_println::println!("teddiebox: pack {mv} mV on wake — below the cutoff, going back");
@@ -4716,28 +4182,22 @@ async fn main(spawner: Spawner) {
 
     loop {
         if let Some(rgb) = rgb.as_ref() {
-            // A byte that names no state can only come from a bug, and the
-            // last colour is a better answer than a dark LED: the box is still
-            // running, whatever the byte says.
+            // An unknown value can only be a bug; keep the last colour rather
+            // than going dark.
             if let Some(state) = LedState::from_code(LED_REQUEST.load(Ordering::Relaxed)) {
                 shown = state;
             }
-            // A dark LED rather than a panic if the rail is ever down here.
-            // It is up for every path that reaches this today — the shutdown
-            // that lowers it parks without coming back — but this is a loop
-            // that runs for the life of the box on a device a child holds.
+            // Leave the LED dark rather than panic if the rail is ever off
+            // here (no current path does that).
             if let Ok(lit) = gates.led(colour_for(shown)) {
                 rgb.apply(&lit, board::LED_DUTY);
             }
         }
 
-        // The jingle stock plays at power-on, once the codec could carry it.
+        // The start-up jingle, once the codec is ready.
         //
-        // It is not decoration. Powering the class-D amplifier is audible on
-        // its own — that is what this box used to click on — and starting the
-        // audio in the same breath is how the stock firmware lives with it.
-        // The sound covers the transient rather than the transient being
-        // removed, which is the same trick, honestly arrived at.
+        // It also hides the click of powering the class-D amplifier, as the
+        // original firmware does.
         if startup_pending && CODEC_READY.load(Ordering::Relaxed) {
             startup_pending = false;
             SOUND_REQUEST.store(Sound::Startup.file(), Ordering::Relaxed);
@@ -4752,34 +4212,29 @@ async fn main(spawner: Spawner) {
             ota::mark_valid();
         }
 
-        // A sound the box decided to say about itself. Raised here rather
-        // than in the task that noticed, because the rails and the playback
-        // request belong to this loop.
+        // A sound the box wants to play, such as a warning. Started here,
+        // because this loop controls the rails.
         let pending = SOUND_REQUEST.swap(NO_SOUND, Ordering::Relaxed);
         if pending != NO_SOUND {
             board.apply(gates.power(Rail::Storage, true));
             request_output(OUTPUT_UP);
             CONTENT_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
             CONTENT_FILE.store(pending, Ordering::Relaxed);
-            // Marked here rather than by the task that plays it, so there is
-            // no window in which the announcement is pending but nothing
-            // reports it as under way. Named as well as marked, so only the
-            // playback this flag is about can clear it.
+            // Set here rather than by the media task, so there is no moment
+            // when the announcement is queued but not marked. The file is
+            // recorded so only its own playback clears the flag.
             ANNOUNCING_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
             ANNOUNCING_FILE.store(pending, Ordering::Relaxed);
             ANNOUNCING.store(true, Ordering::Relaxed);
             REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
         }
 
-        // The box said it was turning off. Do it, once the sentence has been
-        // heard — cutting the announcement short to obey it would be its own
-        // kind of broken.
+        // The box said it is turning off. Do it once the announcement has
+        // finished.
         if SHUTTING_DOWN.load(Ordering::Relaxed) && !ANNOUNCING.load(Ordering::Relaxed) {
-            // The last chance anything has to write the card. Asked of the task
-            // that owns it, and waited for — but not for long: a pack this
-            // close to empty is not worth holding the rails up over, and a lost
-            // bookmark is a smaller failure than a box that will not switch
-            // off.
+            // Last chance to save the position. Ask the media task and wait,
+            // but only briefly: losing the position is better than a box that
+            // will not turn off.
             FLUSH_PLACE.store(true, Ordering::Relaxed);
             for _ in 0..20 {
                 if !FLUSH_PLACE.load(Ordering::Relaxed) {
@@ -4787,30 +4242,20 @@ async fn main(spawner: Spawner) {
                 }
                 Timer::after(Duration::from_millis(25)).await;
             }
-            // Which authority decided is said by `perform`, where it is known.
-            // This line used to name the pack unconditionally, and an idle park
-            // then reported a flat battery that was nothing of the kind.
+            // The reason was already printed by `perform`.
             esp_println::println!("teddiebox: going dark");
             go_dark(&mut board, &mut gates, rgb.as_ref()).await;
-            // Deep sleep is what this was always meant to be. A park keeps the
-            // executor running with the PLLs up — tens of milliamps — so the
-            // cutoff that exists to stop these unprotected cells being driven
-            // into reversal was removing the load a child can see and then
-            // draining the pack anyway.
-            //
-            // The default since the wake was proven on hardware. `autosleep
-            // off` is how a bench asks for a box that cannot disappear.
+            // Deep sleep, because a park keeps the CPU and PLLs running (tens
+            // of milliamps) and would keep draining the pack. `autosleep off`
+            // parks instead.
             if AUTO_SLEEP.load(Ordering::Relaxed) {
                 if let Err(reason) = sleep_now(&mut lpwr).await {
                     esp_println::println!("teddiebox: sleep not armed — {reason}, parking instead");
                 }
             }
-            // Everything a child can see or hear is now off, and every task
-            // that was still working on the box's behalf stops here. Reached
-            // when the ending is a park, and when a sleep would not arm: a box
-            // that drains is recoverable by charging, and a box asleep with
-            // nothing able to wake it is not, so this is the safe side to fall
-            // on.
+            // Sound and lights are off; now stop every task. Reached for a
+            // park, and when sleep could not be armed: a box that drains can
+            // be recharged, but one asleep with no way to wake is stuck.
             PARKED.store(true, Ordering::Relaxed);
             park_task().await;
         }
@@ -4819,11 +4264,9 @@ async fn main(spawner: Spawner) {
         if let Ok(n) = console.read_buffered(&mut buf) {
             let command = buf[..n].iter().find_map(|&b| watch.feed(b));
 
-            // A release image answers `dl` and nothing else. One gate around
-            // the whole dispatch rather than one per command: a command added
-            // later is gated by having been added, which is the opposite of
-            // what a per-arm list does, and `BENCH` being a constant lets the
-            // optimiser drop every arm below rather than only their bodies.
+            // A release image only accepts `dl`. One check around the whole
+            // dispatch, not one per command, so a new command is covered
+            // automatically, and the optimiser drops all of it (see `BENCH`).
             if !BENCH {
                 match command {
                     Some(Command::DownloadMode) => {
@@ -4847,9 +4290,8 @@ async fn main(spawner: Spawner) {
                     reboot(&mut board, &mut gates)
                 }
                 Some(Command::Tone) => {
-                    // The output path is unpowered until something plays, so
-                    // every audio command has to ask for it first or it is
-                    // heard by nobody.
+                    // The output is off until something plays, so every audio
+                    // command must switch it on first.
                     request_output(OUTPUT_UP);
                     REQUEST.store(REQUEST_TONE, Ordering::Relaxed);
                 }
@@ -4905,10 +4347,9 @@ async fn main(spawner: Spawner) {
                 Some(Command::HeadphoneStatus) => {
                     HEADPHONE_REPORT.store(true, Ordering::Relaxed);
                 }
-                // Both halves, always: the static the codec bring-up reads,
-                // and the event that moves the routing and the ladder
-                // together. Setting the static alone would mute the speaker
-                // and leave the level on the other output's ladder.
+                // Sets both the static the codec bring-up reads and the event
+                // for the reducer, which switches the output and its volume
+                // scale together.
                 Some(Command::Headphones(on)) => {
                     HEADPHONES_IN.store(on, Ordering::Relaxed);
                     esp_println::println!(
@@ -4926,7 +4367,7 @@ async fn main(spawner: Spawner) {
                     esp_println::println!("teddiebox: net ssid set to {value}");
                     set_ssid(value);
                 }
-                // Deliberately not echoed, the way `pw` is not.
+                // Not echoed, like `pw`.
                 Some(Command::NetPassword(value)) => {
                     esp_println::println!("teddiebox: net passphrase set ({} chars)", value.len());
                     set_password(value);
@@ -4938,11 +4379,8 @@ async fn main(spawner: Spawner) {
                     NET_REQUEST.store(NET_DOWN, Ordering::Relaxed);
                 }
                 Some(Command::Get(ruid)) => {
-                    // Read and written in the one critical section: whatever
-                    // `token`/`nfc`/`slix` last left behind is what this `get`
-                    // sends, exactly as before — just captured as part of the
-                    // one `FetchRequest` write rather than left for the fetch
-                    // to go looking for later.
+                    // One critical section: the token last read by the
+                    // console `token` command goes into this request.
                     critical_section::with(|cs| {
                         let token = *TAG_TOKEN.borrow_ref(cs);
                         *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest {
@@ -4991,11 +4429,7 @@ async fn main(spawner: Spawner) {
                     board.apply(gates.power(Rail::Storage, true));
                     NFC_REQUEST.store(NFC_LOCK, Ordering::Relaxed);
                 }
-                // Manual, and manual only. The automatic path stays a park
-                // until sleep current and the state of the gate pins have been
-                // measured, and those two numbers are taken with a meter and a
-                // box that sleeps when it is told to — not one that decides to
-                // mid-session.
+                // Sleep now, whatever `autosleep` says.
                 Some(Command::Sleep) => {
                     go_dark(&mut board, &mut gates, rgb.as_ref()).await;
                     if let Err(reason) = sleep_now(&mut lpwr).await {
@@ -5051,8 +4485,8 @@ async fn main(spawner: Spawner) {
                 }
                 Some(Command::Password(value)) => {
                     NFC_PASSWORD.store(value, Ordering::Relaxed);
-                    // Deliberately not echoed. It is a credential, and a bench
-                    // capture is a file that outlives the session.
+                    // Not echoed: it is a credential, and console captures
+                    // are often saved to files.
                     esp_println::println!("teddiebox: nfc password set");
                 }
                 Some(Command::PlayTaf) => {
@@ -5097,19 +4531,14 @@ async fn main(spawner: Spawner) {
                 Some(Command::Stop) => {
                     audio::STOP.store(true, Ordering::Relaxed);
                 }
-                // Setup mode's console acts on this; this one does not. Here
-                // the card is a file away on a laptop, and the access point it
-                // changes is not up — so the command has nothing to fix and
-                // one more way to write the card is one more way to get it
-                // wrong.
+                // Only setup mode's console handles this; outside setup mode
+                // the access point it configures is not running.
                 Some(Command::SetupPassword(_)) => esp_println::println!(
                     "teddiebox: setup pw only works in setup mode — hold both ears at switch-on"
                 ),
                 Some(Command::Storage) => {
-                    // The rail comes up here because this loop owns the pins.
-                    // It stays up afterwards: the walk is a bench action, and a
-                    // rail that drops under a card mid-read is a worse bug than
-                    // one left on.
+                    // Switched on here, because this loop owns the pins, and
+                    // left on afterwards so the card never loses power mid-read.
                     board.apply(gates.power(Rail::Storage, true));
                     REQUEST.store(REQUEST_WALK, Ordering::Relaxed);
                 }

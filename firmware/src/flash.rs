@@ -1,33 +1,23 @@
 //! The one `FlashStorage` handle, lent out to whoever needs raw flash access.
 //!
-//! A device-wide resource, not an OTA one: it lives here rather than in
-//! `ota.rs` only because OTA needed it first. `identity::load` reads a data
-//! partition through the same handle and has nothing to do with OTA at all.
+//! Shared by OTA, `identity::load` and `wifikey`.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use esp_bootloader_esp_idf::partitions::FlashStorage;
 
 /// The one flash handle, built on first use and kept for the life of the box.
 ///
-/// `FlashStorage::new` is documented as panicking if called twice. What it
-/// actually does on this chip is quieter and worse: the first handle works and
-/// every later one fails every read with `StorageError`, so a command that
-/// worked once starts reporting a flash that looks broken. Found on
-/// 2026-09-16 by running `otas` twice — the second call failed, and so did
-/// every flash access after it until the box was rebooted.
-///
-/// So it is built once. Constructing per command was the bug.
+/// `FlashStorage::new` is documented to panic if called twice. On this chip,
+/// in practice, the second handle fails every read with `StorageError`, and
+/// flash access stays broken until a reboot. So it is created only once.
 static mut FLASH: Option<FlashStorage<'static>> = None;
 
 /// Whether the one handle is currently lent out.
 ///
-/// What makes [`flash`] sound. Every caller runs on the one executor and
-/// none holds the handle across an `.await` — every function that borrows it
-/// is synchronous — so no two borrows can overlap, whichever task each is in.
-/// That is true today and enforced by nothing but this: a second borrow while the first is alive
-/// panics where it happens instead of quietly producing two `&mut` to the same
-/// peripheral. It cannot fire while the invariant holds, and if the invariant
-/// stops holding, a panic names the moment it stopped.
+/// This makes [`flash`] safe. Every caller runs on the one executor and none
+/// holds the handle across an `.await` (every function that borrows it is
+/// synchronous), so two borrows never overlap. If that ever changes, a second
+/// borrow panics instead of creating two `&mut` to the same peripheral.
 static LENT: AtomicBool = AtomicBool::new(false);
 
 /// The one flash handle, borrowed. Returns itself on drop.
@@ -55,13 +45,13 @@ impl core::ops::DerefMut for Flash {
 
 /// Hands out the one flash handle.
 ///
-/// Callers are the first line of `main` ([`crate::ota::confirm_boot_or_revert`]),
-/// the main loop's confirmation check ([`crate::ota::mark_valid`]), the
-/// console's OTA commands ([`crate::ota::status`], [`crate::ota::write_probe`],
+/// Callers: the start of `main` ([`crate::ota::confirm_boot_or_revert`]), the
+/// main loop's check ([`crate::ota::mark_valid`]), the console's OTA commands
+/// ([`crate::ota::status`], [`crate::ota::write_probe`],
 /// [`crate::ota::arm_boot`]), [`crate::identity::load`] and
-/// [`crate::wifikey::load`] once at boot, and [`crate::wifikey`]'s store from
-/// the net task's idle pass — each synchronous, so each finishes with the
-/// handle before anything else on the executor can ask for it.
+/// [`crate::wifikey::load`] at boot, and [`crate::wifikey`]'s store from the
+/// network task. All are synchronous, so each is done with the handle before
+/// another can ask for it.
 pub(crate) fn flash() -> Flash {
     assert!(
         !LENT.swap(true, Ordering::Acquire),

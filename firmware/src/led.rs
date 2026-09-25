@@ -1,16 +1,11 @@
 //! The RGB LED, driven by the LEDC peripheral.
 //!
-//! It began as software PWM in the main loop, which worked only while nothing
-//! else wanted the executor. The moment the SD walk started yielding, the 5 ms
-//! period was being stretched by tens of milliseconds and the breath became a
-//! flicker. Step 8 makes that worse and more important: an audio task with a
-//! deadline should not be competing with four hundred LED wakeups a second.
+//! Hardware PWM keeps the LED steady without any CPU work, so busy tasks
+//! (like audio) cannot make it flicker. The main loop only sets the
+//! brightness.
 //!
-//! Design §5 always specified LEDC for this. Hardware holds the waveform with
-//! no processor involvement, so the main loop only has to say how bright.
-//!
-//! Which channels are lit remains [`teddiebox_board`]'s decision — this
-//! turns that decision into a duty cycle, and knows nothing about why.
+//! [`teddiebox_board`] decides which channels are lit; this turns that into
+//! duty cycles.
 
 use esp_hal::gpio::interconnect::PeripheralOutput;
 use esp_hal::ledc::channel::{self, Channel, ChannelIFace};
@@ -19,8 +14,8 @@ use esp_hal::ledc::{LSGlobalClkSource, Ledc, LowSpeed};
 use esp_hal::time::Rate;
 use teddiebox_board::{self as board, PinLevel};
 
-/// Fast enough that no eye or camera sees steps, slow enough to be nowhere
-/// near the peripheral's limits at eight bits of resolution.
+/// Fast enough that no eye or camera sees flicker, and well within the
+/// peripheral's limits at eight-bit resolution.
 pub const PWM_HZ: u32 = 1_000;
 
 /// The three channels that make up the LED.
@@ -32,9 +27,8 @@ pub struct Rgb<'a> {
 
 /// Prepares the LEDC peripheral and its timer.
 ///
-/// Returned separately from [`Rgb`] because the channels borrow the timer, so
-/// both have to outlive them — in practice they live in `main`, which never
-/// returns.
+/// Separate from [`Rgb`] because the channels borrow the timer, so it must
+/// outlive them. In practice both live in `main`, which never returns.
 pub fn controller(ledc: esp_hal::peripherals::LEDC<'_>) -> Ledc<'_> {
     let mut ledc = Ledc::new(ledc);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
@@ -84,9 +78,9 @@ impl<'a> Rgb<'a> {
 
     /// Lights the channels `levels` says are on, at `brightness` out of 255.
     ///
-    /// `levels` comes from `Gates::led`, which has already folded in
-    /// [`board::LED_ACTIVE_HIGH`] — so a channel is lit when the level it asks
-    /// for equals the active level, whichever way round that is.
+    /// `levels` comes from `Gates::led`, which already applies
+    /// [`board::LED_ACTIVE_HIGH`], so a channel is lit when its level equals
+    /// the active level.
     pub fn apply(&self, levels: &[PinLevel; 3], brightness: u8) {
         for level in levels {
             let lit = level.high == board::LED_ACTIVE_HIGH;
@@ -97,8 +91,8 @@ impl<'a> Rgb<'a> {
                 board::LED_BLUE => &self.blue,
                 _ => continue,
             };
-            // A refused duty would only mean a wrong brightness for one frame
-            // of a breath, which is not worth interrupting anything over.
+            // A failed update only means a wrong brightness until the next
+            // one, so the error is ignored.
             let _ = channel.set_duty(duty);
         }
     }
@@ -106,9 +100,9 @@ impl<'a> Rgb<'a> {
 
 /// The duty that leaves an LED dark.
 ///
-/// Not always zero: on an active-low wiring the pin has to sit high to be off,
-/// which is full duty. One constant decides it, the same one everything else
-/// about polarity uses.
+/// Not always zero: with active-low wiring the pin must be high to be off,
+/// which is full duty. Decided by the same polarity constant as everything
+/// else.
 const fn off_duty() -> u8 {
     if board::LED_ACTIVE_HIGH {
         0

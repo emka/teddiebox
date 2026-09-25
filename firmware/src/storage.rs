@@ -1,36 +1,24 @@
 //! The SD card, in SPI mode.
 //!
-//! Bench step 7: the card mounts as FAT and every file on it checksums equal
-//! to the same file read on a laptop. `scripts/sd-checksums.sh` is the other
-//! half of that comparison and prints the same three columns, so the criterion
-//! is a `diff` rather than an eyeball.
+//! Reads stories under `CONTENT/` (never modifying them), and writes
+//! downloads under `CACHE/`, their sidecars, saved positions (`.POS`, next to
+//! the story) and `CONFIG.TXT`.
 //!
-//! Read-only, deliberately. The card in the box is the one the box shipped
-//! with, and it is evidence: nothing here opens a file for writing, creates
-//! one, or touches a directory.
+//! The `sd` walk checksums every file on the card, to compare with the same
+//! files read on a laptop by `scripts/sd-checksums.py`, which prints the same
+//! columns so the two can be compared with `diff`. The checksum is
+//! [`teddiebox_core::checksum`] and the traversal order
+//! [`teddiebox_core::walk`], both tested on the host.
 //!
-//! This module owns pins and a bus. The checksum it reports is
-//! [`teddiebox_core::checksum`] and the traversal order comes from
-//! [`teddiebox_core::walk`]; neither knows anything about cards, which is what
-//! lets both be tested on the host.
+//! **The walk yields** to the executor, so the console and other tasks keep
+//! working during a walk that can take hours. It uses a cursor rather than
+//! recursion, because recursive async needs boxed futures and this firmware
+//! does not allocate (the only heap belongs to the Wi-Fi driver).
 //!
-//! **The walk yields.** It began as a recursive blocking function, and on a
-//! full card that held the single executor for 78 minutes: the heartbeat froze
-//! at one tick, the ears went unpolled and the console stopped reading, so the
-//! box could not be told to stop and only pulling power ended it. Worse, a
-//! file prints only once it is fully read, so a 114 MB file was seven minutes
-//! of silence indistinguishable from a hang. The traversal is now a cursor
-//! rather than a call stack, which is what lets this be a flat `async` loop
-//! that can await — recursion would need its futures boxed, and this firmware
-//! deliberately does not allocate outside the radio stack, whose heap is the
-//! one allocator on the box and is sized for the Wi-Fi driver alone.
-//!
-//! **Names are the 8.3 short names**, because that is what the directory
-//! entries hold. A file stored with a long name prints here as its short alias
-//! and on the host as its long one, so the two would disagree about the path
-//! while agreeing about every byte. A Toniebox card is `CONTENT/<8 hex>/<8
-//! hex>` throughout and has no long names, but a card that did would show it
-//! as a path difference in the diff rather than a checksum difference.
+//! **Names are 8.3 short names**, as stored in the directory entries. A file
+//! with a long name shows its short alias here and its long name on a laptop,
+//! so the paths differ even though the bytes match. A Toniebox card has no
+//! long names.
 
 use core::fmt::Write as _;
 use core::ops::ControlFlow;
@@ -59,67 +47,56 @@ const INIT_RATE_KHZ: u32 = 400;
 
 /// The rate the walk runs at once the card is up.
 ///
-/// Conservative on purpose. Step 7 asks whether the bytes are right, not how
-/// fast they arrive, and a checksum mismatch caused by clocking a card too
-/// hard would be read as a filesystem fault. The throughput this prints is
-/// what a later step would use to argue for more.
+/// Conservative on purpose: correct bytes matter more than speed, and errors
+/// from clocking a card too fast would look like filesystem faults.
 const WALK_RATE_KHZ: u32 = 8_000;
 
 /// How often the file read hands the executor back.
 ///
-/// Every 16 blocks is 8 KiB, about 30 ms at the rate this bus sustains — often
-/// enough that the other tasks keep time and the console stays responsive,
-/// rarely enough that yielding is not what the walk spends its time on.
+/// Every 16 blocks (8 KiB), about 30 ms at this bus speed: often enough for
+/// other tasks and the console, rarely enough not to slow the walk.
 const YIELD_EVERY_BLOCKS: u32 = 16;
 
 /// Microseconds spent inside [`CardPages::read_page`].
 ///
-/// Playback measures how much of real time it costs to keep the codec fed, but
-/// that figure covers the decode *and* the card reads that feed it, because
-/// the reads happen underneath `next_frame`. Which of the two dominates
-/// decides which lever is worth pulling — a faster SPI clock, or a cheaper
-/// decoder — so they are counted apart.
+/// Playback measures decode time including the card reads underneath
+/// `next_frame`. This counts the card reads separately, to see which one
+/// takes longer.
 ///
-/// 64-bit through `portable-atomic`, because Xtensa has no native 64-bit
-/// atomic and microseconds in a `u32` wrap after about seventy minutes — well
-/// inside the length of a single Tonie, and a wrapped figure would read as a
-/// suspiciously fast decode rather than as an error.
+/// 64-bit via `portable-atomic`, because Xtensa has no native 64-bit atomic
+/// and a `u32` of microseconds wraps after about 70 minutes, less than some
+/// Tonies.
 pub static PAGE_READ_US: AtomicU64 = AtomicU64::new(0);
 
 /// The longest single page read, in microseconds.
 ///
-/// The total says how much of real time the card costs; this says whether any
-/// *one* read was long enough to matter. Those are different questions and only
-/// the second explains a missed deadline: the audio cushion is about 170 ms, so
-/// a single read over that starves the DMA however small the average is.
+/// The total shows how much time the card takes overall; this shows whether
+/// any *single* read was long enough to matter. The audio buffer holds about
+/// 170 ms, so one read longer than that starves the DMA.
 pub static PAGE_READ_MAX_US: AtomicU64 = AtomicU64::new(0);
 
 /// Where a Toniebox keeps its audio, and what it calls it.
 ///
-/// Fixed by the box's own layout rather than chosen here: every file step 7
-/// found on the real card sat at `CONTENT/<8 hex>/500304E0`.
+/// Fixed by the Toniebox's layout: every story on a real card is at
+/// `CONTENT/<8 hex>/500304E0`.
 const TONIE_CONTENT_DIR: &str = "CONTENT";
 
 /// Where downloads are cached, laid out exactly like `CONTENT`.
 ///
-/// Same `<8 hex>/<8 hex>` split, so a file that finishes downloading sits
-/// where a stock one would and nothing has to translate between two
-/// conventions later.
+/// The same `<8 hex>/<8 hex>` layout, so no conversion is needed.
 const CACHE_DIR: &str = "CACHE";
 
 /// Where the card's copy of the certificate authority lives.
 ///
-/// Holds `TCCA.DER` alone: the box's own certificate and key are not on the
-/// card, they live in the `cert` flash partition. An 8.3 name already, so
-/// `open_file_in_dir` reaches it directly.
+/// Holds only `TCCA.DER`; the box's own certificate and key are in the
+/// `cert` flash partition. Already an 8.3 name.
 const CERT_DIR: &str = "CERT";
 
 /// Why the card's configuration could not be used.
 ///
-/// Three cases, kept apart because they call for different words: no file at
-/// all is the ordinary state of a fresh card, a file that will not read is a
-/// card or wiring fault, and a file that will not parse is a typo somebody can
-/// fix.
+/// Three cases with different meanings: no file (normal on a new card), a
+/// file that cannot be read (card or wiring fault), and a file that does not
+/// parse (a typo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigTrouble {
     /// No such file in the card's root.
@@ -144,8 +121,8 @@ fn write_hex8(out: &mut [u8; 8], value: u32) {
 /// Longest path the walk will print.
 const MAX_PATH: usize = 64;
 
-/// FAT stamps a timestamp on anything it creates. Nothing here creates
-/// anything, so this is never read back — but the type demands one.
+/// FAT needs a timestamp for new files. The box has no clock, so every
+/// timestamp is zero.
 struct NoClock;
 
 impl TimeSource for NoClock {
@@ -163,9 +140,8 @@ impl TimeSource for NoClock {
 
 /// The path of the directory currently being walked.
 ///
-/// One of these exists for the whole walk and is pushed and popped as it
-/// descends, so the path costs the same whatever the depth. Building it per
-/// level instead would put a buffer on every stack frame.
+/// One buffer for the whole walk, extended and shortened as it goes, so the
+/// memory used does not grow with depth.
 struct Path {
     buf: [u8; MAX_PATH],
     len: usize,
@@ -181,9 +157,8 @@ impl Path {
 
     /// Appends `/name`, and reports where to truncate back to.
     ///
-    /// Silently stops at the buffer's end rather than wrapping: a truncated
-    /// path prints wrongly, which the host diff catches, where a wrapped one
-    /// would print plausibly and be believed.
+    /// Stops at the buffer's end: a cut-off path shows up in the `diff` with
+    /// the host.
     fn push(&mut self, name: &ShortFileName) -> usize {
         let mark = self.len;
         let mut writer = PathWriter { path: self };
@@ -196,7 +171,7 @@ impl Path {
     }
 
     fn as_str(&self) -> &str {
-        // Every byte written came from a ShortFileName, which is 8.3 ASCII.
+        // Every byte came from a ShortFileName, which is 8.3 ASCII.
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("<unprintable>")
     }
 }
@@ -220,9 +195,8 @@ impl core::fmt::Write for PathWriter<'_> {
 
 /// Page-indexed reads of one file on the card.
 ///
-/// `teddiebox-taf` asks for 4096-byte pages and nothing else, because every
-/// structure in a TAF file is 4096-aligned. On the host that trait is a slice
-/// index; here it is a seek and a read, and nothing above it knows which.
+/// `teddiebox-taf` reads 4096-byte pages, because every structure in a TAF
+/// file is 4096-aligned. Here that is a seek and a read.
 pub struct CardPages<'a> {
     card: &'a Mounted,
     file: RawFile,
@@ -235,8 +209,7 @@ impl<'a> CardPages<'a> {
         Self {
             card,
             file,
-            // A short final page is normal — the last Ogg page runs only as
-            // long as it needs to — so this rounds up rather than truncating.
+            // Round up: the last page of a file is often short.
             pages: size.div_ceil(PAGE_SIZE as u32),
         }
     }
@@ -270,8 +243,8 @@ impl CardPages<'_> {
             .ok_or("page index out of range")?;
         self.card.seek(self.file, offset)?;
 
-        // One read is not guaranteed to fill the buffer, so keep asking until
-        // it does or the file ends.
+        // One read may not fill the buffer, so repeat until full or the end
+        // of the file.
         let mut filled = 0;
         while filled < PAGE_SIZE {
             let read = self.card.read(self.file, &mut buf[filled..])?;
@@ -281,9 +254,8 @@ impl CardPages<'_> {
             filled += read;
         }
 
-        // Zero-fill a short final page. Safe because an Ogg page declares its
-        // own extent through its lacing table, so nothing reads past the bytes
-        // that were really there.
+        // Zero-fill a short last page. Safe because an Ogg page states its own
+        // length.
         buf[filled..].fill(0);
         Ok(())
     }
@@ -299,34 +271,24 @@ struct Entry {
 
 type Card = SdCard<ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'static>, Delay>, Delay>;
 
-/// The volume manager, sized to what the walk actually holds open at once.
+/// The volume manager, with limits matching what is open at once.
 ///
-/// The directory limit is [`MAX_DEPTH`] and not a number of its own: the walk
-/// keeps every directory on the current path open, so it needs exactly as many
-/// as it is deep. Setting them independently would let the depth limit grow
-/// past the handle limit, and the walk would then stop with `TooManyOpenDirs`
-/// on a card that is merely deep — which reads as an unreadable directory.
-/// **Two files**, and there is one volume. One was enough while the card was
-/// only ever read, and it is what a download makes insufficient: the cache file
-/// stays open for the length of a download, and with a single handle the box
-/// could not open *anything else* while one ran — no story, no system sound.
-/// A box that cannot play while it downloads is the thing this design exists to
-/// avoid, so the second handle is not a convenience.
+/// The directory limit is [`MAX_DEPTH`]: the walk keeps every directory on
+/// the current path open. A separate number could fall below the depth
+/// limit, and the walk would fail with `TooManyOpenDirs` on a deep card.
 ///
-/// Two, not more: reading and writing the *same* file still shares one handle,
-/// because `embedded-sdmmc` refuses a second on one file whatever this says.
+/// **Two files**: a download keeps its cache file open, and the box must
+/// still be able to open another file (a story or a system sound) meanwhile.
+/// Reading and writing the *same* file shares one handle, because
+/// `embedded-sdmmc` cannot open one file twice.
+///
+/// One volume.
 type Volumes = VolumeManager<Card, NoClock, MAX_DEPTH, 2, 1>;
 
 /// A mounted card, and the handles that keep it open.
 ///
-/// Nothing closes it. Once the card is up it stays up for as long as the box
-/// runs, because every command that wants it wants it again, and a rail shared
-/// with the NFC reader is not one to cycle for the sake of tidiness.
-///
-/// Mounting is separate from walking because step 8 wants the same card for a
-/// different purpose. Doing it once and keeping the handles also avoids
-/// re-identifying the card and re-raising the bus clock every time a bench
-/// command is typed.
+/// Never closed: once mounted, the card stays mounted while the box runs.
+/// Its power rail is shared with the NFC reader, so it is not turned off.
 pub struct Mounted {
     volumes: Volumes,
     root: RawDirectory,
@@ -335,9 +297,8 @@ pub struct Mounted {
 impl Mounted {
     /// Brings the card up and mounts partition 0.
     ///
-    /// The storage rail must already be on; powering it is the caller's
-    /// business, because the rail is shared with the NFC reader and this
-    /// module has no claim on that decision.
+    /// The storage rail must already be on. The caller turns it on, since the
+    /// rail is shared with the NFC reader.
     pub fn open(
         spi: Spi<'static, esp_hal::Blocking>,
         cs: Output<'static>,
@@ -347,8 +308,8 @@ impl Mounted {
             ExclusiveDevice::new(spi, cs, delay).map_err(|_| "chip select would not drive")?;
         let card = SdCard::new(device, delay);
 
-        // The first transaction is what actually identifies the card, so this
-        // is where a dead bus shows up rather than at construction.
+        // The first transaction identifies the card, so a dead bus shows up
+        // here.
         let bytes = card.num_bytes().map_err(|_| "no card answered")?;
         esp_println::println!(
             "teddiebox: card {} MiB, type {:?}",
@@ -356,8 +317,7 @@ impl Mounted {
             card.get_card_type()
         );
 
-        // Identified, so the bus can leave the specification's initialisation
-        // speed behind.
+        // The card is identified, so the bus can run faster now.
         card.spi(|device| {
             let faster = SpiConfig::default().with_frequency(Rate::from_khz(WALK_RATE_KHZ));
             if device.bus_mut().apply_config(&faster).is_err() {
@@ -376,7 +336,7 @@ impl Mounted {
         Ok(Self { volumes, root })
     }
 
-    /// Checksums everything on the card. Bench step 7.
+    /// Checksums every file on the card.
     pub async fn walk(&self) {
         esp_println::println!("teddiebox: sd walk begins");
         walk_tree(&self.volumes, self.root).await;
@@ -385,12 +345,8 @@ impl Mounted {
 
     /// The first file in the root directory with this extension.
     ///
-    /// Root only, and deliberately: the files steps 8 and 9 play are ones
-    /// somebody copies onto the card, the root is where they naturally land,
-    /// and searching the whole card would mean reading every directory first.
-    /// A real Tonie's `.taf` lives three levels down under `CONTENT`, so for
-    /// step 9 it has to be copied out to the root — which also keeps step 7's
-    /// walk comparing like with like.
+    /// Only the root: test files are copied there, and searching the whole
+    /// card would mean reading every directory.
     pub fn find_by_extension(&self, extension: &[u8]) -> Option<(ShortFileName, u32)> {
         let mut index = 0;
         while let Some(entry) = nth_entry(&self.volumes, self.root, index) {
@@ -404,18 +360,13 @@ impl Mounted {
 
     /// Opens the first Tonie audio file on the card.
     ///
-    /// A real card keeps its content at `CONTENT/<8 hex>/500304E0` — three
-    /// levels down, and with no extension, so neither the root search above
-    /// nor an extension match will find it. The name is fixed by the
-    /// Toniebox's own layout, which is the layout this box exists to read.
+    /// A real card keeps stories at `CONTENT/<8 hex>/500304E0`, with no file
+    /// extension, so the root search above does not find them.
     ///
-    /// Read-only, and that is the point: it means step 9 can run against the
-    /// card the box shipped with, without copying anything onto it.
+    /// Read-only, so it works with the card's original content.
     ///
-    /// The directory handles are closed before returning. An open file keeps
-    /// the directory entry it was opened from, so it does not need its parent
-    /// to stay open — and holding three levels open would sit right on the
-    /// `MAX_DIRS` limit.
+    /// The directories are closed before returning: an open file does not
+    /// need its parent directory open.
     pub fn open_first_tonie(&self) -> Option<(RawFile, u32)> {
         let content = self.volumes.open_dir(self.root, TONIE_CONTENT_DIR).ok()?;
 
@@ -466,9 +417,7 @@ impl Mounted {
 
     /// Opens `CACHE/<directory>/<file>`, where a download lands.
     ///
-    /// The same layout as `CONTENT`, deliberately, so a file that finishes
-    /// downloading sits where a stock one would and this is the same call with
-    /// a different tree.
+    /// The same layout as `CONTENT`.
     pub fn open_cache(&self, directory: u32, file: u32) -> Result<(RawFile, u32), &'static str> {
         self.open_audio_under(CACHE_DIR, directory, file)
     }
@@ -476,10 +425,8 @@ impl Mounted {
     /// Reads `CACHE/<directory>/<file>` end to end and returns its size and
     /// CRC32, without walking the rest of the card.
     ///
-    /// The same [`Crc32`] and the same read-and-yield loop `checksum_file`
-    /// runs as one step of `walk` — aimed here at a single named file, so a
-    /// download's whole-file integrity is checkable without the hours a walk
-    /// takes on a large card.
+    /// The same [`Crc32`] and loop as the walk uses, for one file, so a
+    /// download can be checked without a walk that takes hours.
     pub async fn checksum_cache(
         &self,
         directory: u32,
@@ -513,8 +460,7 @@ impl Mounted {
 
         self.close_file(raw_file);
 
-        // A short read is silent corruption otherwise: the checksum would be
-        // of less than the file and would simply disagree, without saying why.
+        // Report a short read, rather than a checksum of part of the file.
         if read != u64::from(size) {
             return Err("short read");
         }
@@ -524,10 +470,8 @@ impl Mounted {
 
     /// Opens `<tree>/<directory>/<file>` for reading, and says how long it is.
     ///
-    /// Names are the eight upper-case hex digits FAT stores, formatted here
-    /// rather than taken from the caller: a lower-case or short name is a
-    /// different file on a FAT volume, and the failure would be "not found"
-    /// rather than anything that points at the cause.
+    /// Names are formatted here as eight upper-case hex digits, as FAT stores
+    /// them, so a caller cannot pass a wrongly formatted name.
     fn open_audio_under(
         &self,
         tree: &str,
@@ -555,9 +499,8 @@ impl Mounted {
             }
         };
 
-        // The size comes from the directory entry rather than from the open
-        // file, because the decoder needs to know where the last page ends
-        // before it reads any of them.
+        // The size comes from the directory entry: the decoder needs it
+        // before reading.
         let mut size = None;
         let mut at = 0;
         while let Some(entry) = nth_entry(&self.volumes, folder, at) {
@@ -592,15 +535,12 @@ impl Mounted {
 
     /// Reads and parses the card's configuration file.
     ///
-    /// The card is the media task's, and the radio must never open a file —
-    /// so this is the one place `CONFIG.TXT` is read, and what comes back is a
-    /// parsed value rather than a handle.
+    /// Only the media task uses the card, so this returns a parsed value, not
+    /// a file handle.
     ///
-    /// `buffer` comes from the caller because this is called once at boot and
-    /// a permanent buffer for a one-shot read would be paid for forever. Its
-    /// size is the file-size limit: a read that fills it is refused rather
-    /// than parsed, since a config cut mid-line still parses and does so into
-    /// a value nobody typed.
+    /// `buffer` comes from the caller, to avoid a permanent buffer for a
+    /// one-time read. Its size is the file-size limit: a read that fills it is
+    /// refused, since a cut-off config could still parse.
     pub fn read_config(&self, buffer: &mut [u8]) -> Result<Config, ConfigTrouble> {
         let name = ShortFileName::create_from_str(teddiebox_config::FILENAME)
             .map_err(|_| ConfigTrouble::Missing)?;
@@ -609,7 +549,7 @@ impl Mounted {
         let mut filled = 0;
         let outcome = loop {
             if filled == buffer.len() {
-                // Full, with no way to know whether more was coming.
+                // Full: the file may be longer.
                 break Err(ConfigTrouble::Refused(ConfigError::Truncated));
             }
             match self.read(file, &mut buffer[filled..]) {
@@ -626,13 +566,10 @@ impl Mounted {
 
     /// The config file's bytes, exactly as the card holds them.
     ///
-    /// Separate from [`Mounted::read_config`], which answers a parsed
-    /// `Config`: the portal shows somebody their file to edit, comments and
-    /// all, so it needs the bytes and not the meaning.
+    /// Unlike [`Mounted::read_config`], this returns the raw bytes, for the
+    /// portal to show for editing, comments included.
     ///
-    /// A missing file answers `Ok(0)`. That is a box being set up for the
-    /// first time, which is the case this whole path exists for — not an
-    /// error to report.
+    /// A missing file returns `Ok(0)`: a new box, not an error.
     pub fn read_config_bytes(&self, buffer: &mut [u8]) -> Result<usize, &'static str> {
         let name = ShortFileName::create_from_str(teddiebox_config::FILENAME)
             .map_err(|_| "the config name is not a short name")?;
@@ -643,12 +580,9 @@ impl Mounted {
         let mut filled = 0;
         let outcome = loop {
             if filled == buffer.len() {
-                // Full is not the same as too long, and treating it as such
-                // made a file of exactly `buffer.len()` bytes unreadable —
-                // which is a length this box will happily *write*, so saving
-                // one left the page empty and erroring for ever. Ask for one
-                // more byte instead: if there is not one, the file ends
-                // exactly here and it fits.
+                // Full does not mean too long: the box can write a file of
+                // exactly `buffer.len()` bytes. Try to read one more byte; if
+                // there is none, the file fits.
                 let mut past = [0u8; 1];
                 break match self.read(file, &mut past) {
                     Ok(0) => Ok(filled),
@@ -668,16 +602,13 @@ impl Mounted {
 
     /// Replaces the config file.
     ///
-    /// **Not atomic, and it cannot be**: `embedded-sdmmc` 0.10 has no rename,
-    /// so there is no way to write beside the file and swap. A power cut
-    /// between the truncate and the flush leaves a short file and a box that
-    /// will not associate.
+    /// **Not atomic**: `embedded-sdmmc` 0.10 cannot rename, so the file cannot
+    /// be written elsewhere and swapped in. A power cut during the write
+    /// leaves a short file, and the box will not connect to Wi-Fi.
     ///
-    /// That is survivable only because of what is *not* here: the setup
-    /// access point's credentials are compiled in and never read from the
-    /// card, so a truncated config is exactly the state holding both ears at
-    /// boot recovers from. `tools/fat-assumptions` proves the truncation
-    /// leaves no tail.
+    /// Setup mode (both ears held at boot) can still fix that, because its
+    /// credentials are built in. `tools/fat-assumptions` checks that the
+    /// truncation leaves no old tail.
     pub fn write_config(&self, bytes: &[u8]) -> Result<(), &'static str> {
         let name = ShortFileName::create_from_str(teddiebox_config::FILENAME)
             .map_err(|_| "the config name is not a short name")?;
@@ -702,17 +633,12 @@ impl Mounted {
     /// Opens `/CACHE/<directory>/<file>` for writing, creating whatever is
     /// missing, and **discards anything already there**.
     ///
-    /// Truncating is the honest behaviour until a sidecar exists. Resuming
-    /// needs to know how far a previous run got, and the only trustworthy
-    /// answer is what survived the last *flush* — `embedded-sdmmc` makes a
-    /// file's recorded length truthful only then. Appending without that
-    /// record would grow a file past its real content and fail a checksum a
-    /// long way from the cause; starting again is slower and correct.
+    /// For a download that starts from the beginning. To continue one, use
+    /// [`Mounted::open_cache_for_append`].
     ///
-    /// **One handle, opened once.** The reader and the writer share it — the
-    /// library refuses a second handle on the same file — so this is called
-    /// once per download and the offset moves between reads and appends, which
-    /// is why [`Mounted::append`] seeks to the end itself.
+    /// **One handle, opened once.** The reader and writer share it (the
+    /// library cannot open a file twice), so the offset moves between reads
+    /// and appends; this is why [`Mounted::append`] seeks to the end itself.
     pub fn open_cache_for_write(&self, directory: u32, file: u32) -> Result<RawFile, &'static str> {
         self.open_cache_in_mode(directory, file, Mode::ReadWriteCreateOrTruncate)
     }
@@ -720,11 +646,10 @@ impl Mounted {
     /// Opens the same file **keeping what is already in it**, to continue an
     /// interrupted download.
     ///
-    /// Only ever right when a sidecar vouches for where the file stops and the
-    /// server has agreed to carry on from there — [`teddiebox_download::place`]
-    /// is what decides that. Appending to a file the server did not resume
-    /// splices the start of a story onto its middle, and the result is the
-    /// right length, so nothing downstream would catch it.
+    /// Only correct when a sidecar confirms where the file ends and the
+    /// server agreed to continue from there; [`teddiebox_download::place`]
+    /// decides that. Otherwise the start of a story would be appended to its
+    /// middle, at the right length, so nothing later would notice.
     pub fn open_cache_for_append(
         &self,
         directory: u32,
@@ -748,11 +673,10 @@ impl Mounted {
         let file_name =
             core::str::from_utf8(&file_name).map_err(|_| "the file name is not text")?;
 
-        // Every handle is closed on the way back out, including on the error
-        // paths. Directory handles are a budget of MAX_DEPTH shared with the
-        // walk, and leaking two per download meant the *second* download could
-        // not create its directory — which reported as an unwritable card
-        // rather than as a handle that was never given back.
+        // Close every handle before returning, including on errors. Only
+        // MAX_DEPTH directory handles exist (shared with the walk), and
+        // leaking them would make the next download fail as if the card were
+        // unwritable.
         let cache = self.open_or_make_dir(self.root, CACHE_DIR)?;
         let folder = self.open_or_make_dir(cache, folder_name);
         let _ = self.volumes.close_dir(cache);
@@ -765,9 +689,8 @@ impl Mounted {
 
     /// How long the cached content file is, or `None` if there is not one.
     ///
-    /// Opened and closed here rather than handed back: the writer needs one
-    /// handle on that file and the library will not give out a second, so the
-    /// length has to be learned before the download opens it.
+    /// Opens and closes the file here, because the library cannot open a file
+    /// twice, so this must happen before the download opens it.
     pub fn cache_length(&self, directory: u32, file: u32) -> Option<u32> {
         let (handle, length) = self.open_cache(directory, file).ok()?;
         self.close_file(handle);
@@ -776,9 +699,9 @@ impl Mounted {
 
     /// Reads `/CACHE/<directory>/<file>.MET` into `buffer`.
     ///
-    /// Returns how many bytes it held. Every failure is the same answer to the
-    /// caller — no sidecar — because a sidecar that cannot be read vouches for
-    /// nothing, and the content beside it is incomplete by definition.
+    /// Returns how many bytes it held. Every failure means "no sidecar": one
+    /// that cannot be read proves nothing, so the content counts as
+    /// incomplete.
     pub fn read_sidecar(&self, directory: u32, file: u32, buffer: &mut [u8]) -> Option<usize> {
         let mut folder_name = [0u8; 8];
         let mut stem = [0u8; 8];
@@ -791,9 +714,7 @@ impl Mounted {
         file_name[8..].copy_from_slice(b".MET");
         let file_name = core::str::from_utf8(&file_name).ok()?;
 
-        // Nothing is created on this path. A read that makes a directory would
-        // leave the card littered by the act of asking whether anything is
-        // there.
+        // Create nothing here: reading should not create directories.
         let cache = self.volumes.open_dir(self.root, CACHE_DIR).ok()?;
         let folder = match self.volumes.open_dir(cache, folder_name) {
             Ok(folder) => folder,
@@ -818,13 +739,10 @@ impl Mounted {
     /// Writes `/CACHE/<directory>/<file>.MET`, the record that says how long
     /// the content beside it is meant to be.
     ///
-    /// **Written before the first body byte, and closed before returning.** It
-    /// is only worth having if it survives the interruption that makes it
-    /// worth having, and a handle held open for the length of a download is a
-    /// handle whose bytes are still in a buffer when the battery goes flat. A
-    /// content file with no sidecar beside it is incomplete by definition, so
-    /// failing to write this is safe in the direction that matters: the
-    /// download is refetched rather than trusted.
+    /// **Written before the first body byte, and closed before returning**,
+    /// so it survives a power loss during the download. A content file
+    /// without a sidecar counts as incomplete, so if this fails, the download
+    /// is simply fetched again.
     pub fn write_sidecar(
         &self,
         directory: u32,
@@ -838,16 +756,15 @@ impl Mounted {
         let folder_name =
             core::str::from_utf8(&folder_name).map_err(|_| "the directory name is not text")?;
 
-        // `<8 hex>.MET`, which is an 8.3 name exactly as FAT wants it.
+        // `<8 hex>.MET`, a valid 8.3 name.
         let mut file_name = [0u8; 12];
         file_name[..8].copy_from_slice(&stem);
         file_name[8..].copy_from_slice(b".MET");
         let file_name =
             core::str::from_utf8(&file_name).map_err(|_| "the sidecar name is not text")?;
 
-        // Same handle discipline as `open_cache_for_write`: directory handles
-        // are a budget shared with the walk, and every path here gives both
-        // back before returning.
+        // As in `open_cache_in_mode`: every path closes both directory
+        // handles before returning.
         let cache = self.open_or_make_dir(self.root, CACHE_DIR)?;
         let folder = self.open_or_make_dir(cache, folder_name);
         let _ = self.volumes.close_dir(cache);
@@ -872,18 +789,14 @@ impl Mounted {
         wrote
     }
 
-    /// Reads `/CONTENT|CACHE/<directory>/<file>.POS`, the chapter a story
-    /// should resume at.
+    /// Reads `/CONTENT|CACHE/<directory>/<file>.POS`, the page a story should
+    /// resume at.
     ///
-    /// Deliberately not the `.MET` sidecar. That records what the server said
-    /// a download's length is, and `decide()` reads it to tell a complete file
-    /// from a partial one — a torn write while saving a chapter would corrupt
-    /// the record download resume depends on. Frequently-written convenience
-    /// data and rarely-written correctness data belong in different files.
+    /// Separate from the `.MET` sidecar, which `decide()` uses to tell a
+    /// complete download from a partial one. An interrupted write of the
+    /// often-changing position must not damage that.
     ///
-    /// Nothing is created on this path, exactly as `read_sidecar` creates
-    /// nothing: a read that made a directory would litter the card by the act
-    /// of asking whether anything is there.
+    /// Creates nothing, like `read_sidecar`.
     pub fn read_position(
         &self,
         stock: bool,
@@ -926,14 +839,11 @@ impl Mounted {
 
     /// Writes `/CONTENT|CACHE/<directory>/<file>.POS`.
     ///
-    /// Truncating rather than appending: this file holds one number, and the
-    /// tail of a longer previous number left behind would parse as something
-    /// else entirely.
+    /// Truncates the file first: it holds one number, and leftover digits
+    /// from a longer old number would change it.
     ///
-    /// Under `CACHE` the directory is ours and may legitimately be created
-    /// here. Under `CONTENT` it is not: a stock directory that is not there is
-    /// a story that is not there, and creating one would litter the card on
-    /// behalf of a question.
+    /// Under `CACHE` the directory may be created here. Under `CONTENT` it is
+    /// not: a missing stock directory means the story is not there.
     pub fn write_position(
         &self,
         stock: bool,
@@ -992,8 +902,7 @@ impl Mounted {
 
     /// Opens a subdirectory, creating it if this is the first download.
     ///
-    /// Creating first and opening second would fail on every run after the
-    /// first, so it is the other way round.
+    /// Tries to open first, and creates only if that fails.
     fn open_or_make_dir(
         &self,
         parent: RawDirectory,
@@ -1012,10 +921,8 @@ impl Mounted {
 
     /// Appends to a cache file, **seeking to the end first**.
     ///
-    /// The seek is the point. This handle is shared with the reader, so by the
-    /// time more bytes arrive the offset is wherever the decoder left it — and
-    /// a write there overwrites part of the story instead of extending it,
-    /// silently, in bytes the decoder has already been promised.
+    /// The handle is shared with the reader, so the offset may be wherever
+    /// the decoder left it; writing there would overwrite part of the story.
     pub fn append(&self, file: RawFile, bytes: &[u8]) -> Result<(), &'static str> {
         self.volumes
             .file_seek_from_end(file, 0)
@@ -1025,7 +932,7 @@ impl Mounted {
             .map_err(|_| "the write failed")
     }
 
-    /// Makes what has been written durable and the recorded length truthful.
+    /// Saves what has been written and updates the file's recorded length.
     pub fn flush(&self, file: RawFile) -> Result<(), &'static str> {
         self.volumes
             .flush_file(file)
@@ -1036,8 +943,7 @@ impl Mounted {
     /// the authority the server is verified against.
     ///
     /// Returns how many bytes were read. A read that fills the buffer is
-    /// refused rather than truncated: half a DER structure is not a smaller
-    /// certificate, it is a parse failure several layers away from here.
+    /// refused rather than cut short, since part of a certificate is useless.
     pub fn read_certificate(&self, name: &str, buffer: &mut [u8]) -> Result<usize, &'static str> {
         let dir = self
             .volumes
@@ -1087,23 +993,22 @@ impl Mounted {
 
 /// Checksums every file under `root`, depth first.
 ///
-/// Flat rather than recursive: [`Cursor`] holds the position the call stack
-/// used to, so this can `await` between entries and inside long reads. The
-/// open directory handles live in an array indexed by depth, which is why
-/// `MAX_DIRS` on [`Volumes`] is `MAX_DEPTH` and not a number of its own.
+/// A loop, not recursion: [`Cursor`] holds the position, so this can `await`
+/// between entries and during long reads. Open directory handles are kept in
+/// an array indexed by depth, which is why [`Volumes`] allows `MAX_DEPTH`
+/// directories.
 async fn walk_tree(volumes: &Volumes, root: RawDirectory) {
     let mut path = Path::new();
     let mut cursor = Cursor::new();
     let mut dirs: [Option<RawDirectory>; MAX_DEPTH] = [None; MAX_DEPTH];
-    // Where to cut the path back to when each level is left.
+    // Where to shorten the path to when leaving each level.
     let mut marks = [0usize; MAX_DEPTH];
     dirs[0] = Some(root);
 
     loop {
         let Some(here) = dirs[cursor.depth()] else {
-            // Only reachable if a level were left open with no handle, which
-            // the cursor's own transitions rule out. Stopping beats walking a
-            // directory this cannot name.
+            // Cannot happen, given how the cursor moves; stop rather than
+            // walk a directory without a handle.
             esp_println::println!("teddiebox: sd lost its place");
             return;
         };
@@ -1130,10 +1035,8 @@ async fn walk_tree(volumes: &Volumes, root: RawDirectory) {
                     Ok(child) => dirs[depth] = Some(child),
                     Err(_) => {
                         esp_println::println!("teddiebox: sd {} UNREADABLE", path.as_str());
-                        // Treat it as a directory that turned out to be empty:
-                        // the cursor pops back to the parent and steps past it,
-                        // which is exactly the recovery wanted and needs no
-                        // separate way to undo a descent.
+                        // Treat it as an empty directory: the cursor goes back
+                        // to the parent and steps past it.
                         if cursor.advance(Found::Nothing) == Action::Ascend {
                             path.truncate(marks[depth]);
                         }
@@ -1149,8 +1052,8 @@ async fn walk_tree(volumes: &Volumes, root: RawDirectory) {
             }
 
             Action::Ascend => {
-                // The cursor has already stepped back, so the level just left
-                // is the one below where it now is.
+                // The cursor has already moved up, so the level just left is
+                // one below it.
                 let left = cursor.depth() + 1;
                 if let Some(directory) = dirs[left].take() {
                     let _ = volumes.close_dir(directory);
@@ -1161,18 +1064,16 @@ async fn walk_tree(volumes: &Volumes, root: RawDirectory) {
             Action::Finished => return,
         }
 
-        // Hand the executor back at every entry, not only inside long reads:
-        // a directory of small files would otherwise starve it just as
-        // effectively as one large one.
+        // Yield at every entry, not only in long reads: many small files
+        // would otherwise block the executor too.
         yield_now().await;
     }
 }
 
 /// The `index`-th real entry of `dir`, ignoring `.`, `..` and the volume label.
 ///
-/// Separate from the walk because `iterate_dir` holds the volume manager for
-/// as long as the closure runs: opening a file or a directory from inside it
-/// fails. Everything the walk does needs the manager back first.
+/// Separate from the walk because `iterate_dir` holds the volume manager
+/// while its closure runs, so nothing can be opened inside it.
 fn nth_entry(volumes: &Volumes, dir: RawDirectory, index: usize) -> Option<Entry> {
     let mut seen = 0;
     let mut found = None;
@@ -1207,10 +1108,8 @@ fn nth_entry(volumes: &Volumes, dir: RawDirectory, index: usize) -> Option<Entry
 
 /// Reads one file end to end and prints its checksum.
 ///
-/// The line is `path size crc32`, which is what the host script prints too.
-/// The throughput after it is not part of the comparison — it is the first
-/// measurement of what this bus actually sustains, which is what a later step
-/// would need before arguing for the SDMMC controller instead.
+/// The line is `path size crc32`, as the host script prints. The throughput
+/// after it is not compared; it shows how fast this bus reads.
 async fn checksum_file(volumes: &Volumes, dir: RawDirectory, path: &mut Path, entry: &Entry) {
     let mark = path.push(&entry.name);
 
@@ -1243,9 +1142,8 @@ async fn checksum_file(volumes: &Volumes, dir: RawDirectory, path: &mut Path, en
             }
         }
 
-        // The largest file on the card is seven minutes of reading. Without a
-        // yield inside this loop the box would still go silent for all of it,
-        // however often the walk yielded between files.
+        // A large file can take minutes to read, so yield inside this loop
+        // too.
         blocks += 1;
         if blocks.is_multiple_of(YIELD_EVERY_BLOCKS) {
             yield_now().await;
@@ -1264,9 +1162,7 @@ async fn checksum_file(volumes: &Volumes, dir: RawDirectory, path: &mut Path, en
         return;
     }
 
-    // A short read is a silent corruption otherwise: the checksum would be of
-    // less than the file and would simply disagree with the host, without
-    // saying why.
+    // Report a short read, rather than a checksum of part of the file.
     if read != u64::from(entry.size) {
         esp_println::println!(
             "teddiebox: sd {} SHORT read {read} of {} bytes",

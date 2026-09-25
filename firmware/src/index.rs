@@ -1,8 +1,8 @@
 //! What the reducer is allowed to know about the card.
 //!
-//! `ContentIndex` is synchronous and infallible by design, and the only task
-//! that can answer it without a cross-task round trip is the one that owns the
-//! card. So this lives in the media task and does nothing but look.
+//! `ContentIndex` is synchronous and cannot fail, and only the task that owns
+//! the card can answer it directly. So this lives in the media task and only
+//! reads.
 
 use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::{ContentIndex, Position, TagUid};
@@ -21,13 +21,11 @@ impl<'a> CardIndex<'a> {
 
     /// Whether the card ships this story under `CONTENT/`.
     ///
-    /// Shipped content is complete by definition and carries no sidecar, so
-    /// opening it is the whole test. The handle is closed immediately: this
-    /// asks a question, it does not begin playback.
+    /// Stock content is always complete and has no sidecar, so opening it is
+    /// the whole test. The file is closed again at once.
     ///
-    /// Public because the same answer decides more than availability: a story
-    /// under `CONTENT/` and a downloaded one under `CACHE/` are played by two
-    /// different requests, and whoever acts on `Action::Play` has to pick one.
+    /// Public because whoever handles `Action::Play` must choose between a
+    /// story under `CONTENT/` and a downloaded one under `CACHE/`.
     pub fn on_stock_card(&self, directory: u32, file: u32) -> bool {
         match self.card.open_content(directory, file) {
             Ok((handle, _size)) => {
@@ -40,9 +38,8 @@ impl<'a> CardIndex<'a> {
 
     /// Records where this story should resume.
     ///
-    /// Story-scoped card knowledge belongs here rather than in `perform`: this
-    /// type already knows how a tag becomes a path and whether that path is
-    /// stock or cached, and it is the only thing holding the card.
+    /// Here rather than in `perform`, because this type already knows a tag's
+    /// path and whether it is stock or cached.
     pub fn remember(&self, tag: TagUid, page: u32) -> Result<(), &'static str> {
         let path = content_path(tag.0);
         let stock = self.on_stock_card(path.directory, path.file);
@@ -54,9 +51,8 @@ impl<'a> CardIndex<'a> {
 
     /// What the card's sidecar promises this story's whole length is.
     ///
-    /// `None` for stock content, for a story that is not on the card, and for
-    /// a sidecar that cannot be read — three different things, and all three
-    /// mean the same here: there is no promise to compare the server against.
+    /// `None` for stock content, a story not on the card, or an unreadable
+    /// sidecar: in each case there is no length to compare with the server.
     pub fn sidecar(&self, tag: TagUid) -> Option<Sidecar> {
         let path = content_path(tag.0);
         self.cached(path.directory, path.file).sidecar
@@ -64,9 +60,8 @@ impl<'a> CardIndex<'a> {
 
     fn cached(&self, directory: u32, file: u32) -> Cached {
         let mut buffer = [0u8; MAX_SIDECAR];
-        // `Sidecar::parse` takes `&str`, not bytes: a sidecar that is not
-        // valid UTF-8 is a sidecar that cannot be trusted, and `decide`
-        // already treats an unreadable one as no sidecar at all.
+        // A sidecar that is not valid UTF-8 cannot be trusted, and is
+        // treated as no sidecar.
         let sidecar = self
             .card
             .read_sidecar(directory, file, &mut buffer)
@@ -91,9 +86,9 @@ impl ContentIndex for CardIndex<'_> {
         let cached = self.cached(path.directory, path.file);
         let available = playable_now(false, &cached);
 
-        // A card that cannot be read reads as "not here", which sends the box
-        // to the network for a story that is sitting on the card. That is the
-        // known cost of an infallible trait; it is at least loud in the log.
+        // A card read error counts as "not here", so the box will try the
+        // network even if the story is on the card. The trait cannot return
+        // errors, so this is logged instead.
         if !available && cached.length_on_card.is_some() && cached.sidecar.is_none() {
             esp_println::println!(
                 "teddiebox: plate /CACHE/{:08X}/{:08X} has no readable sidecar — refetching",
@@ -108,14 +103,13 @@ impl ContentIndex for CardIndex<'_> {
     /// Whether this figure's story should be checked against the server
     /// before it plays.
     ///
-    /// Three conditions, and each one removes a case that would cost the radio
-    /// for nothing. **Stock content never asks**: a file under `CONTENT/` has
-    /// no sidecar to compare a length against and was never downloaded.
-    /// **An incomplete download never asks**: it is already going to the
-    /// network, and `decide` knows whether that is a fetch or a resume.
-    /// **A figure asked about since boot never asks again**: the radio is the
-    /// largest consumer on this pack, and one boot is roughly one session
-    /// because the box switches itself off after five idle minutes.
+    /// No check is needed for:
+    /// - **Stock content**: a file under `CONTENT/` has no sidecar and was
+    ///   never downloaded.
+    /// - **An incomplete download**: it goes to the network anyway.
+    /// - **A figure already checked since boot**: Wi-Fi uses the most battery,
+    ///   and one boot is roughly one play session, since the box switches off
+    ///   after five idle minutes.
     fn wants_revalidation(&self, tag: TagUid) -> bool {
         let path = content_path(tag.0);
         if self.on_stock_card(path.directory, path.file) {
@@ -127,17 +121,14 @@ impl ContentIndex for CardIndex<'_> {
         playable_now(false, &self.cached(path.directory, path.file))
     }
 
-    /// The card's tier: which chapter this story was in when the box last
-    /// stopped. It survives a power cycle, and it is all that survives one.
+    /// Where this story should resume: the position held in RAM if there is
+    /// one, otherwise the one saved on the card.
     ///
-    /// An unreadable, absent or malformed file reads as `Start`. The card is
-    /// not a trusted input, and no byte on it should be able to strand a
-    /// figure at a chapter its story does not have.
+    /// An unreadable, missing or malformed file gives `Start`; the card
+    /// cannot be trusted.
     fn saved_position(&self, tag: TagUid) -> Position {
-        // RAM first: it is newer than the card by construction, because the
-        // card is only written once this is about to be lost. A figure lifted
-        // and put straight back — which is most of what happens to a figure —
-        // never touches the card at all.
+        // RAM first: it is always newer than the card, which is only written
+        // when the RAM copy is about to be lost.
         if let Some(page) = crate::held_place(tag) {
             return Position::Exact { page };
         }

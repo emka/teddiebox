@@ -1,16 +1,11 @@
-//! Playing a WAV off the card, straight at the codec.
+//! Audio playback: WAV files (for testing) and TAF stories, from the card to
+//! the codec over I2S.
 //!
-//! Bench step 8: several minutes of audio read from SD and pushed through I2S
-//! without a gap, with the buffer occupancy logged. It joins steps 6 and 7,
-//! and it is the first time anything on this box has had a deadline.
+//! The WAV path has no decoder, so it tests only whether the card can supply
+//! bytes fast enough; an underrun cannot be confused with a decode fault.
 //!
-//! WAV rather than TAF on purpose. With a decoder in the middle, an underrun
-//! and a decode fault sound the same, and the question here is only whether
-//! bytes can be got off the card fast enough and handed over in time.
-//!
-//! The accounting is [`teddiebox_core::cushion`] and the header parsing is
-//! [`teddiebox_core::wav`]; both are tested on the host. What is left here is
-//! the part that owns a DMA engine.
+//! Buffer accounting ([`teddiebox_core::cushion`]) and WAV header parsing
+//! ([`teddiebox_core::wav`]) are tested on the host. This file drives the DMA.
 
 use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU32};
 use portable_atomic::Ordering;
@@ -31,16 +26,14 @@ use crate::storage::{CardPages, Mounted, PAGE_READ_MAX_US, PAGE_READ_US};
 
 /// The DMA buffer between the card and the codec.
 ///
-/// Roughly 170 ms at 48 kHz stereo 16-bit. Design §5 estimates a 500 ms
-/// cushion at about 96 KB and says explicitly to size it from measurement, so
-/// this starts smaller and the low-water mark it reports is what settles the
-/// real figure.
+/// About 170 ms at 48 kHz stereo 16-bit. The low-water mark printed during
+/// playback shows whether it is big enough.
 pub const BUFFER_BYTES: usize = 32_768;
 
 /// Bytes read from the card in one go.
 ///
-/// A whole number of 512-byte blocks, and large enough that the fixed cost of
-/// a read is spread over useful work.
+/// A whole number of 512-byte blocks, large enough that each read's fixed
+/// cost is small in comparison.
 const CHUNK: usize = 4096;
 
 /// How often the occupancy line is printed.
@@ -48,24 +41,20 @@ const LOG_EVERY: Duration = Duration::from_secs(5);
 
 /// How long to wait when the DMA buffer will not take any more.
 ///
-/// The buffer drains at 192 KB/s, so a 4 KB chunk frees up roughly every
-/// 21 ms — sleeping a millisecond costs nothing against that and avoids
-/// spinning on `yield_now` for the whole window, which would burn the CPU on a
-/// five-minute run for no benefit.
+/// The buffer drains at 192 KB/s, so 4 KB frees up about every 21 ms.
+/// Sleeping 1 ms avoids spinning the CPU on `yield_now` meanwhile.
 const BUFFER_FULL_WAIT: Duration = Duration::from_millis(1);
 
-/// How many consecutive full-buffer waits mean something is wrong rather than
-/// busy. At one millisecond each, this is a second of a buffer that holds
-/// about 170 ms.
+/// How many full-buffer waits in a row mean something is wrong: one second,
+/// for a buffer that holds about 170 ms.
 const STALL_REPORT_AFTER: u32 = 1000;
 
 type Blocking = esp_hal::Blocking;
 
 /// Plays the first `.WAV` in the card's root directory.
 ///
-/// Terminal, like the test tone: the DMA buffer is a `static` claimed once,
-/// and its pre-fill state is not something this re-derives between plays. `rb`
-/// restarts the box, which is the documented way to play it again.
+/// Can only run once per boot, like the test tone: it takes the DMA buffer
+/// for good. Use `rb` to play it again.
 pub async fn play_first_wav(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
@@ -91,9 +80,8 @@ pub async fn play_first_wav(
         format.duration_ms()
     );
 
-    // Step 6 configured I2S and the codec once, at boot. A file in another
-    // format would play at the wrong speed rather than fail, which is a
-    // miserable thing to diagnose by ear.
+    // I2S and the codec are configured once at boot. A file in another format
+    // would play at the wrong speed instead of failing.
     if !format.matches_codec() {
         card.close_file(file);
         return Err("the file is not 48 kHz stereo 16-bit");
@@ -101,18 +89,14 @@ pub async fn play_first_wav(
 
     card.seek(file, format.data_offset)?;
 
-    // Pre-fill before the transfer starts. `write()` begins the transfer as it
-    // is created, so a buffer that is still empty at that moment is played as
-    // silence and the stream runs off its end before the first sample arrives
-    // — which is exactly how the step 6 tone failed.
+    // Fill the buffer before starting: `write()` starts the transfer at once,
+    // and an empty buffer would run out before the first sample arrived.
     let filled = prefill(card, file, &mut buffer, format.data_len as usize)?;
-    // Prefill reads ahead of what it could fit, so put the file back exactly
-    // where the buffer ends.
+    // Prefill may read more than fits, so seek back to where the buffer ends.
     card.seek(file, format.data_offset + filled as u32)?;
     esp_println::println!("teddiebox: wav buffer {filled} bytes pre-filled");
 
-    // Saturating because a file shorter than the buffer is fully pre-filled,
-    // and there is then nothing left to stream.
+    // A file shorter than the buffer is completely pre-filled.
     let mut remaining = (format.data_len as usize).saturating_sub(filled);
     let mut transfer = match i2s_tx.write(buffer) {
         Ok(transfer) => transfer,
@@ -122,8 +106,8 @@ pub async fn play_first_wav(
         }
     };
 
-    // The denominator is the whole buffer, not what pre-fill happened to fit:
-    // `available_bytes` reports free space across all of it.
+    // Measured against the whole buffer: `available_bytes` reports free
+    // space across all of it.
     let mut cushion = Cushion::new(BUFFER_BYTES as u32);
     cushion.start();
     let mut chunk = [0u8; CHUNK];
@@ -138,14 +122,12 @@ pub async fn play_first_wav(
             let want = CHUNK.min(remaining);
             let read = card.read(file, &mut chunk[..want])?;
             if read == 0 {
-                // The header's length disagreed with the file. Not fatal, but
-                // it means the file is shorter than it claims.
+                // The file is shorter than its header says. Not fatal.
                 esp_println::println!("teddiebox: wav ended {remaining} bytes early");
                 break;
             }
 
-            // `push` takes what fits and no more, so the remainder has to be
-            // offered again rather than dropped.
+            // `push` only takes what fits, so push the rest again.
             let mut offset = 0;
             while offset < read {
                 let pushed = transfer.push(&chunk[offset..read]);
@@ -156,8 +138,7 @@ pub async fn play_first_wav(
             }
             remaining -= read;
         } else {
-            // Nothing would fit. Wait for the DMA to make room rather than
-            // asking again immediately.
+            // Nothing fits. Wait for the DMA to make room.
             Timer::after(BUFFER_FULL_WAIT).await;
         }
 
@@ -193,8 +174,7 @@ pub async fn play_first_wav(
 
 /// Fills the DMA buffer from the card before the transfer starts.
 ///
-/// Returns how many bytes went in, which is the buffer's usable capacity and
-/// therefore the denominator for every occupancy figure afterwards.
+/// Returns how many bytes went in.
 fn prefill(
     card: &Mounted,
     file: RawFile,
@@ -205,9 +185,8 @@ fn prefill(
     let mut chunk = [0u8; CHUNK];
 
     loop {
-        // Bounded by the data chunk: a WAV may carry metadata after its
-        // samples, and reading into that would play it as the first audio out
-        // of the speaker.
+        // Stop at the end of the data chunk: a WAV may have metadata after
+        // its samples, which must not be played.
         let want = CHUNK.min(limit.saturating_sub(filled));
         if want == 0 {
             break;
@@ -219,10 +198,9 @@ fn prefill(
         let pushed = buffer.push(&chunk[..read]);
         filled += pushed;
         if pushed < read {
-            // The buffer is full. Whatever did not fit has already been read
-            // from the card, so the caller winds the file back to `filled` —
-            // otherwise those bytes are silently dropped from the middle of
-            // the audio, which is a click rather than an error.
+            // The buffer is full. The part that did not fit was already read,
+            // so the caller seeks back to `filled`; otherwise those bytes
+            // would be lost, causing a click.
             break;
         }
     }
@@ -240,9 +218,8 @@ fn describe(error: WavError) -> &'static str {
 
 /// Decoder state and PCM scratch.
 ///
-/// Static because neither belongs in an embassy task's future: the Opus state
-/// alone is 28 KB, and a task arena sized to hold it would be paying for it on
-/// every boot whether or not anything ever decodes.
+/// Static rather than in an embassy task's future: the Opus state alone is
+/// 28 KB.
 struct DecodeScratch {
     opus: OpusState,
     pcm: [i16; MAX_FRAME_SAMPLES],
@@ -256,12 +233,9 @@ static SCRATCH_TAKEN: AtomicBool = AtomicBool::new(false);
 
 /// The scratch measured as plain memory, for whoever borrows it wholesale.
 ///
-/// See [`take_scratch_bytes`]. The assertion below is what makes the byte
-/// view legal rather than merely convenient: `DecodeScratch` is two plain
-/// arrays and this proves the compiler laid them out with no padding between
-/// or after them, so every one of these bytes is initialised by the
-/// declaration above. Adding a field that does not pack exactly breaks the
-/// build here rather than handing somebody a slice over uninitialised bytes.
+/// See [`take_scratch_bytes`]. The assertion below checks that
+/// `DecodeScratch` has no padding, so every byte is initialised and viewing
+/// it as bytes is sound. A new field that adds padding breaks the build.
 pub const SCRATCH_BYTES: usize = core::mem::size_of::<DecodeScratch>();
 const _: () = assert!(
     SCRATCH_BYTES
@@ -269,24 +243,17 @@ const _: () = assert!(
     "DecodeScratch has padding, so its bytes are not all initialised"
 );
 
-/// Hands out the decode scratch, once and once only.
-///
-/// The guard is what makes the `static mut` sound rather than merely
-/// convention: a second caller gets `None` instead of a second `&mut` to the
-/// same bytes.
 /// Set to ask whatever is playing to stop at the next frame.
 ///
-/// Read by the playback loop rather than acted on from outside it: the DMA
-/// transfer owns the I2S transmitter and the buffer, and only the loop that
-/// created it can hand them back.
+/// Read by the playback loop, because only that loop can hand back the I2S
+/// transmitter and buffer the DMA transfer owns.
 pub static STOP: AtomicBool = AtomicBool::new(false);
 
 /// The container page the decoder is on, and the chapter it is in.
 ///
-/// Position memory reads both from outside this module: the page for the exact
-/// tier it keeps in RAM, the chapter for the one it writes to the card. The
-/// decoder itself is created inside the playback loop and is reachable from
-/// nowhere else, which is the same reason `STOP` and `SKIP` are statics.
+/// Statics, because the decoder only exists inside the playback loop (the
+/// same reason as for `STOP` and `SKIP`). `PAGE` is the position that is saved
+/// when a figure is lifted. `CHAPTER` is currently not read anywhere.
 pub static PAGE: AtomicU32 = AtomicU32::new(0);
 pub static CHAPTER: AtomicU16 = AtomicU16::new(0);
 
@@ -294,82 +261,65 @@ pub static CHAPTER: AtomicU16 = AtomicU16::new(0);
 /// keeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Finish {
-    /// The stream ran out. A finished story is not a paused one, so whoever
-    /// owns the position clears it.
+    /// The story played to the end, so its saved position is cleared.
     Ended,
-    /// `STOP` was set — a figure lifted, a console `stop`, a new request.
+    /// `STOP` was set: a figure lifted, a console `stop`, or a new request.
     Stopped,
 }
 
 /// Set to ask whatever is playing to skip a chapter at the next frame:
 /// [`SKIP_FORWARD`] or [`SKIP_BACK`].
 ///
-/// Read by the playback loop for the same reason [`STOP`] is — the decoder is
-/// created inside it and reachable from nowhere else — and set from outside by
-/// whoever decided a chapter should change. Which is the same bargain
-/// `on_frame` strikes: this module is told what to do and never learns that an
-/// ear exists.
+/// Read by the playback loop, like [`STOP`], and set by whoever decides a
+/// chapter should change. This module does not know about ears.
 ///
-/// The last request wins rather than accumulating. Recognising a held ear
-/// takes longer than half a second and a frame is 60 ms, so the loop has
-/// always read one before the next can arrive.
+/// The last request wins; requests do not add up. A held ear takes over half
+/// a second to recognise and a frame is 60 ms, so each request is read before
+/// the next arrives.
 pub static SKIP: AtomicI8 = AtomicI8::new(SKIP_NONE);
 
 pub const SKIP_NONE: i8 = 0;
 pub const SKIP_FORWARD: i8 = 1;
 pub const SKIP_BACK: i8 = -1;
 
-/// Hands the scratch back, so another playback can have it.
-///
-/// Playback used to be terminal — the decoder was claimed once for the life of
-/// the program — which made `stop` meaningless and a second `taf` impossible.
+/// Hands the scratch back, so another playback can use it.
 fn release_scratch() {
     SCRATCH_TAKEN.store(false, Ordering::Relaxed);
 }
 
+/// Hands out the decode scratch, to one user at a time.
+///
+/// The flag makes the `static mut` safe: a second caller gets `None` instead
+/// of a second `&mut` to the same bytes.
 fn take_scratch() -> Option<&'static mut DecodeScratch> {
     if SCRATCH_TAKEN.swap(true, Ordering::Relaxed) {
         return None;
     }
-    // SAFETY: the swap above succeeds exactly once for the life of the
-    // program, so no other reference to SCRATCH can exist.
+    // SAFETY: the swap succeeds only while no one else holds the scratch (it
+    // is reset by `release_scratch`), so no other reference to SCRATCH
+    // exists.
     Some(unsafe { &mut *core::ptr::addr_of_mut!(SCRATCH) })
 }
 
 /// Hands the same scratch out as plain bytes, once and for good.
 ///
-/// This is the second claimant on [`SCRATCH`], and it exists because the
-/// setup portal's whole future — every socket buffer plus the radio's
-/// `StackResources`, measured at 18,288 bytes when it lived in `main`'s own
-/// future — needs somewhere to live while 51,712 bytes of decoder scratch
-/// sit untouched: setup mode starts no decoder, and a box that is decoding
-/// is not in setup mode. `.bss` is what the linker carves the stack region
-/// out of, so two buffers that can never coexist must not both be in it —
-/// see the measurements in `portal.rs`.
+/// Used by the setup portal, which needs room for its future (socket buffers
+/// and the radio's `StackResources`) and never decodes. Reusing this 51,712
+/// byte buffer keeps the portal out of `.bss`, which would shrink the stack.
+/// See `portal.rs`.
 ///
-/// The gate is the same [`SCRATCH_TAKEN`] flag [`take_scratch`] uses, which is
-/// what makes the sharing safe rather than merely true: whichever claimant
-/// arrives second gets `None` and says so, instead of a second `&mut` to the
-/// same bytes. A box that somehow reached setup mode with a story playing
-/// would raise no access point; one that somehow tried to play a story after
-/// the portal had this would refuse with "the decoder is already in use".
+/// Uses the same [`SCRATCH_TAKEN`] flag as [`take_scratch`], so whichever
+/// comes second gets `None`.
 ///
-/// **There is no counterpart to [`release_scratch`] for this claim, by
-/// design.** The portal never returns — it resets the box or parks it — so
-/// there is no moment at which handing the decoder back a scratch full of
-/// HTTP would be an improvement on refusing to decode at all.
+/// **Never released**: the portal never returns (it resets or stops the box).
 pub fn take_scratch_bytes() -> Option<&'static mut [u8]> {
     if SCRATCH_TAKEN.swap(true, Ordering::Relaxed) {
         return None;
     }
-    // SAFETY: the swap above succeeds exactly once for the life of the
-    // program and is the same gate `take_scratch` passes through, so no other
-    // reference to SCRATCH can exist while this one does. The region is
-    // SCRATCH_BYTES long by construction, fully initialised (the const
-    // assertion above rules out padding), and `u8` accepts every bit pattern
-    // and every alignment — so both the slice made here and any later
-    // `&mut DecodeScratch` over the same bytes hold a valid value whatever
-    // this writes.
+    // SAFETY: the swap succeeds only if no one holds the scratch, and it is
+    // never released afterwards, so no other reference to SCRATCH exists. The
+    // region is SCRATCH_BYTES long and fully initialised (no padding, checked
+    // above), and `u8` accepts any bit pattern and alignment.
     Some(unsafe {
         core::slice::from_raw_parts_mut(
             core::ptr::addr_of_mut!(SCRATCH).cast::<u8>(),
@@ -380,30 +330,21 @@ pub fn take_scratch_bytes() -> Option<&'static mut [u8]> {
 
 /// Reinterprets decoded samples as the bytes I2S wants.
 ///
-/// The codec is configured for 16-bit little-endian samples and this is a
-/// little-endian target, so the in-memory representation is already the wire
-/// format. Converting sample by sample would be the same bytes, more slowly.
+/// The codec takes 16-bit little-endian samples and this chip is
+/// little-endian, so the samples in memory are already in the right format.
 fn as_bytes(pcm: &[i16]) -> &[u8] {
     // SAFETY: `i16` has no padding and no invalid bit patterns, and any
     // alignment is valid for `u8`.
     unsafe { core::slice::from_raw_parts(pcm.as_ptr() as *const u8, core::mem::size_of_val(pcm)) }
 }
 
-/// Decodes the first `.TAF` on the card and plays it. Bench step 9.
-///
-/// Terminal, for the same reason as the others: the DMA buffer and the decode
-/// scratch are each claimed once. `rb` restarts the box.
 /// Decodes `frames` frames of the first TAF and prints the samples.
 ///
-/// No I2S, no playback, no real-time constraint: step 9 asks whether the box
-/// decodes the same audio the host does, and that is a question about numbers
-/// rather than about sound. A checksum can only answer yes or no, and Opus is
-/// not specified to be bit-exact across platforms — so the samples themselves
-/// are what the host needs in order to say *how far apart*.
+/// No playback: this compares the box's decoded samples with the host's.
+/// Opus is not guaranteed bit-exact across platforms, so the samples are
+/// printed to see how far apart they are, not just a checksum.
 ///
-/// Hex rather than anything denser because the console is a text stream shared
-/// with the box's own logging, and a decoder that has to be told where the
-/// data starts is one more thing to get wrong.
+/// Hex, because the console is a text stream shared with the box's logging.
 pub async fn dump_pcm(card: &Mounted, frames: u8) -> Result<(), &'static str> {
     let Some(scratch) = take_scratch() else {
         return Err("the decoder is already in use");
@@ -430,8 +371,7 @@ pub async fn dump_pcm(card: &Mounted, frames: u8) -> Result<(), &'static str> {
             match decoder.next_frame(&mut scratch.pcm) {
                 Ok(Some(samples)) => {
                     crc.update(as_bytes(&scratch.pcm[..samples]));
-                    // One line per frame, so a divergence can be placed as
-                    // well as detected.
+                    // One line per frame, to see where a difference starts.
                     esp_println::print!("teddiebox: pcm {index} ");
                     for sample in &scratch.pcm[..samples] {
                         esp_println::print!("{:04X}", *sample as u16);
@@ -464,16 +404,12 @@ pub enum Source {
 
 /// Plays one TAF, handing back the hardware it borrowed.
 ///
-/// Returning the I2S transmitter and the DMA buffer is what makes playback
-/// something the box can do twice. It used to be terminal — `rb` between every
-/// attempt — which also made stopping meaningless, since nothing could follow.
+/// Returns the I2S transmitter and DMA buffer, so playback can run again.
 ///
-/// `on_frame` is called once per pass of the decode loop. Playback owns the
-/// task for the length of a story, so this is the caller's only opportunity to
-/// do anything at all while one plays; it exists so that whoever started the
-/// story can keep watching for a reason to end it. This module deliberately
-/// knows nothing about what that reason might be — it hands over a turn and
-/// then reads [`STOP`], exactly as it already did for the console.
+/// `on_frame` is called once per pass of the decode loop. Playback runs in
+/// the caller's task for the whole story, so this is the caller's only chance
+/// to do anything meanwhile, such as noticing the figure was lifted. This
+/// module does not know why; it just checks [`STOP`] afterwards.
 pub async fn play_taf(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
@@ -507,10 +443,9 @@ async fn play_taf_inner(
         return Err(("the decoder is already in use", i2s_tx, buffer));
     };
 
-    // A `.TAF` copied into the root wins, so a specific file can be chosen for
-    // a test. Failing that, the card's own content is used where the Toniebox
-    // keeps it — which means step 9 runs against the stock card without
-    // anything being written to it.
+    // A `.TAF` in the root is used first, so a specific file can be tested.
+    // Otherwise the card's own content is used, so nothing has to be written
+    // to the card.
     let opened = match source {
         Source::Content { directory, file } => card.open_content(directory, file),
         Source::Cache { directory, file } => card.open_cache(directory, file),
@@ -556,10 +491,8 @@ async fn play_taf_inner(
         decoder.chapter_count()
     );
 
-    // Where to start, and what to do when it cannot be honoured. A story that
-    // has been replaced or re-downloaded can name a page or a chapter it no
-    // longer has, and that is a reason to play it from the beginning — never a
-    // reason to refuse to play it.
+    // Where to start. A replaced or re-downloaded story may not have the saved
+    // page any more; then it plays from the beginning.
     match from {
         Position::Start => {}
         Position::Exact { page } => {
@@ -573,17 +506,11 @@ async fn play_taf_inner(
         }
     }
 
-    // Pre-fill before the transfer starts, exactly as the WAV path does: a
-    // buffer still empty when `write()` runs is played as silence and the
-    // stream ends before the first sample arrives.
-    // Step 9's criterion is that the device's samples match the host's. The
-    // box cannot hand back a WAV, so it checksums the PCM it decoded and the
-    // host checksums what `taf2wav` produced from the same file — the same
-    // trick step 7 used for the card, and the same CRC-32.
+    // Fill the buffer before starting, as the WAV path does: an empty buffer
+    // would run out before the first sample arrived.
     //
-    // Both of these start here rather than after the pre-fill: the frames that
-    // fill the buffer are as much a part of the stream as the rest, and a
-    // checksum that skipped them could never match.
+    // A CRC-32 of the decoded samples, to compare with `taf2wav` output on the
+    // host. It includes the pre-fill frames.
     let mut pcm_crc = Crc32::new();
     let mut frames: u32 = 0;
 
@@ -608,8 +535,7 @@ async fn play_taf_inner(
         let pushed = buffer.push(&as_bytes(&scratch.pcm)[pending.clone()]);
         pending.start += pushed;
         if pushed == 0 {
-            // The buffer is full; whatever is left stays pending for the
-            // transfer loop below rather than being dropped.
+            // The buffer is full; the rest stays pending for the loop below.
             ended = true;
         }
     }
@@ -627,30 +553,24 @@ async fn play_taf_inner(
     cushion.start();
     let mut last_log = Instant::now();
     let started = Instant::now();
-    // The other half of the criterion: how much of real time the decode costs.
-    // Accumulated rather than sampled, because a mean hides exactly the frames
-    // that would cause a dropout.
+    // Total decode time, to compare with real time.
     let mut decode_us: u64 = 0;
 
-    // The quantity that decides everything: how long the loop is ever away.
-    // The DMA stops if it drains the queued descriptors before this loop links
-    // another one on, so "how late does the media task get" is the whole
-    // question and every other explanation has been a proxy for it.
+    // The longest time between loop passes. The DMA stops if it runs through
+    // its queued descriptors before the loop adds another, so this is what
+    // matters most.
     let mut longest_gap_us: u64 = 0;
     let mut last_pass = Instant::now();
     let mut stopped = false;
     // How many times the DMA ran off the end of its descriptor chain and had
-    // to be started again. Zero is the only good number; anything else is
-    // audible.
+    // to be restarted. Each one is audible.
     let mut restarts: u32 = 0;
     // Consecutive milliseconds the buffer has refused a byte.
     let mut stalled: u32 = 0;
     loop {
-        // The caller's turn. This loop is the whole media task for as long as
-        // a story lasts, so anything that decides playback should end — a
-        // figure lifted off the plate above all — can only be noticed from in
-        // here. It is given the turn *before* the stop check, so a decision
-        // made now is acted on now rather than one frame later.
+        // The caller's turn, since this loop occupies the media task for the
+        // whole story (for example to notice a lifted figure). Called before
+        // the stop check, so its decision takes effect at once.
         on_frame();
 
         if STOP.swap(false, Ordering::Relaxed) {
@@ -658,19 +578,15 @@ async fn play_taf_inner(
             break;
         }
 
-        // Read after the stop, so an ear still held as a figure is lifted does
-        // not skip within a story the box is about to stop playing anyway.
+        // Checked after the stop, so a skip does not happen in a story that
+        // is about to stop.
         //
-        // A skip drops the frame half-pushed into the buffer, or the tail of
-        // the chapter just left would be played over the start of the new one.
-        // What the DMA already holds — up to `BUFFER_BYTES` — is not
-        // recoverable, so a little of the old chapter is still heard. That is
-        // a chosen cost: draining it would mean stopping and restarting the
-        // transfer, which is the thing this box clicks through.
+        // A skip drops the partly pushed frame. The audio already in the DMA
+        // buffer (up to `BUFFER_BYTES`) still plays, so a little of the old
+        // chapter is heard; clearing it would mean restarting the transfer,
+        // which clicks.
         //
-        // A run that skipped has a `pcm_crc` that no host decode of the whole
-        // file can match. That is correct — it is not the same audio — and
-        // step 9's comparison simply must not skip.
+        // After a skip, `pcm_crc` no longer matches a full decode on the host.
         match SKIP.swap(SKIP_NONE, Ordering::Relaxed) {
             SKIP_NONE => {}
             n if n > 0 => match decoder.next_chapter() {
@@ -678,8 +594,7 @@ async fn play_taf_inner(
                     esp_println::println!("teddiebox: taf skipped to chapter {chapter}");
                     pending = 0..0;
                 }
-                // Skipping out of the last chapter is the end of the story,
-                // which is the same thing the stream running out means.
+                // Skipping past the last chapter ends the story.
                 Ok(Skip::PastTheEnd) => {
                     esp_println::println!("teddiebox: taf skipped past the last chapter");
                     break;
@@ -694,29 +609,22 @@ async fn play_taf_inner(
                 Err(_) => esp_println::println!("teddiebox: taf could not skip back"),
             },
         }
-        // Checked before the buffer level, because the level cannot tell this
-        // apart. `available_bytes` counts descriptors the CPU owns, so zero
-        // means either "full" or "the DMA has stopped owning nothing back" —
-        // and `DmaTxStreamBuf` stops for good when its chain runs dry. Read as
-        // fullness it produces a loop that waits for ever on a buffer that is
-        // actually empty and dead, reporting 100% and no underruns while a
-        // child hears silence.
-        // The chain has ended. `DmaTxStreamBuf` links each filled descriptor
-        // onto a list that always terminates in a null `next`, so if the DMA
-        // reaches that tail before the CPU appends the next one it runs off the
-        // end and *stops* — and writing `prev.next` afterwards does not revive
-        // it. Every append is a chance to lose that race, which is why load
-        // makes it likelier and why it happens with the buffer still two-thirds
-        // full rather than empty.
+        // Checked before the buffer level, which cannot show this:
+        // `available_bytes` counts descriptors the CPU owns, so it reads 0
+        // both when the buffer is full and when the DMA has stopped.
         //
-        // So this is not something to be fast enough to avoid. Restart the
-        // transfer and carry on: a gap of a few milliseconds is a glitch, and
-        // the alternative is silence for the rest of the story.
+        // The DMA has stopped. `DmaTxStreamBuf` keeps a descriptor list that
+        // ends in a null `next`; if the DMA reaches the end before the CPU
+        // adds the next descriptor, it stops and does not restart by itself.
+        // This can happen on any append, more often under load, even with the
+        // buffer two-thirds full.
+        //
+        // So restart the transfer and carry on: a gap of a few milliseconds is
+        // a glitch, but otherwise the story would go silent.
         if transfer.is_done() {
             restarts += 1;
-            // *When* matters. Restarts bunched at the first frame are a
-            // priming problem and fixable; ones spread through playback are
-            // the descriptor race and are not.
+            // Print when: restarts at the first frame point at the pre-fill;
+            // restarts spread through playback are the descriptor race.
             esp_println::println!(
                 "teddiebox: taf restart {restarts} at frame {frames}, {} ms in",
                 started.elapsed().as_millis()
@@ -748,7 +656,7 @@ async fn play_taf_inner(
                     pending = 0..samples * 2;
                     frames += 1;
                     // Published for position memory, which cannot reach the
-                    // decoder: it lives inside this loop and nowhere else.
+                    // decoder.
                     PAGE.store(decoder.page(), Ordering::Relaxed);
                     CHAPTER.store(decoder.chapter() as u16, Ordering::Relaxed);
                 }
@@ -766,11 +674,8 @@ async fn play_taf_inner(
             // The buffer is full and a frame is waiting. Let the DMA drain.
             Timer::after(BUFFER_FULL_WAIT).await;
             stalled += 1;
-            // A full buffer is normal for a millisecond. A full buffer for a
-            // second means nothing is draining it, and "full" is then a lie:
-            // `available_bytes` counts descriptors owned by the CPU, so a DMA
-            // that has stopped owns them all and reads as full rather than as
-            // dead. Say which it is, once.
+            // A full buffer for a second means nothing is draining it: a
+            // stopped DMA also reads as full. Print the details once.
             if stalled == STALL_REPORT_AFTER {
                 esp_println::println!(
                     "teddiebox: taf buffer has not drained in {} ms — dma done {}, available {}",
@@ -786,10 +691,9 @@ async fn play_taf_inner(
         if last_log.elapsed() >= LOG_EVERY {
             last_log = Instant::now();
             let so_far = started.elapsed().as_micros().max(1);
-            // The checksum and the decode cost so far, not only at the end.
-            // A whole Tonie is over half an hour of loud audio in the room,
-            // and every figure step 9 wants is comparable at any frame count:
-            // `taf2wav --frames N` decodes exactly this many on the host.
+            // Print the checksum and decode cost so far, not only at the end,
+            // since a whole Tonie is over half an hour. `taf2wav --frames N`
+            // decodes the same number of frames on the host.
             esp_println::println!(
                 "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns,                  crc32 {:08X}, decode {}%",
                 so_far / 1_000_000,
@@ -799,10 +703,8 @@ async fn play_taf_inner(
                 pcm_crc.finish(),
                 decode_us * 100 / so_far
             );
-            // `available_bytes` counts descriptors the CPU owns, so a DMA that
-            // has stopped reads as a *full* buffer rather than an empty one —
-            // which is why a stall reports 100% and no underruns. These two
-            // say which it really is.
+            // A stopped DMA reads as a *full* buffer (100%, no underruns).
+            // These values tell the two apart.
             esp_println::println!(
                 "teddiebox: taf   dma done {}, available {} bytes, pending {}",
                 transfer.is_done(),
@@ -830,9 +732,8 @@ async fn play_taf_inner(
         last_pass = Instant::now();
     }
 
-    // A stop must not wait for the buffer to drain — that is most of a second
-    // of audio after the word was typed, which does not read as having
-    // stopped.
+    // Do not wait for the buffer to drain after a stop: that would play
+    // almost a second more.
     if !stopped {
         while !transfer.is_done() {
             yield_now().await;
@@ -851,10 +752,9 @@ async fn play_taf_inner(
         );
     }
     esp_println::println!(
-        // The underrun count comes from the cushion, which watches the buffer
-        // level and cannot see this one: a stopped DMA reads as a full buffer,
-        // so the level never reaches zero. Reported alongside rather than
-        // folded in, so the cushion keeps meaning what it measures.
+        // DMA restarts are reported separately from underruns: the cushion
+        // watches the buffer level and cannot see a stopped DMA, which reads
+        // as full.
         "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns, {} dma restarts",
         elapsed.as_secs(),
         cushion.low_water_percent(),
@@ -863,9 +763,8 @@ async fn play_taf_inner(
     );
     esp_println::println!("teddiebox: taf pcm crc32 {:08X}", pcm_crc.finish());
 
-    // Decode cost as a percentage of the audio it produced. Under 100 means
-    // the box can decode faster than it plays, and the margin is the headroom
-    // step 9 asks to be measured rather than assumed.
+    // Decode time as a percentage of the audio's length. Under 100 means the
+    // box decodes faster than it plays.
     let played_us = elapsed.as_micros().max(1);
     let card_us = PAGE_READ_US.load(Ordering::Relaxed);
     esp_println::println!(

@@ -1,13 +1,11 @@
 //! The derived Wi-Fi key, kept in the `wifi` partition.
 //!
-//! A join handed the passphrase spends 1.75 s in the driver deriving this
-//! key; handed the key, it takes ~70 ms (measured 2026-09-24). So the key is
-//! kept across boots and derived again only when the credentials change —
-//! see `teddiebox_wifikey::record` for how "change" is decided.
+//! Given the passphrase, a Wi-Fi join spends 1.75 s deriving this key; given
+//! the key, it takes about 70 ms. So the key is kept across boots and derived
+//! again only when the credentials change (see `teddiebox_wifikey::record`).
 //!
-//! Only a data partition survives `just flash`, which is why this is not in
-//! RAM alone, and why it is not on the card: the card already holds the
-//! passphrase this came from, and needs nothing more.
+//! Stored in a data partition, which survives `just flash`. Not on the card,
+//! which already holds the passphrase.
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,19 +27,18 @@ const SECTOR: u32 = 0x1000;
 
 /// Rounds of the derivation run per pass of the net task's idle loop.
 ///
-/// Each pass holds the executor for as long as its rounds take, and the plate
-/// poller is what waits, so a slice stays under ~10 ms. Measured 2026-09-24:
-/// 64 rounds took 20.0–20.5 ms (software SHA-1, ~0.32 ms a round); 24 take
-/// 5.0–8.2 ms, and a whole derivation is 171 passes, ~22 s in the background,
-/// once per change of credentials.
+/// Each pass blocks the executor, delaying the NFC reader, so a pass stays
+/// under about 10 ms. Measured: 64 rounds took 20.0–20.5 ms (software SHA-1,
+/// about 0.32 ms a round); 24 take 5.0–8.2 ms. A whole derivation is 171
+/// passes, about 22 s in the background, once per change of credentials.
 const DERIVE_SLICE: u32 = 24;
 
 /// Whether a key derived now could be kept.
 ///
-/// False until [`load`] has found and read the partition, and again after a
-/// write fails: a box flashed over the air never receives the new table, and
-/// without this it would derive a key after every passphrase join — ~20 s of
-/// slices — only to fail to write it.
+/// False until [`load`] has read the partition, and after a write fails. A
+/// box updated over the air keeps its old partition table (which may lack
+/// this partition), and without this would derive a key after every join,
+/// about 20 s of work, only to fail to write it.
 static WRITABLE: AtomicBool = AtomicBool::new(false);
 
 /// What the partition held at boot. `None` once [`forget`] has been called.
@@ -77,8 +74,8 @@ fn with_region<R>(f: impl FnOnce(&mut FlashRegion<'_, '_>) -> R) -> Option<R> {
 
 /// Reads the stored key, if there is one, for [`key_for`] to answer from.
 ///
-/// Every failure is reported and none is fatal: without a key, a join hands
-/// the driver the passphrase, exactly as before there was a key to keep.
+/// Failures are reported but not fatal: without a key, a join uses the
+/// passphrase.
 pub fn load() {
     let Some(read) = with_region(|region| {
         let mut raw = Aligned([0; RECORD]);
@@ -112,14 +109,13 @@ pub fn load() {
 
 /// Writes a key for these credentials and uses it from now on.
 ///
-/// Erases the sector first, which holds a critical section for ~300 ms
-/// (memory `teddiebox-flash-writes-need-critical-section`), so the caller
-/// must not reach here while audio plays. Read back and parsed before it is
-/// believed: a write that does not come back whole is not a key.
+/// Erasing the sector holds a critical section for about 300 ms, so this
+/// must not run while audio plays. The record is read back and parsed before
+/// it is used.
 ///
-/// A record already in flash byte for byte is not written again. A correct
-/// key forgotten after one transient handshake timeout comes back here
-/// identical, and an erase would buy nothing but wear.
+/// A record identical to the one in flash is not written again (for example
+/// a correct key that was dropped after one handshake timeout), to avoid
+/// needless flash wear.
 fn store(ssid: &str, passphrase: &str, psk: &Psk) -> bool {
     let record = match render(ssid.as_bytes(), passphrase.as_bytes(), psk) {
         Ok(record) => Aligned(record),
@@ -179,17 +175,17 @@ pub fn key_for(ssid: &str, passphrase: &str) -> Option<[u8; 64]> {
 
 /// Stops using the stored key for the rest of this boot.
 ///
-/// For a key the access point refused. The record stays in flash until the
-/// passphrase join that follows proves a new one worth keeping.
+/// For a key the access point refused. The record stays in flash until a
+/// successful passphrase join produces a new one.
 pub fn forget() {
     critical_section::with(|cs| *STORED.borrow_ref_mut(cs) = None);
 }
 
 /// One idle pass of the derivation, owned by the net task.
 ///
-/// Runs a slice only for credentials a passphrase join proved, and never
-/// while audio plays: its slices and the sector erase at the end would land
-/// on the story. See `teddiebox_wifikey::schedule` for when a key is due.
+/// Only runs for credentials a passphrase join has proven, and never while
+/// audio plays, which the work and the final sector erase would disturb. See
+/// `teddiebox_wifikey::schedule`.
 pub fn pass(schedule: &mut Schedule, credentials: impl FnOnce() -> Option<Config>, playing: bool) {
     if playing || !WRITABLE.load(Ordering::Relaxed) {
         return;

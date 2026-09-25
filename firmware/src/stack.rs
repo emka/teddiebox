@@ -1,19 +1,16 @@
 //! How much of the stack has ever been used.
 //!
-//! Three experiments this session have guessed at this number and two of them
-//! cost a bench session: a second core given 32 KiB panicked on its stack
-//! guard, and an audio buffer enlarged until only 42 KiB of stack remained left
-//! the box silent and needing a cold boot. The number was never measured, only
-//! assumed, and both assumptions were wrong in the same direction.
+//! Needed before changing anything that shares RAM with the stack; guessing
+//! has gone wrong before.
 //!
-//! So: paint the free stack with a known word at boot, and count backwards from
-//! the top later to find the deepest point anything reached. It is the standard
-//! trick and it costs one pass over free memory at startup.
+//! The free stack is filled with a known word at boot. Later, the untouched
+//! words show how deep the stack has ever reached. This costs one pass over
+//! free memory at start-up.
 //!
-//! **This measures the main task's stack**, which on `esp-hal` is whatever DRAM
-//! `.bss` leaves over — the region between `_stack_end` and `_stack_start`.
-//! Every embassy task polled by the thread-mode executor runs on it, so the
-//! figure is the worst case across all of them, not any one task's own need.
+//! **This measures the main stack**, which on `esp-hal` is the DRAM left
+//! after `.bss` (between `_stack_end` and `_stack_start`). All embassy tasks
+//! on the thread-mode executor share it, so the figure is the worst case
+//! across all of them.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -25,23 +22,19 @@ unsafe extern "C" {
     static _stack_start: u32;
     /// The stack canary, at `_stack_end + ESP_HAL_CONFIG_STACK_GUARD_OFFSET`.
     ///
-    /// **Never write here.** With `stack_guard_monitoring` the chip holds a
-    /// watchpoint on this word, so a single store traps immediately — which is
-    /// what a first attempt at this file did, taking the box down to a silent
-    /// boot that needed a J100 recovery to undo.
+    /// **Never write here.** With `stack_guard_monitoring` the chip has a
+    /// watchpoint on this word, so any write traps at once, and the box then
+    /// needs a J100 recovery.
     static __stack_chk_guard: u32;
 }
 
-/// The word written into free stack. Chosen to be implausible as data: a
-/// pointer, a length or a sample would all have to be exactly this to be
-/// mistaken for paint.
+/// The word written into free stack. Chosen to be unlikely as real data.
 const PAINT: u32 = 0xC0DE_FACE;
 
 /// How much room to leave below the stack pointer when painting.
 ///
-/// Painting over the frame that is doing the painting would corrupt the return
-/// address of the very call doing it. A kilobyte is far more than the few words
-/// this needs and costs only a slightly pessimistic measurement.
+/// Painting over the current stack frame would corrupt its return address. A
+/// kilobyte is plenty, and only makes the measurement slightly pessimistic.
 const HEADROOM: usize = 1024;
 
 /// Where painting stopped, so the reader knows what was never covered.
@@ -50,22 +43,19 @@ static PAINTED_TO: AtomicUsize = AtomicUsize::new(0);
 /// Fills the unused stack with [`PAINT`].
 ///
 /// Call once, as early in `main` as possible: everything below the caller's
-/// frame is free at that moment, and anything already used before this runs is
-/// invisible to the measurement afterwards.
+/// frame is free then, and stack used before this call is not measured.
 pub fn paint() {
-    // Start *above* the canary, never at `_stack_end`. Anything deeper than
-    // this is the guard's business and would trap on the write.
+    // Start *above* the canary, never at `_stack_end`, or the write traps.
     let low = (&raw const __stack_chk_guard as usize) + 4;
     let floor = &raw const _stack_end as usize;
     let ceiling = &raw const _stack_start as usize;
-    // Refuse rather than guess if the symbols are not the shape expected: a
-    // wrong address here writes over live memory and the box comes back
-    // silent, with nothing on the console to say why.
+    // Give up if the symbols look wrong: a wrong address would overwrite live
+    // memory and crash the box silently.
     if low <= floor || low >= ceiling {
         return;
     }
-    // A local's address is a good enough stand-in for the stack pointer, and
-    // it does not need inline assembly to obtain.
+    // A local variable's address is close enough to the stack pointer, and
+    // needs no inline assembly.
     let here = {
         let probe = 0u32;
         &probe as *const u32 as usize
@@ -88,10 +78,8 @@ pub fn paint() {
 
 /// The deepest point the stack has reached, in bytes used.
 ///
-/// `None` if [`paint`] never ran, or if the paint is gone all the way down —
-/// which means the stack went at least as deep as the painting reached and the
-/// true figure is unknown rather than merely large. Reporting a floor as if it
-/// were a measurement is how this number got guessed wrong twice already.
+/// `None` if [`paint`] never ran, or if all the paint is gone: then the stack
+/// went at least as deep as the painting, and the true figure is unknown.
 pub fn high_water() -> Option<Used> {
     let painted_to = PAINTED_TO.load(Ordering::Relaxed);
     if painted_to == 0 {
@@ -118,16 +106,13 @@ pub fn high_water() -> Option<Used> {
 
 /// Prints the high-water mark, or says plainly that there is not one.
 ///
-/// Two callers want this and neither wants its own wording: the `stack`
-/// console command, and the setup portal, which never reaches the loop that
-/// reads the console. Two spellings of one measurement is how a bench capture
-/// stops being greppable.
+/// Used by the `stack` console command and by the setup portal (which never
+/// reaches the console loop), so both print the same text.
 pub fn report() {
     match high_water() {
         None => esp_println::println!("teddiebox: stack was never painted"),
         Some(used) if used.exhausted => {
-            // A floor, not an answer. Saying "deepest" here would be the same
-            // mistake that has already cost two bench sessions.
+            // Only a lower bound, not the real figure.
             esp_println::println!(
                 "teddiebox: stack at least {} of {} bytes — the paint is gone \
                  everywhere, so this is a floor",

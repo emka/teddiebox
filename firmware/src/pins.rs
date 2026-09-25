@@ -1,7 +1,7 @@
 //! The only place that knows a GPIO number is a physical pin.
 //!
-//! `teddiebox_board` decides which pin goes to which level; this turns
-//! those decisions into writes. It contains no policy of its own.
+//! `teddiebox_board` decides which pin gets which level; this applies those
+//! decisions to the pins.
 
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use teddiebox_board::{self as board, PinLevel};
@@ -16,12 +16,9 @@ pub struct BoardPins<'d> {
 impl<'d> BoardPins<'d> {
     /// Claims the pins, leaving every rail off.
     ///
-    /// The reset level of each pin — including GPIO45, the VDD_SPI
-    /// strapping pin that must come up Low or the chip will not boot on a
-    /// 1.8 V flash supply it doesn't have — comes from
-    /// [`board::at_reset_levels`], not from a level chosen here. That is
-    /// the one place board.rs's gate/LED polarities are known; this
-    /// function only applies what it says.
+    /// Each pin's starting level comes from [`board::at_reset_levels`], the
+    /// only place the polarities are defined. This includes GPIO45, the
+    /// VDD_SPI strapping pin, which must start low or the chip will not boot.
     pub fn new(
         gpio45: impl esp_hal::gpio::OutputPin + 'd,
         gpio47: impl esp_hal::gpio::OutputPin + 'd,
@@ -48,7 +45,7 @@ impl<'d> BoardPins<'d> {
             board::GATE_PERIPHERALS => self.gate_peripherals.set_level(level),
             board::GATE_STORAGE => self.gate_storage.set_level(level),
             // The LEDs are PWM outputs on the LEDC peripheral, not plain
-            // pins — see led.rs. Their levels arrive as duty cycles instead.
+            // pins; see led.rs.
             other => panic!("no pin for GPIO{other}"),
         }
     }
