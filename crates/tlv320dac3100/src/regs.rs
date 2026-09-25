@@ -1,8 +1,6 @@
 //! Register addresses, by page.
 //!
-//! **Unverified against silicon.** These values come from the TLV320DAC3100
-//! datasheet (SLAS671C) and are checked only by the mocks in this crate.
-//! Phase B step 6 is the first time they meet the real codec.
+//! From the TLV320DAC3100 datasheet (SLAS671C).
 
 /// Register 0 on every page selects the active page.
 pub const REG_PAGE_SELECT: u8 = 0x00;
@@ -23,9 +21,9 @@ pub mod page0 {
     /// asked for: D7 left DAC, D5 HPL driver, D4 left class-D, D3 right DAC,
     /// D0 right class-D.
     pub const DAC_FLAGS: u8 = 0x25;
-    /// Read-only live status. D4 is the jack itself: 0 after a removal, 1
-    /// after an insertion. This, not `HEADSET_DETECT`, is what "are
-    /// headphones in?" means — see `headphones_connected`.
+    /// Read-only live status. D4 shows the headphone socket: 0 after removal,
+    /// 1 after insertion. Use this, not `HEADSET_DETECT`, to ask whether
+    /// headphones are plugged in. See `headphones_connected`.
     pub const INTERRUPT_FLAGS_DAC: u8 = 0x2E;
     pub const DAC_PROCESSING_BLOCK: u8 = 0x3C;
     pub const DAC_DATA_PATH: u8 = 0x3F;
@@ -42,17 +40,16 @@ pub mod page1 {
     /// Output driver pop-removal settings: D7 orders the power-down, D6-D3 the
     /// driver power-on time and D2-D1 the gain ramp step.
     pub const HP_POP_REMOVAL: u8 = 0x21;
-    /// The datasheet calls this MICBIAS, but D7 is the device software
-    /// power-down enable and that is the only bit this driver uses. Named for
-    /// the datasheet so it can be found there.
+    /// The datasheet calls this MICBIAS. This driver uses D7 (software
+    /// power-down) and the MICBIAS bits for headset detection. Named as in
+    /// the datasheet.
     pub const MICBIAS: u8 = 0x2E;
     /// DAC_L and DAC_R output mixer routing.
     pub const OUTPUT_MIXER_ROUTING: u8 = 0x23;
     /// Analog volume controls, one per output driver.
     ///
-    /// D7 routes the volume control to its driver and D6–D0 is the gain, whose
-    /// reset value is –78 dB. Both halves matter: an unrouted driver is silent,
-    /// and so is a routed one left at its reset gain.
+    /// D7 connects the volume control to its driver and D6–D0 is the gain,
+    /// which resets to –78 dB. A driver is silent unless both are set.
     pub const HPL_ANALOG_VOLUME: u8 = 0x24;
     pub const HPR_ANALOG_VOLUME: u8 = 0x25;
     pub const SPK_ANALOG_VOLUME: u8 = 0x26;
@@ -62,8 +59,8 @@ pub mod page1 {
 }
 
 pub mod page3 {
-    /// The 1 MHz reference the headset-detection debounce counts on. D7
-    /// selects the clock source — set for an external MCLK, which is its
-    /// reset value and which this board does not wire — and D6-D0 divide it.
+    /// The 1 MHz clock the headset-detection debounce uses. D7 selects the
+    /// source (set means external MCLK, the reset value, which this board
+    /// does not connect) and D6-D0 divide it.
     pub const TIMER_CLOCK: u8 = 0x10;
 }

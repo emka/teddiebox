@@ -16,8 +16,7 @@ pub const DEFAULT_ADDRESS: u8 = 0x18;
 pub enum Error<E> {
     Bus(E),
     /// The output stages did not report themselves off in time. Cutting the
-    /// supply now will be heard, so the caller is told rather than left to
-    /// assume the codec is quiet.
+    /// power now would be audible.
     StillPowered,
 }
 
@@ -46,12 +45,9 @@ where
 
     /// Forgets which page is selected, so the next access selects one again.
     ///
-    /// The page cache is the driver's belief about state it does not own. Call
-    /// this after anything that resets the codec behind its back — the RESET
-    /// line on GPIO26, or the board's power gate cycling on idle. A stale
-    /// cache does not fail: it silently writes the right value to the wrong
-    /// page, which is why this is on the public surface rather than a rule to
-    /// remember.
+    /// Call this after anything that resets the codec without the driver
+    /// knowing: the RESET line on GPIO26, or the board's power gate turning
+    /// off. A stale page cache would silently write to the wrong page.
     pub fn invalidate_page(&mut self) {
         self.page = None;
     }
@@ -88,19 +84,17 @@ where
     /// Configures the codec and leaves it silent.
     ///
     /// The output stages are configured but not powered, and the speaker is
-    /// muted: a box that is not playing anything should not be driving a
-    /// speaker, and powering these stages is what it used to click on.
-    /// `start_output` is what makes it audible.
+    /// muted, because powering them causes a click. `start_output` makes the
+    /// codec audible.
     pub fn init<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
         self.apply(delay, INIT_ANALOG, &[])
     }
 
     /// Writes `analog`, waits `DRIVER_RAMP_MS`, then writes `dac`.
     ///
-    /// The wait is the whole point, so it is a step of this operation rather
-    /// than something a caller is trusted to remember — SLAS671C §6.3.10.14
-    /// puts it between powering the output drivers and powering the DAC, and
-    /// skipping it means the DAC unmutes into drivers that are still ramping.
+    /// SLAS671C §6.3.10.14 requires this wait between powering the output
+    /// drivers and powering the DAC; without it the DAC unmutes into drivers
+    /// that are still ramping up.
     pub fn apply<D: DelayNs>(
         &mut self,
         delay: &mut D,
@@ -141,19 +135,14 @@ where
 
     /// Powers the output path up, in the order the datasheet gives.
     ///
-    /// Separate from `init` because powering these stages is what the box
-    /// clicked on, and nothing should pay for that until there is audio to
-    /// hear. The speaker is unmuted last, which is the one step in the whole
-    /// sequence already measured to be silent.
+    /// Separate from `init` because powering these stages clicks, so it only
+    /// happens when there is audio to play. The speaker is unmuted last,
+    /// which is silent.
     ///
-    /// The whole output path comes up either way; `speaker` decides only
-    /// whether the class-D driver is unmuted at the end. With headphones in
-    /// the amplifier is still powered, and sits there muted: a jack pulled
-    /// mid-story has to be answerable with an unmute alone, or a story that
-    /// began with headphones in would stay silent on the speaker until the
-    /// figure was lifted and put back. The muting at the top covers the other
-    /// direction — a jack pulled while nothing played unmutes the driver, and
-    /// nothing may power the amplifier into that.
+    /// `speaker` decides whether the class-D amplifier is powered and
+    /// unmuted. With headphones in, it stays off; [`Self::resume_speaker`]
+    /// turns it on if the plug is pulled. The speaker is muted first, so the
+    /// amplifier is never powered while unmuted.
     pub fn start_output<D: DelayNs>(
         &mut self,
         delay: &mut D,
@@ -172,18 +161,13 @@ where
 
     /// Brings the class-D stage back for a story that is already playing.
     ///
-    /// The unplug path, and the only thing that powers the amplifier once a
-    /// story has started. `start_output` declines to power it when headphones
-    /// are in, because powering an output stage is audible on this box
-    /// whether or not the driver in front of it is muted — and a listener
-    /// wearing headphones should not hear a speaker they are not using click
-    /// at the start of every story. This moves that one click to the moment
-    /// the plug comes out, which the person doing the pulling has already
-    /// made a noise at.
+    /// Used when headphones are unplugged during a story. `start_output` does
+    /// not power the amplifier when headphones are in, because powering it
+    /// clicks even when muted. This moves that click to the moment the plug is
+    /// pulled.
     ///
-    /// Safe on an amplifier that is already powered: writing `SPK_AMP_UP`
-    /// over itself is a register write, not a power transition, so a story
-    /// that began on the speaker pays one write and hears nothing.
+    /// Safe if the amplifier is already powered: writing `SPK_AMP_UP` again
+    /// does not change anything audible.
     pub fn resume_speaker<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
         self.write_reg(1, page1::SPK_AMP, SPK_AMP_UP)?;
         self.unmute_speaker(delay)
@@ -204,16 +188,13 @@ where
 
     /// Unmutes the class-D driver and waits for the gain to take effect.
     ///
-    /// The last step of a start-up, and deliberately so: the speaker is muted
-    /// through everything before it, because unmuting it while the drivers
-    /// ramp and the DAC comes up is — measured by ear — what made the box
-    /// click when it powered on.
+    /// The last step of starting output: unmuting earlier, while the drivers
+    /// ramp and the DAC powers up, causes a click.
     ///
-    /// SLAS671C Table 6-110 gives D0 of the same register as "all programmed
-    /// gains to the Class-D driver have been applied", so the wait is on the
-    /// part rather than on a guess. Running on regardless after the poll
-    /// budget is the right failure: a box that plays is better than one that
-    /// refuses to finish starting.
+    /// SLAS671C Table 6-110 says D0 of the same register means "all
+    /// programmed gains to the Class-D driver have been applied", so this
+    /// waits for it. If it never comes, carry on anyway: playing is better
+    /// than failing to start.
     pub fn unmute_speaker<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
         self.write_reg(1, page1::SPK_DRIVER_GAIN, SPK_GAIN_UNMUTED)?;
         for _ in 0..GAIN_POLLS {
@@ -227,12 +208,11 @@ where
 
     /// Runs the codec's own power-down and waits for it to finish.
     ///
-    /// Setting D7 of page 1 register 46 hands the sequence to the codec, which
-    /// — with `HP_POP_REMOVAL` D7 set in `INIT_ANALOG` — takes the amplifiers
-    /// down before the DAC. That ordering is the datasheet's stated way to
-    /// "optimize power-down POP", and it only helps if the supply is still
-    /// there while it happens, so this waits for the stages to report off
-    /// rather than returning as soon as the write lands.
+    /// Setting D7 of page 1 register 46 starts the codec's own power-down,
+    /// which (with `HP_POP_REMOVAL` D7 set in `INIT_ANALOG`) turns off the
+    /// amplifiers before the DAC, to reduce the power-down pop. The supply
+    /// must stay on until it finishes, so this waits for the stages to
+    /// report off.
     pub fn power_down<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<E>> {
         self.write_reg(1, page1::MICBIAS, SOFTWARE_POWER_DOWN)?;
         for _ in 0..POWER_DOWN_POLLS {
@@ -247,9 +227,9 @@ where
 
     /// What the codec says actually powered up.
     ///
-    /// Writing a power-up bit is a request; this register is the answer. A
-    /// silent output with every configuration register correct is the case
-    /// this exists for — it separates "we asked wrongly" from "it declined".
+    /// Writing a power-up bit is a request; this register shows the result.
+    /// Useful when the output is silent although the configuration looks
+    /// right.
     pub fn power_flags(&mut self) -> Result<PowerFlags, Error<E>> {
         let v = self.read_reg(0, page0::DAC_FLAGS)?;
         Ok(PowerFlags {
@@ -263,14 +243,12 @@ where
 
     /// True while a jack is inserted. The firmware mutes the speaker on this.
     ///
-    /// Read from the live status flag, not from `HEADSET_DETECT`'s type
-    /// field. The type field answers "what was the last headset plugged in?"
-    /// and keeps that answer for ever: on the box it held `01` for the whole
-    /// 35 s after the plug came out, so a removal was invisible. SLAS671C
-    /// Table 6-63 gives D4 here as the insertion-or-removal state itself.
+    /// Reads the live status flag, not `HEADSET_DETECT`'s type field. The
+    /// type field keeps showing the last headset type after the plug is
+    /// removed. SLAS671C Table 6-63 gives D4 here as the current state.
     ///
-    /// Detection only reports anything once `INIT_SEQUENCE` has enabled it in
-    /// `HEADSET_DETECT`; with it disabled this flag never moves.
+    /// Only works once `INIT_ANALOG` has enabled detection in
+    /// `HEADSET_DETECT`.
     pub fn headphones_connected(&mut self) -> Result<bool, Error<E>> {
         let v = self.read_reg(0, page0::INTERRUPT_FLAGS_DAC)?;
         Ok(v & HEADSET_INSERTED != 0)
@@ -278,22 +256,17 @@ where
 
     /// The headset-detection register itself, unmasked.
     ///
-    /// Exists because a decoded answer cannot tell an empty jack from
-    /// detection that was never enabled: the register reads a constant 00 in
-    /// both cases, so a codec that failed bring-up reports exactly what a box
-    /// with nothing plugged in reports. The byte separates them — D7 is the
-    /// enable `INIT_ANALOG` writes — and that is the first thing a bench
-    /// session needs to know.
+    /// For debugging: D7 shows whether detection is enabled, which tells an
+    /// empty socket apart from detection that was never turned on.
     pub fn headset_detect_raw(&mut self) -> Result<u8, Error<E>> {
         self.read_reg(0, page0::HEADSET_DETECT)
     }
 
     /// The live status register itself, unmasked.
     ///
-    /// The companion to `headset_detect_raw`, and the one that answers the
-    /// question the firmware actually asks. Printed beside it because the two
-    /// disagree whenever a plug has been pulled: 67 keeps naming the headset
-    /// it last saw, 46's D4 has already gone back to 0.
+    /// Printed next to `headset_detect_raw`. After a plug is pulled they
+    /// differ: register 67 still shows the last headset, while D4 of
+    /// register 46 is already 0.
     pub fn headset_status_raw(&mut self) -> Result<u8, Error<E>> {
         self.read_reg(0, page0::INTERRUPT_FLAGS_DAC)
     }
@@ -311,21 +284,19 @@ pub struct PowerFlags {
 
 /// The power-on configuration, as `(page, register, value)`.
 ///
-/// Kept as data so it can be compared line by line against the datasheet.
-/// Routes the DAC to both the speaker amplifier and the headphone drivers, and
-/// clocks a 48 kHz DAC from BCLK alone — the board wires no MCLK, only DIN,
+/// Kept as data so it can be compared line by line with the datasheet.
+/// Routes the DAC to both the speaker amplifier and the headphone drivers,
+/// and clocks a 48 kHz DAC from BCLK alone: the board has no MCLK, only DIN,
 /// BCLK and WCLK.
 ///
-/// The clocking is a chain of exact integers, and every link is checked here
-/// because a single wrong one is inaudible until it is a wrong pitch:
+/// The clock chain:
 ///
-/// - **BCLK = 1.536 MHz**, from 48 kHz x 16 bits x 2 channels. This is a
-///   requirement on the I2S peripheral, not an observation: if it is ever
-///   configured for 32-bit slots, BCLK doubles and `J` must halve to 32.
+/// - **BCLK = 1.536 MHz**, from 48 kHz x 16 bits x 2 channels. The I2S
+///   peripheral must use 16-bit slots; with 32-bit slots BCLK doubles and `J`
+///   must halve to 32.
 /// - **PLL = 1.536 MHz x J=64 = 98.304 MHz**, with P=1, R=1 and D=0. SLAS671C
 ///   requires 80 MHz <= PLL_CLKIN x J.D x R/P <= 110 MHz and 4 <= R x J <= 259;
-///   both hold. The previous J=32 gave 49.152 MHz, under the floor, so the PLL
-///   never locked at all.
+///   both hold.
 /// - **fS = 98.304 MHz / (NDAC=8 x MDAC=2 x DOSR=128) = 48000 Hz** exactly.
 pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // Clocking: PLL from BCLK, CODEC_CLKIN from PLL.
@@ -341,41 +312,34 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     // Interface: I2S, 16-bit, slave.
     (0, page0::CODEC_IF_CTRL1, 0x00),
     (0, page0::DAC_PROCESSING_BLOCK, 0x08),
-    // The debounce below counts on a clock this register chooses, and the
-    // reset choice is an external MCLK the board does not wire — see
-    // `the_headset_debounce_is_clocked_from_the_internal_oscillator`. Written
-    // before detection is enabled, because a debounce with no clock is the
-    // failure that looks exactly like an unwired jack.
+    // The headset debounce needs a clock, chosen here. The default is an
+    // external MCLK, which the board does not have; see
+    // `the_headset_debounce_is_clocked_from_the_internal_oscillator`. Set
+    // before detection is enabled.
     (3, page3::TIMER_CLOCK, 0x01),
-    // Headset detection is off after reset, so without this the jack reads as
-    // permanently empty. 128 ms debounce rather than the reset 16 ms: a plug
-    // pushed in slowly makes and breaks the switch, and at 16 ms the flaps
-    // land in different polls and cross the speaker between them.
+    // Headset detection is off after reset. 128 ms debounce rather than the
+    // default 16 ms: a plug pushed in slowly makes and breaks contact, and at
+    // 16 ms the output would switch back and forth.
     (0, page0::HEADSET_DETECT, 0x8C),
     // Analog, in the order SLAS671C §6.3.10.14 gives: route the DAC to the
     // output amplifier (d), unmute and set the gain of the output drivers
-    // (e), and only then power the drivers up (f). Powering a driver first —
-    // as this sequence did — brings it up against the reset state, no routing
-    // and -78 dB, and then steps it to 0 dB once the gain arrives. The
-    // speaker reproduces that step.
-    // The bias headset detection senses against (SLAS671C Figure 6-17), at
-    // 2 V, the lowest level on offer. Its reset value powers it down, and with
-    // it down the MICDET pin is undriven: measured on the box, it held the
-    // charge the last plug left on it and reported a headset on an empty jack
-    // for the rest of the session, across a reflash and a power cycle.
-    // Writing this one register made a removal visible within a second, every
-    // time.
+    // (e), and only then power the drivers up (f). Powering a driver first
+    // would start it with no routing at -78 dB and then jump to 0 dB, which
+    // the speaker plays as a click.
     //
-    // D3 is why the value is 0x09 rather than 0x01. Clear, the bias comes up
-    // only once a headset has been *deemed* inserted, which is a
-    // chicken-and-egg at start-up: for about 1.7 s after the codec is
-    // configured the box believed headphones were in, and a boot sound started
-    // in them. Set, the bias is up against an empty jack too, the first
-    // measurement is valid, and that transient is gone — measured both ways on
-    // the box. An empty jack draws nothing from it.
+    // MICBIAS: the bias voltage headset detection measures against (SLAS671C
+    // Figure 6-17), at 2 V, the lowest setting. By default it is off, and then
+    // the MICDET pin floats: it keeps the charge from the last plug and
+    // reports a headset in an empty socket.
     //
-    // It is in the sequence rather than left inherited so `cset 1 2e <v>` can
-    // still reach it from the console.
+    // D3 is why the value is 0x09 rather than 0x01. With D3 clear, the bias
+    // only turns on once a headset is detected, so for about 1.7 s after
+    // start-up the box thought headphones were in. With D3 set, the bias is
+    // always on and the first reading is valid. An empty socket draws no
+    // current from it.
+    //
+    // Written here explicitly, so `cset 1 2e <v>` can change it from the
+    // console.
     (1, page1::MICBIAS, 0x09),
     (1, page1::OUTPUT_MIXER_ROUTING, 0x44),
     // Route each analog volume control to its driver at 0 dB. Without D7 the
@@ -385,31 +349,27 @@ pub const INIT_ANALOG: &[(u8, u8, u8)] = &[
     (1, page1::SPK_ANALOG_VOLUME, 0x80),
     (1, page1::HPL_DRIVER_GAIN, 0x06),
     (1, page1::HPR_DRIVER_GAIN, 0x06),
-    // 6 dB, the lowest the class-D stage offers, and unmuted. 12 dB was
-    // painfully loud on a bench with the box open; real content can raise it
-    // deliberately rather than inheriting it.
+    // 6 dB, the lowest the class-D stage offers, and muted until
+    // `start_output`. 12 dB was painfully loud.
     (1, page1::SPK_DRIVER_GAIN, SPK_GAIN_MUTED),
-    // Pop removal, written rather than inherited. D7 set orders a software
-    // power-down to take the amplifiers down before the DAC — Table 6-101's
-    // own "this is to optimize power-down POP". D6-D3 (driver power-on time,
-    // 304 ms) and D2-D1 (gain ramp step, 3.9 ms) keep their reset values, so
-    // this changes the power-down and nothing about the power-up.
+    // Pop removal. D7 makes a software power-down turn off the amplifiers
+    // before the DAC ("to optimize power-down POP", Table 6-101). D6-D3
+    // (driver power-on time, 304 ms) and D2-D1 (gain ramp step, 3.9 ms) keep
+    // their reset values, so power-up is unchanged.
     (1, page1::HP_POP_REMOVAL, 0xBE),
     // The drivers last. D7 and D6 power the HPL and HPR drivers; D2 is
     // reserved and must be 1. Common mode stays at its 1.35 V reset value.
     (1, page1::HP_DRIVERS, 0xC4),
-    // Configured but *not* powered: D7 clear. Powering the class-D amplifier
-    // is, measured by ear, the loudest part of what the box used to do when it
-    // started, and it is audible whether or not the driver in front of it is
-    // muted. D6-D1 keep their reset value as the datasheet requires.
+    // Configured but *not* powered (D7 clear). Powering the class-D amplifier
+    // causes the loudest click, even when muted. D6-D1 keep their reset
+    // value, as the datasheet requires.
     (1, page1::SPK_AMP, SPK_AMP_DOWN),
 ];
 
-/// Class-D driver, 6 dB, muted — D2 clear. The speaker spends the whole
-/// start-up like this: unmuting it any earlier is, measured by ear on the
-/// box, the click that start-up made.
+/// Class-D driver, 6 dB, muted (D2 clear). The speaker stays muted through
+/// start-up; unmuting earlier causes a click.
 pub const SPK_GAIN_MUTED: u8 = 0x00;
-/// The same 6 dB, unmuted. Written last, once there is nothing left to expose.
+/// The same 6 dB, unmuted. Written last.
 pub const SPK_GAIN_UNMUTED: u8 = 0x04;
 /// D0 of the class-D driver register: all programmed gains have been applied.
 const SPK_GAINS_APPLIED: u8 = 0x01;
@@ -422,22 +382,20 @@ pub const GAIN_POLLS: u32 = 40;
 const SOFTWARE_POWER_DOWN: u8 = 0x80;
 /// How long between reads of the power flags while the codec shuts down.
 pub const POWER_DOWN_POLL_MS: u32 = 20;
-/// How many such reads before giving up. Twenty-five covers half a second,
-/// comfortably past the ramp the drivers came up on.
+/// How many such reads before giving up: half a second, well past the
+/// drivers' ramp time.
 pub const POWER_DOWN_POLLS: u32 = 25;
 
 /// How long the output drivers are given to finish ramping.
 ///
-/// SLAS671C Table 6-101 gives the reset driver power-on time as `0111`, which
-/// is 304 ms, and a ramp-up step time of 3.9 ms. §6.3.10.14 step 4 says to
-/// wait that out before the DAC is powered. Measured on the board: the HPL
-/// driver reads as unpowered immediately after the analog block is written
-/// and powered 400 ms later — the long-standing `hpl=false` was this ramp
-/// being read through, not a driver declining to come up.
+/// SLAS671C Table 6-101 gives the default driver power-on time as `0111`,
+/// 304 ms, with a ramp step of 3.9 ms. §6.3.10.14 step 4 says to wait for it
+/// before powering the DAC. Measured: the HPL driver reads as off right after
+/// the analog block is written, and on 400 ms later.
 pub const DRIVER_RAMP_MS: u32 = 400;
 
-/// Class-D amplifier configured and powered; D6-D1 are reserved and hold the
-/// reset value the datasheet insists on.
+/// Class-D amplifier configured and powered. D6-D1 are reserved and keep the
+/// reset value the datasheet requires.
 pub const SPK_AMP_UP: u8 = 0x86;
 /// The same, powered down.
 pub const SPK_AMP_DOWN: u8 = 0x06;
@@ -449,10 +407,8 @@ pub const DAC_DOWN: u8 = 0x14;
 pub const DAC_MUTED: u8 = 0x0C;
 pub const DAC_UNMUTED: u8 = 0x00;
 
-/// Applied when there is something to play, never at start-up.
-///
-/// Powering the DAC accounts for most of what remains of the start-up click
-/// once the amplifier is left alone, so it waits here with it.
+/// Applied when there is something to play, never at start-up, because
+/// powering the DAC also clicks.
 pub const INIT_DAC: &[(u8, u8, u8)] = &[
     (0, page0::DAC_DATA_PATH, DAC_UP),
     (0, page0::DAC_MUTE_CTRL, DAC_UNMUTED),
@@ -462,9 +418,7 @@ pub const INIT_DAC: &[(u8, u8, u8)] = &[
 // is why the codes below are twice the decibel figures beside them.
 const VOLUME_MIN_CODE: i16 = -127; // -63.5 dB
 const VOLUME_MAX_CODE: i16 = 48; //  +24 dB
-/// D6-D5 of the headset-detection register report what is plugged in: 00 for
-/// nothing, 01 for a headset without a microphone, 11 for one with. Anything
-/// non-zero is a jack, which is all this driver needs to know.
+/// D4 of `INTERRUPT_FLAGS_DAC`: a headphone plug is inserted.
 pub const HEADSET_INSERTED: u8 = 0x10;
 
 #[cfg(test)]
@@ -507,11 +461,9 @@ mod tests {
 
     /// Every byte `init` puts on the wire, written out by hand.
     ///
-    /// This is the only artefact in the crate that a datasheet can be diffed
-    /// against, so it must not be derived from `INIT_SEQUENCE` — a test that
-    /// reads the same table as the code cannot disagree with it, and that is
-    /// precisely how a shifted register map ships green. Changing the driver
-    /// means changing these literals deliberately, in the same commit.
+    /// Not derived from `INIT_ANALOG`, so the test can disagree with the code
+    /// and can be checked against the datasheet. Changing the driver means
+    /// changing these literals too.
     #[test]
     fn init_puts_exactly_this_sequence_on_the_bus() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
@@ -555,15 +507,13 @@ mod tests {
         delay.done();
     }
 
-    /// SLAS671C Table 6-79 note (1): the headset-detection debounce is clocked
-    /// from "the 1 MHz reference clock defined in Page 3 / Register 16", and
-    /// Table 6-118 gives that register's reset value as D7 = 1 — external
-    /// MCLK. This board wires no MCLK, only DIN, BCLK and WCLK, so the reset
-    /// value leaves the debounce with no clock at all and detection can fail
-    /// in a way indistinguishable from a jack that reaches no codec pin.
+    /// SLAS671C Table 6-79 note (1): the headset-detection debounce uses "the
+    /// 1 MHz reference clock defined in Page 3 / Register 16", whose reset
+    /// value (Table 6-118) selects external MCLK (D7 = 1). This board has no
+    /// MCLK, so the debounce would have no clock and detection could fail.
     ///
-    /// `0x01` clears D7 to select the internal oscillator and leaves the
-    /// divider field at its reset value: exactly one bit changes.
+    /// `0x01` clears D7 to select the internal oscillator; the divider keeps
+    /// its reset value.
     #[test]
     fn the_headset_debounce_is_clocked_from_the_internal_oscillator() {
         let &(_, _, value) = INIT_ANALOG
@@ -578,11 +528,9 @@ mod tests {
         assert_eq!(value, 0x01);
     }
 
-    /// D7 enables detection and D4-D2 set the debounce, whose reset `000` is
-    /// 16 ms. A jack is not pushed in cleanly — a slow plug makes and breaks
-    /// the switch several times — and at 16 ms each of those can land in a
-    /// different poll, which would cross the speaker and back between them.
-    /// `011` is 128 ms, comfortably longer than a hand.
+    /// D7 enables detection and D4-D2 set the debounce (reset `000` = 16 ms).
+    /// A plug pushed in slowly makes and breaks contact several times; at
+    /// 16 ms the output would switch back and forth. `011` is 128 ms.
     #[test]
     fn detection_debounces_for_longer_than_a_slow_hand() {
         let &(_, _, value) = INIT_ANALOG
@@ -594,37 +542,10 @@ mod tests {
         assert_eq!(value, 0x8C);
     }
 
-    /// SLAS671C §6.3.10.14 orders the analog block deliberately: (d) route the
-    /// DAC to the output amplifier, (e) unmute and set the gain of the output
-    /// drivers, and only then (f) power up the output drivers. A driver
-    /// powered before its routing exists comes up against the reset state —
-    /// no routing and −78 dB — and is then slammed to 0 dB once the gain
-    /// arrives, which is a step the speaker reproduces.
-    /// SLAS671C §6.3.10.14 step 4: after powering the output drivers, "apply
-    /// waiting time determined by the de-pop settings and the soft-stepping
-    /// settings of the driver gain" — and only then power up the DAC.
-    ///
-    /// The wait is not optional padding. Table 6-101 gives the reset driver
-    /// power-on time as 0111, 304 ms, so without it the DAC is powered and
-    /// unmuted while the output drivers are still ramping, and the speaker
-    /// hears the rest of that ramp. Measured on the board: the HPL driver
-    /// reports itself unpowered when read straight after init and powered
-    /// 400 ms later, which is the ramp this waits out.
-    /// SLAS671C Table 6-101, page 1 / register 33 D7: with it set, a software
-    /// power-down takes the DAC down "only after HP and SP amplifiers are
-    /// completely powered down. This is to optimize power-down POP". Its reset
-    /// value is 0, which powers everything down together — and this driver was
-    /// inheriting that.
-    /// Measured by ear on the box: muting the class-D driver for the whole of
-    /// the start-up sequence is what stops it clicking. So the speaker comes
-    /// up muted and is unmuted last, once the drivers have ramped and the DAC
-    /// is running — everything the unmute would otherwise expose.
-    /// Measured by ear, bisecting the start-up a register at a time: leaving
-    /// the class-D amplifier unpowered is what silences it, leaving the DAC
-    /// unpowered accounts for most of the rest, and the headphone drivers
-    /// contribute nothing. Powering an output stage is audible whether or not
-    /// the driver in front of it is muted, so the only cure is not to power
-    /// it until there is something to play.
+    /// Found by ear, one register at a time: leaving the class-D amplifier
+    /// unpowered at start-up removes most of the click, and leaving the DAC
+    /// unpowered removes most of the rest. Powering them clicks even when
+    /// muted, so they are only powered when there is something to play.
     #[test]
     fn the_start_up_leaves_the_output_stages_unpowered() {
         let &(_, _, amp) = INIT_ANALOG
@@ -644,14 +565,12 @@ mod tests {
         );
     }
 
-    /// Starting the output is the inverse of stopping it, and its order is the
-    /// datasheet's: the DAC comes up, then the amplifier, and the speaker is
-    /// unmuted last — the one step already measured to be silent.
+    /// The reverse of stopping, in the datasheet's order: the DAC, then the
+    /// amplifier, and the speaker is unmuted last, which is silent.
     ///
-    /// It mutes *first* as well. Pulling a jack unmutes the class-D driver
-    /// while nothing is playing, so without this the next story would power
-    /// the amplifier into an already-unmuted driver, which is the click the
-    /// muted-through-start-up rule exists to prevent.
+    /// It also mutes *first*: unplugging headphones while nothing plays
+    /// unmutes the speaker, and powering the amplifier behind an unmuted
+    /// speaker clicks.
     #[test]
     fn starting_the_output_mutes_first_then_powers_the_dac_and_the_amplifier() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
@@ -674,15 +593,11 @@ mod tests {
         delay.done();
     }
 
-    /// With headphones in, the speaker is not the output and its amplifier
-    /// stays unpowered. Powering an output stage is audible on this box
-    /// whether or not the driver in front of it is muted, and a listener
-    /// wearing headphones would hear that click come out of a speaker they
-    /// are not using. `resume_speaker` is what powers it, at the moment the
-    /// plug comes out — see the test below.
+    /// With headphones in, the speaker amplifier stays unpowered, because
+    /// powering it clicks even when muted. `resume_speaker` powers it when
+    /// the plug is pulled (see the next test).
     ///
-    /// The driver is still muted first, so what this leaves behind does not
-    /// depend on what an earlier unplug left unmuted.
+    /// The speaker is still muted first, whatever an earlier unplug left.
     #[test]
     fn starting_the_output_for_headphones_leaves_the_speaker_unpowered() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
@@ -702,20 +617,12 @@ mod tests {
         delay.done();
     }
 
-    /// Pulling the plug mid-story is the one moment the speaker has to come
-    /// back, and it may have to be powered first: a story that began with
-    /// headphones in never powered the amplifier at all. Powering it is
-    /// audible, so it happens here — at a moment the listener has just made a
-    /// noise of their own — rather than at the silent start of every such
-    /// story.
+    /// When the plug is pulled during a story, the speaker must come back,
+    /// and its amplifier may not be powered yet. Power first, then unmute,
+    /// as in `start_output`: unmuting before the amplifier is up clicks.
     ///
-    /// Power first, unmute second, which is the same order `start_output`
-    /// uses and the datasheet's: an unmuted driver in front of a stage that
-    /// is still coming up is what the box used to click on.
-    ///
-    /// Writing `SPK_AMP_UP` over an amplifier that is already powered is a
-    /// register write and not a power transition, so the ordinary case — a
-    /// story that began on the speaker — costs one write and stays silent.
+    /// If the amplifier is already powered, writing `SPK_AMP_UP` again is
+    /// silent.
     #[test]
     fn resuming_the_speaker_powers_the_amplifier_before_it_unmutes() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
@@ -733,7 +640,7 @@ mod tests {
         delay.done();
     }
 
-    /// Stopping unwinds it: muted first, so nothing that follows is heard.
+    /// Stopping mutes first, so nothing after it is heard.
     #[test]
     fn stopping_the_output_mutes_before_it_unpowers_anything() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
@@ -764,11 +671,9 @@ mod tests {
         );
     }
 
-    /// SLAS671C Table 6-110: D0 of the class-D driver register reads back
-    /// whether "all programmed gains to the Class-D driver have been applied".
-    /// Unmuting is the last thing the sequence does, so the codec is only
-    /// really up once that clears — waiting on the part rather than on a
-    /// guessed delay.
+    /// SLAS671C Table 6-110: D0 of the class-D driver register shows whether
+    /// "all programmed gains to the Class-D driver have been applied". The
+    /// driver waits for it instead of guessing a delay.
     #[test]
     fn unmuting_the_speaker_waits_for_its_gains_to_be_applied() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
@@ -789,13 +694,9 @@ mod tests {
         delay.done();
     }
 
-    /// Headset detection senses the MICDET pin against MICBIAS (SLAS671C
-    /// Figure 6-17). Page 1 register 46 holds that bias and its reset value
-    /// powers it down, so the pin is undriven and holds whatever charge the
-    /// last plug left on it — which is why removal was never detected on the
-    /// box. The register is written here at its reset value so that it is part
-    /// of the sequence and `cset` can reach it: a bias level can then be tried
-    /// from the console instead of costing a reflash each time.
+    /// Headset detection measures the MICDET pin against MICBIAS (SLAS671C
+    /// Figure 6-17), set in page 1 register 46. It must be in the sequence so
+    /// `cset` can override it from the console.
     #[test]
     fn the_bias_the_detector_senses_against_is_part_of_the_sequence() {
         assert!(
@@ -819,10 +720,8 @@ mod tests {
         );
     }
 
-    /// The power-down is a request the codec services over time, so it is not
-    /// finished when the write returns. Cutting the rail while the class-D
-    /// stage is still powered is exactly the pop this exists to avoid, so the
-    /// driver waits for the flags to go clear rather than for a guessed delay.
+    /// The power-down takes time. Cutting power while the class-D stage is
+    /// still on would pop, so the driver waits for the flags to clear.
     #[test]
     fn powering_down_waits_for_the_output_stages_to_report_off() {
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
@@ -932,9 +831,8 @@ mod tests {
 
     #[test]
     fn the_sequence_unmutes_only_after_the_output_stages_are_powered() {
-        // Now structural rather than positional: the amp is in the analog
-        // table and the unmute in the one applied after the ramp, so the
-        // ordering holds by construction.
+        // The amplifier is in the analog table and the unmute in the table
+        // applied after the ramp, so the order is guaranteed.
         assert!(
             INIT_ANALOG
                 .iter()
@@ -1013,15 +911,10 @@ mod tests {
         dac.release().done();
     }
 
-    /// Register 67's type field names the last headset the codec saw and does
-    /// not return to "none" when the plug comes out: measured on the box on
-    /// 2026-09-22, where it read 0xAC for 35 s after the jack was empty, and
-    /// 0xEC after a re-init with nothing plugged in at all. Presence has to
-    /// come from register 46's live status bit instead, which SLAS671C
-    /// Table 6-63 defines as 0 for removal and 1 for insertion.
-    /// The two registers disagree in normal use, so a bench session has to be
-    /// able to see both: 67 says what kind of headset was last detected, 46
-    /// says whether one is in the socket now.
+    /// Register 67's type field keeps showing the last headset after the plug
+    /// is removed (measured on the box). Register 46's live status bit
+    /// (SLAS671C Table 6-63) shows whether one is in now. Both are printed
+    /// for debugging.
     #[test]
     fn the_live_status_register_is_reported_byte_for_byte() {
         let expected = [
@@ -1049,8 +942,8 @@ mod tests {
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x00]),
-            // The caller has since driven the RESET line, or the board's power
-            // gate cycled, so the codec is back on page 0 and the cache lies.
+            // The RESET line was driven or the power gate cycled, so the
+            // codec is back on page 0 and the cache is wrong.
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x10]),
         ];
@@ -1062,9 +955,8 @@ mod tests {
         dac.release().done();
     }
 
-    /// The decoded answer cannot tell an empty jack from detection that was
-    /// never switched on — both read 00 — so the raw byte is handed over
-    /// unmasked, enable bit and all.
+    /// The raw byte, including the enable bit, tells an empty socket apart
+    /// from detection that was never turned on.
     #[test]
     fn the_raw_headset_register_is_reported_byte_for_byte() {
         let expected = [
@@ -1076,8 +968,7 @@ mod tests {
         dac.release().done();
     }
 
-    /// The bit positions are the point of this function, so they are asserted
-    /// against a literal register value rather than a mask expression.
+    /// Checked against a literal register value, not a mask expression.
     #[test]
     fn the_power_flags_decode_each_stage_separately() {
         let expected = [
@@ -1114,15 +1005,11 @@ mod tests {
 
 /// Register overrides applied to a start-up sequence before it is written.
 ///
-/// Which register value stops a box clicking on start-up is a question for the
-/// ear, and a reflash between guesses makes that loop minutes long. This is
-/// what lets one be typed at a console instead: the answer is a register, a
-/// page and a byte, and the sequences in this module are what they land on.
+/// Lets register values be changed from the console, to find by ear which
+/// ones cause a click, without reflashing.
 ///
-/// Six slots, because the question being asked is "which one of these is it",
-/// not "what would a whole different codec setup look like" — a table long
-/// enough to hold a second start-up sequence would hide a mistake rather than
-/// catch it.
+/// Six slots: enough to try a few registers, not to replace the whole
+/// sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Overrides {
     slots: [Option<(u8, u8, u8)>; OVERRIDE_SLOTS],
@@ -1146,10 +1033,8 @@ impl Overrides {
 
     /// Records an override, or answers `false` if there is no room.
     ///
-    /// An override of a register already overridden replaces it. Keeping both
-    /// would fill the table with one register's history and then refuse the
-    /// next register — which is the opposite of what somebody stepping a value
-    /// up and down is asking for.
+    /// Overriding the same register again replaces the old value instead of
+    /// using another slot.
     pub fn set(&mut self, page: u8, register: u8, value: u8) -> bool {
         if let Some(slot) = self
             .slots
@@ -1173,15 +1058,13 @@ impl Overrides {
     /// Copies `table` into `out`, replacing the value of any register that has
     /// an override.
     ///
-    /// An override naming a register the table does not contain does nothing.
-    /// It is not an error: the sequence a value belongs to is the caller's
-    /// business, and this is called once per sequence with the same table of
-    /// overrides.
+    /// An override for a register not in the table does nothing. This is
+    /// called once per sequence with the same overrides.
     ///
     /// # Panics
     ///
-    /// If `out` is shorter than `table`. Both are compiled-in sequences at
-    /// every call site, so a short buffer is a build-time mistake.
+    /// If `out` is shorter than `table`. Both are fixed at compile time, so
+    /// this is a programming mistake.
     pub fn apply<'a>(
         &self,
         table: &[(u8, u8, u8)],
@@ -1261,8 +1144,8 @@ mod override_tests {
         assert_eq!(overrides.apply(TABLE, &mut out), TABLE);
     }
 
-    /// An override for a register this sequence does not carry is not an
-    /// error: `cset` is typed once and both sequences are run through it.
+    /// An override for a register not in this sequence is not an error:
+    /// the same overrides are applied to both sequences.
     #[test]
     fn an_override_for_an_absent_register_does_nothing() {
         let mut overrides = Overrides::new();
