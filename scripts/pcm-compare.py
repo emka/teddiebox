@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Compare the box's decoded PCM against the host's, with a tolerance.
 
-Step 9 originally asked for a bit-exact match. Opus is not specified to be
-bit-exact across implementations — its own conformance suite compares within a
-tolerance, because a fixed-point decoder's last bit depends on the compiler and
-the target — so a CRC that disagrees proves nothing on its own. This says how
-far apart the two are, which is the question that can actually be answered.
+Opus is not specified to be bit-exact across implementations — its own
+conformance suite compares within a tolerance, because a fixed-point decoder's
+last bit depends on the compiler and the target — so a CRC that disagrees
+proves nothing on its own. This says how far apart the two are instead.
 
 Reads a console capture containing `teddiebox: pcm <frame> <hex>` lines and the
 WAV that `taf2wav` produced from the same file.
