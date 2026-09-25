@@ -1,10 +1,10 @@
 //! The `wifi` partition's one record: which credentials a key was derived
 //! from, and the key.
 //!
-//! **The check value is a CRC-32 of the passphrase, and that is a choice.**
-//! Any fast check lets somebody holding a flash dump test passphrase guesses
-//! cheaply. Accepted: the passphrase is on the card in plain text, and the
-//! card is inside the same box.
+//! **The check value is a CRC-32 of the passphrase, on purpose.** Any fast
+//! check lets someone with a flash dump test passphrase guesses quickly. That
+//! is acceptable: the passphrase is in plain text on the SD card inside the
+//! same box.
 
 use teddiebox_core::checksum::Crc32;
 
@@ -20,11 +20,11 @@ const MAX_SSID: usize = 32;
 pub enum RecordError {
     /// Erased flash: nothing was ever written.
     Blank,
-    /// Not a record this firmware wrote — typically a never-erased partition.
+    /// Not a record this firmware wrote, usually a never-erased partition.
     Unrecognised,
     /// A record from another version of this format.
     Version(u16),
-    /// The checksum does not match: a torn write.
+    /// The checksum does not match: an interrupted write.
     Damaged,
     /// Longer than the 32 bytes 802.11 allows an SSID.
     SsidTooLong,
@@ -87,7 +87,8 @@ pub fn parse(raw: &[u8; RECORD]) -> Result<Stored, RecordError> {
     if crc_of(&raw[..76]) != u32::from_le_bytes([raw[76], raw[77], raw[78], raw[79]]) {
         return Err(RecordError::Damaged);
     }
-    // Covered by the checksum, but a slice bound is not the place to trust it.
+    // The checksum covers this too, but check before using it as a slice
+    // bound.
     let ssid_len = usize::from(raw[6]);
     if ssid_len > MAX_SSID {
         return Err(RecordError::Damaged);
@@ -152,9 +153,9 @@ mod tests {
         assert_eq!(&raw[44..76], &[0x22; 32]);
     }
 
-    // Both from Python's zlib.crc32, not from this crate: a change to the CRC
-    // or its byte order would pass every round trip and quietly invalidate
-    // every record already in a box's flash.
+    // Both from Python's zlib.crc32, not this crate. A change to the CRC or
+    // its byte order would pass round-trip tests but invalidate every record
+    // already in a box's flash.
     #[test]
     fn the_check_is_the_passphrase_crc32_little_endian() {
         let raw = render(b"AB", b"pw", &Psk::from_bytes([0x22; 32])).unwrap();

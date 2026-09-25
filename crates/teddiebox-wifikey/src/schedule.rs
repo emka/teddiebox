@@ -1,10 +1,10 @@
-//! When to derive a key: only for credentials a join has just proved, only
-//! while nothing plays, a slice at a time.
+//! When to derive a key: only for credentials a successful join has just
+//! used, only while nothing plays, and a slice at a time.
 //!
-//! **Proof belongs to credentials, not to the boot.** A passphrase join
-//! proves the SSID and passphrase it used, and nothing else: credentials
-//! typed or re-read after it are unproved, and deriving them would keep a
-//! key the router may refuse — costing a refused join on every boot after.
+//! **Only the credentials that joined count.** A successful join proves the
+//! SSID and passphrase it used. Credentials typed or re-read afterwards are
+//! not proven; storing a key for them could store one the router refuses,
+//! causing a failed join on every later boot.
 
 use teddiebox_core::checksum::Crc32;
 
@@ -17,7 +17,7 @@ pub enum Pass {
     Idle,
     /// A slice ran; more to come.
     Working,
-    /// The key for the proved credentials, handed out once.
+    /// The key for the proven credentials, returned once.
     Done(Psk),
 }
 
@@ -30,7 +30,7 @@ fn fingerprint(ssid: &[u8], passphrase: &[u8]) -> u32 {
     crc.finish()
 }
 
-/// The proved credentials, and the derivation for them if one has started.
+/// The proven credentials, and their key derivation if one has started.
 pub struct Schedule {
     proved: Option<u32>,
     job: Option<Derivation>,
@@ -50,9 +50,9 @@ impl Schedule {
         }
     }
 
-    /// A join with this passphrase succeeded: its key is worth keeping.
+    /// A join with this passphrase succeeded, so its key is worth keeping.
     ///
-    /// Replaces any earlier proof, and drops a derivation for it.
+    /// Replaces any earlier credentials and drops their derivation.
     pub fn proved(&mut self, ssid: &[u8], passphrase: &[u8]) {
         let fingerprint = fingerprint(ssid, passphrase);
         if self.proved != Some(fingerprint) {
@@ -113,7 +113,8 @@ mod tests {
         s.pass(Some((ssid, passphrase)), false, false, SLICE)
     }
 
-    /// Passes until a key comes out, or `None` after far more than enough.
+    /// Runs passes until a key comes out, or returns `None` after far more
+    /// passes than needed.
     fn until_done(s: &mut Schedule, ssid: &[u8], passphrase: &[u8]) -> Option<(u32, Psk)> {
         for n in 1..=100 {
             if let Pass::Done(psk) = idle(s, ssid, passphrase) {

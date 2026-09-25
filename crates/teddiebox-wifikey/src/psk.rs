@@ -1,9 +1,9 @@
 //! WPA2's PSK: PBKDF2-HMAC-SHA1(passphrase, ssid, 4096, 32 bytes).
 //!
-//! **Sliced, because the box runs it on its one executor.** `step` does a
-//! caller-chosen number of rounds and returns, so the plate and the codec
-//! get their turn between slices. Both output blocks advance together, so a
-//! round is two HMACs.
+//! **Done in slices**, because the box has only one executor. `step` runs a
+//! chosen number of rounds and returns, so the NFC reader and the codec get
+//! a turn in between. Both output blocks advance together, so one round is
+//! two HMACs.
 
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
@@ -26,8 +26,8 @@ impl Psk {
         &self.0
     }
 
-    /// The key as the driver takes it: 64 lower-case hex characters, which it
-    /// reads as the key itself rather than as a passphrase to derive from.
+    /// The key in the form the driver takes: 64 lower-case hex characters,
+    /// which it uses as the key directly instead of deriving one.
     pub fn hex(&self) -> [u8; 64] {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
         let mut out = [0; 64];
