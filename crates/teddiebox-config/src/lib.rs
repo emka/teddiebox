@@ -2,52 +2,44 @@
 
 //! Parses the box's configuration file from the SD card.
 //!
-//! Format is deliberately the dullest thing that works: `key = value`, one per
-//! line, `#` comments, blank lines ignored. A parent editing this file on a
-//! laptop should not be able to get the syntax wrong.
+//! The format is kept as simple as possible, so a parent editing it on a
+//! laptop cannot easily get it wrong: `key = value`, one per line, `#`
+//! comments, blank lines ignored.
 //!
-//! A `#` that starts a word ends the line, so `server = box.lan:8080 # ours`
-//! means what it looks like, while `ssid = net#1` keeps its hash. **`password`
-//! is exempt**: it is opaque bytes, `#` is common in them, and a password
-//! truncated by a comment rule fails at the box where the cause is invisible.
-//! Everything after `password =` is the password. `setup_password` is exempt
-//! for the same reason.
+//! A `#` at the start of a word starts a comment, so
+//! `server = box.lan:8080 # ours` works, while `ssid = net#1` keeps its `#`.
+//! **`password` is an exception**: passwords often contain `#`, and a cut-off
+//! password would fail with no visible cause. Everything after `password =`
+//! is the password. The same applies to `setup_password`.
 //!
-//! Unknown keys are ignored, so a card written for a newer firmware still boots
-//! an older one. A *known* key given a value it does not accept is refused —
-//! `ears_skip = ture` is a typo about what the ears do, and the box saying so
-//! beats the box guessing.
+//! Unknown keys are ignored, so a card written for newer firmware still works
+//! with older firmware. A *known* key with a value it does not accept is an
+//! error: `ears_skip = ture` is a typo, and reporting it is better than
+//! guessing.
 
 use heapless::String;
 
 /// The file's name in the card's root directory.
 ///
-/// **Short**, so that `embedded-sdmmc` opens it with the ordinary
-/// `open_file_in_dir` — which takes a `ShortFileName` and refuses the ninth
-/// character of a stem.
+/// A **short** (8.3) name, so `embedded-sdmmc` can open it with the ordinary
+/// `open_file_in_dir`, which only accepts short names.
 ///
-/// Upper case here because that is how FAT *stores* an 8.3 name, not because
-/// the card has to show it that way: a lower-case `config.txt` is the same
-/// directory entry with two "display lower case" flag bits set, and is opened
-/// by this same upper-case name. The card carries it lower case, to match the
-/// certificates beside it. `tools/fat-assumptions` proves the two are one
-/// entry, for a directory as well as a file, rather than leaving it as the sort
-/// of assumption that has cost this project a bench session before. A long name such as `teddiebox.conf` is not out of
-/// reach: `open_long_name_file_in_dir` opens one. It just costs more than the
-/// name is worth — that call rescans the directory reassembling long names,
-/// cannot create a file, and would be a second way into the filesystem for the
-/// media task to own, while `Storage::open_file` already speaks short names.
-/// `tools/fat-assumptions` runs both doors against the real library.
+/// Upper case because that is how FAT stores 8.3 names. A lower-case
+/// `config.txt` on the card is the same directory entry (with "display lower
+/// case" flags set) and opens with this name. `tools/fat-assumptions` tests
+/// this against the real library.
 ///
-/// `.TXT` over `.CNF` so that the laptop this gets edited on opens it in a text
-/// editor rather than asking what a `.CNF` is.
+/// A long name would need `open_long_name_file_in_dir`, which is slower,
+/// cannot create files, and would add a second way into the filesystem.
+///
+/// `.TXT` so a laptop opens it in a text editor.
 pub const FILENAME: &str = "CONFIG.TXT";
 
 pub const MAX_SSID: usize = 32;
 pub const MAX_PASSWORD: usize = 63;
 pub const MAX_SERVER: usize = 64;
-/// The example in this module's docs (`update_url`) is 55 characters; 128
-/// leaves room for a real path without being silly about it.
+/// The example on [`Config::update_url`] is 55 characters; 128 leaves room for
+/// a longer path.
 pub const MAX_UPDATE_URL: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,35 +50,27 @@ pub struct Config {
     pub server: String<MAX_SERVER>,
     /// Whether holding an ear skips a chapter.
     ///
-    /// A stock box's ears do volume and nothing else; skipping on a held ear
-    /// is this box's own idea, which makes it taste rather than a fault to be
-    /// fixed. It lives on the card so that changing your mind costs an edit on
-    /// a laptop rather than a reflash.
+    /// A stock box's ears only change the volume; skipping is this firmware's
+    /// addition, so it is a setting on the card rather than a rebuild.
     ///
-    /// Defaults to `true`. A file that says nothing keeps the box doing what
-    /// it already did — and with this off, a held ear simply steps the volume
-    /// like any other press, which is what a stock box does.
+    /// Defaults to `true`. When off, a held ear changes the volume like any
+    /// other press, as on a stock box.
     pub ears_skip: bool,
     /// Where to fetch the OTA manifest, in full — scheme, host, port and
     /// path, e.g.
     /// `https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt`.
     ///
-    /// **Optional, and `None` means no OTA at all** — the box does not check
-    /// for updates. A card written for an older firmware must not suddenly
-    /// start fetching firmware images from somewhere, and there is no safe
-    /// value to default to instead.
-    ///
-    /// Defaults to `None`.
+    /// **Optional. `None` (the default) turns OTA off**: the box does not
+    /// check for updates. There is no safe default location, and an old card
+    /// must not start fetching firmware.
     pub update_url: Option<String<MAX_UPDATE_URL>>,
     /// Passphrase for the box's own setup access point.
     ///
-    /// `None` means the compiled-in one, which is published in `README.md` and
-    /// has to be: the way back into a box that will not start cannot depend on
-    /// a file somebody may have got wrong. Setting this narrows the ten-minute
-    /// window to people who know this value — at the price that a card whose
-    /// `CONFIG.TXT` still *parses* is a card whose portal answers to nothing
-    /// else. Forgetting it costs a card reader, which is the one thing the
-    /// portal exists to avoid.
+    /// `None` means the built-in passphrase, which is published in
+    /// `README.md`: the way back into a broken box cannot depend on a file
+    /// that might be wrong. Setting this limits the ten-minute setup window to
+    /// people who know it. If you forget it, you need a card reader to fix
+    /// the config, which is what the portal is meant to avoid.
     pub setup_password: Option<String<MAX_PASSWORD>>,
 }
 
@@ -104,28 +88,23 @@ pub enum ConfigError {
     NotText,
     /// `update_url` was given but has no content.
     ///
-    /// Unlike `ssid` and `server`, absence of `update_url` is not an error —
-    /// it means no OTA. So an empty value cannot reuse `Missing*`-shaped
-    /// handling; it is its own, honest mistake: `update_url =` with nothing
-    /// after it, someone who meant to write a URL and didn't.
+    /// Unlike `ssid` and `server`, a missing `update_url` is not an error (it
+    /// turns OTA off). But `update_url =` with nothing after it is probably a
+    /// mistake, so it gets its own error.
     EmptyUpdateUrl,
 }
 
 /// Writes `text` into `out` with one key changed, added or taken out.
 ///
-/// Every other line survives byte for byte — comments, blank lines, spacing,
-/// the order somebody put them in. That is the whole point: this edits a file a
-/// person wrote and will read again, so anything it reformats is something
-/// they have to notice and forgive.
+/// Every other line is kept exactly as it was (comments, blank lines,
+/// spacing, order), because a person wrote this file and will read it again.
 ///
-/// `value` of `None` removes the key's line. A key that is not there and is
-/// being removed is not an error: the outcome asked for is already the case.
-/// A key that is not there and is being set is appended, on its own line, with
-/// a newline first if the file did not end in one.
+/// A `value` of `None` removes the key's line; removing a key that is not
+/// there is not an error. Setting a key that is not there appends it on its
+/// own line.
 ///
-/// Refuses rather than truncates when `out` is too small — a config cut
-/// mid-line is the dangerous kind of wrong, which is the same argument
-/// [`Config::parse_read`] makes about a file cut mid-read.
+/// Returns an error instead of truncating when `out` is too small: a config
+/// cut off mid-line is dangerous. See [`Config::parse_read`].
 pub fn set_key<const N: usize>(
     text: &str,
     key: &str,
@@ -167,43 +146,34 @@ pub fn set_key<const N: usize>(
 
 /// The range WPA2 accepts for a passphrase.
 ///
-/// Outside it the driver refuses the access point, and a box that cannot raise
-/// its own network is the one box nobody can reach to ask why — so the
-/// complaint belongs at the parser, in front of whoever edited the file.
+/// Outside this range the driver cannot start the setup access point, and
+/// then nobody can reach the box to find out why. So the parser rejects it.
 const WPA2_PASSPHRASE: core::ops::RangeInclusive<usize> = 8..=63;
 
 /// Says whether a value is shaped like the `host:port` a `Host:` header wants.
 ///
-/// The value is interpolated into a request header unescaped, and a line of
-/// this file is found by splitting on `\n` -- so a `CR` in the middle of the
-/// value reaches the wire as a line terminator, and a space reaches it as a
-/// token boundary. An allow-list of what a hostname, an address and a port are
-/// made of is cheaper than enumerating what is dangerous, and refuses both.
+/// The value is copied into a request header without escaping, and lines are
+/// split on `\n` only, so a `CR` inside the value would end the header line
+/// early, and a space would split it. Only characters found in hostnames,
+/// addresses and ports are allowed.
 ///
-/// Refusing rather than repairing: a `server` that is not a host is a typo, and
-/// the box saying so beats the box guessing -- the same argument `parse_bool`
-/// makes for `ears_skip = ture`.
+/// A bad value is rejected, not repaired: it is a typo.
 ///
-/// An empty value passes, so that `server =` keeps saying `MissingServer`:
-/// a key left blank is a different mistake from a key filled in wrong, and the
-/// two send a person to different lines of the file.
+/// An empty value passes, so that `server =` still reports `MissingServer`.
 fn is_host_port(value: &str) -> bool {
     value
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
 }
 
-/// The box's live configuration: what the card said, and what the bench typed
-/// over it.
+/// The box's current configuration: what the card says, plus anything typed
+/// at the console.
 ///
-/// The two cannot be kept apart at the call sites without the precedence rule
-/// being restated at each of them, which is how the card came to silently undo
-/// an override once already -- see [`Overridden`]. Here every way of changing a
-/// setting goes through one of these methods, and each one records that it was
-/// typed, so a later [`take_card`](Self::take_card) cannot take it back.
+/// Every change goes through these methods, which record that a value was
+/// typed, so a later [`take_card`](Self::take_card) does not overwrite it.
+/// See [`Overridden`].
 ///
-/// Holding this behind a lock is the caller's business; nothing here is shared
-/// or interior-mutable.
+/// The caller is responsible for locking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     held: Config,
@@ -211,8 +181,8 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// An empty configuration: no credentials, no server, certificates
-    /// checked, ears skipping chapters.
+    /// An empty configuration: no credentials, no server, ears skipping
+    /// chapters.
     ///
     /// `const` so it can start a `static` without a lazy initialiser.
     pub const fn new() -> Self {
@@ -236,16 +206,16 @@ impl Settings {
         }
     }
 
-    /// Everything as it currently stands, card and overrides already resolved.
+    /// The current configuration, with console overrides applied.
     pub fn config(&self) -> &Config {
         &self.held
     }
 
-    /// Takes what the card said for every setting nobody has typed.
+    /// Takes the card's value for every setting that was not typed.
     ///
-    /// The media task owns the card and calls this at the first mount, which
-    /// may be *after* something was typed: the mount is lazy, and on this box
-    /// it is often a network command that triggers it.
+    /// The media task calls this when it first mounts the card, which can be
+    /// *after* something was typed: the card is mounted on first use, often by
+    /// a network command.
     pub fn take_card(&mut self, card: Config) {
         self.held = self.overridden.merge(card, &self.held);
     }
@@ -268,9 +238,8 @@ impl Settings {
     /// The whole configuration, or `None` if it is not yet usable for joining
     /// a network.
     ///
-    /// Both halves or neither: handing the driver an empty string fails
-    /// association in a way that presents as a wrong passphrase, which sends
-    /// whoever is diagnosing it to retype something that was never there.
+    /// Needs both SSID and passphrase. An empty one would make joining fail
+    /// as if the passphrase were wrong.
     pub fn credentials(&self) -> Option<&Config> {
         if self.held.ssid.is_empty() || self.held.password.is_empty() {
             return None;
@@ -287,9 +256,8 @@ impl Default for Settings {
 
 /// Cuts a trailing `# comment` off a value.
 ///
-/// The `#` must begin a word — preceded by whitespace, or first in the value —
-/// so that `net#1` survives intact while `net #1` does not. Callers decide
-/// whether a value is eligible; `password` is not.
+/// The `#` must start a word (be first, or follow whitespace), so `net#1` is
+/// kept while `net #1` is cut. Not used for `password`.
 fn strip_comment(value: &str) -> &str {
     let mut after_space = true;
     for (i, c) in value.char_indices() {
@@ -303,11 +271,8 @@ fn strip_comment(value: &str) -> &str {
 
 /// Reads the one boolean this file has.
 ///
-/// `yes`/`no` and `true`/`false`, in any case, because both spellings are what
-/// people reach for. Anything else is refused rather than defaulted: an
-/// unrecognised value means the line did not do what it was meant to, and the
-/// line in question decides whether certificates get checked. Being told at the
-/// box beats a silent guess in either direction.
+/// Accepts `yes`/`no`, `true`/`false` (any case) and `1`/`0`. Anything else is
+/// an error, not a default: the line did not say what was meant.
 fn parse_bool(value: &str) -> Result<bool, ConfigError> {
     // `eq_ignore_ascii_case` compares in place; there is no allocator here.
     if value.eq_ignore_ascii_case("yes") || value.eq_ignore_ascii_case("true") || value == "1" {
@@ -322,16 +287,13 @@ fn parse_bool(value: &str) -> Result<bool, ConfigError> {
     }
 }
 
-/// Which settings the bench has typed, so a later card read cannot undo them.
+/// Which settings were typed at the console, so a later card read does not
+/// undo them.
 ///
-/// The card is read **lazily**, at the first mount, which can happen after
-/// somebody has already typed an override — the mount is triggered by whatever
-/// first needs the card, and on this box that is often a network command. So
-/// "the card is read at boot, the console overrides it afterwards" is not true
-/// in the order it happens, and replacing the whole config on a card read
-/// silently undid the override. That cost an hour at the bench, on a setting
-/// since retired: the box confirmed it would stop checking the server's
-/// certificate, and then checked it anyway at the next mount.
+/// The card is read when it is first mounted, which can happen *after*
+/// something was typed (the first user of the card is often a network
+/// command). Replacing the whole config at that point would lose the typed
+/// values.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Overridden {
     pub ssid: bool,
@@ -343,10 +305,10 @@ pub struct Overridden {
 }
 
 impl Overridden {
-    /// Takes the card's value for every setting the bench has *not* typed.
+    /// Takes the card's value for every setting that was *not* typed.
     ///
-    /// Per field rather than all-or-nothing: typing a passphrase must not pin
-    /// the ssid to whatever happened to be in memory before the card was read.
+    /// Per field: typing a passphrase must not keep an old SSID from before
+    /// the card was read.
     pub fn merge(self, card: Config, held: &Config) -> Config {
         Config {
             ssid: if self.ssid {
@@ -386,13 +348,10 @@ impl Overridden {
 impl Config {
     /// Parses a file that was read into a fixed buffer.
     ///
-    /// `capacity` is how large that buffer was. **A read that filled it
-    /// exactly is refused**, because nothing distinguishes a file that just
-    /// fits from one that was cut off — and a config cut mid-line is the
-    /// dangerous kind of wrong. It still parses; it just parses into a
-    /// plausible-looking value nobody typed, and fails later somewhere the
-    /// cause is invisible. Refusing costs a bigger buffer; not refusing costs
-    /// an evening.
+    /// `capacity` is the size of that buffer. **A read that filled it exactly
+    /// is refused**, because a file that just fits cannot be told apart from
+    /// one that was cut off. A cut-off file can still parse, into a wrong
+    /// value that fails later with no visible cause.
     pub fn parse_read(raw: &[u8], capacity: usize) -> Result<Self, ConfigError> {
         if raw.len() >= capacity {
             return Err(ConfigError::Truncated);
@@ -426,7 +385,7 @@ impl Config {
                     let value = strip_comment(value);
                     ssid = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
                 }
-                // Not comment-stripped, deliberately: see the module docs.
+                // No comment stripping: see the module docs.
                 "password" => {
                     password = String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?;
                 }
@@ -440,8 +399,7 @@ impl Config {
                 "ears_skip" => {
                     ears_skip = parse_bool(strip_comment(value))?;
                 }
-                // Not comment-stripped, for `password`'s reason: it is a
-                // passphrase, and `#` is common in one.
+                // No comment stripping, like `password`.
                 "setup_password" => {
                     if !WPA2_PASSPHRASE.contains(&value.len()) {
                         return Err(ConfigError::MalformedValue);
@@ -457,14 +415,14 @@ impl Config {
                     update_url =
                         Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
                 }
-                // Unknown keys are ignored so a newer config file does not
-                // brick an older firmware.
+                // Ignore unknown keys, so a newer config file works with older
+                // firmware.
                 _ => {}
             }
         }
 
-        // A key present but empty is the same mistake as a key left out. An
-        // empty password is not: an open network is a real thing.
+        // An empty key counts as missing. An empty password is allowed, for
+        // open networks.
         Ok(Config {
             ssid: ssid
                 .filter(|s| !s.is_empty())
@@ -487,9 +445,8 @@ mod tests {
 
     use super::*;
 
-    /// A key with nothing after the `=` is the same mistake as leaving the key
-    /// out: there is no network called "". Accepting it turned a typo into a
-    /// WiFi failure diagnosed at the box rather than at the config file.
+    /// A key with nothing after the `=` counts as missing: there is no
+    /// network called "".
     #[test]
     fn an_ssid_with_no_value_is_missing_rather_than_empty() {
         let err = Config::parse("ssid =\nserver = box.lan:8080\n").unwrap_err();
@@ -515,9 +472,7 @@ mod tests {
         assert_eq!(c.ssid.as_str(), "net#1");
     }
 
-    /// The exception that the whole rule is shaped around: WiFi passwords
-    /// contain `#` often, and truncating one fails at the box rather than in
-    /// the file, where nobody can see why.
+    /// Wi-Fi passwords often contain `#`, so the password keeps everything.
     #[test]
     fn a_password_keeps_a_hash_and_everything_after_it() {
         let c =
@@ -525,7 +480,7 @@ mod tests {
         assert_eq!(c.password.as_str(), "hunter2 #1");
     }
 
-    /// An open network is a real thing, so this one stays permitted.
+    /// Allowed, for open networks.
     #[test]
     fn an_empty_password_is_allowed() {
         let c = Config::parse("ssid = home\npassword =\nserver = box.lan:8080\n").unwrap();
@@ -583,9 +538,8 @@ mod tests {
         );
     }
 
-    /// `server` is interpolated into a `Host:` header unescaped, and a line
-    /// of a config file is found by splitting on `\n` — so a bare `CR` in the
-    /// middle of the value survives to become a line terminator in a request.
+    /// `server` is copied unescaped into a `Host:` header, and lines are split
+    /// on `\n` only, so a `CR` inside the value would end the header line.
     #[test]
     fn a_server_carrying_a_bare_cr_is_refused() {
         assert_eq!(
@@ -617,11 +571,7 @@ mod tests {
         assert_eq!(Config::parse(TEXT), Err(ConfigError::ValueTooLong));
     }
 
-    /// The default has to be the safe one. A file that says nothing about
-    /// certificates must not quietly get less checking than one that does.
-    /// Hold-to-skip is this box's own idea — a stock box's ears do volume and
-    /// nothing else — so whether it is wanted is taste, and taste belongs on
-    /// the card rather than behind a reflash.
+    /// Skipping is on unless the card turns it off.
     #[test]
     fn a_missing_ears_skip_key_leaves_the_ears_skipping() {
         let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
@@ -634,9 +584,8 @@ mod tests {
         assert!(!c.ears_skip);
     }
 
-    /// Spelled out one form at a time. A test that looped over a list of
-    /// truthy spellings would agree with whatever list the parser happened to
-    /// hold, which is the failure these tables exist to catch.
+    /// Each accepted spelling is written out, so the test can disagree with
+    /// the parser.
     #[test]
     fn ears_skip_accepts_the_spellings_a_parent_might_reach_for() {
         for text in [
@@ -657,9 +606,7 @@ mod tests {
         }
     }
 
-    /// A typo about the ears is refused rather than guessed. Silently taking
-    /// it as `false` would leave a parent believing they had switched
-    /// something on.
+    /// A typo is an error, not silently `false`.
     #[test]
     fn a_misspelled_ears_skip_value_is_refused() {
         assert_eq!(
@@ -668,8 +615,7 @@ mod tests {
         );
     }
 
-    /// An empty value is the same mistake as a misspelt one, and it is the
-    /// likelier typo: a line left half-written.
+    /// An empty value is an error too.
     #[test]
     fn an_empty_ears_skip_value_is_refused() {
         assert_eq!(
@@ -678,19 +624,15 @@ mod tests {
         );
     }
 
-    /// Booleans are comment-stripped, unlike `password`: there is no boolean
-    /// that needs a `#` in it.
+    /// Unlike `password`, booleans have comments stripped.
     #[test]
     fn a_trailing_comment_is_not_part_of_a_boolean_value() {
         let c = Config::parse("ssid = A\nserver = s:1\nears_skip = no # volume only\n").unwrap();
         assert!(!c.ears_skip);
     }
 
-    /// A read that exactly filled the buffer is indistinguishable from one
-    /// that ran out of room, so it is refused. The failure it prevents is the
-    /// quiet one: a file cut mid-line still parses, and `server = teddycloud.l`
-    /// is a plausible-looking wrong answer that fails much later and somewhere
-    /// else.
+    /// A read that exactly filled the buffer may have been cut off, so it is
+    /// refused. A cut-off `server = teddycloud.l` would still parse.
     #[test]
     fn a_read_that_filled_the_buffer_is_refused_rather_than_parsed() {
         let raw = b"ssid = A\nserver = s:1\n";
@@ -708,8 +650,7 @@ mod tests {
         assert_eq!(c.ssid.as_str(), "A");
     }
 
-    /// A card can hold anything. Bytes that are not text are not a config
-    /// file, and saying so beats a parse error about a line nobody wrote.
+    /// Bytes that are not UTF-8 text are not a config file.
     #[test]
     fn bytes_that_are_not_text_are_refused() {
         assert_eq!(
@@ -722,10 +663,8 @@ mod tests {
             .unwrap()
     }
 
-    /// The bug this exists to prevent, caught on the bench: the card is read
-    /// lazily, at the first mount, which can be *after* somebody has typed an
-    /// override. Replacing the whole struct then silently undid it, and the box
-    /// went back to the card's answer the bench had just typed over.
+    /// The card can be read *after* something was typed at the console; the
+    /// typed value must survive.
     #[test]
     fn a_later_card_read_does_not_undo_what_the_bench_set() {
         let mut held = card();
@@ -744,8 +683,7 @@ mod tests {
         );
     }
 
-    /// Nothing overridden means the card wins outright, which is the ordinary
-    /// boot.
+    /// With nothing typed, the card's values are used.
     #[test]
     fn an_untouched_setting_is_taken_from_the_card() {
         let held = Config::parse("ssid = Old\nserver = old:1\n").unwrap();
@@ -755,8 +693,8 @@ mod tests {
         assert!(!merged.ears_skip);
     }
 
-    /// Each field is independent: overriding the passphrase must not pin the
-    /// ssid to whatever was in RAM before the card was read.
+    /// Each field is independent: typing the passphrase must not keep an old
+    /// SSID from before the card was read.
     #[test]
     fn overrides_are_per_field() {
         let mut held = card();
@@ -784,9 +722,7 @@ mod tests {
         );
     }
 
-    /// Absence means no OTA at all, not a default location to check. A card
-    /// written for an older firmware must not suddenly start fetching images
-    /// from somewhere, and there is no safe value to default to.
+    /// A missing key turns OTA off; there is no default location.
     #[test]
     fn a_missing_update_url_key_leaves_it_none() {
         let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
@@ -800,8 +736,7 @@ mod tests {
         assert_eq!(Config::parse(TEXT), Err(ConfigError::ValueTooLong));
     }
 
-    /// Pins the boundary itself, not just a value comfortably past it — so
-    /// MAX_UPDATE_URL cannot drift (say, to 140) with this suite still green.
+    /// Tests the exact limit, so a change to `MAX_UPDATE_URL` is caught.
     #[test]
     fn an_update_url_at_exactly_the_limit_is_accepted() {
         let value = format!("https://example.com/{}", "x".repeat(MAX_UPDATE_URL - 20));
@@ -819,10 +754,8 @@ mod tests {
         assert_eq!(Config::parse(&text), Err(ConfigError::ValueTooLong));
     }
 
-    /// `update_url =` with nothing after it is someone who meant to write a
-    /// URL. This project has already been bitten once, in
-    /// `teddiebox-ota::manifest`, by a present-but-empty value sailing
-    /// through as though it meant "absent".
+    /// `update_url =` with nothing after it is probably a mistake, not a way
+    /// to turn OTA off.
     #[test]
     fn an_empty_update_url_is_refused() {
         assert_eq!(
@@ -851,19 +784,16 @@ mod tests {
         );
     }
 
-    /// Only a `#` that starts a word is a comment, matching `ssid` and
-    /// `server`. A URL has no legitimate `#` in this use, but the rule is the
-    /// same rule everywhere it applies.
+    /// Only a `#` that starts a word is a comment, the same rule as for
+    /// `ssid` and `server`.
     #[test]
     fn a_hash_inside_the_update_url_is_part_of_the_value() {
         let c = Config::parse("ssid = A\nserver = s:1\nupdate_url = https://x/y#z\n").unwrap();
         assert_eq!(c.update_url.as_deref(), Some("https://x/y#z"));
     }
 
-    /// The sequence the firmware actually runs, in one place: something is
-    /// typed at the console, and the card is mounted afterwards because the
-    /// mount is lazy. The typed value has to win, and every value nobody typed
-    /// has to come from the card.
+    /// Something is typed at the console, then the card is mounted. The typed
+    /// value wins, and every other value comes from the card.
     #[test]
     fn a_typed_value_wins_over_a_card_read_after_it() {
         let mut settings = Settings::new();
@@ -877,8 +807,8 @@ mod tests {
         assert_eq!(settings.config().server.as_str(), "card:1");
     }
 
-    /// The other order, which is the one the box runs when the card is good:
-    /// the card lands first, and the console still overrides it afterwards.
+    /// The other order: the card is read first, then a typed value overrides
+    /// it.
     #[test]
     fn a_value_typed_after_a_card_read_still_wins() {
         let mut settings = Settings::new();
@@ -890,8 +820,7 @@ mod tests {
         assert_eq!(settings.config().server.as_str(), "card:1");
     }
 
-    /// Handing the radio an empty half fails association in a way that reads
-    /// as a wrong passphrase, so a half-filled config is no config.
+    /// Credentials need both SSID and passphrase.
     #[test]
     fn credentials_are_withheld_until_both_halves_are_there() {
         let mut settings = Settings::new();
@@ -910,17 +839,15 @@ mod tests {
         assert_eq!(c.setup_password.as_deref(), Some("our#house"));
     }
 
-    /// Absence is the ordinary case, and means the compiled-in one.
+    /// No `setup_password` means the built-in one is used.
     #[test]
     fn no_setup_password_is_absent_rather_than_empty() {
         let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
         assert_eq!(c.setup_password, None);
     }
 
-    /// WPA2 will not take a passphrase outside 8..=63 characters, and a box
-    /// that refuses to raise its own access point is the one box nobody can
-    /// reach to find out why. Refusing at the parser puts the complaint in
-    /// front of whoever edited the file.
+    /// WPA2 needs 8 to 63 characters. Otherwise the setup access point could
+    /// not start, so the parser rejects it.
     #[test]
     fn a_setup_password_too_short_for_wpa2_is_refused() {
         assert_eq!(
@@ -982,8 +909,7 @@ mod tests {
         assert_eq!(out.as_str(), "ssid = Home\nsetup_password = a new one\n");
     }
 
-    /// Removing what is not there is what `setup pw off` does on a card that
-    /// never had the key — the outcome asked for is already the case.
+    /// What `setup pw off` does on a card that never had the key.
     #[test]
     fn removing_a_key_that_is_not_there_changes_nothing() {
         let mut out = String::<256>::new();
@@ -991,8 +917,8 @@ mod tests {
         assert_eq!(out.as_str(), "ssid = Home\n");
     }
 
-    /// A file whose last line has no newline is one a hand editor leaves
-    /// behind, and appending to it must not join two keys into one line.
+    /// Appending to a file without a final newline must not join two keys
+    /// on one line.
     #[test]
     fn appending_to_a_file_with_no_trailing_newline_still_starts_a_line() {
         let mut out = String::<256>::new();
@@ -1014,8 +940,7 @@ mod tests {
         );
     }
 
-    /// The bug this exists to prevent: overriding one setting at the console
-    /// must not throw away an `update_url` typed at the same session.
+    /// A typed `update_url` survives a later card read.
     #[test]
     fn overridden_update_url_survives_a_later_card_read() {
         let mut held = card();
