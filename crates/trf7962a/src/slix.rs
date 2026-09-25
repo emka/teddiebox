@@ -1,51 +1,43 @@
 //! NXP ICODE privacy mode.
 //!
-//! Tonie figures ship with privacy mode enabled: the tag ignores inventory
-//! entirely until it receives the correct privacy password. The unlock is a
-//! two-step exchange — fetch a random number, then send the password XORed
-//! with that number, twice over.
+//! Tonie figures come with privacy mode on: the tag ignores inventory until
+//! it receives the correct privacy password. Unlocking takes two steps: get
+//! a random number, then send the password XORed with that number.
 //!
-//! **Verified against silicon on 2026-09-02**, on a Tonie figure and on a
-//! SLIX-L, both of which answered inventory after being unlocked this way.
+//! Tested on a Tonie figure and on a SLIX-L; both answered inventory after
+//! being unlocked this way.
 //!
-//! Named for SLIX by habit, but **plain ICODE SLIX has no privacy mode at
-//! all** — it offers only a password-protected EAS/AFI, at password
-//! identifier `10h`. Privacy belongs to SLIX-L and SLIX2 (SL2S5002 §1.3), so
-//! **SL2S2602, the SLIX2 product data sheet, is the reference for everything
-//! here**; it is the only public one in the family
-//! that carries the full command table.
+//! The module is named SLIX, but **plain ICODE SLIX has no privacy mode**;
+//! only SLIX-L and SLIX2 do (SL2S5002 §1.3). **SL2S2602, the SLIX2 data
+//! sheet, is the reference for everything here**; it is the only public one
+//! in the family with the full command table.
 //!
-//! It settles two things this driver had to find out the hard way. Table 13
-//! gives the password identifiers — `01h` read, `02h` write, **`04h`
-//! privacy**, `08h` destroy, `10h` EAS/AFI. And §9.5.3.2: "the SET PASSWORD
+//! Table 13 gives the password identifiers: `01h` read, `02h` write, **`04h`
+//! privacy**, `08h` destroy, `10h` EAS/AFI. §9.5.3.2: "the SET PASSWORD
 //! command can only be executed in Addressed or Selected mode **except for
-//! the Privacy password**", which is what makes the unaddressed request
-//! below correct rather than a violation — a tag in privacy mode will not
-//! give up the UID an addressed request would need.
+//! the Privacy password**", so the unaddressed request below is allowed; a
+//! locked tag would not reveal the UID an addressed request needs.
 //!
-//! One rule from it governs everything above: **a password the tag does not
-//! hold is answered with silence, and the tag then ignores every command
-//! until its field has been taken away** (SL2S2602 §9.5.3.2). Trying a second
-//! password without that reset asks a tag that has stopped listening.
+//! **A wrong password gets no answer, and the tag then ignores every command
+//! until the field is turned off** (SL2S2602 §9.5.3.2). So the field must be
+//! reset before trying another password.
 //!
-//! The Toniebox's own password is a caller-supplied constant, not held here.
+//! The Toniebox's password is passed in by the caller, not stored here.
 
 /// Request flags: one subcarrier, high data rate, not addressed.
 ///
-/// ISO 15693-3 §7.3.1 puts the Address flag in bit 6, and a request that sets
-/// it must carry the tag's eight-byte UID. During a privacy unlock the UID is
-/// exactly what is not yet known — a locked tag will not answer inventory, so
-/// there is nothing to address — which makes 0x02 the only flags byte these
-/// two commands can carry. Nothing marks a request as manufacturer-custom:
-/// that is the command code's range plus the IC manufacturer byte after it.
+/// ISO 15693-3 §7.3.1 puts the Address flag in bit 6, and an addressed
+/// request must include the tag's UID. A locked tag does not reveal its UID,
+/// so these commands must be unaddressed. A custom command is marked by its
+/// command code and the manufacturer byte, not by a flag.
 pub const FLAGS: u8 = 0x02;
 /// NXP's IC manufacturer code.
 pub const MFG_NXP: u8 = 0x04;
 
 pub const CMD_GET_RANDOM_NUMBER: u8 = 0xB2;
 pub const CMD_SET_PASSWORD: u8 = 0xB3;
-/// SL2S2602 §9.5.3.9. **One bit from DESTROY at `0xB9`** — see
-/// `enable_privacy_request`, which is why it is never sent addressed.
+/// SL2S2602 §9.5.3.9. **One bit away from DESTROY at `0xB9`**; see
+/// `enable_privacy_request` for why it is never sent addressed.
 pub const CMD_ENABLE_PRIVACY: u8 = 0xBA;
 
 /// Password identifier for the privacy password.
@@ -53,21 +45,17 @@ pub const PASSWORD_ID_PRIVACY: u8 = 0x04;
 
 /// NXP's factory default privacy password.
 ///
-/// SL2S2602 §9.2.3, the configuration ICs are delivered in: "all password
-/// bytes are 0Fh for the Privacy and Destroy passwords". A tag that has never
-/// had a password written to it still holds this, so a plain one off the reel
-/// is readable without knowing anything about it. Confirmed at the bench on
-/// 2026-09-02: a SLIX-L that refused the Toniebox password accepted this and
-/// then answered inventory with `E00403504E3D2C1B`.
+/// SL2S2602 §9.2.3: "all password bytes are 0Fh for the Privacy and Destroy
+/// passwords" on delivery. A new, unused tag still has this password.
+/// Confirmed on a SLIX-L that refused the Toniebox password but accepted this
+/// one.
 ///
-/// It is a published default, not a secret, which is why it can live here
-/// while the Toniebox's own password cannot.
+/// A published default, not a secret, so it can be in the code.
 ///
-/// **The Destroy password ships as the same value**, and DESTROY (`B9h`) sits
-/// next to ENABLE PRIVACY (`BAh`). On a factory tag a one-bit slip in the
-/// command code is therefore not a failed request — it is an irreversibly
-/// dead tag. Neither command is implemented here, and neither should be added
-/// without the request format in front of you.
+/// **The Destroy password has the same default**, and DESTROY (`B9h`) is one
+/// bit away from ENABLE PRIVACY (`BAh`). On a new tag, a one-bit mistake in
+/// the command code would permanently destroy it. DESTROY is not implemented
+/// and must not be added without great care.
 pub const VENDOR_DEFAULT_PASSWORD: u32 = 0x0F0F_0F0F;
 
 /// Builds the GET RANDOM NUMBER request.
@@ -77,15 +65,12 @@ pub fn get_random_number_request() -> [u8; 3] {
 
 /// Builds the SET PASSWORD request.
 ///
-/// The password is transmitted XORed with the random number repeated across
-/// both halves, so the plaintext never crosses the air gap.
+/// The password is sent XORed with the random number (repeated twice), so
+/// the plain password is never transmitted.
 ///
-/// It goes on the air most significant byte first, which is how a password is
-/// written down and how the box's is quoted. Sent the other way round the tag
-/// does not refuse it, it simply says nothing at all — measured at the bench,
-/// where reversing the byte order turned silence into the one-byte `0x00`
-/// that ISO 15693 uses to mean "done". The mask is applied in that same wire
-/// order: the two random bytes as the tag sent them, repeated.
+/// The password is sent most significant byte first. In the wrong order the
+/// tag does not answer at all (measured). The mask uses the two random bytes
+/// in the order the tag sent them, repeated.
 pub fn set_password_request(password: u32, random: u16) -> [u8; 8] {
     let password = password.to_be_bytes();
     let mask = random.to_le_bytes();
@@ -103,16 +88,14 @@ pub fn set_password_request(password: u32, random: u16) -> [u8; 8] {
 
 /// Builds the ENABLE PRIVACY request, which puts a tag back into privacy mode.
 ///
-/// SL2S2602 §9.5.3.9, Table 39. The password is masked exactly as SET
-/// PASSWORD masks it, and there is **no password identifier byte** — the
-/// command names the password by being the command it is.
+/// SL2S2602 §9.5.3.9, Table 39. The password is masked as in SET PASSWORD,
+/// and there is **no password identifier byte**.
 ///
-/// **Deliberately never addressed.** DESTROY sits one bit away at `B9h`,
-/// takes the same mask, and on a factory tag holds the same password; but
-/// §9.5.3.8 says it "can only be executed in addressed or selected mode".
-/// Leaving the Address flag clear therefore turns the one catastrophic slip
-/// this command is near into a request the tag declines to execute. That is
-/// worth more than a comment, so it is asserted in the tests below.
+/// **Never addressed, on purpose.** DESTROY is one bit away at `B9h`, uses the
+/// same mask, and on a new tag has the same password; but §9.5.3.8 says it
+/// "can only be executed in addressed or selected mode". With the Address
+/// flag clear, a one-bit mistake becomes a request the tag ignores. The tests
+/// check this.
 pub fn enable_privacy_request(password: u32, random: u16) -> [u8; 7] {
     let password = password.to_be_bytes();
     let mask = random.to_le_bytes();
@@ -132,9 +115,9 @@ mod tests {
     use super::*;
 
     /// ISO 15693-3 §7.3.1: bit 6 of the request flags is the Address flag,
-    /// and setting it promises an eight-byte UID that these three bytes do
-    /// not carry. A tag reading a malformed addressed request stays silent,
-    /// which at a bench is indistinguishable from an empty plate.
+    /// which would require an eight-byte UID these three bytes do not carry.
+    /// A tag does not answer a malformed request, which looks like an empty
+    /// plate.
     #[test]
     fn the_random_number_request_is_not_addressed_to_a_uid() {
         assert_eq!(
@@ -152,14 +135,14 @@ mod tests {
     #[test]
     fn the_password_is_masked_with_the_random_number_in_both_halves() {
         let request = set_password_request(0x0000_0000, 0xABCD);
-        // A zero password leaves the mask itself: the two random bytes in the
-        // order the tag sent them, repeated.
+        // With a zero password, the result is the mask itself: the two
+        // random bytes in the order the tag sent them, repeated.
         assert_eq!(&request[4..], &[0xCD, 0xAB, 0xCD, 0xAB]);
     }
 
-    /// The box's own password, as it is written down, is what must appear on
-    /// the air. Sent least significant byte first the tag stays silent — the
-    /// one failure that reads as an empty plate.
+    /// The password is sent in written order (most significant byte first).
+    /// In the other order the tag does not answer, which looks like an empty
+    /// plate.
     #[test]
     fn the_password_goes_on_the_air_most_significant_byte_first() {
         let request = set_password_request(0x1122_3344, 0x0000);
@@ -172,19 +155,17 @@ mod tests {
         assert_eq!(request[3], PASSWORD_ID_PRIVACY);
     }
 
-    /// The command code, spelled out rather than taken from the constant.
-    /// `0xB9` is DESTROY and is irreversible, so this is the one byte in the
-    /// driver where a typo cannot be allowed to agree with itself.
+    /// The command code is written out, not taken from the constant: `0xB9`
+    /// is the irreversible DESTROY, so a typo in the constant must be caught.
     #[test]
     fn the_privacy_request_carries_the_enable_privacy_command_and_not_destroy() {
         let request = enable_privacy_request(0, 0);
         assert_eq!(request[1], 0xBA, "0xB9 is DESTROY");
     }
 
-    /// The safety property this command leans on: SL2S2602 §9.5.3.8 lets
-    /// DESTROY run only in addressed or selected mode, so an unaddressed
-    /// frame cannot destroy a tag whatever its command byte says. Setting the
-    /// Address flag here would throw that guarantee away.
+    /// SL2S2602 §9.5.3.8 only allows DESTROY in addressed or selected mode, so
+    /// an unaddressed frame can never destroy a tag, whatever its command
+    /// byte. The Address flag must stay clear.
     #[test]
     fn the_privacy_request_is_never_addressed_to_a_uid() {
         assert_eq!(
@@ -194,9 +175,8 @@ mod tests {
         );
     }
 
-    /// No password identifier byte, unlike SET PASSWORD: Table 39 goes
-    /// straight from the manufacturer code to the masked password. An extra
-    /// byte here would shift the password by one and mean nothing to the tag.
+    /// No password identifier byte, unlike SET PASSWORD: in Table 39 the
+    /// masked password follows the manufacturer code directly.
     #[test]
     fn the_privacy_request_masks_the_password_with_no_identifier_byte() {
         let request = enable_privacy_request(0x1122_3344, 0x0000);

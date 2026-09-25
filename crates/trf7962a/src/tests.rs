@@ -30,14 +30,11 @@ fn spi_write(bytes: Vec<u8>) -> Vec<Transaction<u8>> {
 }
 
 /// SLOS757C: reading the interrupt status register over SPI needs the
-/// continuous-address bit set and a dummy read of the next register, "because
-/// the reader's IRQ Status register needs an additional clock cycle to clear
-/// the register". A plain single-byte read leaves it uncleared, and the
-/// address byte is 0x6C rather than 0x4C.
+/// continuous-address bit and a dummy read of the next register, "because the
+/// reader's IRQ Status register needs an additional clock cycle to clear the
+/// register". So the address byte is 0x6C, not 0x4C.
 ///
-/// Literal bytes, from the datasheet's own step-by-step procedure. The driver
-/// read this register the ordinary way for its whole life, and at the bench
-/// that reads as a reader which never raises an interrupt at all.
+/// Literal bytes from the datasheet's procedure.
 #[test]
 fn the_interrupt_status_is_read_with_a_dummy_byte() {
     let mut trf = reader(&[
@@ -49,9 +46,8 @@ fn the_interrupt_status_is_read_with_a_dummy_byte() {
     check(trf);
 }
 
-/// The interrupt status read, which is not an ordinary register read: the
-/// continuous-address bit is set and a dummy byte follows. See
-/// `the_interrupt_status_is_read_with_a_dummy_byte`.
+/// The interrupt status read: continuous-address bit set, and a dummy byte
+/// after. See `the_interrupt_status_is_read_with_a_dummy_byte`.
 fn spi_read_irq(value: u8) -> Vec<Transaction<u8>> {
     vec![
         Transaction::transaction_start(),
@@ -62,8 +58,7 @@ fn spi_read_irq(value: u8) -> Vec<Transaction<u8>> {
 
 /// One SPI transaction reading a register.
 ///
-/// Two bytes are clocked: the reader cannot answer during the address
-/// byte, so the value only appears on the second.
+/// Two bytes are clocked: the value comes back during the second.
 fn spi_read(address: u8, value: u8) -> Vec<Transaction<u8>> {
     vec![
         Transaction::transaction_start(),
@@ -74,9 +69,8 @@ fn spi_read(address: u8, value: u8) -> Vec<Transaction<u8>> {
 
 /// The IRQ line going high on the `n`th poll.
 ///
-/// The poll count is a tuning policy rather than a bus encoding, so sharing
-/// the constant with the driver is safe here — retuning the window should not
-/// mean editing a test, and no datasheet transcription error can hide in it.
+/// The poll count is a tuning choice, not a datasheet value, so these helpers
+/// may use the driver's constants.
 fn irq_after(n: usize) -> Vec<PinTransaction> {
     let mut t = vec![PinTransaction::get(PinState::Low); n];
     t.push(PinTransaction::get(PinState::High));
@@ -91,12 +85,9 @@ fn polls(n: usize) -> Vec<DelayTransaction> {
     vec![DelayTransaction::delay_us(IRQ_POLL_INTERVAL_US); n]
 }
 
-/// The delays through one exchange that a tag answers: `n` interrupt polls
-/// waiting for it, then the quiet the reply has to be followed by.
-///
-/// Separate from `polls` because the two are different claims. An exchange
-/// nothing answers ends with a poll, and one a tag answers ends with t2 —
-/// see `the_air_is_left_quiet_for_t2_after_a_tag_has_answered`.
+/// The delays in one exchange a tag answers: `n` interrupt polls, then the t2
+/// quiet time. An unanswered exchange has no t2; see
+/// `the_air_is_left_quiet_for_t2_after_a_tag_has_answered`.
 fn answered(n: usize) -> Vec<DelayTransaction> {
     let mut t = polls(n);
     t.push(DelayTransaction::delay_us(T2_QUIET_US));
@@ -105,14 +96,11 @@ fn answered(n: usize) -> Vec<DelayTransaction> {
 
 /// Builds the SPI transactions for one transceive that a tag answers.
 ///
-/// `tx_length` is the two-register length field, stated literally by the
-/// caller rather than recomputed here. Recomputing it would mean a wrong
-/// length encoding agreed with itself and passed — the encoding is the
-/// thing under test, so the test has to spell it out.
-/// `fifo_status` is likewise the raw status byte the reader returns, so a
-/// caller can set the overflow flag independently of the byte count. Per
-/// SLOS757C Table 6-21 the count sits in B3-B0 and reads as N-1, so a
-/// ten-byte reply is the literal 9.
+/// `tx_length` is the two-register length field, given literally by the
+/// caller so the length encoding is really tested. `fifo_status` is the raw
+/// status byte, so a caller can set the overflow flag separately. Per
+/// SLOS757C Table 6-21 the count is in B3-B0 and reads as N-1, so a ten-byte
+/// reply is 9.
 fn transceive_transactions(
     request: &[u8],
     tx_length: [u8; 2],
@@ -120,9 +108,9 @@ fn transceive_transactions(
     response: &[u8],
 ) -> Vec<Transaction<u8>> {
     let mut t = transmit_transactions(request, tx_length);
-    // Two interrupts, not one: the transmit finishing (0x80), then the tag's
-    // answer (0x40), with the FIFO reset between them. Asserted byte for byte
-    // by `the_transmit_interrupt_is_not_mistaken_for_the_tags_reply`.
+    // Two interrupts: the transmit finishing (0x80), then the tag's answer
+    // (0x40), with a FIFO reset between them. See
+    // `the_transmit_interrupt_is_not_mistaken_for_the_tags_reply`.
     t.extend(spi_read_irq(0x80));
     t.extend(spi_write(vec![0x8F]));
     t.extend(spi_read_irq(0x40));
@@ -131,10 +119,10 @@ fn transceive_transactions(
     t
 }
 
-/// The continuous read that empties the FIFO — SLOS757G Figure 6-23.
+/// The continuous read that empties the FIFO (SLOS757G Figure 6-23).
 ///
-/// Asserted byte for byte by `the_fifo_is_read_as_one_continuous_burst`; this
-/// builds the same burst for the tests that care about what it returns.
+/// Checked byte for byte by `the_fifo_is_read_as_one_continuous_burst`; this
+/// helper builds it for other tests.
 fn fifo_burst(response: &[u8]) -> Vec<Transaction<u8>> {
     let mut out = vec![0x7Fu8];
     out.extend(core::iter::repeat_n(0x00, response.len()));
@@ -155,13 +143,12 @@ fn irq_exchange() -> Vec<PinTransaction> {
     t
 }
 
-/// Everything up to and including the transmit command — all that happens
-/// when nothing answers.
-/// The transmit sequence, as one slave-select window — SLOS757G Figure 6-20.
+/// The transmit sequence, as one SPI transaction (SLOS757G Figure 6-20). This
+/// is all that happens when nothing answers.
 ///
-/// The shape is asserted byte for byte by
-/// `a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it`; this only
-/// builds the same burst for the tests that care about what comes after it.
+/// Checked byte for byte by
+/// `a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it`; this helper
+/// builds it for other tests.
 fn transmit_transactions(request: &[u8], tx_length: [u8; 2]) -> Vec<Transaction<u8>> {
     let mut burst = vec![
         0x8F, // command: reset FIFO
@@ -177,7 +164,7 @@ fn transmit_transactions(request: &[u8], tx_length: [u8; 2]) -> Vec<Transaction<
 /// GET RANDOM NUMBER, spelled out rather than taken from `slix`.
 const GET_RANDOM_NUMBER: [u8; 3] = [0x02, 0xB2, 0x04];
 /// SET PASSWORD for privacy, password 0 masked with random number 0xABCD.
-/// A zero password makes the byte order invisible, so this stays as it was.
+/// With a zero password, byte order does not matter.
 const SET_PASSWORD_0: [u8; 8] = [0x02, 0xB3, 0x04, 0x04, 0xCD, 0xAB, 0xCD, 0xAB];
 /// Single-slot inventory: high data rate, inventory, one slot.
 const INVENTORY: [u8; 3] = [0x26, 0x01, 0x00];
@@ -191,8 +178,7 @@ fn a_register_write_sends_the_bare_address() {
 
 #[test]
 fn a_register_read_sets_the_read_bit() {
-    // Address 0x01 with the read bit set, then a second byte clocked out so
-    // the reader has somewhere to put the value.
+    // Address 0x01 with the read bit set, then a second byte for the value.
     let mut r = reader(&spi_read(0x41, 0x02));
     assert_eq!(r.read_register(regs::ISO_CONTROL).unwrap(), 0x02);
     check(r);
@@ -207,25 +193,22 @@ fn a_direct_command_sets_the_command_bit() {
 
 /// Every byte `init_iso15693` puts on the wire, written out by hand.
 ///
-/// Deliberately not derived from `INIT_SEQUENCE`: a test that loops over
-/// the table under test asserts only that the driver iterates a slice, and
-/// cannot tell a correct register map from a shifted one. These literals
-/// are what a datasheet gets diffed against.
+/// Not derived from `INIT_SEQUENCE`, so the test can disagree with the code
+/// and be checked against the datasheet.
 #[test]
 fn initialisation_puts_exactly_this_sequence_on_the_bus() {
     let mut spi = Vec::new();
     spi.extend(spi_write(vec![0x83])); // command: soft init
     spi.extend(spi_write(vec![0x80])); // command: idle
     spi.extend(spi_write(vec![0x01, 0x02])); // ISO control: 15693 high rate
-                                             // Chip status, written last. B0 is `vrs5_3`: 1 selects 5-V operation and
-                                             // 0 selects 3-V (Table 6-16), and §6.4 says the 3-V configuration is the
-                                             // one to use below 4.3 V. The reader shares power gate 47 with the SD
-                                             // card, so its rail is 3.3 V.
+                                             // Chip status, written last. B0 (`vrs5_3`) clear selects 3-V operation
+                                             // (Table 6-16), which §6.4 says to use below 4.3 V. The reader runs at
+                                             // 3.3 V.
     spi.extend(spi_write(vec![0x00, 0x20]));
 
-    // The reader needs to settle after a soft init before it takes
-    // configuration, so both commands are followed by a wait. The third wait
-    // is the field's, not the reader's — see `FIELD_SETTLE_MS`.
+    // The reader needs time to settle after a soft init, so both commands
+    // are followed by a wait. The third wait is for the field; see
+    // `FIELD_SETTLE_MS`.
     let delay = [
         DelayTransaction::delay_ms(SOFT_INIT_SETTLE_MS),
         DelayTransaction::delay_ms(SOFT_INIT_SETTLE_MS),
@@ -251,8 +234,8 @@ fn inventory_waits_for_the_reader_before_reading_the_fifo() {
     // Three bytes: the 12-bit length field splits as 0x00 / 0x30.
     let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 9, &response);
 
-    // Two polls come back low before the tag's answer arrives; the transmit's
-    // own interrupt is already there when it is first looked for.
+    // Two polls are low before the tag's answer arrives; the transmit's
+    // interrupt is already there at the first poll.
     let mut irq = irq_after(0);
     irq.extend(irq_after(2));
 
@@ -271,18 +254,12 @@ fn inventory_waits_for_the_reader_before_reading_the_fifo() {
     irq.done();
 }
 
-/// ISO 15693-3 §9.1: after a tag has answered, a reader must leave the air
-/// quiet for t2 before it sends the next request, because the tag is not
-/// listening again until then. The driver had no such wait and issued the
-/// next frame as fast as SPI could carry it.
+/// ISO 15693-3 §9.1: after a tag answers, the reader must wait t2 before the
+/// next request, because the tag is not listening until then.
 ///
-/// Measured on the board, twelve forced privacy unlocks each sending GET
-/// RANDOM NUMBER and then SET PASSWORD back to back: GET RANDOM NUMBER was
-/// answered 12 times out of 12, and the SET PASSWORD that immediately
-/// followed it was silent 6 times out of 12, in no pattern. With roughly 4 ms
-/// of console printing between the two, 12 out of 12. The reader transmits
-/// and receives perfectly throughout — it is the tag that is not listening
-/// yet, and a silent tag is indistinguishable from an empty plate.
+/// Measured on the board without this wait: in twelve privacy unlocks, GET
+/// RANDOM NUMBER was always answered, but the SET PASSWORD sent straight
+/// after it got no answer 6 times out of 12.
 #[test]
 fn the_air_is_left_quiet_for_t2_after_a_tag_has_answered() {
     let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
@@ -291,7 +268,7 @@ fn the_air_is_left_quiet_for_t2_after_a_tag_has_answered() {
     let mut irq = irq_after(0);
     irq.extend(irq_after(2));
 
-    // The two IRQ polls, and then the guard the reply has to be followed by.
+    // The two IRQ polls, then the t2 wait after the reply.
     let mut delay = polls(2);
     delay.push(DelayTransaction::delay_us(T2_QUIET_US));
 
@@ -309,21 +286,15 @@ fn the_air_is_left_quiet_for_t2_after_a_tag_has_answered() {
     irq.done();
 }
 
-/// A tag that has refused a password stops answering everything until its
-/// supply is cycled — SL2S2602 §9.5.3.2, "if the IC receives an invalid
-/// password, it will not execute any following command until a Power-On Reset
-/// (POR) (RF reset) is executed". A passive tag's only supply is the reader's
-/// field, so the reset is the reader's to give: drop the field, let the tag's
-/// reservoir collapse, bring it back and let it charge again.
-///
-/// Rebooting the box does this only as a side effect of dropping the storage
-/// rail, which is a heavy way to reset one tag and is not available to
-/// firmware that has to keep running.
+/// A tag that refused a password stops answering until it loses power
+/// (SL2S2602 §9.5.3.2: "if the IC receives an invalid password, it will not
+/// execute any following command until a Power-On Reset (POR) (RF reset) is
+/// executed"). The tag is powered by the reader's field, so the reader turns
+/// the field off, waits, and turns it on again.
 #[test]
 fn a_tag_is_reset_by_taking_its_field_away_and_giving_it_back() {
     let mut spi = Vec::new();
-    // The field down: the same word with the transmitter bit cleared, so the
-    // supply selection cannot drift between the two.
+    // Field off: the same word with the transmitter bit cleared.
     spi.extend(spi_write(vec![0x00, 0x00]));
     spi.extend(spi_write(vec![0x00, 0x20]));
 
@@ -348,11 +319,9 @@ fn a_tag_is_reset_by_taking_its_field_away_and_giving_it_back() {
 /// random number of zero, so the password shows through unchanged.
 const SET_PASSWORD_VENDOR: [u8; 8] = [0x02, 0xB3, 0x04, 0x04, 0x0F, 0x0F, 0x0F, 0x0F];
 
-/// A tag may hold any of several passwords, and the wrong one is answered
-/// with silence — after which the tag ignores everything until its field has
-/// been taken away (SL2S2602 §9.5.3.2). So a driver that simply tries the
-/// next password sends it to a tag that has stopped listening, and reports
-/// the plate empty whichever password was right.
+/// A wrong password gets no answer, and the tag then ignores everything
+/// until its field is turned off (SL2S2602 §9.5.3.2). So the field must be
+/// reset before trying the next password.
 #[test]
 fn a_refused_password_is_followed_by_a_field_reset_before_the_next_one() {
     let uid_response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
@@ -360,8 +329,8 @@ fn a_refused_password_is_followed_by_a_field_reset_before_the_next_one() {
     let mut spi = Vec::new();
     // A tag in privacy mode ignores inventory entirely.
     spi.extend(transmit_transactions(&INVENTORY, [0x00, 0x30]));
-    // It does answer GET RANDOM NUMBER — that is what privacy mode leaves
-    // open — and then says nothing to a password it does not hold.
+    // It does answer GET RANDOM NUMBER, then says nothing to a wrong
+    // password.
     spi.extend(transceive_transactions(
         &GET_RANDOM_NUMBER,
         [0x00, 0x30],
@@ -369,10 +338,10 @@ fn a_refused_password_is_followed_by_a_field_reset_before_the_next_one() {
         &[0x00, 0xCD, 0xAB],
     ));
     spi.extend(transmit_transactions(&SET_PASSWORD_0, [0x00, 0x80]));
-    // The field down and back up, which is the tag's power-on reset.
+    // Field off and on again: the tag's power-on reset.
     spi.extend(spi_write(vec![0x00, 0x00]));
     spi.extend(spi_write(vec![0x00, 0x20]));
-    // Listening again, so the second password can be tried at all.
+    // The tag listens again, so the second password can be tried.
     spi.extend(transceive_transactions(
         &GET_RANDOM_NUMBER,
         [0x00, 0x30],
@@ -424,9 +393,8 @@ fn a_refused_password_is_followed_by_a_field_reset_before_the_next_one() {
     irq.done();
 }
 
-/// The FIFO holds twelve bytes and this driver loads a request in one go, so
-/// a longer one cannot be sent. Silently, it both overran the FIFO and, past
-/// 4096 bytes, wrapped the 12-bit length field into a plausible small number.
+/// The FIFO holds twelve bytes and the whole request is loaded at once, so a
+/// longer request is refused.
 #[test]
 fn a_request_too_large_for_the_fifo_is_refused_before_any_bus_traffic() {
     let mut r = reader(&[]);
@@ -440,8 +408,7 @@ fn a_request_too_large_for_the_fifo_is_refused_before_any_bus_traffic() {
 
 #[test]
 fn an_empty_plate_reports_no_tag_without_reading_the_fifo() {
-    // Nothing answers, so the interrupt never comes. Reading the FIFO anyway
-    // is what made a figure on the plate look like an empty one.
+    // Nothing answers, so there is no interrupt and the FIFO is not read.
     let spi = transmit_transactions(&INVENTORY, [0x00, 0x30]);
 
     let mut r = Trf7962a::new(
@@ -463,9 +430,8 @@ fn an_empty_plate_reports_no_tag_without_reading_the_fifo() {
 
 #[test]
 fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
-    // Bit 7 is the overflow flag; the count is bits 6:0. Taking the raw
-    // byte as a count reads 0x8A as 138 bytes available and fabricates a
-    // UID out of whatever the FIFO returns.
+    // B4 is the overflow flag; the count is B3-B0. 0x1A has the overflow
+    // flag set.
     let mut spi = transmit_transactions(&INVENTORY, [0x00, 0x30]);
     spi.extend(spi_read_irq(0x80));
     spi.extend(spi_write(vec![0x8F]));
@@ -484,8 +450,8 @@ fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
     irq.done();
 }
 
-/// B6 and B5 are the FIFO level flags, not part of the count. Masking them
-/// in turns a ten-byte reply into a claim of 105 bytes.
+/// B6 and B5 are the FIFO level flags, not part of the count. Counting them
+/// would turn a ten-byte reply into 105 bytes.
 #[test]
 fn the_fifo_level_flags_are_not_counted_as_received_bytes() {
     let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
@@ -519,10 +485,8 @@ fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
     let mut irq = irq_exchange();
     irq.extend(irq_exchange());
 
-    // Two exchanges, so two guards. This is the sequence the bench found:
-    // the tag answers GET RANDOM NUMBER and then ignores a SET PASSWORD that
-    // follows it too soon, which is why the second guard matters as much as
-    // the first.
+    // Two exchanges, so two t2 waits. Without the first, the tag ignores a
+    // SET PASSWORD that follows GET RANDOM NUMBER too soon.
     let mut delay = answered(0);
     delay.extend(answered(0));
 
@@ -540,9 +504,9 @@ fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
 
 #[test]
 fn a_rejected_password_is_reported_rather_than_read_as_success() {
-    // ISO 15693-3 §7.4: bit 0 of the response flags means the payload is
-    // an error code. A SLIX refusing the privacy password answers
-    // [0x01, 0x0F] — two bytes, so a bare length check calls it a success.
+    // ISO 15693-3 §7.4: bit 0 of the response flags means the payload is an
+    // error code. A SLIX refusing the password answers [0x01, 0x0F], which a
+    // length check alone would accept.
     let mut spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &[0x00, 0xCD, 0xAB]);
     spi.extend(transceive_transactions(
         &SET_PASSWORD_0,
@@ -554,7 +518,7 @@ fn a_rejected_password_is_reported_rather_than_read_as_success() {
     let mut irq = irq_exchange();
     irq.extend(irq_exchange());
 
-    // Two exchanges, so two guards.
+    // Two exchanges, so two t2 waits.
     let mut delay = answered(0);
     delay.extend(answered(0));
 
@@ -616,9 +580,8 @@ fn the_field_is_turned_on_last() {
 
 /// The interrupt line is readable without an exchange in flight.
 ///
-/// At a bench the register and the pin disagree in the one case that matters:
-/// the reader latched an interrupt the wiring never delivered. Telling those
-/// apart needs the level on its own, outside a transceive.
+/// For debugging: shows whether the wiring delivers an interrupt that the
+/// status register reports.
 #[test]
 fn the_interrupt_line_can_be_read_on_its_own() {
     let mut r = Trf7962a::new(
@@ -630,21 +593,16 @@ fn the_interrupt_line_can_be_read_on_its_own() {
     check(r);
 }
 
-/// SLOS757G Figure 6-20, byte for byte: the datasheet's own single-slot
-/// inventory, in one slave-select window.
+/// SLOS757G Figure 6-20, byte for byte: the datasheet's single-slot
+/// inventory, in one SPI transaction.
 ///
-/// Loading the FIFO one transaction per byte does not reach the FIFO at all.
-/// Measured on the reader: after a reset and three single-address writes of
-/// 0x26, 0x01, 0x00 the FIFO byte counter still reads 0x00, while a write to
-/// the length register 0x1E in the same style reads back correctly. Since
-/// "transmission starts automatically after the first byte is written into
-/// the FIFO" (§6.12.5), a FIFO that never takes a byte is a transmitter that
-/// never starts — which at a bench is a reader that raises no interrupt and
-/// looks like an empty plate.
+/// Written one byte per transaction, the FIFO stays empty (measured), and
+/// since "transmission starts automatically after the first byte is written
+/// into the FIFO" (§6.12.5), nothing is sent.
 ///
-/// The bytes are copied from the figure rather than assembled here: 0x8F
-/// reset FIFO, 0x91 transmit with CRC, 0x3D continuous write from 0x1D, the
-/// two length bytes, then the request.
+/// The bytes are copied from the figure: 0x8F reset FIFO, 0x91 transmit with
+/// CRC, 0x3D continuous write from 0x1D, the two length bytes, then the
+/// request.
 #[test]
 fn a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it() {
     let mut r = Trf7962a::new(
@@ -662,21 +620,17 @@ fn a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it() {
     irq.done();
 }
 
-/// SLOS757G §6.12.5 and Figure 6-21: a transmit raises an interrupt of its
-/// own, before the tag has said anything.
+/// SLOS757G §6.12.5 and Figure 6-21: a transmit raises its own interrupt
+/// before the tag answers.
 ///
 /// "The flag is set at the start of TX but the interrupt request is sent when
-/// TX is finished" (Table 6-29, B7). The tag's answer is a *second* interrupt,
-/// about 4 ms later, and between the two the datasheet resets the FIFO.
+/// TX is finished" (Table 6-29, B7). The tag's answer is a *second*
+/// interrupt, about 4 ms later, and the FIFO is reset between the two.
+/// Reading the FIFO at the first interrupt would give an empty FIFO, which
+/// the N-1 count reports as one byte.
 ///
-/// Measured on the reader with the transmit burst working: the first
-/// interrupt arrives, the FIFO status reads 0x00 because the FIFO is empty,
-/// and the driver's N-1 rule turns that into a one-byte reply of 0x00. A
-/// reader transmitting perfectly well looked exactly like a tag answering
-/// with nonsense.
-///
-/// Bytes spelled out: 0x6C the interrupt status read, 0x80 TX complete, 0x8F
-/// reset FIFO, 0x40 RX started, 0x5C the FIFO status read.
+/// Bytes: 0x6C interrupt status read, 0x80 TX complete, 0x8F reset FIFO,
+/// 0x40 RX started, 0x5C FIFO status read.
 #[test]
 fn the_transmit_interrupt_is_not_mistaken_for_the_tags_reply() {
     let reply = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
@@ -708,9 +662,8 @@ fn the_transmit_interrupt_is_not_mistaken_for_the_tags_reply() {
 
 /// A reader that transmits and hears nothing must say so, not read the FIFO.
 ///
-/// The transmit interrupt always arrives, so "an interrupt happened" is not
-/// evidence a tag answered — which is the whole reason an empty plate used to
-/// come back as a one-byte reply.
+/// The transmit interrupt always arrives, so an interrupt alone does not
+/// mean a tag answered.
 #[test]
 fn a_transmit_with_no_answer_reports_no_tag() {
     let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00]);
@@ -737,16 +690,11 @@ fn a_transmit_with_no_answer_reports_no_tag() {
 
 /// SLOS757G Figure 6-23: the FIFO is read as one continuous burst.
 ///
-/// The address byte is 0x7F — read bit, continuous bit, FIFO address — sent
-/// once, followed by a filler byte per byte wanted, all inside one slave
-/// select. The reply arrives one byte behind, as it does for every read.
+/// The address byte 0x7F (read bit, continuous bit, FIFO address) is sent
+/// once, then one filler byte per byte wanted, all in one SPI transaction.
+/// The reply arrives one byte behind.
 ///
-/// Read a byte per transaction instead, the count is right and every byte
-/// comes back 0x00. Measured on the board: a GET RANDOM NUMBER answered with
-/// exactly three bytes — the right shape, so the N-1 count is sound — and all
-/// three were zero, giving a random number of 0x0000 on every run. The FIFO
-/// refuses single-address reads the same way it refuses single-address
-/// writes.
+/// Read one byte per transaction, every byte comes back 0x00 (measured).
 #[test]
 fn the_fifo_is_read_as_one_continuous_burst() {
     let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x02, 0xB2, 0x04]);
@@ -778,12 +726,10 @@ fn the_fifo_is_read_as_one_continuous_burst() {
 
 /// A reception the reader could not decode says why.
 ///
-/// SLOS757G Table 6-29 gives four separate reasons — CRC (B4), parity (B3),
-/// byte framing or EOF (B2), and collision (B1) — and at a bench they point
-/// at quite different things: a collision or a framing error is a reader
-/// mistuned for the reply it is getting, while a CRC error is a reply that
-/// arrived and was corrupted. Folding them into one "bad response" throws
-/// away the only evidence that separates them.
+/// SLOS757G Table 6-29 gives four reasons: CRC (B4), parity (B3), byte
+/// framing or EOF (B2), and collision (B1). A collision or framing error
+/// suggests a mistuned reader; a CRC error suggests a corrupted reply. So the
+/// reason is kept.
 #[test]
 fn a_reception_error_carries_the_reader_s_own_reason() {
     let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00]);
@@ -814,16 +760,12 @@ fn a_reception_error_carries_the_reader_s_own_reason() {
 ///
 /// SLOS757G §6.12.5: "if the number of bytes to be transmitted is higher or
 /// equal to 5, then the interrupt is generated. This occurs also when the
-/// number of bytes in the FIFO reaches 3", so the MCU can load more. This
-/// driver preloads the whole request, so there is never more to load and the
-/// interrupt is simply not the end of the transmit.
+/// number of bytes in the FIFO reaches 3", so more data can be loaded. The
+/// whole request is already loaded, so this interrupt is ignored.
 ///
-/// Measured on the board for the eight-byte SET PASSWORD: 0xA0 at 1.4 ms —
-/// transmit in progress, FIFO running low — then 0x80 at 1.6 ms when it
-/// actually finished. Taking the first for the end resets the FIFO in the
-/// middle of the frame, so the tag receives a truncated request and says
-/// nothing at all. Three-byte requests are below the threshold and worked
-/// throughout, which is what made this look like a password being refused.
+/// Measured for the eight-byte SET PASSWORD: 0xA0 at 1.4 ms (transmitting,
+/// FIFO low), then 0x80 at 1.6 ms (finished). Treating the first as the end
+/// would reset the FIFO mid-frame, and the tag would not answer.
 #[test]
 fn a_fifo_interrupt_during_a_transmit_is_not_the_end_of_it() {
     let reply = [0x00u8, 0xCD, 0xAB];
@@ -907,9 +849,8 @@ fn a_tag_error_on_a_block_read_is_reported_rather_than_returned_as_data() {
 
 #[test]
 fn a_short_block_response_is_rejected_rather_than_read_past() {
-    // Two bytes: flags and a single data byte, not the four the block
-    // promises. Reading past this would hand back stale or zeroed bytes as
-    // if they were the tag's memory.
+    // Two bytes: flags and one data byte instead of four. Reading past them
+    // would return stale bytes as if they were tag memory.
     let response = [0x00u8, 0x11];
     let spi = transceive_transactions(&READ_BLOCK_5, [0x00, 0x30], 1, &response);
 
@@ -993,13 +934,11 @@ fn reading_memory_with_a_length_not_a_multiple_of_four_is_refused_before_any_bus
 /// interrupt is sent before the end of the receive operation when the ninth
 /// byte is loaded into the FIFO... In the case of an IRQ_FIFO, the MCU should
 /// expect either another IRQ_FIFO or RX complete interrupt. This is repeated
-/// until an RX complete interrupt is generated." The datasheet's own example
-/// reads nine bytes and then collects the tenth, the UID's most significant
-/// byte, from a second interrupt 160 µs later (Figures 6-23 and 6-24).
+/// until an RX complete interrupt is generated." The datasheet's example
+/// reads nine bytes, then the tenth from a second interrupt 160 µs later
+/// (Figures 6-23 and 6-24).
 ///
-/// An inventory reply is exactly ten bytes, so this is every tag read there
-/// will ever be. Stopping at the first interrupt returns nine, one short, and
-/// the caller rejects a perfectly good tag as a malformed response.
+/// An inventory reply is exactly ten bytes, so this always happens.
 #[test]
 fn a_reply_longer_than_the_fifo_warning_is_collected_in_full() {
     let first = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02];
@@ -1036,12 +975,11 @@ fn a_reply_longer_than_the_fifo_warning_is_collected_in_full() {
     irq.done();
 }
 
-/// The plate poller's presence check. SL2S5002 §1.3: in privacy mode the label
-/// "will not respond to any command except the command GET RANDOM NUMBER,
-/// until it next receives the correct Privacy password" — so this one command
-/// answers whether a Tonie is on the plate, and it answers without unlocking
-/// anything. The bus traffic below is the whole exchange: no SET PASSWORD
-/// follows it, which `spi.done()` is what proves.
+/// The plate's presence check. SL2S5002 §1.3: in privacy mode the label "will
+/// not respond to any command except the command GET RANDOM NUMBER, until it
+/// next receives the correct Privacy password". So this command shows whether
+/// a Tonie is on the plate without unlocking it. `spi.done()` checks that no
+/// SET PASSWORD follows.
 #[test]
 fn a_tag_is_noticed_without_being_unlocked() {
     let random_response = [0x00u8, 0xCD, 0xAB]; // flags, then RN low, high
@@ -1060,10 +998,8 @@ fn a_tag_is_noticed_without_being_unlocked() {
     irq.done();
 }
 
-/// An empty plate costs exactly one unanswered exchange. This is the state the
-/// box sits in almost all the time, and the reason the check exists: asking
-/// anything else first spends a second timeout learning what this one already
-/// said.
+/// An empty plate costs exactly one unanswered exchange. The box is in this
+/// state most of the time.
 #[test]
 fn an_empty_plate_costs_one_unanswered_exchange() {
     let spi = transmit_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30]);
@@ -1081,13 +1017,8 @@ fn an_empty_plate_costs_one_unanswered_exchange() {
     irq.done();
 }
 
-/// What the reply window should actually be sized against.
-///
-/// `IRQ_POLL_ATTEMPTS` was set generously on purpose and its own comment asks
-/// for a retune against a real exchange. That retune needs a number from the
-/// bench rather than from arithmetic, so the driver keeps the worst reply it
-/// has seen; too short a window makes a tag on the plate read as no tag, which
-/// is the one failure indistinguishable from a broken antenna.
+/// The driver remembers the slowest reply it has seen, to size
+/// `IRQ_POLL_ATTEMPTS` from real measurements.
 #[test]
 fn the_slowest_reply_is_remembered_for_the_bench_to_read() {
     let random_response = [0x00u8, 0xCD, 0xAB];
