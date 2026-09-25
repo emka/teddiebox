@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""The host half of bench step 7.
+"""Checks that the box reads the SD card correctly.
 
-Step 7 passes when a file on the SD card checksums the same read by the box as
-read by a laptop. The box prints one line per file; this prints the same lines
-for the same card, so the criterion is a `diff` rather than an eyeball.
+The box's `sd` command prints one checksum line per file. This prints the same
+lines for the same card read on this machine, so the two can be compared with
+`diff`.
 
     # with the card in a reader on this machine
     scripts/sd-checksums.py /run/media/user/TONIEBOX > host.txt
@@ -13,19 +13,16 @@ for the same card, so the criterion is a `diff` rather than an eyeball.
 
     diff host.txt box.txt
 
-Read-only on both sides: the card in the box is the one it shipped with, and
-it is evidence.
+Read-only on both sides.
 
-Names are upper-cased and lines are sorted, because the two sides disagree
-about neither the bytes nor the order but about presentation. FAT stores 8.3
-names in upper case and Linux's vfat driver hands some of them back lowered,
-and the box walks directories in on-disk order while a host walk does not.
+Names are upper-cased and lines are sorted, because only the presentation
+differs: FAT stores 8.3 names in upper case but Linux's vfat driver returns
+some in lower case, and the box walks directories in on-disk order.
 
-One presentational difference this cannot paper over: the box reads 8.3 short
-names from the directory entries, while this reads whatever the vfat driver
-reports, which for a long-named file is the long name. A Toniebox card is
-`CONTENT/<8 hex>/<8 hex>` throughout and has none, but on a card that did, the
-diff would show a differing path rather than a differing checksum.
+One difference remains: the box reads 8.3 short names, while this reads what
+the vfat driver reports, which for a long-named file is the long name. A
+Toniebox card only has `CONTENT/<8 hex>/<8 hex>` names, but on a card with
+long names the diff would show a different path, not a different checksum.
 """
 
 import argparse
@@ -36,15 +33,14 @@ import zlib
 
 # `teddiebox: sd /CONTENT/00000000/500304E0 4198400 A1B2C3D4 (438 KiB/s)`
 #
-# The throughput is deliberately outside the capture: it is a measurement of
-# this bus on this day, not a property of the card, and comparing it against a
-# laptop would be meaningless.
+# The throughput is left out: it measures the bus, not the card, and would
+# never match the host.
 GOOD_LINE = re.compile(
     r"^teddiebox: sd (?P<path>/\S*) (?P<size>\d+) (?P<crc>[0-9A-F]{8})(?: \(|$)"
 )
 
-# Anything else the walk says about a particular file. These are reported, not
-# dropped: a card whose files went unread is not a card that matched.
+# Any other message the walk prints about a file. Kept, because a file that
+# could not be read must not look like a match.
 BAD_LINE = re.compile(r"^teddiebox: sd (?P<path>/\S*) (?P<why>UNREADABLE|SHORT|READ|SKIPPED)\b")
 
 

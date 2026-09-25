@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate the WAV that bench step 8 plays off the SD card.
+"""Generate a test WAV for the box's `wav` command to play from the SD card.
 
-Step 8 wants several minutes of uninterrupted playback. Nothing on a stock
-Toniebox card is a plain WAV, so this makes one, at exactly the format step 6
-configured the codec for: 48 kHz, stereo, 16-bit PCM.
+Used to test several minutes of uninterrupted playback. A Toniebox card has no
+plain WAV files, so this makes one in the format the codec is configured for:
+48 kHz, stereo, 16-bit PCM.
 
     scripts/make-test-wav.py TEST.WAV
 
@@ -14,9 +14,8 @@ The signal is chosen so a dropout is obvious rather than subtle:
   without watching the console, and a repeated segment gives itself away.
 - A brief silence before each step, which is where a stalled buffer will most
   obviously stutter.
-- Quiet by default. The box has 12 dB of class-D gain and no volume control of
-  its own yet; the first tone anyone played through it was, in the listener's
-  words, "super loud".
+- Quiet by default, because the `wav` command plays at a fixed volume and
+  the speaker amplifier adds gain.
 """
 
 import argparse
@@ -29,11 +28,11 @@ SAMPLE_RATE = 48_000
 CHANNELS = 2
 BITS = 16
 
-# A tenth of full scale. Loud enough to hear a gap in, quiet enough to sit
-# next to for five minutes.
+# A tenth of full scale: loud enough to hear a gap, quiet enough to listen to
+# for five minutes.
 AMPLITUDE = 3200
 
-# Steps chosen to be plainly distinguishable by ear rather than musical.
+# Pitches chosen to be easy to tell apart by ear, not to be musical.
 TONES_HZ = [440, 550, 660, 880, 1100]
 SEGMENT_SECONDS = 15
 SILENCE_MS = 120

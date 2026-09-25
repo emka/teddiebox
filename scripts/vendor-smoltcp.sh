@@ -6,11 +6,11 @@
 # smoltcp silences its *whole* neighbor cache for one second after sending any
 # ARP request. The box's first connection after association needs two: the
 # gateway, because it answers DNS, and then teddyCloud, a different host on the
-# same link. The second one waited out the rest of that second — 1.03 s of
-# every ask, measured on 2026-09-24, and 0.01 s once the gap was forced wide.
-# The patch keeps the one-second silence but applies it per address, which is
-# what it protects against: asking the same silent neighbor over and over.
-# Upstream `main` still has the cache-wide field.
+# same link. The second one waited out the rest of that second: 1.03 s of
+# every request (measured), against 0.01 s without the wait. The patch keeps
+# the one-second silence but applies it per address, which is what it is for:
+# not asking the same silent neighbor over and over. Upstream smoltcp still
+# applies it to the whole cache.
 #
 # Fetched and patched rather than committed, for the reasons
 # `scripts/vendor-mbedtls-rs-sys.sh` gives: the tarball is pinned by the
@@ -55,9 +55,8 @@ if [ "$got" != "$CKSUM" ]; then
 fi
 
 tar -xzf "$work/crate.tar.gz" -C "$work"
-# --forward and a clean exit or nothing: a patch that half-applies would ship
-# a stack that still hushes the whole cache, and the only symptom is a slow
-# first connection.
+# --forward, and fail on any error: a half-applied patch would still silence
+# the whole cache, and the only symptom would be a slow first connection.
 patch --quiet --forward -p1 -d "$work/smoltcp-$VERSION" < "$patch_file"
 
 # Its own workspace root, so `just test` can run its tests from where it sits:
@@ -66,11 +65,10 @@ patch --quiet --forward -p1 -d "$work/smoltcp-$VERSION" < "$patch_file"
 # is unaffected — cargo ignores a dependency's `[workspace]` table.
 printf '\n[workspace]\n' >> "$work/smoltcp-$VERSION/Cargo.toml"
 
-# A path dependency is built as local code, so its lints are no longer capped
-# the way a registry crate's are, and every firmware build would print the
-# thirteen warnings this feature set leaves in smoltcp (unused imports and
-# variables behind features the box does not enable). They are upstream's,
-# not ours to act on.
+# A path dependency is built as local code, so its lints are not capped as a
+# registry crate's are, and every firmware build would print thirteen
+# upstream warnings (unused imports and variables behind features the box
+# does not enable).
 printf '\n[lints.rust]\nwarnings = "allow"\n' >> "$work/smoltcp-$VERSION/Cargo.toml"
 
 rm -rf "$dest"

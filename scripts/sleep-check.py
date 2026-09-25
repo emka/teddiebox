@@ -76,7 +76,7 @@ def parse_current_ua(answer):
 
 
 def verdict_for(sleep_ua):
-    """What a sleep current means, in the words the plan uses."""
+    """What a sleep current means, as a one-line verdict."""
     if sleep_ua is None:
         return "not measured"
     if sleep_ua < 500:

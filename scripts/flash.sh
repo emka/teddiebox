@@ -2,18 +2,17 @@
 #
 # Put the box in download mode, flash it, and start it again.
 #
-# This exists because the order matters and getting it wrong costs a J100 cold
-# boot with the board opened up. Every rule below was learned that way; see
-# HARDWARE.md for the long version.
+# The order matters: getting it wrong means opening the box to short J100 and
+# cold-boot it. See HARDWARE.md for details.
 #
 #   1. DTR and RTS are not wired on this board, so espflash's and esptool's
 #      auto-reset cannot work. Every invocation needs --before no-reset.
 #   2. espflash must be the *first* tool to touch the port after the box enters
 #      download mode. Running esptool first — even flash-id — leaves its stub
 #      loader resident and espflash then cannot connect.
-#   3. esptool runs only if espflash succeeded. Piping espflash through `tail`
-#      hides its exit status behind tail's, which is how a failed flash was
-#      once followed by an esptool run that wedged the box.
+#   3. esptool runs only if espflash succeeded; esptool after a failed
+#      espflash hangs the box. So espflash is never piped (e.g. through
+#      `tail`), which would hide its exit status.
 #   4. The port takes exactly one owner, so a capture still holding it makes
 #      the flash fail in a way that looks like the box is dead.
 #   5. The partition table is ours, not espflash's default: the default has a
@@ -48,10 +47,9 @@ fi
 [ -f "$TABLE" ] || die "no partition table at $TABLE — run this from the repository root"
 [ -e "$PORT" ] || die "no $PORT — is the box plugged in?"
 
-# Who holds the port is console.py's question to answer, from /proc. The guard
-# this replaces matched `bench-console.*$PORT`, and neither script names the
-# port on its command line when it is the default one — so it never fired for
-# the capture it was written to catch.
+# console.py finds who holds the port, from /proc. Matching command lines
+# would miss a reader using the default port, which is not on its command
+# line.
 if holder=$(python3 scripts/console.py --check-owner --port "$PORT"); then
     :
 else
@@ -72,10 +70,8 @@ else
 echo "flash: asking the box to enter download mode"
 capture=$(mktemp)
 trap 'rm -f "$capture"' EXIT
-# Three seconds, not two. The console is up long before that, but a box that
-# is mid-request answers late, and a `dl` sent too early is simply dropped —
-# which reads exactly like a box that has stopped listening, and cost a
-# misdiagnosis and very nearly a needless J100.
+# Three seconds, not two: a box busy with a request answers late, and a `dl`
+# sent too early is dropped, which looks like a box that stopped listening.
 python3 scripts/bench-console.py --port "$PORT" --send dl --send-after 3.0 \
     --until "waiting for download" --timeout 25 --out "$capture" >/dev/null 2>&1 || true
 

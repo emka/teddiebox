@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """An interactive console on the box's UART0: type a command, watch it answer.
 
-`scripts/bench-console.py` sends one line and captures until a marker, which is
-what a scripted bench step wants. This is the other half: a session driven by
-hand, for the things that need a person at the box between two commands —
-plugging headphones in between `t` and `stop`, or watching a download and
-deciding whether to let it run.
+`scripts/bench-console.py` sends one line and captures until a marker, for
+scripts. This is for interactive use, when a person needs to act between
+commands, such as plugging in headphones between `t` and `stop`.
 
-Line-oriented on purpose. A raw-mode terminal would let the box see every
-keystroke, which the firmware's parser has no use for, and would leave the
-terminal wrecked if this died mid-session.
+Line-based on purpose. A raw-mode terminal would send every keystroke, which
+the firmware's parser does not need, and would leave the terminal broken if
+this crashed.
 
-**The port takes exactly one owner**, and who owns it is answered from `/proc`
-rather than by matching command lines: a name match blocks on an editor that
-merely has this file open, and misses a `cat /dev/ttyUSB0` or a stray picocom,
-which are the two ways the port actually gets wedged.
+**Only one program may use the port at a time.** Who holds it is found from
+`/proc`, not by matching command lines: a name match would block on an editor
+that has this file open, and miss a `cat /dev/ttyUSB0` or a stray picocom.
 
 `--self-test` runs the logic below without a box attached.
 """
@@ -141,10 +138,9 @@ def main():
     owners = port_owners(args.port, my_pid=os.getpid()) if os.path.exists(args.port) else []
 
     if args.check_owner:
-        # Exists so `flash.sh` needs no second idea of what holding the port
-        # looks like. Its old guard matched `bench-console.*$PORT`, and neither
-        # script puts the port on its command line when it is the default one —
-        # so the guard never fired for the capture it was written to catch.
+        # Lets `flash.sh` use the same check instead of its own. Matching
+        # command lines misses a reader started with the default port, which
+        # does not appear on its command line.
         for owner in owners:
             print(owner)
         sys.exit(3 if owners else 0)
@@ -158,8 +154,7 @@ def main():
             f"the port takes one owner — stop it first:\n  {held}"
         )
 
-    # A port left in the wrong state produces nothing and reads exactly like a
-    # dead box. Worth the second it costs.
+    # A port in the wrong mode shows nothing, which looks like a dead box.
     subprocess.run(["stty", "-F", args.port, "115200", "raw", "-echo"], check=True)
 
     log = open(args.log, "wb") if args.log else None
