@@ -118,8 +118,8 @@ pub async fn play_first_wav(
         let free = transfer.available_bytes();
         cushion.observe(BUFFER_BYTES.saturating_sub(free) as u32);
 
-        if free >= CHUNK.min(remaining) {
-            let want = CHUNK.min(remaining);
+        let want = CHUNK.min(remaining);
+        if free >= want {
             let read = card.read(file, &mut chunk[..want])?;
             if read == 0 {
                 // The file is shorter than its header says. Not fatal.
@@ -514,8 +514,7 @@ async fn play_taf_inner(
     let mut frames: u32 = 0;
 
     let mut pending: core::ops::Range<usize> = 0..0;
-    let mut ended = false;
-    while !ended {
+    loop {
         if pending.is_empty() {
             match decoder.next_frame(&mut scratch.pcm) {
                 Ok(Some(samples)) => {
@@ -535,7 +534,7 @@ async fn play_taf_inner(
         pending.start += pushed;
         if pushed == 0 {
             // The buffer is full; the rest stays pending for the loop below.
-            ended = true;
+            break;
         }
     }
 
@@ -723,10 +722,7 @@ async fn play_taf_inner(
         }
 
         yield_now().await;
-        let gap = last_pass.elapsed().as_micros();
-        if gap > longest_gap_us {
-            longest_gap_us = gap;
-        }
+        longest_gap_us = longest_gap_us.max(last_pass.elapsed().as_micros());
         last_pass = Instant::now();
     }
 
@@ -771,13 +767,10 @@ async fn play_taf_inner(
         card_us * 100 / played_us,
         decode_us.saturating_sub(card_us) * 100 / played_us
     );
-    Ok((
-        if stopped {
-            Finish::Stopped
-        } else {
-            Finish::Ended
-        },
-        i2s_tx,
-        buffer,
-    ))
+    let finish = if stopped {
+        Finish::Stopped
+    } else {
+        Finish::Ended
+    };
+    Ok((finish, i2s_tx, buffer))
 }
