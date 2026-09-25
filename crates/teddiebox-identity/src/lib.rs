@@ -1,14 +1,13 @@
 #![no_std]
 //! The `cert` partition's layout: a versioned header, then two DER bodies.
 //!
-//! One crate for both sides. `tools/identity-image` renders the image on a
-//! laptop and the firmware parses it on the box, so a change to the layout
-//! that only one side follows fails `cargo test` rather than a bench session.
+//! Used by both sides: `tools/identity-image` writes the image on a laptop,
+//! and the firmware reads it on the box. A layout change that only one side
+//! follows fails `cargo test`.
 //!
-//! **Read in two steps, not one.** [`parse_header`] takes only the first
-//! [`HEADER`] bytes and reports where the bodies are, so the firmware never
-//! needs the whole image in one buffer — the partition is 16 KB and the box's
-//! stack is not.
+//! **Read in two steps.** [`parse_header`] reads only the first [`HEADER`]
+//! bytes and reports where the bodies are, so the firmware never needs the
+//! whole 16 KB partition in one buffer.
 
 use teddiebox_core::checksum::Crc32;
 
@@ -17,14 +16,11 @@ pub const MAGIC: [u8; 4] = *b"TBID";
 
 /// The layout's version.
 ///
-/// Bumped when the header or the body order changes. A firmware that does not
-/// know a version refuses the image rather than guessing at it — the whole
-/// reason the field is here.
+/// Increased when the header or body order changes. Firmware refuses a
+/// version it does not know rather than guessing.
 ///
-/// **2 added the body checksum.** Version 1 had six reserved bytes where the
-/// CRC now sits, so a v1 image in a v2 firmware would read as a valid header
-/// over unchecked bodies. Refusing it outright is what the field is for, and
-/// the remedy — one `just identity` run — is the same one the message names.
+/// Version 2 added the body checksum, in bytes that were reserved in version
+/// 1. A version 1 image must be rewritten with `just identity`.
 pub const VERSION: u16 = 2;
 
 /// Bytes before the first body.
@@ -32,47 +28,43 @@ pub const HEADER: usize = 16;
 
 /// The longest certificate or key the box can hold.
 ///
-/// Must equal `tls::CERT_BYTES` in the firmware, which asserts it. A length
-/// this side accepted and that side could not hold would be a refusal at the
-/// worst possible moment — on the box, after provisioning looked fine.
+/// Must equal `tls::CERT_BYTES` in the firmware, which checks it at compile
+/// time.
 pub const MAX_BODY: usize = 1536;
 
-/// What went wrong with an image, in terms the box can say out loud.
+/// What is wrong with an image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityError {
-    /// Erased flash. Not a fault: it is what an unprovisioned box looks like,
-    /// and it is worth its own variant so the box can say "run `just identity`"
-    /// rather than "this partition is corrupt".
+    /// Erased flash: the box has not been provisioned yet. Separate, so the
+    /// box can say "run `just identity`" rather than "corrupt".
     Blank,
-    /// Something is there, and it is not ours.
+    /// The partition holds something else.
     Magic,
-    /// Ours, from a firmware that wrote a layout this one does not know.
+    /// Our format, but a version this firmware does not know.
     Version,
-    /// A length of zero. A key that is not there is not a key.
+    /// A length of zero.
     Empty,
-    /// A body longer than the buffers it has to land in.
+    /// A body longer than the buffers that hold it.
     TooLong,
     /// The bodies do not match the checksum the header carries.
     ///
-    /// What this catches is a torn write: `espflash write-bin` is not atomic —
-    /// flash pages are 256 bytes — so a USB pull mid-write leaves a perfectly
-    /// valid header over bodies that are still erased. Without this the box
-    /// prints the line that means success and fails every handshake after.
+    /// Catches an interrupted write: `espflash write-bin` writes 256-byte
+    /// pages, so unplugging USB midway can leave a valid header over erased
+    /// bodies. Without this check the box would report success and then fail
+    /// every TLS handshake.
     Corrupt,
     /// The image claims more than the partition or the buffer holds.
     Truncated,
 }
 
-/// Where the bodies are, once the header has been believed.
+/// Where the bodies are, according to the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     pub certificate_len: usize,
     pub key_len: usize,
     /// CRC-32 of the certificate followed by the key, as the header claims it.
     ///
-    /// Checked by [`verify`] rather than here, because a header is read before
-    /// the bodies are — that two-step read is the whole reason this crate
-    /// splits parsing from verifying.
+    /// Checked by [`verify`], because the header is read before the bodies.
     pub crc: u32,
 }
 
@@ -92,10 +84,8 @@ impl Header {
 
 /// Checks the bodies against the checksum the header carried.
 ///
-/// Separate from [`parse_header`] because the firmware reads the header first
-/// to learn where the bodies are, and only then reads them — so nothing can
-/// check both at once without holding the whole image in memory, which is the
-/// thing the two-step read exists to avoid.
+/// Separate from [`parse_header`] because the firmware reads the header
+/// first, then the bodies, and never holds the whole image at once.
 pub fn verify(header: &Header, certificate: &[u8], key: &[u8]) -> Result<(), IdentityError> {
     if certificate.len() != header.certificate_len || key.len() != header.key_len {
         return Err(IdentityError::Corrupt);
@@ -111,17 +101,16 @@ pub fn verify(header: &Header, certificate: &[u8], key: &[u8]) -> Result<(), Ide
 
 /// Reads the header and nothing else.
 ///
-/// `capacity` is how many bytes are actually available — the partition's
-/// length on the box, the buffer's length on a laptop. Checking the claim
-/// against it here is what stops a later read running off the end.
+/// `capacity` is how many bytes are available: the partition's length on the
+/// box, the buffer's length on a laptop. Checking against it stops a later
+/// read from running past the end.
 pub fn parse_header(raw: &[u8], capacity: usize) -> Result<Header, IdentityError> {
     if raw.len() < HEADER {
         return Err(IdentityError::Truncated);
     }
     let header = &raw[..HEADER];
 
-    // Erased flash first, because it would otherwise be reported as a wrong
-    // magic — true, and useless to whoever has simply not provisioned the box.
+    // Check for erased flash first, so it is not reported as a wrong magic.
     if header.iter().all(|&byte| byte == 0xFF) {
         return Err(IdentityError::Blank);
     }
@@ -154,10 +143,8 @@ pub fn parse_header(raw: &[u8], capacity: usize) -> Result<Header, IdentityError
 
 /// Writes the whole image into `out`, returning how much of it was used.
 ///
-/// The reserved bytes are zeroed rather than left as they were found: an
-/// image built twice from the same inputs must be the same bytes, or the
-/// fixture that pins this layout would pass on one machine and fail on
-/// another.
+/// The reserved bytes are zeroed, so the same inputs always give the same
+/// image.
 pub fn render(certificate: &[u8], key: &[u8], out: &mut [u8]) -> Result<usize, IdentityError> {
     if certificate.is_empty() || key.is_empty() {
         return Err(IdentityError::Empty);
@@ -188,13 +175,12 @@ pub fn render(certificate: &[u8], key: &[u8], out: &mut [u8]) -> Result<usize, I
 mod tests {
     use super::*;
 
-    /// Stand-ins for the real DER. Nothing here is a key, and nothing here
-    /// should ever be one: this file is committed.
+    /// Placeholders for the real DER. Never put a real key here: this file is
+    /// committed.
     const CERTIFICATE: &[u8] = b"not-a-certificate";
     const KEY: &[u8] = b"not-a-key";
 
-    /// The point of one crate owning both directions: what the tool writes is
-    /// what the box reads, and this is the test that says so.
+    /// What the tool writes is what the box reads.
     #[test]
     fn a_rendered_image_parses_back_to_what_it_held() {
         let mut image = [0xFFu8; 64];
@@ -215,10 +201,8 @@ mod tests {
         );
     }
 
-    /// The failure this exists for: `espflash write-bin` is not atomic — flash
-    /// pages are 256 bytes — so a USB pull mid-write can leave a header that
-    /// parses perfectly over bodies that never arrived. Without a checksum the
-    /// box prints the line that means success and then fails every handshake.
+    /// An interrupted write can leave a valid header over bodies that never
+    /// arrived; the checksum catches it.
     #[test]
     fn a_body_that_does_not_match_its_checksum_is_refused() {
         let mut image = [0u8; 64];
@@ -245,8 +229,7 @@ mod tests {
         assert_eq!(verify(&header, certificate, key), Ok(()));
     }
 
-    /// The version field earning its keep: an image written before the
-    /// checksum existed is refused rather than read as if it had one.
+    /// An image from before the checksum existed is refused.
     #[test]
     fn an_image_from_the_version_before_the_checksum_is_refused() {
         let mut image = [0u8; 64];
@@ -258,7 +241,7 @@ mod tests {
         );
     }
 
-    /// An unprovisioned box, which is an ordinary state and not a fault.
+    /// An unprovisioned box, which is normal, not a fault.
     #[test]
     fn erased_flash_is_blank_rather_than_malformed() {
         let image = [0xFFu8; 64];
@@ -273,8 +256,7 @@ mod tests {
         assert_eq!(parse_header(&image[..len], len), Err(IdentityError::Magic));
     }
 
-    /// The field exists so that a layout change is refused rather than
-    /// misread. A test that did not check this would leave it decorative.
+    /// A layout change is refused, not misread.
     #[test]
     fn a_version_this_firmware_does_not_know_is_refused() {
         let mut image = [0u8; 64];
@@ -297,7 +279,7 @@ mod tests {
         );
     }
 
-    /// The check that stops a body read running off the end of the partition.
+    /// Stops a body read from running past the end of the partition.
     #[test]
     fn an_image_claiming_more_than_it_has_is_refused() {
         let mut image = [0u8; 64];
@@ -308,13 +290,9 @@ mod tests {
         );
     }
 
-    /// The other tests build input with `render` and read it back with
-    /// `parse_header` — both defined in this file, so a layout bug that
-    /// moves a field the same way in both (a reviewer once swapped
-    /// `certificate_len` and `key_len` in both functions) passes every one
-    /// of them. This pins the actual bytes `render` writes, hand-written
-    /// rather than assembled from the code's own field constants, so the
-    /// layout cannot move without this failing for the right reason.
+    /// The other tests write with `render` and read with `parse_header`, so a
+    /// field moved the same way in both would pass them. This checks the
+    /// exact bytes, written by hand.
     #[test]
     fn a_rendered_image_matches_the_documented_byte_layout() {
         let mut image = [0u8; 64];
@@ -330,11 +308,9 @@ mod tests {
             0x11, 0x00,
             // 0x08-0x09: key length 9, little-endian
             0x09, 0x00,
-            // 0x0a-0x0d: CRC-32 of the two bodies, little-endian. Written out
-            // rather than computed here: a test that recomputed the checksum
-            // with the same `Crc32` the code uses would agree with a broken
-            // one. This is the IEEE CRC-32 of `not-a-certificatenot-a-key`,
-            // which any host confirms in one line.
+            // 0x0a-0x0d: CRC-32 of the two bodies, little-endian: the IEEE
+            // CRC-32 of `not-a-certificatenot-a-key`, written out rather than
+            // computed with the code's own `Crc32`.
             0x6D, 0x4B, 0x39, 0x36,
             // 0x0e-0x0f: reserved
             0x00, 0x00,
