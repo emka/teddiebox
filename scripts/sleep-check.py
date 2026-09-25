@@ -85,7 +85,7 @@ def verdict_for(sleep_ua):
         return "hundreds of microamps: better than a park, worse than expected"
     return (
         "milliamps — a domain stayed powered and the sleep saved nothing. "
-        "Stop here: Task 11 is not worth doing until this is understood"
+        "Stop here: find out what stays powered before relying on sleep"
     )
 
 
