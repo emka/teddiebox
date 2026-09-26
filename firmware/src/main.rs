@@ -1519,9 +1519,12 @@ async fn play_idle_cue(
         esp_println::println!("teddiebox: cue {cue:?} — the audio hardware is claimed");
         return false;
     }
+    // Asked for even when the output reads as up: it replaces a power-down
+    // the idle loop may have queued a moment ago, and costs nothing when the
+    // output really is up.
+    i2c_bus::request_output(i2c_bus::OUTPUT_UP);
     if !i2c_bus::OUTPUT_IS_UP.load(Ordering::Relaxed) {
         let asked = Instant::now();
-        i2c_bus::request_output(i2c_bus::OUTPUT_UP);
         while !i2c_bus::OUTPUT_IS_UP.load(Ordering::Relaxed) {
             if asked.elapsed() >= OUTPUT_UP_WAIT {
                 esp_println::println!("teddiebox: cue {cue:?} — the output did not come up");
