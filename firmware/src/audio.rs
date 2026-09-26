@@ -177,9 +177,6 @@ pub async fn play_first_wav(
     Ok(())
 }
 
-/// Fills the DMA buffer from the card before the transfer starts.
-///
-/// Returns how many bytes went in.
 /// A used stream buffer, made ready for a new transfer with nothing in it.
 ///
 /// `DmaTxStreamBuf` counts the bytes pushed before a transfer from its
@@ -193,6 +190,9 @@ fn emptied(buffer: DmaTxStreamBuf) -> DmaTxStreamBuf {
     DmaTxStreamBuf::new(descriptors, memory).expect("the parts it was built from at boot")
 }
 
+/// Fills the DMA buffer from the card before the transfer starts.
+///
+/// Returns how many bytes went in.
 fn prefill(
     card: &Mounted,
     file: RawFile,
