@@ -233,28 +233,32 @@ fn answer_waiting() -> bool {
     critical_section::with(|cs| PROBE_ANSWER.borrow_ref(cs).is_some())
 }
 
-/// A cached file the server has contradicted, as `CACHE/<dir>/<file>`.
+/// The cached file the server has contradicted, as `CACHE/<dir>/<file>`, if any.
 ///
-/// Set when a probe says the cached copy is out of date, and read once by the
-/// download that replaces it. The old story stays playable until that
-/// download starts writing, so a failed download does not lose it.
-static STALE_DIR: AtomicU32 = AtomicU32::new(0);
-static STALE_FILE: AtomicU32 = AtomicU32::new(0);
-static STALE_ARMED: AtomicBool = AtomicBool::new(false);
+/// Set by a probe that finds the cached copy out of date, and taken by the
+/// download that replaces it. One value, so the path is always read and
+/// cleared whole. The old story stays playable until that download starts
+/// writing, so a failed download does not lose it.
+static STALE: CsMutex<RefCell<Option<teddiebox_download::ContentPath>>> =
+    CsMutex::new(RefCell::new(None));
 
 /// Whether this cache entry is the one a probe has just contradicted.
 ///
 /// Clears the mark, so a second download of the same file does not start from
-/// zero again.
+/// zero again. A mark for another file is left for that file's download.
 fn take_stale(dir: u32, file: u32) -> bool {
-    if !STALE_ARMED.load(Ordering::Relaxed)
-        || STALE_DIR.load(Ordering::Relaxed) != dir
-        || STALE_FILE.load(Ordering::Relaxed) != file
-    {
-        return false;
-    }
-    STALE_ARMED.store(false, Ordering::Relaxed);
-    true
+    let path = teddiebox_download::ContentPath {
+        directory: dir,
+        file,
+    };
+    critical_section::with(|cs| {
+        let mut stale = STALE.borrow_ref_mut(cs);
+        if *stale != Some(path) {
+            return false;
+        }
+        *stale = None;
+        true
+    })
 }
 
 /// The question the box is waiting on the server for, if any.
@@ -515,9 +519,7 @@ fn freshness_of(
         );
         // Read by the download the reducer is about to request.
         let path = teddiebox_download::content_path(tag.0);
-        STALE_DIR.store(path.directory, Ordering::Relaxed);
-        STALE_FILE.store(path.file, Ordering::Relaxed);
-        STALE_ARMED.store(true, Ordering::Relaxed);
+        critical_section::with(|cs| *STALE.borrow_ref_mut(cs) = Some(path));
         Freshness::Stale
     } else {
         Freshness::Current
