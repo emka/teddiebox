@@ -251,7 +251,13 @@ pub(crate) async fn i2c_bus(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Out
                         if up && !speaker { " (headphones)" } else { "" }
                     )
                 }
-                Err(_) => esp_println::println!("teddiebox: codec output would not change"),
+                Err(_) => {
+                    // Counted as down whichever way it failed, so the next
+                    // request reruns the whole power-up: a stray click is
+                    // better than a speaker left muted until a restart.
+                    OUTPUT_IS_UP.store(false, Ordering::Relaxed);
+                    esp_println::println!("teddiebox: codec output would not change")
+                }
             }
             let bus = dac.release();
             accel = Lis3dh::new(bus, address);
