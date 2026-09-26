@@ -2,6 +2,7 @@
 
 mod battery;
 pub mod checksum;
+pub mod cue;
 pub mod cushion;
 pub mod i2c;
 pub mod input;
