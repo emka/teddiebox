@@ -1284,8 +1284,8 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             CONTENT_DIRECTORY.store(path.directory, Ordering::Relaxed);
             CONTENT_FILE.store(path.file, Ordering::Relaxed);
             // The storage rail is already on, or the card would not be
-            // mounted, but the codec's output must be powered here; the
-            // console `play` command leaves that to the user.
+            // mounted. The output is asked for here, ahead of the request, so
+            // its power-up overlaps the card's first reads.
             i2c_bus::request_output(i2c_bus::OUTPUT_UP);
             REQUEST.store(request, Ordering::Relaxed);
         }
