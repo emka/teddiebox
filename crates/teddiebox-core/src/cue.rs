@@ -11,7 +11,8 @@
 /// Frames per second.
 pub const SAMPLE_RATE_HZ: u32 = 48_000;
 
-/// The loudest a cue gets: half of full scale.
+/// The loudest a cue gets: half of full scale. Judged by ear on the box over
+/// a playing story, at every volume step: clearly heard, never startling.
 pub const CUE_PEAK: i16 = 16_384;
 
 /// A sound the box makes about a press.
