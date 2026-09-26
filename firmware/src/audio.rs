@@ -37,6 +37,9 @@ pub const BUFFER_BYTES: usize = 32_768;
 /// cost is small in comparison.
 const CHUNK: usize = 4096;
 
+/// Samples of a cue fed to the DMA at a time: 20 ms of stereo.
+const CUE_CHUNK: usize = 960 * 2;
+
 /// How often the occupancy line is printed.
 const LOG_EVERY: Duration = Duration::from_secs(5);
 
@@ -597,6 +600,12 @@ async fn play_taf_inner(
     let mut stalled: u32 = 0;
     // A cue sounding over the story, mixed into each frame as it is decoded.
     let mut over: Option<CueSamples> = None;
+    // A cue that takes the story's place for a moment, as a skip's does.
+    // While it lasts, frames come from it instead of the decoder.
+    let mut instead: Option<CueSamples> = None;
+    // Set by a skip past the last chapter: the story ends once its cue has
+    // played.
+    let mut end_after_cue = false;
     loop {
         // The caller's turn, since this loop occupies the media task for the
         // whole story (for example to notice a lifted figure). Called before
@@ -611,10 +620,11 @@ async fn play_taf_inner(
         // Checked after the stop, so a skip does not happen in a story that
         // is about to stop.
         //
-        // A skip drops the partly pushed frame. The audio already in the DMA
-        // buffer (up to `BUFFER_BYTES`) still plays, so a little of the old
-        // chapter is heard; clearing it would mean restarting the transfer,
-        // which clicks.
+        // A skip drops the partly pushed frame and plays its cue before the
+        // new chapter. The audio already in the DMA buffer (up to
+        // `BUFFER_BYTES`) still plays first, so a little of the old chapter
+        // is heard; clearing it would mean restarting the transfer, which
+        // clicks. A skip that cannot move plays nothing.
         //
         // After a skip, `pcm_crc` no longer matches a full decode on the host.
         match SKIP.swap(SKIP_NONE, Ordering::Relaxed) {
@@ -623,11 +633,15 @@ async fn play_taf_inner(
                 Ok(Skip::To(chapter)) => {
                     esp_println::println!("teddiebox: taf skipped to chapter {chapter}");
                     pending = 0..0;
+                    instead = Some(Cue::SkipForward.samples());
+                    end_after_cue = false;
                 }
-                // Skipping past the last chapter ends the story.
+                // Skipping past the last chapter ends the story, on its cue.
                 Ok(Skip::PastTheEnd) => {
                     esp_println::println!("teddiebox: taf skipped past the last chapter");
-                    break;
+                    pending = 0..0;
+                    instead = Some(Cue::SkipForward.samples());
+                    end_after_cue = true;
                 }
                 Err(_) => esp_println::println!("teddiebox: taf could not skip forward"),
             },
@@ -635,6 +649,8 @@ async fn play_taf_inner(
                 Ok(chapter) => {
                     esp_println::println!("teddiebox: taf skipped back to chapter {chapter}");
                     pending = 0..0;
+                    instead = Some(Cue::SkipBack.samples());
+                    end_after_cue = false;
                 }
                 Err(_) => esp_println::println!("teddiebox: taf could not skip back"),
             },
@@ -679,29 +695,38 @@ async fn play_taf_inner(
         cushion.observe(BUFFER_BYTES.saturating_sub(transfer.available_bytes()) as u32);
 
         if pending.is_empty() {
-            let began = Instant::now();
-            let decoded = decoder.next_frame(&mut scratch.pcm);
-            decode_us += began.elapsed().as_micros();
-
-            match decoded {
-                Ok(Some(samples)) => {
-                    pcm_crc.update(as_bytes(&scratch.pcm[..samples]));
-                    // After the checksum, which covers the story alone.
-                    if let Some(cue) = over.as_mut() {
-                        if cue.mix_into(&mut scratch.pcm[..samples]) {
-                            over = None;
-                        }
-                    }
-                    pending = 0..samples * 2;
-                    frames += 1;
-                    // Published for position memory, which cannot reach the
-                    // decoder.
-                    PAGE.store(decoder.page(), Ordering::Relaxed);
+            if let Some(cue) = instead.as_mut() {
+                if cue.fill(&mut scratch.pcm[..CUE_CHUNK]) {
+                    instead = None;
                 }
-                Ok(None) => break,
-                Err(_) => {
-                    esp_println::println!("teddiebox: taf decode failed after {frames} frames");
-                    break;
+                pending = 0..CUE_CHUNK * 2;
+            } else if end_after_cue {
+                break;
+            } else {
+                let began = Instant::now();
+                let decoded = decoder.next_frame(&mut scratch.pcm);
+                decode_us += began.elapsed().as_micros();
+
+                match decoded {
+                    Ok(Some(samples)) => {
+                        pcm_crc.update(as_bytes(&scratch.pcm[..samples]));
+                        // After the checksum, which covers the story alone.
+                        if let Some(cue) = over.as_mut() {
+                            if cue.mix_into(&mut scratch.pcm[..samples]) {
+                                over = None;
+                            }
+                        }
+                        pending = 0..samples * 2;
+                        frames += 1;
+                        // Published for position memory, which cannot reach the
+                        // decoder.
+                        PAGE.store(decoder.page(), Ordering::Relaxed);
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        esp_println::println!("teddiebox: taf decode failed after {frames} frames");
+                        break;
+                    }
                 }
             }
         }
