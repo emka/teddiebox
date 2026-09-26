@@ -322,13 +322,14 @@ const CUE_TAIL_FRAMES: usize = 960;
 /// back whatever happens, so a story can play afterwards.
 pub async fn play_cue(
     i2s_tx: I2sTx<'static, Blocking>,
-    mut buffer: DmaTxStreamBuf,
+    buffer: DmaTxStreamBuf,
     cue: Cue,
 ) -> (
     Result<(), &'static str>,
     I2sTx<'static, Blocking>,
     DmaTxStreamBuf,
 ) {
+    let mut buffer = emptied(buffer);
     let mut samples = cue.samples();
     let mut chunk = [0i16; CUE_CHUNK];
     let mut pending: core::ops::Range<usize> = 0..0;
