@@ -740,4 +740,89 @@ mod tests {
         assert!(!transfer.could_not_connect(Outcome::Unreachable));
         assert_eq!(transfer.take_outcome(), None);
     }
+
+    /// A transfer with an outcome from an earlier attempt still unread.
+    fn with_unread_refusal() -> Transfer {
+        let mut transfer = Transfer::new();
+        transfer.start(FIGURE);
+        transfer.could_not_connect(Outcome::Refused);
+        transfer
+    }
+
+    #[test]
+    fn a_whole_story_is_completed_even_if_the_producer_reported_a_failure() {
+        let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
+        transfer.sent(4_000);
+        transfer.ended(Some(Outcome::Unreachable));
+        transfer.finish(4_000);
+        assert_eq!(transfer.take_outcome(), Some((Outcome::Completed, FIGURE)));
+    }
+
+    #[test]
+    fn the_producers_reason_replaces_an_unread_outcome() {
+        let mut transfer = with_unread_refusal();
+        transfer.ask(PATH);
+        transfer.planned(nothing_cached());
+        transfer.ended(Some(Outcome::NoContent));
+        assert_eq!(transfer.take_outcome(), Some((Outcome::NoContent, FIGURE)));
+    }
+
+    #[test]
+    fn a_card_that_cannot_be_opened_replaces_an_unread_outcome() {
+        let mut transfer = with_unread_refusal();
+        transfer.ask(PATH);
+        transfer.planned(nothing_cached());
+        transfer.headers(whole_file(Some(4_000)));
+        transfer.open_failed();
+        assert_eq!(
+            transfer.take_outcome(),
+            Some((Outcome::Unreachable, FIGURE))
+        );
+    }
+
+    #[test]
+    fn a_card_that_cannot_be_written_replaces_an_unread_outcome() {
+        let mut transfer = with_unread_refusal();
+        transfer.ask(PATH);
+        transfer.planned(nothing_cached());
+        transfer.headers(whole_file(Some(4_000)));
+        transfer.write_failed();
+        assert_eq!(
+            transfer.take_outcome(),
+            Some((Outcome::Unreachable, FIGURE))
+        );
+    }
+
+    #[test]
+    fn a_card_that_holds_everything_replaces_an_unread_outcome() {
+        let mut transfer = with_unread_refusal();
+        transfer.ask(PATH);
+        transfer.holds_all();
+        assert_eq!(transfer.take_outcome(), Some((Outcome::Completed, FIGURE)));
+    }
+
+    #[test]
+    fn giving_up_leaves_an_unread_outcome_alone() {
+        let mut transfer = with_unread_refusal();
+        transfer.ask(PATH);
+        transfer.gave_up();
+        assert_eq!(transfer.take_outcome(), Some((Outcome::Refused, FIGURE)));
+    }
+
+    #[test]
+    fn a_failure_to_connect_leaves_an_unread_outcome_alone() {
+        let mut transfer = with_unread_refusal();
+        assert!(!transfer.could_not_connect(Outcome::Unreachable));
+        assert_eq!(transfer.take_outcome(), Some((Outcome::Refused, FIGURE)));
+    }
+
+    #[test]
+    fn a_new_ask_forgets_the_bytes_the_last_transfer_sent() {
+        let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
+        transfer.sent(512);
+        transfer.ask(PATH);
+        transfer.planned(nothing_cached());
+        transfer.ended(Some(Outcome::Unreachable));
+        assert_eq!(transfer.next(false), Work::Discard);
+    }
 }
