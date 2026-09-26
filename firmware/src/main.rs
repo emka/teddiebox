@@ -59,7 +59,8 @@ use teddiebox_core::{
     Position, PowerOffReason, TagUid, Unavailable,
 };
 use teddiebox_download::{
-    Bytes, CardSays, ContentSink, Handshake, Landing, Pages, Placement, Step, Throttle, Writer,
+    Bytes, CardSays, ContentSink, Handshake, Landing, Outcome, Outcomes, Pages, Placement, Step,
+    Throttle, Writer,
 };
 
 use crate::index::CardIndex;
@@ -362,99 +363,49 @@ static DOWNLOAD_ETAG: CsMutex<RefCell<Option<teddiebox_cloud::ETag>>> =
 /// wedging against a pipe nobody is draining.
 static DOWNLOAD_ABORT: AtomicBool = AtomicBool::new(false);
 
-/// The figure of the fetch that is running, or that most recently ended.
+/// How the last download ended, and which figure it was for.
 ///
-/// Set from the [`FetchRequest`] that started it, together with
-/// [`DOWNLOAD_DIR`] and [`DOWNLOAD_FILE`]. [`fetch_ended`] reads it, so an
-/// outcome is always labelled with the fetch that produced it, not with a
-/// newer queued request.
-static FETCH_ACTIVE_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+/// Every report is labelled with the figure given to [`Outcomes::start`], so
+/// the media task can tell the result of its own fetch from that of a console
+/// `get` that finished while a figure was on the plate.
+static OUTCOMES: CsMutex<RefCell<Outcomes>> = CsMutex::new(RefCell::new(Outcomes::new()));
 
-/// What the last download came to, for whoever asked for it.
+/// The outcome that carries one of the reducer's reasons between the two
+/// tasks.
 ///
-/// The fetch runs in the network task and finishes writing in the media task,
-/// where the reducer decides what to do about it. Tasks cannot call each
-/// other, so the result is left here.
-///
-/// Only as detailed as the reducer needs; the console prints the exact error.
-static FETCH_OUTCOME: AtomicU8 = AtomicU8::new(FETCH_NOTHING);
-/// No download has ended since the last one was read.
-const FETCH_NOTHING: u8 = 0;
-/// The bytes are on the card.
-const FETCH_COMPLETED: u8 = 1;
-/// The server could not be reached, or could not be asked.
-const FETCH_UNREACHABLE: u8 = 2;
-/// The server was reached and has nothing filed under that figure.
-const FETCH_NO_CONTENT: u8 = 3;
-/// The access point turned the box away: the card's passphrase is not its one.
-const FETCH_REFUSED: u8 = 4;
-
-/// The byte that carries one of the reducer's reasons between the two tasks.
-///
-/// An exhaustive match, so a new [`Unavailable`] reason without a byte here
-/// fails to compile instead of being reported as the wrong fault.
-const fn outcome_for(why: Unavailable) -> u8 {
+/// An exhaustive match, so a new [`Unavailable`] reason without an outcome
+/// here fails to compile instead of being reported as the wrong fault.
+const fn outcome_for(why: Unavailable) -> Outcome {
     match why {
-        Unavailable::Unreachable => FETCH_UNREACHABLE,
-        Unavailable::Refused => FETCH_REFUSED,
-        Unavailable::NoContent => FETCH_NO_CONTENT,
+        Unavailable::Unreachable => Outcome::Unreachable,
+        Unavailable::Refused => Outcome::Refused,
+        Unavailable::NoContent => Outcome::NoContent,
     }
 }
 
-/// Which figure [`FETCH_OUTCOME`] belongs to.
-///
-/// Set together with it, so the media task can tell the result of its own
-/// fetch from that of a console `get` that finished while a figure was on the
-/// plate.
-static FETCH_OUTCOME_RUID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+/// Names the figure the next outcome is about.
+fn fetch_started(ruid: u64) {
+    critical_section::with(|cs| OUTCOMES.borrow_ref_mut(cs).start(ruid));
+}
 
-/// Records how a download ended, once.
+/// Records how a download ended.
 ///
 /// A download can end before the request, during the fetch, or at the card;
-/// each records its result here, labelled with [`FETCH_ACTIVE_RUID`].
-///
-/// The outcome and its figure are two atomics, so they are written under one
-/// critical section, and [`take_fetch_outcome`] reads them the same way. With
-/// one core and no await here nothing could run between the two stores
-/// anyway, but the lock makes that explicit and costs little, as it runs once
-/// per download.
-fn fetch_ended(outcome: u8) {
-    critical_section::with(|_| {
-        FETCH_OUTCOME_RUID.store(FETCH_ACTIVE_RUID.load(Ordering::Relaxed), Ordering::Relaxed);
-        FETCH_OUTCOME.store(outcome, Ordering::Relaxed);
-    });
+/// each records its result here.
+fn fetch_ended(outcome: Outcome) {
+    critical_section::with(|cs| OUTCOMES.borrow_ref_mut(cs).report(outcome));
 }
 
 /// Records how a download ended, unless something already has.
 ///
-/// Both the net task, which knows *why* a fetch failed, and the media task,
-/// which only knows the file stopped short, can report the same fetch. The
-/// first report wins, so a precise `NoContent` is not overwritten by
-/// `Unreachable`; the box announces those two differently.
-///
-/// Returns whether it recorded anything. Uses the same critical section as
-/// [`fetch_ended`], so the check and the store happen together.
-fn fetch_ended_if_silent(outcome: u8) -> bool {
-    critical_section::with(|_| {
-        if FETCH_OUTCOME.load(Ordering::Relaxed) != FETCH_NOTHING {
-            return false;
-        }
-        FETCH_OUTCOME_RUID.store(FETCH_ACTIVE_RUID.load(Ordering::Relaxed), Ordering::Relaxed);
-        FETCH_OUTCOME.store(outcome, Ordering::Relaxed);
-        true
-    })
+/// See [`Outcomes::report_if_silent`]. Returns whether it recorded anything.
+fn fetch_ended_if_silent(outcome: Outcome) -> bool {
+    critical_section::with(|cs| OUTCOMES.borrow_ref_mut(cs).report_if_silent(outcome))
 }
 
-/// Takes the pending outcome and the figure it belongs to, together.
-///
-/// `FETCH_NOTHING` means no download has ended since the last read.
-fn take_fetch_outcome() -> (u8, u64) {
-    critical_section::with(|_| {
-        (
-            FETCH_OUTCOME.swap(FETCH_NOTHING, Ordering::Relaxed),
-            FETCH_OUTCOME_RUID.load(Ordering::Relaxed),
-        )
-    })
+/// Takes the waiting outcome and the figure it belongs to, together.
+fn take_fetch_outcome() -> Option<(Outcome, u64)> {
+    critical_section::with(|cs| OUTCOMES.borrow_ref_mut(cs).take())
 }
 
 /// Records that a probe ended without learning anything.
@@ -753,7 +704,7 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
                 // Reported as `Unreachable`: a card problem is not the
                 // server's fault, but "reached and has nothing" would be
                 // wrong, and `Unreachable` makes the box try again next time.
-                fetch_ended(FETCH_UNREACHABLE);
+                fetch_ended(Outcome::Unreachable);
                 DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
                 DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
                 return false;
@@ -777,7 +728,7 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         }
         if let Err(reason) = active.writer.write(&mut sink, &buf[..taken]) {
             esp_println::println!("teddiebox: get write failed — {reason}");
-            fetch_ended(FETCH_UNREACHABLE);
+            fetch_ended(Outcome::Unreachable);
             DOWNLOAD_ABORT.store(true, Ordering::Relaxed);
             break;
         }
@@ -816,7 +767,7 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         if whole {
             // Reported here, not where the fetch returned: a story is ready
             // once it is on the card, not when the last byte arrived.
-            fetch_ended(FETCH_COMPLETED);
+            fetch_ended(Outcome::Completed);
         } else {
             esp_println::println!(
                 "teddiebox: get stopped short — {} of {} bytes, not vouching for it",
@@ -826,7 +777,7 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
             // Not if the download was abandoned: the figure was lifted, and
             // the reducer has already moved on.
             if !DOWNLOAD_ABORT.load(Ordering::Relaxed) {
-                fetch_ended_if_silent(FETCH_UNREACHABLE);
+                fetch_ended_if_silent(Outcome::Unreachable);
             }
         }
         DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
@@ -1638,23 +1589,19 @@ async fn media(
 
         // A download ended in another task. Read every pass so an old result
         // cannot later be matched to a different figure.
-        let (outcome, outcome_ruid) = take_fetch_outcome();
-        if outcome != FETCH_NOTHING {
+        if let Some((outcome, outcome_ruid)) = take_fetch_outcome() {
             match placed.answering(outcome_ruid) {
                 // The figure it was for is still on the plate. (The reducer
                 // checks the identity again before acting.)
                 Answering::TheFigure(tag) => {
-                    events[1] = match outcome {
-                        FETCH_COMPLETED => Some(Event::ContentReady(tag)),
-                        FETCH_UNREACHABLE => {
-                            Some(Event::ContentMissing(tag, Unavailable::Unreachable))
+                    events[1] = Some(match outcome {
+                        Outcome::Completed => Event::ContentReady(tag),
+                        Outcome::Unreachable => {
+                            Event::ContentMissing(tag, Unavailable::Unreachable)
                         }
-                        FETCH_NO_CONTENT => {
-                            Some(Event::ContentMissing(tag, Unavailable::NoContent))
-                        }
-                        FETCH_REFUSED => Some(Event::ContentMissing(tag, Unavailable::Refused)),
-                        _ => unreachable!("outcome != FETCH_NOTHING was just checked"),
-                    };
+                        Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
+                        Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),
+                    });
                 }
                 // A different figure is on the plate, for example after a
                 // console `get`. Not passed to the reducer.
@@ -2288,7 +2235,7 @@ async fn fetch_story(
     token: Option<&[u8; 32]>,
 ) {
     // Recorded now, from this fetch's own request (see `FetchRequest`).
-    FETCH_ACTIVE_RUID.store(requested, Ordering::Relaxed);
+    fetch_started(requested);
     let ruid = requested.to_be_bytes();
     // `content_path` reverses the UID itself, and the ruid is already
     // reversed, so undo that first.
@@ -2331,7 +2278,7 @@ async fn fetch_story(
         Step::Play => {
             esp_println::println!("teddiebox: get the card already holds all of it");
             // Nothing to fetch: the story can play now.
-            fetch_ended(FETCH_COMPLETED);
+            fetch_ended(Outcome::Completed);
             DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
             return;
         }
@@ -2343,7 +2290,7 @@ async fn fetch_story(
                  leaving what is cached alone",
                 teddiebox_download::DEADLINE_MS / 1_000
             );
-            fetch_ended_if_silent(FETCH_UNREACHABLE);
+            fetch_ended_if_silent(Outcome::Unreachable);
             DOWNLOAD_STATE.store(DOWNLOAD_IDLE, Ordering::Relaxed);
             return;
         }
@@ -2558,7 +2505,7 @@ async fn net(
                 }
                 Some(FetchRequest { ruid, probe, .. }) => {
                     // Recorded before anything can end the fetch.
-                    FETCH_ACTIVE_RUID.store(ruid, Ordering::Relaxed);
+                    fetch_started(ruid);
                     esp_println::println!(
                         "teddiebox: net coming up {}",
                         if probe {

@@ -11,6 +11,7 @@ mod availability;
 mod cache;
 mod content_path;
 mod handshake;
+mod outcome;
 mod reconcile;
 mod revalidate;
 mod sidecar;
@@ -25,6 +26,7 @@ pub use cache::{
 };
 pub use content_path::{content_path, ContentPath};
 pub use handshake::{CardSays, Handshake, Step, DEADLINE_MS, RETRY_MS};
+pub use outcome::{Outcome, Outcomes};
 pub use reconcile::{reconcile, Action, Mismatch};
 pub use revalidate::{is_stale, Answer, Asked, Revalidation, Settled, PATIENCE_MS, REMEMBERED};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
