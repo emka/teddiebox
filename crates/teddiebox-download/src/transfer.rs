@@ -3,9 +3,9 @@
 //!
 //! The network task produces the bytes; only the media task may write them to
 //! the card, and it is busy for seconds at a time while a story plays. Neither
-//! can wait for the other, so they meet here: each makes short calls under one
-//! critical section and reads back what to do next. Keeping it here means how
-//! a download starts, finishes and reports can be tested on the host.
+//! can wait for the other, so they meet here: each makes short calls on one
+//! shared value and reads back what to do next. Keeping it here means how a
+//! download starts, finishes and reports can be tested on the host.
 //!
 //! The bytes themselves travel through a separate pipe; this holds only what
 //! is known *about* them.
@@ -151,8 +151,8 @@ impl Transfer {
 
     /// Names the figure that later outcomes are about.
     ///
-    /// Called when the radio comes up for a fetch, before anything can end
-    /// it, so a failure to connect is labelled too.
+    /// Call it before anything can end the fetch, including a failure to
+    /// connect, so every outcome carries the right figure.
     pub fn start(&mut self, ruid: u64) {
         self.outcomes.start(ruid);
     }
@@ -310,8 +310,8 @@ impl Transfer {
     }
 
     /// Writing to the open file failed. Reported as for
-    /// [`Transfer::open_failed`]; the file is finished as usual once the
-    /// producer stops.
+    /// [`Transfer::open_failed`], and the producer is stopped; the transfer
+    /// stays where it is.
     pub fn write_failed(&mut self) {
         self.outcomes.report(Outcome::Unreachable);
         self.aborted = true;
