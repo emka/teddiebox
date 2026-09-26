@@ -58,8 +58,9 @@ type Blocking = esp_hal::Blocking;
 pub async fn play_first_wav(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
-    mut buffer: DmaTxStreamBuf,
+    buffer: DmaTxStreamBuf,
 ) -> Result<(), &'static str> {
+    let mut buffer = emptied(buffer);
     let Some((name, size)) = card.find_by_extension(b"WAV") else {
         return Err("no .WAV in the card's root directory");
     };
@@ -175,6 +176,19 @@ pub async fn play_first_wav(
 /// Fills the DMA buffer from the card before the transfer starts.
 ///
 /// Returns how many bytes went in.
+/// A used stream buffer, made ready for a new transfer with nothing in it.
+///
+/// `DmaTxStreamBuf` counts the bytes pushed before a transfer from its
+/// creation and never resets the count. On any transfer after the first,
+/// `push` therefore appends after the previous transfer's bytes, and the
+/// transfer opens by playing whatever the buffer last held: up to
+/// `BUFFER_BYTES` of the previous story or sound. Rebuilding it from its own
+/// parts starts the count at zero.
+fn emptied(buffer: DmaTxStreamBuf) -> DmaTxStreamBuf {
+    let (descriptors, memory) = buffer.split();
+    DmaTxStreamBuf::new(descriptors, memory).expect("the parts it was built from at boot")
+}
+
 fn prefill(
     card: &Mounted,
     file: RawFile,
@@ -433,11 +447,12 @@ type PlaybackError = (&'static str, I2sTx<'static, Blocking>, DmaTxStreamBuf);
 async fn play_taf_inner(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
-    mut buffer: DmaTxStreamBuf,
+    buffer: DmaTxStreamBuf,
     source: Source,
     from: Position,
     on_frame: &mut dyn FnMut(),
 ) -> Result<Reclaimed, PlaybackError> {
+    let mut buffer = emptied(buffer);
     let Some(scratch) = take_scratch() else {
         return Err(("the decoder is already in use", i2s_tx, buffer));
     };
