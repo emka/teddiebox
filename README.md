@@ -147,6 +147,13 @@ the single RGB light to say what it is doing:
 It is steady rather than breathing, and deliberately dim: this sits in a
 child's room.
 
+## What it does not do yet
+
+**Rewind and fast-forward are not implemented.** On a stock box, tilting it
+to one side winds the story back or forward within a chapter. This box does
+nothing when it is tilted: the only way to move through a story is a whole
+chapter at a time, by holding an ear or slapping the side.
+
 ## What goes in `CONFIG.TXT`
 
 One `key = value` per line, `#` starts a comment, blank lines are ignored.
