@@ -274,6 +274,26 @@ pub static STOP: AtomicBool = AtomicBool::new(false);
 /// same reason as for `STOP` and `SKIP`).
 pub static PAGE: AtomicU32 = AtomicU32::new(0);
 
+/// Whether a story's decoded samples are checksummed, for comparing the box's
+/// decode with `taf2wav` on the host. Read when a story starts.
+///
+/// Off unless the console's `pcmcrc on` asks for it: computed bit by bit, the
+/// checksum takes a fifth of playback time, and without that margin the loop
+/// falls behind the DMA often enough to be heard.
+pub static PCM_CRC: AtomicBool = AtomicBool::new(false);
+
+/// A checksum for the log: its value, or `off` when none is kept.
+struct Shown(Option<u32>);
+
+impl core::fmt::Display for Shown {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(crc) => write!(f, "{crc:08X}"),
+            None => f.write_str("off"),
+        }
+    }
+}
+
 /// How playback ended, which decides whether a saved position is worth
 /// keeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -616,9 +636,9 @@ async fn play_taf_inner(
     // Fill the buffer before starting, as the WAV path does: an empty buffer
     // would run out before the first sample arrived.
     //
-    // A CRC-32 of the decoded samples, to compare with `taf2wav` output on the
-    // host. It includes the pre-fill frames.
-    let mut pcm_crc = Crc32::new();
+    // A CRC-32 of the decoded samples, when `PCM_CRC` asks for one, to compare
+    // with `taf2wav` output on the host. It includes the pre-fill frames.
+    let mut pcm_crc = PCM_CRC.load(Ordering::Relaxed).then(Crc32::new);
     let mut frames: u32 = 0;
 
     let mut pending: core::ops::Range<usize> = 0..0;
@@ -626,7 +646,9 @@ async fn play_taf_inner(
         if pending.is_empty() {
             match decoder.next_frame(&mut scratch.pcm) {
                 Ok(Some(samples)) => {
-                    pcm_crc.update(as_bytes(&scratch.pcm[..samples]));
+                    if let Some(crc) = pcm_crc.as_mut() {
+                        crc.update(as_bytes(&scratch.pcm[..samples]));
+                    }
                     frames += 1;
                     pending = 0..samples * 2;
                 }
@@ -784,7 +806,9 @@ async fn play_taf_inner(
 
                 match decoded {
                     Ok(Some(samples)) => {
-                        pcm_crc.update(as_bytes(&scratch.pcm[..samples]));
+                        if let Some(crc) = pcm_crc.as_mut() {
+                            crc.update(as_bytes(&scratch.pcm[..samples]));
+                        }
                         // After the checksum, which covers the story alone.
                         if let Some(cue) = over.as_mut() {
                             if cue.mix_into(&mut scratch.pcm[..samples]) {
@@ -829,16 +853,17 @@ async fn play_taf_inner(
         if last_log.elapsed() >= LOG_EVERY {
             last_log = Instant::now();
             let so_far = started.elapsed().as_micros().max(1);
-            // Print the checksum and decode cost so far, not only at the end,
-            // since a whole Tonie is over half an hour. `taf2wav --frames N`
-            // decodes the same number of frames on the host.
+            // Print the checksum, if one is kept, and the decode cost so far,
+            // not only at the end, since a whole Tonie is over half an hour.
+            // `taf2wav --frames N` decodes the same number of frames on the
+            // host.
             esp_println::println!(
-                "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns, crc32 {:08X}, decode {}%",
+                "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns, crc32 {}, decode {}%",
                 so_far / 1_000_000,
                 cushion.percent(),
                 cushion.low_water_percent(),
                 cushion.underruns(),
-                pcm_crc.finish(),
+                Shown(pcm_crc.map(|crc| crc.finish())),
                 decode_us * 100 / so_far
             );
             // A stopped DMA reads as a *full* buffer (100%, no underruns).
@@ -896,7 +921,9 @@ async fn play_taf_inner(
         cushion.underruns(),
         restarts
     );
-    esp_println::println!("teddiebox: taf pcm crc32 {:08X}", pcm_crc.finish());
+    if let Some(crc) = pcm_crc {
+        esp_println::println!("teddiebox: taf pcm crc32 {:08X}", crc.finish());
+    }
 
     // Decode time as a percentage of the audio's length. Under 100 means the
     // box decodes faster than it plays.

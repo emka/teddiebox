@@ -226,6 +226,13 @@ pub enum Command {
     /// `plate off` is for tests: a reader that unlocks tags on its own would
     /// interfere with any test involving a figure, such as downloads.
     Plate(bool),
+    /// Checksum every decoded frame of a story, or stop.
+    ///
+    /// **Off at boot.** The checksum lets a bench run compare the box's decode
+    /// with `taf2wav` on the host, but computed bit by bit it takes a fifth of
+    /// playback time, which leaves the loop too little margin to keep the DMA
+    /// fed.
+    PcmCrc(bool),
     /// Hold the idle timeout off, or let it run again.
     ///
     /// For long tests (a discharge, a download) during which the idle timeout
@@ -338,6 +345,8 @@ impl CommandWatch {
                     b"ears skip off" => Some(Command::EarsSkip(false)),
                     b"plate on" => Some(Command::Plate(true)),
                     b"plate off" => Some(Command::Plate(false)),
+                    b"pcmcrc on" => Some(Command::PcmCrc(true)),
+                    b"pcmcrc off" => Some(Command::PcmCrc(false)),
                     b"reval" => Some(Command::Revalidate),
                     b"sleep" => Some(Command::Sleep),
                     b"autosleep on" => Some(Command::AutoSleep(true)),
@@ -1367,6 +1376,20 @@ mod tests {
     fn the_box_can_be_told_to_ask_the_server_again() {
         let mut watch = CommandWatch::new();
         assert_eq!(feed_all(&mut watch, b"reval\r"), Some(Command::Revalidate));
+    }
+
+    #[test]
+    fn the_playback_checksum_can_be_switched_from_the_console() {
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"pcmcrc on\r"),
+            Some(Command::PcmCrc(true))
+        );
+        let mut watch = CommandWatch::new();
+        assert_eq!(
+            feed_all(&mut watch, b"pcmcrc off\r"),
+            Some(Command::PcmCrc(false))
+        );
     }
 
     #[test]

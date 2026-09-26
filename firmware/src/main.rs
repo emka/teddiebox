@@ -2828,7 +2828,7 @@ async fn main(spawner: Spawner) {
     // confirming an update also needs the card, which is mounted later.
     let mut boot_confirmed = false;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | awake on|off | sleep | autosleep on|off | reval"
+        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | pcmcrc on|off | awake on|off | sleep | autosleep on|off | reval"
     );
 
     // Here rather than next to `ota::confirm_boot_or_revert()`: loaded before
@@ -3255,6 +3255,14 @@ async fn main(spawner: Spawner) {
                         }
                     );
                 }
+                Some(Command::PcmCrc(on)) => {
+                    audio::PCM_CRC.store(on, Ordering::Relaxed);
+                    esp_println::println!(
+                        "teddiebox: playback checksum {} from the next story",
+                        if on { "on" } else { "off" }
+                    );
+                }
+
                 Some(Command::Plate(on)) => {
                     if !on {
                         nfc::PLATE_REPORT.store(true, Ordering::Relaxed);
