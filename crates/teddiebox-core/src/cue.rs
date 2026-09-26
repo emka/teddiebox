@@ -426,14 +426,15 @@ mod tests {
     #[test]
     fn no_cue_is_louder_than_the_peak() {
         for cue in ALL {
-            assert!(peak(&render(cue)) <= CUE_PEAK, "{cue:?}");
+            assert!(peak(&render(cue)) <= 16_384, "{cue:?}");
         }
     }
 
-    /// Guards against a cue that is correct in pitch but far too quiet.
+    /// Guards against a cue that is correct in pitch but far too quiet: 95 %
+    /// of the 16,384 peak.
     #[test]
     fn the_beeps_reach_the_peak() {
-        assert!(i32::from(peak(&render(Cue::VolumeUp))) >= i32::from(CUE_PEAK) * 95 / 100);
+        assert!(peak(&render(Cue::VolumeUp)) >= 15_564);
     }
 
     /// A skip note starts at full level and has fallen to about two thirds
@@ -532,6 +533,14 @@ mod tests {
         Cue::VolumeUp.samples().mix_into(&mut loud);
         assert!(loud.iter().all(|&s| s > 0), "a sample wrapped negative");
         assert!(loud.contains(&i16::MAX));
+    }
+
+    #[test]
+    fn mixing_clips_at_the_negative_rail_too() {
+        let mut loud = vec![-30_000i16; 960 * 2];
+        Cue::VolumeUp.samples().mix_into(&mut loud);
+        assert!(loud.iter().all(|&s| s < 0), "a sample wrapped positive");
+        assert!(loud.contains(&i16::MIN));
     }
 
     /// Mixing past the end of the cue leaves the story untouched.
