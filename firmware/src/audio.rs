@@ -24,6 +24,7 @@ use teddiebox_core::Position;
 use teddiebox_audio::{LibOpus, OpusState, Skip, TafDecoder, MAX_FRAME_SAMPLES};
 
 use crate::storage::{CardPages, Mounted, PAGE_READ_MAX_US, PAGE_READ_US};
+use crate::BENCH;
 
 /// The DMA buffer between the card and the codec.
 ///
@@ -40,7 +41,10 @@ const CHUNK: usize = 4096;
 /// Samples of a cue fed to the DMA at a time: 20 ms of stereo.
 const CUE_CHUNK: usize = 960 * 2;
 
-/// How often the occupancy line is printed.
+/// How often a bench image prints a story's occupancy lines.
+///
+/// A release image never prints them: each console line keeps interrupts off
+/// while it goes out at 115200 baud, and nobody reads a closed box's UART.
 const LOG_EVERY: Duration = Duration::from_secs(5);
 
 /// How long to wait when the DMA buffer will not take any more.
@@ -850,7 +854,7 @@ async fn play_taf_inner(
             stalled = 0;
         }
 
-        if last_log.elapsed() >= LOG_EVERY {
+        if BENCH && last_log.elapsed() >= LOG_EVERY {
             last_log = Instant::now();
             let so_far = started.elapsed().as_micros().max(1);
             // Print the checksum, if one is kept, and the decode cost so far,
