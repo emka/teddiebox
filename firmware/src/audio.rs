@@ -313,6 +313,80 @@ pub fn take_cue() -> Option<Cue> {
     Cue::from_code(CUE.swap(CUE_NONE, Ordering::Relaxed))
 }
 
+/// Silence after an idle cue, so the transfer never stops mid-tone: 20 ms.
+const CUE_TAIL_FRAMES: usize = 960;
+
+/// Plays a cue when no story holds the output.
+///
+/// The output must already be powered. Gives the transmitter and buffer
+/// back whatever happens, so a story can play afterwards.
+pub async fn play_cue(
+    i2s_tx: I2sTx<'static, Blocking>,
+    mut buffer: DmaTxStreamBuf,
+    cue: Cue,
+) -> (
+    Result<(), &'static str>,
+    I2sTx<'static, Blocking>,
+    DmaTxStreamBuf,
+) {
+    let mut samples = cue.samples();
+    let mut chunk = [0i16; CUE_CHUNK];
+    let mut pending: core::ops::Range<usize> = 0..0;
+    // `black_box` keeps the tail out of constant folding: the Xtensa backend
+    // cannot select the `add 3840` it would fold into ("Cannot select:
+    // Constant<3840>").
+    let mut left = (cue.frames() as usize + core::hint::black_box(CUE_TAIL_FRAMES)) * 4;
+
+    // Filled before starting, as a story is: a stream transfer starts at
+    // once and would run dry before the first sample arrived.
+    loop {
+        refill(&mut samples, &mut chunk, &mut pending, left);
+        if pending.is_empty() {
+            break;
+        }
+        let pushed = buffer.push(&as_bytes(&chunk)[pending.clone()]);
+        pending.start += pushed;
+        left -= pushed;
+        if pushed == 0 {
+            break;
+        }
+    }
+
+    let mut transfer = match i2s_tx.write(buffer) {
+        Ok(transfer) => transfer,
+        Err((_, tx, buffer)) => return (Err("I2S would not start"), tx, buffer),
+    };
+    while left > 0 {
+        refill(&mut samples, &mut chunk, &mut pending, left);
+        let pushed = transfer.push(&as_bytes(&chunk)[pending.clone()]);
+        pending.start += pushed;
+        left -= pushed;
+        if pushed == 0 {
+            Timer::after(BUFFER_FULL_WAIT).await;
+        }
+    }
+    // Everything is queued; the DMA stops by itself at the end of it.
+    let deadline = Instant::now() + Duration::from_millis(u64::from(cue.frames()) / 48 + 200);
+    while !transfer.is_done() && Instant::now() < deadline {
+        Timer::after(Duration::from_millis(1)).await;
+    }
+    let (tx, buffer) = transfer.stop();
+    (Ok(()), tx, buffer)
+}
+
+/// Refills `chunk` from the cue once the last one has all been pushed.
+fn refill(
+    samples: &mut CueSamples,
+    chunk: &mut [i16; CUE_CHUNK],
+    pending: &mut core::ops::Range<usize>,
+    left: usize,
+) {
+    if core::ops::Range::is_empty(pending) && left > 0 {
+        samples.fill(chunk);
+        *pending = 0..(CUE_CHUNK * 2).min(left);
+    }
+}
+
 /// Hands the scratch back, so another playback can use it.
 fn release_scratch() {
     SCRATCH_TAKEN.store(false, Ordering::Relaxed);

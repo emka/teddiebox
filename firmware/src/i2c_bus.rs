@@ -229,6 +229,9 @@ pub(crate) async fn i2c_bus(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Out
             continue;
         }
         let output = OUTPUT_REQUEST.swap(0, Ordering::Relaxed);
+        if output == OUTPUT_UP && OUTPUT_IS_UP.load(Ordering::Relaxed) {
+            continue;
+        }
         if let request @ (OUTPUT_DOWN | OUTPUT_UP) = output {
             let bus = accel.release();
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
@@ -240,11 +243,14 @@ pub(crate) async fn i2c_bus(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Out
                 dac.stop_output()
             };
             match outcome {
-                Ok(()) => esp_println::println!(
-                    "teddiebox: codec output {}{}",
-                    if up { "up" } else { "down" },
-                    if up && !speaker { " (headphones)" } else { "" }
-                ),
+                Ok(()) => {
+                    OUTPUT_IS_UP.store(up, Ordering::Relaxed);
+                    esp_println::println!(
+                        "teddiebox: codec output {}{}",
+                        if up { "up" } else { "down" },
+                        if up && !speaker { " (headphones)" } else { "" }
+                    )
+                }
                 Err(_) => esp_println::println!("teddiebox: codec output would not change"),
             }
             let bus = dac.release();
@@ -255,7 +261,10 @@ pub(crate) async fn i2c_bus(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Out
             let bus = accel.release();
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
             match dac.power_down(&mut dac_delay) {
-                Ok(()) => esp_println::println!("teddiebox: codec powered down"),
+                Ok(()) => {
+                    OUTPUT_IS_UP.store(false, Ordering::Relaxed);
+                    esp_println::println!("teddiebox: codec powered down")
+                }
                 Err(_) => esp_println::println!("teddiebox: codec would not power down"),
             }
             let bus = dac.release();
@@ -267,6 +276,7 @@ pub(crate) async fn i2c_bus(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Out
             let bus = accel.release();
             let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
             let _ = dac.power_down(&mut dac_delay);
+            OUTPUT_IS_UP.store(false, Ordering::Relaxed);
             match dac
                 .reset()
                 .and_then(|()| codec_bring_up(&mut dac, &mut dac_delay))
@@ -609,6 +619,12 @@ pub(crate) const SPEAKER_RESUME: u8 = 3;
 static OUTPUT_REQUEST: AtomicU8 = AtomicU8::new(0);
 pub(crate) const OUTPUT_DOWN: u8 = 1;
 pub(crate) const OUTPUT_UP: u8 = 2;
+
+/// Whether the codec's output is powered, as last set by this task.
+///
+/// Lets the media task wait for the output before playing a cue, and keeps
+/// a second power-up off a powered codec: rerunning the sequence clicks.
+pub(crate) static OUTPUT_IS_UP: AtomicBool = AtomicBool::new(false);
 
 /// Ends the `i2c_bus` task's nap early.
 ///

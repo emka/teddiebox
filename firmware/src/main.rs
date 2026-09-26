@@ -46,6 +46,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::{Config as UartConfig, UartRx};
 use teddiebox_board::{self as board, Gates, Rail};
 use teddiebox_console::{Command, CommandWatch};
+use teddiebox_core::cue::Cue;
 use teddiebox_core::pipe::Pipe;
 use teddiebox_core::place::PendingPlace;
 use teddiebox_core::plate::{Answering, Placed};
@@ -1495,6 +1496,53 @@ fn feed_tick(
     }
 }
 
+/// How long the codec's output stays powered after the last sound.
+///
+/// Powering it up clicks and takes a moment, so a run of presses, or a press
+/// just after a story, would otherwise click each time.
+const OUTPUT_LINGER: Duration = Duration::from_secs(5);
+
+/// How long an idle cue waits for the output to come up before giving up.
+const OUTPUT_UP_WAIT: Duration = Duration::from_secs(1);
+
+/// Plays a cue while nothing else holds the output, powering it first.
+async fn play_idle_cue(
+    cue: Cue,
+    i2s_tx: &mut Option<esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>>,
+    wav_buffer: &mut Option<esp_hal::dma::DmaTxStreamBuf>,
+) {
+    // Checked before taking either: taking both and then matching would drop
+    // one if the other was missing.
+    if i2s_tx.is_none() || wav_buffer.is_none() {
+        esp_println::println!("teddiebox: cue {cue:?} — the audio hardware is claimed");
+        return;
+    }
+    if !i2c_bus::OUTPUT_IS_UP.load(Ordering::Relaxed) {
+        let asked = Instant::now();
+        i2c_bus::request_output(i2c_bus::OUTPUT_UP);
+        while !i2c_bus::OUTPUT_IS_UP.load(Ordering::Relaxed) {
+            if asked.elapsed() >= OUTPUT_UP_WAIT {
+                esp_println::println!("teddiebox: cue {cue:?} — the output did not come up");
+                return;
+            }
+            Timer::after(Duration::from_millis(5)).await;
+        }
+        esp_println::println!(
+            "teddiebox: cue output up in {} ms",
+            asked.elapsed().as_millis()
+        );
+    }
+    let (Some(tx), Some(buffer)) = (i2s_tx.take(), wav_buffer.take()) else {
+        return;
+    };
+    let (result, tx, buffer) = audio::play_cue(tx, buffer, cue).await;
+    *i2s_tx = Some(tx);
+    *wav_buffer = Some(buffer);
+    if let Err(reason) = result {
+        esp_println::println!("teddiebox: cue {cue:?} failed — {reason}");
+    }
+}
+
 /// Owns the I2S peripheral and the SD card, runs the reducer, plays stories
 /// and sounds, writes downloads to the card, and serves the console commands
 /// that need this hardware.
@@ -1533,6 +1581,9 @@ async fn media(
     let mut i2s_tx = Some(i2s_tx);
     let mut tone_buffer = Some(tone_buffer);
     let mut wav_buffer = Some(wav_buffer);
+    // When the last sound ended, while the output is still powered; the idle
+    // loop powers it down `OUTPUT_LINGER` later.
+    let mut quiet_since: Option<Instant> = None;
     // The tone stops when its transfer is dropped, so it is kept here until
     // the box restarts.
     let mut _tone_transfer = None;
@@ -1714,6 +1765,17 @@ async fn media(
 
         let request = REQUEST.swap(REQUEST_NONE, Ordering::Relaxed);
         if request == REQUEST_NONE {
+            if let Some(cue) = audio::take_cue() {
+                play_idle_cue(cue, &mut i2s_tx, &mut wav_buffer).await;
+                quiet_since = Some(Instant::now());
+                continue;
+            }
+            if quiet_since.is_some_and(|since| since.elapsed() >= OUTPUT_LINGER)
+                && REQUEST.load(Ordering::Relaxed) == REQUEST_NONE
+            {
+                i2c_bus::request_output(i2c_bus::OUTPUT_DOWN);
+                quiet_since = None;
+            }
             // Serviced when idle, so a download progresses in the gaps without
             // blocking the loop.
             let downloading = service_download(card.as_ref(), &mut download);
@@ -1827,6 +1889,11 @@ async fn media(
                 audio::STOP.store(false, Ordering::Relaxed);
                 audio::SKIP.store(audio::SKIP_NONE, Ordering::Relaxed);
                 audio::CUE.store(audio::CUE_NONE, Ordering::Relaxed);
+                // The idle loop may have asked for a power-down in the moment
+                // before this request arrived; this undoes it. Harmless when
+                // the output is already up.
+                i2c_bus::request_output(i2c_bus::OUTPUT_UP);
+                quiet_since = None;
 
                 // Set while feeding the DMA, so the download leaves the radio
                 // alone. Always cleared afterwards, even on failure, or the
@@ -1915,13 +1982,9 @@ async fn media(
                     }
                     i2s_tx = Some(tx);
                     wav_buffer = Some(buffer);
-                    // Nothing is playing, so power the output down, unless
-                    // something is already queued: that powered the output up
-                    // when it asked, and powering down would silence it (and
-                    // click).
-                    if REQUEST.load(Ordering::Relaxed) == REQUEST_NONE {
-                        i2c_bus::request_output(i2c_bus::OUTPUT_DOWN);
-                    }
+                    // The output stays up a while, so a press just after the
+                    // story does not click; the idle loop powers it down.
+                    quiet_since = Some(Instant::now());
                 }
                 PLAYING.store(false, Ordering::Relaxed);
             }
