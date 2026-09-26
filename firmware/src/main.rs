@@ -1375,8 +1375,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             NET_REQUEST.store(NET_GET, Ordering::Relaxed);
         }
 
-        // Nothing plays cues yet; the console shows they are asked for.
-        Action::PlayCue(cue) => esp_println::println!("teddiebox: cue {cue:?}"),
+        Action::PlayCue(cue) => audio::CUE.store(cue.code(), Ordering::Relaxed),
 
         Action::PlayPrompt(prompt) => {
             SOUND_REQUEST.store(Sound::for_prompt(prompt).file(), Ordering::Relaxed)
@@ -1823,10 +1822,11 @@ async fn media(
                     continue;
                 };
 
-                // Clear any stop or skip left over from before, or it would
-                // act on this playback.
+                // Clear any stop, skip or cue left over from before, or it
+                // would act on this playback.
                 audio::STOP.store(false, Ordering::Relaxed);
                 audio::SKIP.store(audio::SKIP_NONE, Ordering::Relaxed);
+                audio::CUE.store(audio::CUE_NONE, Ordering::Relaxed);
 
                 // Set while feeding the DMA, so the download leaves the radio
                 // alone. Always cleared afterwards, even on failure, or the

@@ -7,7 +7,7 @@
 //! Buffer accounting ([`teddiebox_core::cushion`]) and WAV header parsing
 //! ([`teddiebox_core::wav`]) are tested on the host. This file drives the DMA.
 
-use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU32};
+use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU32, AtomicU8};
 use portable_atomic::Ordering;
 
 use embassy_futures::yield_now;
@@ -16,6 +16,7 @@ use embedded_sdmmc::RawFile;
 use esp_hal::dma::DmaTxStreamBuf;
 use esp_hal::i2s::master::I2sTx;
 use teddiebox_core::checksum::Crc32;
+use teddiebox_core::cue::{Cue, CueSamples};
 use teddiebox_core::cushion::Cushion;
 use teddiebox_core::wav::{WavError, WavFormat};
 use teddiebox_core::Position;
@@ -294,6 +295,20 @@ pub static SKIP: AtomicI8 = AtomicI8::new(SKIP_NONE);
 pub const SKIP_NONE: i8 = 0;
 pub const SKIP_FORWARD: i8 = 1;
 pub const SKIP_BACK: i8 = -1;
+
+/// A cue waiting to sound: [`CUE_NONE`], or a [`Cue::code`].
+///
+/// Set by whoever decides a press deserves a cue; taken by whatever holds
+/// the I2S output. A story's loop mixes it in; the idle media loop plays it
+/// on its own. The last request wins, as for [`SKIP`].
+pub static CUE: AtomicU8 = AtomicU8::new(CUE_NONE);
+
+pub const CUE_NONE: u8 = 0;
+
+/// Takes the waiting cue, if there is one.
+pub fn take_cue() -> Option<Cue> {
+    Cue::from_code(CUE.swap(CUE_NONE, Ordering::Relaxed))
+}
 
 /// Hands the scratch back, so another playback can use it.
 fn release_scratch() {
@@ -580,6 +595,8 @@ async fn play_taf_inner(
     let mut restarts: u32 = 0;
     // Consecutive milliseconds the buffer has refused a byte.
     let mut stalled: u32 = 0;
+    // A cue sounding over the story, mixed into each frame as it is decoded.
+    let mut over: Option<CueSamples> = None;
     loop {
         // The caller's turn, since this loop occupies the media task for the
         // whole story (for example to notice a lifted figure). Called before
@@ -621,6 +638,9 @@ async fn play_taf_inner(
                 }
                 Err(_) => esp_println::println!("teddiebox: taf could not skip back"),
             },
+        }
+        if let Some(cue) = take_cue() {
+            over = Some(cue.samples());
         }
         // Checked before the buffer level, which cannot show this:
         // `available_bytes` counts descriptors the CPU owns, so it reads 0
@@ -666,6 +686,12 @@ async fn play_taf_inner(
             match decoded {
                 Ok(Some(samples)) => {
                     pcm_crc.update(as_bytes(&scratch.pcm[..samples]));
+                    // After the checksum, which covers the story alone.
+                    if let Some(cue) = over.as_mut() {
+                        if cue.mix_into(&mut scratch.pcm[..samples]) {
+                            over = None;
+                        }
+                    }
                     pending = 0..samples * 2;
                     frames += 1;
                     // Published for position memory, which cannot reach the
