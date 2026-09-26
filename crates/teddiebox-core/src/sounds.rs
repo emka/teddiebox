@@ -111,15 +111,15 @@ pub enum Sound {
 }
 
 impl Sound {
-    /// The sound for a prompt, if there is one.
-    pub const fn for_prompt(prompt: crate::Prompt) -> Option<Self> {
+    /// The sound for a prompt.
+    pub const fn for_prompt(prompt: crate::Prompt) -> Self {
         match prompt {
-            crate::Prompt::Startup => Some(Self::Startup),
-            crate::Prompt::NoNetwork => Some(Self::NoInternet),
-            crate::Prompt::BatteryLow => Some(Self::BatteryLow),
-            crate::Prompt::BatteryCritical => Some(Self::BatteryCritical),
-            crate::Prompt::NoContent => Some(Self::NoStory),
-            crate::Prompt::WrongPassword => Some(Self::WrongPassword),
+            crate::Prompt::Startup => Self::Startup,
+            crate::Prompt::NoNetwork => Self::NoInternet,
+            crate::Prompt::BatteryLow => Self::BatteryLow,
+            crate::Prompt::BatteryCritical => Self::BatteryCritical,
+            crate::Prompt::NoContent => Self::NoStory,
+            crate::Prompt::WrongPassword => Self::WrongPassword,
         }
     }
 
@@ -219,24 +219,18 @@ mod tests {
     }
 
     #[test]
-    fn the_prompts_with_a_known_file_map_to_it() {
-        assert_eq!(Sound::for_prompt(Prompt::Startup), Some(Sound::Startup));
-        assert_eq!(
-            Sound::for_prompt(Prompt::NoNetwork),
-            Some(Sound::NoInternet)
-        );
-        assert_eq!(
-            Sound::for_prompt(Prompt::BatteryLow),
-            Some(Sound::BatteryLow)
-        );
+    fn each_prompt_maps_to_its_file() {
+        assert_eq!(Sound::for_prompt(Prompt::Startup), Sound::Startup);
+        assert_eq!(Sound::for_prompt(Prompt::NoNetwork), Sound::NoInternet);
+        assert_eq!(Sound::for_prompt(Prompt::BatteryLow), Sound::BatteryLow);
         assert_eq!(
             Sound::for_prompt(Prompt::BatteryCritical),
-            Some(Sound::BatteryCritical)
+            Sound::BatteryCritical
         );
-        assert_eq!(Sound::for_prompt(Prompt::NoContent), Some(Sound::NoStory));
+        assert_eq!(Sound::for_prompt(Prompt::NoContent), Sound::NoStory);
         assert_eq!(
             Sound::for_prompt(Prompt::WrongPassword),
-            Some(Sound::WrongPassword)
+            Sound::WrongPassword
         );
     }
 

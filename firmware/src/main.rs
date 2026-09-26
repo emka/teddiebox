@@ -1378,14 +1378,9 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         // Nothing plays cues yet; the console shows they are asked for.
         Action::PlayCue(cue) => esp_println::println!("teddiebox: cue {cue:?}"),
 
-        Action::PlayPrompt(prompt) => match Sound::for_prompt(prompt) {
-            Some(sound) => SOUND_REQUEST.store(sound.file(), Ordering::Relaxed),
-            // No sound file is known for this message, and playing another
-            // would say the wrong thing, so only the console is told.
-            None => esp_println::println!(
-                "teddiebox: plate no sound identified for {prompt:?} — saying nothing"
-            ),
-        },
+        Action::PlayPrompt(prompt) => {
+            SOUND_REQUEST.store(Sound::for_prompt(prompt).file(), Ordering::Relaxed)
+        }
 
         Action::SavePosition { tag, pos } => {
             // Kept in RAM, not written to the card: figures are lifted and put
