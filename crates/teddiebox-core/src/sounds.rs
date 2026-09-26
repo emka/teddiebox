@@ -112,10 +112,6 @@ pub enum Sound {
 
 impl Sound {
     /// The sound for a prompt, if there is one.
-    ///
-    /// `None` is deliberate. The volume limit has no sound: every file on the
-    /// card was checked and none fits (the closest, `0x02`, is a
-    /// discouraging "no", and was rejected).
     pub const fn for_prompt(prompt: crate::Prompt) -> Option<Self> {
         match prompt {
             crate::Prompt::Startup => Some(Self::Startup),
@@ -124,7 +120,6 @@ impl Sound {
             crate::Prompt::BatteryCritical => Some(Self::BatteryCritical),
             crate::Prompt::NoContent => Some(Self::NoStory),
             crate::Prompt::WrongPassword => Some(Self::WrongPassword),
-            crate::Prompt::VolumeLimit => None,
         }
     }
 
@@ -259,12 +254,6 @@ mod tests {
     #[test]
     fn the_figure_with_no_story_has_its_own_file() {
         assert_eq!(Sound::NoStory.file(), 0x0000_0012);
-    }
-
-    /// The volume limit is silent on purpose: no file on the card fits it.
-    #[test]
-    fn the_volume_ceiling_is_deliberately_silent() {
-        assert_eq!(Sound::for_prompt(Prompt::VolumeLimit), None);
     }
 
     /// Identified by listening; the wiki is wrong about this one. 0x09 is

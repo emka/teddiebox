@@ -1375,6 +1375,9 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             NET_REQUEST.store(NET_GET, Ordering::Relaxed);
         }
 
+        // Nothing plays cues yet; the console shows they are asked for.
+        Action::PlayCue(cue) => esp_println::println!("teddiebox: cue {cue:?}"),
+
         Action::PlayPrompt(prompt) => match Sound::for_prompt(prompt) {
             Some(sound) => SOUND_REQUEST.store(sound.file(), Ordering::Relaxed),
             // No sound file is known for this message, and playing another

@@ -165,7 +165,6 @@ pub enum Prompt {
     /// Unlike [`Prompt::BatteryLow`], which is only a warning, this announces
     /// that the box is shutting down.
     BatteryCritical,
-    VolumeLimit,
 }
 
 /// Why the box is powering off.

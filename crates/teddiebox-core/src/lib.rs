@@ -120,6 +120,8 @@ pub enum Action {
     /// Stop a download that is no longer needed.
     AbortFetch,
     PlayPrompt(Prompt),
+    /// Play a short sound about a press, over whatever is playing.
+    PlayCue(cue::Cue),
     PowerOff(PowerOffReason),
 }
 
@@ -223,8 +225,8 @@ impl Core {
         self.externally_in_use = in_use;
     }
 
-    /// Steps the volume for one ear, or plays the limit prompt if the volume
-    /// is already at its end.
+    /// Steps the volume for one ear and asks for its cue, or asks for the
+    /// limit cue if the volume is already at its end.
     ///
     /// Called from both the press and the release (depending on whether
     /// skipping is on), so both behave the same at the limit.
@@ -241,9 +243,13 @@ impl Core {
                     step,
                     db: db_for(output, step),
                 });
+                let _ = actions.push(Action::PlayCue(match ear {
+                    Ear::Larger => cue::Cue::VolumeUp,
+                    Ear::Smaller => cue::Cue::VolumeDown,
+                }));
             }
             None => {
-                let _ = actions.push(Action::PlayPrompt(Prompt::VolumeLimit));
+                let _ = actions.push(Action::PlayCue(cue::Cue::VolumeLimit));
             }
         }
     }
@@ -469,6 +475,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cue::Cue;
 
     const TAG: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
 
@@ -614,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn with_skipping_off_a_press_at_the_ceiling_prompts() {
+    fn with_skipping_off_a_press_at_the_ceiling_plays_the_limit_cue() {
         let mut c = core();
         c.note_ears_skip(false);
         for i in 0..10 {
@@ -622,7 +629,7 @@ mod tests {
             c.handle(Event::EarUp(Ear::Larger, i * 200 + 100), &Index);
         }
         let actions = c.handle(Event::EarDown(Ear::Larger, 5_000), &Index);
-        assert!(contains(&actions, Action::PlayPrompt(Prompt::VolumeLimit)));
+        assert!(contains(&actions, Action::PlayCue(Cue::VolumeLimit)));
     }
 
     /// The skip happens while the ear is still held. Waiting for the release
@@ -690,7 +697,65 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_at_the_volume_ceiling_prompts_instead_of_changing_volume() {
+    fn a_tap_on_the_larger_ear_beeps_up() {
+        let mut c = core();
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
+        assert!(
+            contains(&actions, Action::PlayCue(Cue::VolumeUp)),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_tap_on_the_smaller_ear_beeps_down() {
+        let mut c = core();
+        c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Smaller, 100), &Index);
+        assert!(
+            contains(&actions, Action::PlayCue(Cue::VolumeDown)),
+            "{actions:?}"
+        );
+    }
+
+    /// The limit cue sounds at the bottom of the scale as well as the top:
+    /// no separate sound for the bottom was observed on a stock box.
+    #[test]
+    fn a_tap_at_the_volume_floor_plays_the_limit_cue() {
+        let mut c = core();
+        for i in 0..10 {
+            c.handle(Event::EarDown(Ear::Smaller, i * 200), &Index);
+            c.handle(Event::EarUp(Ear::Smaller, i * 200 + 100), &Index);
+        }
+        c.handle(Event::EarDown(Ear::Smaller, 5_000), &Index);
+        let actions = c.handle(Event::EarUp(Ear::Smaller, 5_100), &Index);
+        assert!(
+            contains(&actions, Action::PlayCue(Cue::VolumeLimit)),
+            "{actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::SetVolume { .. })),
+            "{actions:?}"
+        );
+    }
+
+    /// A hold is a skip; its sound comes from playback, which knows whether
+    /// the skip happened. The reducer asks for no volume cue.
+    #[test]
+    fn a_hold_asks_for_no_volume_cue() {
+        let mut c = core();
+        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+        let actions = c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::PlayCue(_))),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_tap_at_the_volume_ceiling_plays_the_limit_cue_instead_of_changing_volume() {
         let mut c = core();
         for i in 0..10 {
             c.handle(Event::EarDown(Ear::Larger, i * 200), &Index);
@@ -698,7 +763,7 @@ mod tests {
         }
         c.handle(Event::EarDown(Ear::Larger, 5_000), &Index);
         let actions = c.handle(Event::EarUp(Ear::Larger, 5_100), &Index);
-        assert!(contains(&actions, Action::PlayPrompt(Prompt::VolumeLimit)));
+        assert!(contains(&actions, Action::PlayCue(Cue::VolumeLimit)));
     }
 
     /// The larger ear is on the box's right, and right goes forward, like a
