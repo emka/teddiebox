@@ -33,38 +33,6 @@ pub enum CardSays {
     HoldsAll,
 }
 
-impl CardSays {
-    /// What [`CardSays::as_offset`] returns for "there is nothing to ask the
-    /// server for".
-    ///
-    /// A special value rather than a separate flag: `u32::MAX` can never be a
-    /// real offset.
-    pub const NOTHING_TO_FETCH: u32 = u32::MAX;
-
-    /// The answer as one number, for a transport that can carry only one.
-    ///
-    /// The two tasks pass the answer through an atomic.
-    pub const fn as_offset(self) -> u32 {
-        match self {
-            CardSays::Nothing => 0,
-            CardSays::Holds(from) => from,
-            CardSays::HoldsAll => Self::NOTHING_TO_FETCH,
-        }
-    }
-
-    /// The number read back.
-    ///
-    /// `Nothing` and `Holds(0)` are both `0`, because both mean "download from
-    /// the beginning" and [`Handshake::card_answered`] treats them the same.
-    pub const fn from_offset(offset: u32) -> Self {
-        match offset {
-            Self::NOTHING_TO_FETCH => CardSays::HoldsAll,
-            0 => CardSays::Nothing,
-            from => CardSays::Holds(from),
-        }
-    }
-}
-
 /// What the caller should do about the conversation now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -311,47 +279,5 @@ mod tests {
             );
         }
         assert!(now >= u64::from(DEADLINE_MS), "gave up early, at {now} ms");
-    }
-
-    /// Whatever the card said must mean the same after passing through the
-    /// atomic.
-    #[test]
-    fn every_answer_survives_the_trip_between_the_two_tasks() {
-        for says in [
-            CardSays::Nothing,
-            CardSays::Holds(1),
-            CardSays::Holds(4_194_304),
-            CardSays::HoldsAll,
-        ] {
-            let there_and_back = CardSays::from_offset(says.as_offset());
-            let mut direct = Handshake::new();
-            direct.requested(0);
-            let mut round_tripped = Handshake::new();
-            round_tripped.requested(0);
-
-            assert_eq!(
-                direct.card_answered(says),
-                round_tripped.card_answered(there_and_back),
-                "{says:?} arrived as {there_and_back:?} and meant something else",
-            );
-        }
-    }
-
-    /// Mixing these up would either resume after four gigabytes or play a
-    /// partial file.
-    #[test]
-    fn a_full_card_is_not_confusable_with_an_offset() {
-        assert_eq!(
-            CardSays::from_offset(CardSays::HoldsAll.as_offset()),
-            CardSays::HoldsAll
-        );
-        assert_ne!(
-            CardSays::Holds(1).as_offset(),
-            CardSays::HoldsAll.as_offset()
-        );
-        assert_ne!(
-            CardSays::Nothing.as_offset(),
-            CardSays::HoldsAll.as_offset()
-        );
     }
 }
