@@ -1506,16 +1506,18 @@ const OUTPUT_LINGER: Duration = Duration::from_secs(5);
 const OUTPUT_UP_WAIT: Duration = Duration::from_secs(1);
 
 /// Plays a cue while nothing else holds the output, powering it first.
+///
+/// Returns whether it played.
 async fn play_idle_cue(
     cue: Cue,
     i2s_tx: &mut Option<esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>>,
     wav_buffer: &mut Option<esp_hal::dma::DmaTxStreamBuf>,
-) {
+) -> bool {
     // Checked before taking either: taking both and then matching would drop
     // one if the other was missing.
     if i2s_tx.is_none() || wav_buffer.is_none() {
         esp_println::println!("teddiebox: cue {cue:?} — the audio hardware is claimed");
-        return;
+        return false;
     }
     if !i2c_bus::OUTPUT_IS_UP.load(Ordering::Relaxed) {
         let asked = Instant::now();
@@ -1523,7 +1525,7 @@ async fn play_idle_cue(
         while !i2c_bus::OUTPUT_IS_UP.load(Ordering::Relaxed) {
             if asked.elapsed() >= OUTPUT_UP_WAIT {
                 esp_println::println!("teddiebox: cue {cue:?} — the output did not come up");
-                return;
+                return false;
             }
             Timer::after(Duration::from_millis(5)).await;
         }
@@ -1533,13 +1535,17 @@ async fn play_idle_cue(
         );
     }
     let (Some(tx), Some(buffer)) = (i2s_tx.take(), wav_buffer.take()) else {
-        return;
+        return false;
     };
     let (result, tx, buffer) = audio::play_cue(tx, buffer, cue).await;
     *i2s_tx = Some(tx);
     *wav_buffer = Some(buffer);
-    if let Err(reason) = result {
-        esp_println::println!("teddiebox: cue {cue:?} failed — {reason}");
+    match result {
+        Ok(()) => true,
+        Err(reason) => {
+            esp_println::println!("teddiebox: cue {cue:?} failed — {reason}");
+            false
+        }
     }
 }
 
@@ -1766,8 +1772,12 @@ async fn media(
         let request = REQUEST.swap(REQUEST_NONE, Ordering::Relaxed);
         if request == REQUEST_NONE {
             if let Some(cue) = audio::take_cue() {
-                play_idle_cue(cue, &mut i2s_tx, &mut wav_buffer).await;
-                quiet_since = Some(Instant::now());
+                // Only a cue that played leaves the output up to be powered
+                // down later; one that could not play (the console tone holds
+                // the hardware) must not power that tone off.
+                if play_idle_cue(cue, &mut i2s_tx, &mut wav_buffer).await {
+                    quiet_since = Some(Instant::now());
+                }
                 continue;
             }
             if quiet_since.is_some_and(|since| since.elapsed() >= OUTPUT_LINGER)
@@ -1827,6 +1837,9 @@ async fn media(
             }
 
             REQUEST_TONE => {
+                // The tone plays until a restart, so nothing may power its
+                // output down.
+                quiet_since = None;
                 let (Some(tx), Some(buffer)) = (i2s_tx.take(), tone_buffer.take()) else {
                     esp_println::println!("teddiebox: I2S is already in use");
                     continue;
