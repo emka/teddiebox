@@ -2107,8 +2107,6 @@ async fn fetch_story(
     uid.reverse();
     let path = teddiebox_download::content_path(uid);
 
-    critical_section::with(|cs| *DOWNLOAD_PIPE.borrow_ref_mut(cs) = Pipe::new());
-
     // Only the card knows what is already downloaded, and only the media task
     // may read it, so the request waits for its answer. A resume asks only for
     // the rest, instead of downloading the whole file again.
@@ -2120,7 +2118,13 @@ async fn fetch_story(
     let mut step = handshake.requested(Instant::now().as_millis());
     let settled = loop {
         match step {
-            Step::AskCard => transfer(|t| t.ask(path)),
+            // The pipe is emptied only once the ask is accepted: until then
+            // it may still hold the end of the last download.
+            Step::AskCard => critical_section::with(|cs| {
+                if TRANSFER.borrow_ref_mut(cs).ask(path) {
+                    *DOWNLOAD_PIPE.borrow_ref_mut(cs) = Pipe::new();
+                }
+            }),
             Step::Wait => {}
             settled => break settled,
         }

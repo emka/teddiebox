@@ -123,6 +123,10 @@ pub struct Transfer {
     /// pipe without reaching the card, so the card can never catch up with
     /// what was sent.
     broken: bool,
+    /// The figure the next request is for.
+    requested: u64,
+    /// The figure whose download this is, from the ask that started it.
+    figure: u64,
     outcomes: Outcomes,
 }
 
@@ -154,25 +158,38 @@ impl Transfer {
             sent: 0,
             aborted: false,
             broken: false,
+            requested: 0,
+            figure: 0,
             outcomes: Outcomes::new(),
         }
     }
 
     // The producer's side.
 
-    /// Names the figure that later outcomes are about.
+    /// Names the figure the next request is for.
     ///
     /// Call it before anything can end the fetch, including a failure to
-    /// connect, so every outcome carries the right figure.
+    /// connect, so that failure is credited to it. A download still being
+    /// written keeps its own figure; the new one takes this figure only when
+    /// its ask is accepted.
     pub fn start(&mut self, ruid: u64) {
-        self.outcomes.start(ruid);
+        self.requested = ruid;
     }
 
-    /// Asks the card's owner what it holds of `path`.
+    /// Asks the card's owner what it holds of `path`, and returns whether it
+    /// did.
+    ///
+    /// Refused while the last download is still being written to the card:
+    /// the new one would reuse its pipe and its open file. The producer asks
+    /// again until the card's owner has finished, or gives up.
     ///
     /// Asking again while still waiting is harmless: nothing has been sent
     /// before the card answers.
-    pub fn ask(&mut self, path: ContentPath) {
+    pub fn ask(&mut self, path: ContentPath) -> bool {
+        if matches!(self.phase, Phase::Running | Phase::Ended) {
+            return false;
+        }
+        self.figure = self.requested;
         self.path = path;
         self.sent = 0;
         self.head = Head {
@@ -181,6 +198,7 @@ impl Transfer {
             etag: None,
         };
         self.phase = Phase::Asking;
+        true
     }
 
     /// The card's answer, once its owner has given one.
@@ -190,14 +208,18 @@ impl Transfer {
 
     /// The card holds the whole file, so there is nothing to fetch.
     pub fn holds_all(&mut self) {
-        self.outcomes.report(Outcome::Completed);
+        self.outcomes.report(Outcome::Completed, self.figure);
         self.phase = Phase::Idle;
     }
 
-    /// The card did not answer in time. What is cached is left alone.
+    /// The card did not answer in time. What is cached is left alone, and so
+    /// is a previous download still being written.
     pub fn gave_up(&mut self) {
-        self.outcomes.report_if_silent(Outcome::Unreachable);
-        self.phase = Phase::Idle;
+        self.outcomes
+            .report_if_silent(Outcome::Unreachable, self.requested);
+        if self.phase == Phase::Asking {
+            self.phase = Phase::Idle;
+        }
     }
 
     /// The request is about to be sent. A lift from before it no longer
@@ -237,7 +259,7 @@ impl Transfer {
     pub fn ended(&mut self, failure: Option<Outcome>) {
         self.phase = Phase::Ended;
         if let Some(why) = failure {
-            self.outcomes.report(why);
+            self.outcomes.report(why, self.figure);
         }
     }
 
@@ -247,7 +269,7 @@ impl Transfer {
     /// reported, since otherwise that download reports for itself. Returns
     /// whether it recorded anything.
     pub fn could_not_connect(&mut self, why: Outcome) -> bool {
-        self.phase == Phase::Idle && self.outcomes.report_if_silent(why)
+        self.phase == Phase::Idle && self.outcomes.report_if_silent(why, self.requested)
     }
 
     // The card owner's side.
@@ -316,7 +338,7 @@ impl Transfer {
     /// but "reached and has nothing" would be wrong, and `Unreachable` makes
     /// the box try again next time.
     pub fn open_failed(&mut self) {
-        self.outcomes.report(Outcome::Unreachable);
+        self.outcomes.report(Outcome::Unreachable, self.figure);
         self.aborted = true;
         self.phase = Phase::Idle;
     }
@@ -326,7 +348,7 @@ impl Transfer {
     /// pipe is dropped rather than written, and the file is finished once the
     /// producer has ended.
     pub fn write_failed(&mut self) {
-        self.outcomes.report(Outcome::Unreachable);
+        self.outcomes.report(Outcome::Unreachable, self.figure);
         self.aborted = true;
         self.broken = true;
     }
@@ -349,9 +371,10 @@ impl Transfer {
         }
         let whole = is_whole(self.head.at, written, self.head.total);
         if whole {
-            self.outcomes.report(Outcome::Completed);
+            self.outcomes.report(Outcome::Completed, self.figure);
         } else if !self.aborted {
-            self.outcomes.report_if_silent(Outcome::Unreachable);
+            self.outcomes
+                .report_if_silent(Outcome::Unreachable, self.figure);
         }
         self.phase = Phase::Idle;
         self.aborted = false;
@@ -380,8 +403,13 @@ mod tests {
     use super::*;
 
     const FIGURE: u64 = 0xE0_04_03_50_1A_2B_3C_4D;
+    const OTHER_FIGURE: u64 = 0xE0_04_03_50_99_88_77_66;
     const PATH: ContentPath = ContentPath {
         directory: 0x4D3C_2B1A,
+        file: 0x5003_04E0,
+    };
+    const OTHER_PATH: ContentPath = ContentPath {
+        directory: 0x6677_8899,
         file: 0x5003_04E0,
     };
 
@@ -837,6 +865,8 @@ mod tests {
     fn a_new_ask_forgets_the_bytes_the_last_transfer_sent() {
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(512);
+        transfer.ended(None);
+        transfer.finish(512);
         transfer.ask(PATH);
         transfer.planned(nothing_cached());
         transfer.ended(Some(Outcome::Unreachable));
@@ -867,5 +897,46 @@ mod tests {
         transfer.sent(1_024);
         transfer.write_failed();
         assert_eq!(transfer.next(true), Work::Drop);
+    }
+
+    /// A transfer whose producer has stopped while its last bytes are still
+    /// in the pipe.
+    fn still_being_written() -> Transfer {
+        let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
+        transfer.sent(4_000);
+        transfer.ended(None);
+        transfer
+    }
+
+    #[test]
+    fn a_new_fetch_waits_while_the_last_one_is_still_being_written() {
+        let mut transfer = still_being_written();
+        transfer.ask(OTHER_PATH);
+        assert_eq!(transfer.next(true), Work::Drain);
+    }
+
+    #[test]
+    fn giving_up_on_a_new_fetch_leaves_the_last_one_being_written() {
+        let mut transfer = still_being_written();
+        transfer.ask(OTHER_PATH);
+        transfer.gave_up();
+        assert_eq!(transfer.next(true), Work::Drain);
+    }
+
+    #[test]
+    fn a_new_fetch_is_asked_once_the_last_one_has_finished() {
+        let mut transfer = still_being_written();
+        transfer.finish(4_000);
+        assert!(transfer.ask(OTHER_PATH));
+        assert_eq!(transfer.next(false), Work::Plan(OTHER_PATH));
+    }
+
+    #[test]
+    fn the_last_download_is_credited_to_its_own_figure_when_a_new_one_is_waiting() {
+        let mut transfer = still_being_written();
+        transfer.start(OTHER_FIGURE);
+        transfer.ask(OTHER_PATH);
+        transfer.finish(4_000);
+        assert_eq!(transfer.take_outcome(), Some((Outcome::Completed, FIGURE)));
     }
 }
