@@ -37,14 +37,16 @@ impl Outcomes {
         self.pending = Some((outcome, ruid));
     }
 
-    /// Records how the download for `ruid` ended, unless something already
-    /// has.
+    /// Records how the download for `ruid` ended, unless an unread report
+    /// about the same figure is already waiting.
     ///
     /// The network task knows *why* a fetch failed; the media task only knows
     /// the file stopped short. Deferring keeps the precise reason, which the
-    /// box announces differently. Returns whether it recorded anything.
+    /// box announces differently. A report about another figure is from an
+    /// earlier fetch, so it gives way like any other. Returns whether it
+    /// recorded anything.
     pub fn report_if_silent(&mut self, outcome: Outcome, ruid: u64) -> bool {
-        if self.pending.is_some() {
+        if matches!(self.pending, Some((_, waiting)) if waiting == ruid) {
             return false;
         }
         self.report(outcome, ruid);
@@ -99,5 +101,14 @@ mod tests {
         outcomes.report(Outcome::Completed, FIGURE);
         outcomes.take();
         assert_eq!(outcomes.take(), None);
+    }
+
+    #[test]
+    fn a_report_if_silent_replaces_an_unread_report_about_another_figure() {
+        const OTHER: u64 = 0xE0_04_03_50_99_88_77_66;
+        let mut outcomes = Outcomes::new();
+        outcomes.report(Outcome::NoContent, OTHER);
+        assert!(outcomes.report_if_silent(Outcome::Unreachable, FIGURE));
+        assert_eq!(outcomes.take(), Some((Outcome::Unreachable, FIGURE)));
     }
 }

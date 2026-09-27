@@ -939,4 +939,22 @@ mod tests {
         transfer.finish(4_000);
         assert_eq!(transfer.take_outcome(), Some((Outcome::Completed, FIGURE)));
     }
+
+    #[test]
+    fn an_unread_outcome_for_another_figure_does_not_silence_a_new_fetch() {
+        let mut transfer = Transfer::new();
+        transfer.start(FIGURE);
+        transfer.ask(PATH);
+        transfer.planned(nothing_cached());
+        transfer.ended(Some(Outcome::NoContent));
+        assert_eq!(transfer.next(false), Work::Discard);
+
+        transfer.start(OTHER_FIGURE);
+        transfer.ask(OTHER_PATH);
+        transfer.gave_up();
+        assert_eq!(
+            transfer.take_outcome(),
+            Some((Outcome::Unreachable, OTHER_FIGURE))
+        );
+    }
 }
