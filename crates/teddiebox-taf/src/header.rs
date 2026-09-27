@@ -41,84 +41,92 @@ impl TonieHeader {
         let mut pos = 0usize;
         while pos < body.len() {
             let key = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
-            let field = key >> 3;
-            let wire = key & 0x07;
-
-            match (field, wire) {
-                // data_length
-                (2, 0) => {
-                    let v = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
-                    header.data_length = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
-                }
-                // audio_id
-                (3, 0) => {
-                    let v = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
-                    header.audio_id = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
-                }
-                // chapter_pages, unpacked
-                (4, 0) => {
-                    let v = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
-                    let v = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
-                    header
-                        .chapter_pages
-                        .push(v)
-                        .map_err(|_| TafError::TooManyChapters)?;
-                }
-                // chapter_pages, packed
-                (4, 2) => {
-                    let len =
-                        read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)? as usize;
-                    let end = pos.checked_add(len).ok_or(TafError::MalformedHeader)?;
-                    if end > body.len() {
-                        return Err(TafError::MalformedHeader);
-                    }
-                    while pos < end {
-                        let v = read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
-                        let v = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
-                        header
-                            .chapter_pages
-                            .push(v)
-                            .map_err(|_| TafError::TooManyChapters)?;
-                    }
-                    // `read_varint` does not stop at `end`, so a varint that
-                    // runs past the packed field is only caught here.
-                    if pos != end {
-                        return Err(TafError::MalformedHeader);
-                    }
-                }
-                // Unknown field: skip by wire type.
-                (_, 0) => {
-                    read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)?;
-                }
-                (_, 2) => {
-                    let len =
-                        read_varint(body, &mut pos).ok_or(TafError::MalformedHeader)? as usize;
-                    pos = pos.checked_add(len).ok_or(TafError::MalformedHeader)?;
-                    if pos > body.len() {
-                        return Err(TafError::MalformedHeader);
-                    }
-                }
-                // Fixed-width fields need a bounds check too. Otherwise
-                // stepping past the end would just end the loop and accept a
-                // truncated message.
-                (_, 5) => {
-                    pos = pos.checked_add(4).ok_or(TafError::MalformedHeader)?;
-                    if pos > body.len() {
-                        return Err(TafError::MalformedHeader);
-                    }
-                }
-                (_, 1) => {
-                    pos = pos.checked_add(8).ok_or(TafError::MalformedHeader)?;
-                    if pos > body.len() {
-                        return Err(TafError::MalformedHeader);
-                    }
-                }
-                _ => return Err(TafError::MalformedHeader),
-            }
+            apply_field(&mut header, key >> 3, key & 0x07, body, &mut pos)?;
         }
 
         Ok(header)
     }
+}
+
+/// Decodes one protobuf field into `header`, or skips it by wire type if the
+/// field is unknown — a newer TAF with an extra field still reads.
+fn apply_field(
+    header: &mut TonieHeader,
+    field: u64,
+    wire: u64,
+    body: &[u8],
+    pos: &mut usize,
+) -> Result<(), TafError> {
+    match (field, wire) {
+        // data_length
+        (2, 0) => {
+            let v = read_varint(body, pos).ok_or(TafError::MalformedHeader)?;
+            header.data_length = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
+        }
+        // audio_id
+        (3, 0) => {
+            let v = read_varint(body, pos).ok_or(TafError::MalformedHeader)?;
+            header.audio_id = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
+        }
+        // chapter_pages, unpacked
+        (4, 0) => {
+            let v = read_varint(body, pos).ok_or(TafError::MalformedHeader)?;
+            let v = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
+            header
+                .chapter_pages
+                .push(v)
+                .map_err(|_| TafError::TooManyChapters)?;
+        }
+        // chapter_pages, packed
+        (4, 2) => {
+            let len = read_varint(body, pos).ok_or(TafError::MalformedHeader)? as usize;
+            let end = pos.checked_add(len).ok_or(TafError::MalformedHeader)?;
+            if end > body.len() {
+                return Err(TafError::MalformedHeader);
+            }
+            while *pos < end {
+                let v = read_varint(body, pos).ok_or(TafError::MalformedHeader)?;
+                let v = u32::try_from(v).map_err(|_| TafError::MalformedHeader)?;
+                header
+                    .chapter_pages
+                    .push(v)
+                    .map_err(|_| TafError::TooManyChapters)?;
+            }
+            // `read_varint` does not stop at `end`, so a varint that runs
+            // past the packed field is only caught here.
+            if *pos != end {
+                return Err(TafError::MalformedHeader);
+            }
+        }
+        // Unknown field: skip by wire type.
+        (_, 0) => {
+            read_varint(body, pos).ok_or(TafError::MalformedHeader)?;
+        }
+        (_, 2) => {
+            let len = read_varint(body, pos).ok_or(TafError::MalformedHeader)? as usize;
+            *pos = pos.checked_add(len).ok_or(TafError::MalformedHeader)?;
+            if *pos > body.len() {
+                return Err(TafError::MalformedHeader);
+            }
+        }
+        // Fixed-width fields need a bounds check too. Otherwise stepping
+        // past the end would just end the loop and accept a truncated
+        // message.
+        (_, 5) => {
+            *pos = pos.checked_add(4).ok_or(TafError::MalformedHeader)?;
+            if *pos > body.len() {
+                return Err(TafError::MalformedHeader);
+            }
+        }
+        (_, 1) => {
+            *pos = pos.checked_add(8).ok_or(TafError::MalformedHeader)?;
+            if *pos > body.len() {
+                return Err(TafError::MalformedHeader);
+            }
+        }
+        _ => return Err(TafError::MalformedHeader),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
