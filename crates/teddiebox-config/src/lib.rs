@@ -377,48 +377,16 @@ impl Config {
             let Some((key, value)) = line.split_once('=') else {
                 return Err(ConfigError::MalformedLine);
             };
-            let key = key.trim();
-            let value = value.trim();
-
-            match key {
-                "ssid" => {
-                    let value = strip_comment(value);
-                    ssid = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
-                }
-                // No comment stripping: see the module docs.
-                "password" => {
-                    password = String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?;
-                }
-                "server" => {
-                    let value = strip_comment(value);
-                    if !is_host_port(value) {
-                        return Err(ConfigError::MalformedValue);
-                    }
-                    server = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
-                }
-                "ears_skip" => {
-                    ears_skip = parse_bool(strip_comment(value))?;
-                }
-                // No comment stripping, like `password`.
-                "setup_password" => {
-                    if !WPA2_PASSPHRASE.contains(&value.len()) {
-                        return Err(ConfigError::MalformedValue);
-                    }
-                    setup_password =
-                        Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
-                }
-                "update_url" => {
-                    let value = strip_comment(value);
-                    if value.is_empty() {
-                        return Err(ConfigError::EmptyUpdateUrl);
-                    }
-                    update_url =
-                        Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
-                }
-                // Ignore unknown keys, so a newer config file works with older
-                // firmware.
-                _ => {}
-            }
+            apply_line(
+                key.trim(),
+                value.trim(),
+                &mut ssid,
+                &mut password,
+                &mut server,
+                &mut ears_skip,
+                &mut update_url,
+                &mut setup_password,
+            )?;
         }
 
         // An empty key counts as missing. An empty password is allowed, for
@@ -436,6 +404,59 @@ impl Config {
             setup_password,
         })
     }
+}
+
+/// Applies one `key=value` line to the fields being built.
+///
+/// Unknown keys are ignored, so a newer config file works with older
+/// firmware.
+#[allow(clippy::too_many_arguments)]
+fn apply_line(
+    key: &str,
+    value: &str,
+    ssid: &mut Option<String<MAX_SSID>>,
+    password: &mut String<MAX_PASSWORD>,
+    server: &mut Option<String<MAX_SERVER>>,
+    ears_skip: &mut bool,
+    update_url: &mut Option<String<MAX_UPDATE_URL>>,
+    setup_password: &mut Option<String<MAX_PASSWORD>>,
+) -> Result<(), ConfigError> {
+    match key {
+        "ssid" => {
+            let value = strip_comment(value);
+            *ssid = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
+        }
+        // No comment stripping: see the module docs.
+        "password" => {
+            *password = String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?;
+        }
+        "server" => {
+            let value = strip_comment(value);
+            if !is_host_port(value) {
+                return Err(ConfigError::MalformedValue);
+            }
+            *server = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
+        }
+        "ears_skip" => {
+            *ears_skip = parse_bool(strip_comment(value))?;
+        }
+        // No comment stripping, like `password`.
+        "setup_password" => {
+            if !WPA2_PASSPHRASE.contains(&value.len()) {
+                return Err(ConfigError::MalformedValue);
+            }
+            *setup_password = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
+        }
+        "update_url" => {
+            let value = strip_comment(value);
+            if value.is_empty() {
+                return Err(ConfigError::EmptyUpdateUrl);
+            }
+            *update_url = Some(String::try_from(value).map_err(|_| ConfigError::ValueTooLong)?);
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
