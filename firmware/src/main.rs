@@ -1873,6 +1873,91 @@ async fn media(
 /// this function, not a state it returns.
 ///
 /// Returns why the connection failed, or `None` if it worked.
+/// Serves `NET_GET`/`NET_PRIME`/`NET_TLS`/`NET_STATUS` requests while the
+/// stack is up, until told to stop.
+///
+/// Runs beside the caller's `link.run()`: dropping the runner between
+/// requests would stall the connection. Needs the stack, which only exists
+/// between `acquire` and `release`, so it cannot live in `net.rs` beside the
+/// requests it serves.
+async fn serve_while_connected(
+    stack: &embassy_net::Stack<'_>,
+    tls: Option<&tls::Client>,
+    config: &Config,
+    stay_up: bool,
+) {
+    loop {
+        match NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
+            NET_DOWN => break,
+            NET_STATUS => report_address(stack),
+            NET_GET => {
+                match tls {
+                    None => {
+                        esp_println::println!("teddiebox: tls context unavailable");
+                        // Answer a waiting probe, or the figure on the plate
+                        // would stay silent.
+                        if let Some(FetchRequest {
+                            ruid, probe: true, ..
+                        }) = critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs))
+                        {
+                            probe_ended(ruid);
+                        }
+                    }
+                    Some(tls) => match critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs)) {
+                        None => esp_println::println!(
+                            "teddiebox: get has no request queued — nothing to fetch"
+                        ),
+                        Some(FetchRequest {
+                            ruid,
+                            token,
+                            probe: true,
+                        }) => ask_length(tls, stack, &config.server, ruid, token.as_ref()).await,
+                        Some(FetchRequest {
+                            ruid,
+                            token,
+                            probe: false,
+                        }) => fetch_story(tls, stack, &config.server, ruid, token.as_ref()).await,
+                    },
+                }
+                // A connection made for one story ends with it, after the
+                // whole fetch is done.
+                if !stay_up {
+                    break;
+                }
+            }
+
+            NET_PRIME => {
+                if let Some(tls) = tls {
+                    let started = Instant::now();
+                    match tls::prime(tls, stack, &config.server).await {
+                        Ok(()) => esp_println::println!(
+                            "teddiebox: net primed in {} ms",
+                            started.elapsed().as_millis()
+                        ),
+                        Err(e) => esp_println::println!("teddiebox: net could not prime — {e:?}"),
+                    }
+                }
+                // A figure placed while this ran uses this connection.
+                if !stay_up && NET_REQUEST.load(Ordering::Relaxed) != NET_GET {
+                    break;
+                }
+            }
+
+            NET_TLS => match tls {
+                None => esp_println::println!(
+                    "teddiebox: tls context unavailable — mbedtls would not start"
+                ),
+                Some(tls) => match tls::probe(tls, stack, &config.server).await {
+                    Ok(()) => esp_println::println!("teddiebox: tls ok"),
+                    Err(e) => esp_println::println!("teddiebox: tls failed — {e:?}"),
+                },
+            },
+            _ => {}
+        }
+        Timer::after(Duration::from_millis(100)).await;
+    }
+}
+
 async fn bring_up(
     radio: &mut net::Radio<'_>,
     tls: Option<&tls::Client>,
@@ -1996,90 +2081,12 @@ async fn bring_up(
 
     // Connected. Stay here, polling the stack, until told to stop: dropping
     // the runner between requests would stall the connection.
-    let until_down = async {
-        loop {
-            match NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
-                NET_DOWN => break,
-                NET_STATUS => report_address(&stack),
-                // Runs here because it needs the stack, which only exists
-                // between `acquire` and `release`. Awaited inline, so the
-                // runner beside it keeps being polled.
-                NET_GET => {
-                    match tls {
-                        None => {
-                            esp_println::println!("teddiebox: tls context unavailable");
-                            // Answer a waiting probe, or the figure on the
-                            // plate would stay silent.
-                            if let Some(FetchRequest {
-                                ruid, probe: true, ..
-                            }) = critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs))
-                            {
-                                probe_ended(ruid);
-                            }
-                        }
-                        Some(tls) => match critical_section::with(|cs| {
-                            *FETCH_REQUEST.borrow_ref(cs)
-                        }) {
-                            None => esp_println::println!(
-                                "teddiebox: get has no request queued — nothing to fetch"
-                            ),
-                            Some(FetchRequest {
-                                ruid,
-                                token,
-                                probe: true,
-                            }) => {
-                                ask_length(tls, &stack, &config.server, ruid, token.as_ref()).await
-                            }
-                            Some(FetchRequest {
-                                ruid,
-                                token,
-                                probe: false,
-                            }) => {
-                                fetch_story(tls, &stack, &config.server, ruid, token.as_ref()).await
-                            }
-                        },
-                    }
-                    // A connection made for one story ends with it, after the
-                    // whole fetch is done.
-                    if !stay_up {
-                        break;
-                    }
-                }
-
-                NET_PRIME => {
-                    if let Some(tls) = tls {
-                        let started = Instant::now();
-                        match tls::prime(tls, &stack, &config.server).await {
-                            Ok(()) => esp_println::println!(
-                                "teddiebox: net primed in {} ms",
-                                started.elapsed().as_millis()
-                            ),
-                            Err(e) => {
-                                esp_println::println!("teddiebox: net could not prime — {e:?}")
-                            }
-                        }
-                    }
-                    // A figure placed while this ran uses this connection.
-                    if !stay_up && NET_REQUEST.load(Ordering::Relaxed) != NET_GET {
-                        break;
-                    }
-                }
-
-                NET_TLS => match tls {
-                    None => esp_println::println!(
-                        "teddiebox: tls context unavailable — mbedtls would not start"
-                    ),
-                    Some(tls) => match tls::probe(tls, &stack, &config.server).await {
-                        Ok(()) => esp_println::println!("teddiebox: tls ok"),
-                        Err(e) => esp_println::println!("teddiebox: tls failed — {e:?}"),
-                    },
-                },
-                _ => {}
-            }
-            Timer::after(Duration::from_millis(100)).await;
-        }
-    };
-    match select(link.run(), until_down).await {
+    match select(
+        link.run(),
+        serve_while_connected(&stack, tls, &config, stay_up),
+    )
+    .await
+    {
         Either::First(_) => unreachable!("the runner never returns"),
         Either::Second(()) => {}
     }
