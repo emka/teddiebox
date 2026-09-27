@@ -131,11 +131,32 @@ impl BatteryModel {
             pack_mv
         };
 
+        let new = self.classify(mv);
+        if new == self.candidate {
+            self.agreed = self.agreed.saturating_add(1);
+        } else {
+            self.candidate = new;
+            self.agreed = 1;
+        }
+
+        self.track_cutoff(mv);
+
+        if self.agreed < self.config.readings_to_agree || new == self.level {
+            return None;
+        }
+
+        self.level = new;
+        Some(new)
+    }
+
+    /// The level a load-compensated reading falls into.
+    ///
+    /// Rising to a higher level needs the threshold plus the hysteresis
+    /// margin. Falling happens at the threshold, because reporting too
+    /// little charge is the safer mistake.
+    fn classify(&self, mv: u16) -> BatteryLevel {
         let hyst = self.config.hysteresis_mv;
-        // Rising to a higher level needs the threshold plus the hysteresis
-        // margin. Falling happens at the threshold, because reporting too
-        // little charge is the safer mistake.
-        let new = if mv >= self.config.full_mv.saturating_add(hyst)
+        if mv >= self.config.full_mv.saturating_add(hyst)
             || (self.level >= BatteryLevel::Full && mv >= self.config.full_mv)
         {
             BatteryLevel::Full
@@ -149,18 +170,13 @@ impl BatteryModel {
             BatteryLevel::Low
         } else {
             BatteryLevel::Critical
-        };
-
-        if new == self.candidate {
-            self.agreed = self.agreed.saturating_add(1);
-        } else {
-            self.candidate = new;
-            self.agreed = 1;
         }
+    }
 
-        // The cutoff is a separate threshold, below the start of Critical. It
-        // uses the load-compensated reading and its own agreement count (see
-        // `below_cutoff`). Once set, it is never cleared.
+    /// The cutoff is a separate threshold, below the start of Critical. It
+    /// uses the load-compensated reading and its own agreement count (see
+    /// `below_cutoff`). Once set, `shut_down` is never cleared.
+    fn track_cutoff(&mut self, mv: u16) {
         if mv < self.config.cutoff_mv {
             self.below_cutoff = self.below_cutoff.saturating_add(1);
             if self.below_cutoff >= self.config.readings_to_agree {
@@ -169,17 +185,6 @@ impl BatteryModel {
         } else {
             self.below_cutoff = 0;
         }
-
-        if self.agreed < self.config.readings_to_agree {
-            return None;
-        }
-
-        if new == self.level {
-            return None;
-        }
-
-        self.level = new;
-        Some(new)
     }
 }
 
