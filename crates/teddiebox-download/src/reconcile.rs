@@ -81,51 +81,61 @@ pub fn reconcile(decision: &Decision, begun: &Begun) -> Action {
             }
         }
         Some((from, requested_etag)) => {
-            if offset == from {
-                // A total shorter than the offset is impossible from a
-                // correct server. Refuse rather than resume past the end of
-                // the file.
-                if total < from {
-                    return Action::Refuse(Mismatch::ShorterThanWhatIsOnTheCard {
-                        total,
-                        on_card: from,
-                    });
-                }
+            reconcile_resume(from, requested_etag, offset, total, response_etag)
+        }
+    }
+}
 
-                // With `If-Range`, a `206` at our offset already means the
-                // etag matched. This check only catches a server that
-                // ignores `If-Range`, but it is cheap.
-                if let (Some(requested_etag), Some(response_etag)) = (requested_etag, response_etag)
-                {
-                    if requested_etag != response_etag {
-                        return Action::Restart {
-                            total,
-                            etag: Some(response_etag.clone()),
-                        };
-                    }
-                }
+/// Reconciles a `Resume { from, etag }` decision against what the server
+/// actually sent back.
+fn reconcile_resume(
+    from: u32,
+    requested_etag: &Option<ETag>,
+    offset: u32,
+    total: u32,
+    response_etag: &Option<ETag>,
+) -> Action {
+    if offset == from {
+        // A total shorter than the offset is impossible from a correct
+        // server. Refuse rather than resume past the end of the file.
+        if total < from {
+            return Action::Refuse(Mismatch::ShorterThanWhatIsOnTheCard {
+                total,
+                on_card: from,
+            });
+        }
 
-                // This includes `from == 0` answered at `offset == 0`: the
-                // normal state right after the sidecar was written, before
-                // any body byte arrived.
-                Action::Append {
-                    resume_from: from,
+        // With `If-Range`, a `206` at our offset already means the etag
+        // matched. This check only catches a server that ignores
+        // `If-Range`, but it is cheap.
+        if let (Some(requested_etag), Some(response_etag)) = (requested_etag, response_etag) {
+            if requested_etag != response_etag {
+                return Action::Restart {
                     total,
-                }
-            } else if offset == 0 {
-                // Here `from != 0`: the server ignored the range and sent
-                // the whole file, so start the file again.
-                Action::Restart {
-                    total,
-                    etag: response_etag.clone(),
-                }
-            } else {
-                Action::Refuse(Mismatch::WrongOffset {
-                    asked: from,
-                    got: offset,
-                })
+                    etag: Some(response_etag.clone()),
+                };
             }
         }
+
+        // This includes `from == 0` answered at `offset == 0`: the normal
+        // state right after the sidecar was written, before any body byte
+        // arrived.
+        Action::Append {
+            resume_from: from,
+            total,
+        }
+    } else if offset == 0 {
+        // Here `from != 0`: the server ignored the range and sent the
+        // whole file, so start the file again.
+        Action::Restart {
+            total,
+            etag: response_etag.clone(),
+        }
+    } else {
+        Action::Refuse(Mismatch::WrongOffset {
+            asked: from,
+            got: offset,
+        })
     }
 }
 
