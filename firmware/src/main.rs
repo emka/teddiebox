@@ -1288,6 +1288,99 @@ fn apply(reducer: &mut Core, card: &storage::Mounted, event: Event, token: Optio
     }
 }
 
+/// Everything that happened to the plate this pass: a lift or place, a
+/// finished download or probe, and a settled revalidation question — each
+/// matched to the figure it was about, so a stale result cannot land on a
+/// different one.
+fn gather_events(card: Option<&storage::Mounted>, placed: &mut Placed) -> [Option<Event>; 3] {
+    let mut events: [Option<Event>; 3] = [None, None, None];
+
+    // Checked first, because the card is about to become unwritable.
+    if FLUSH_PLACE.swap(false, Ordering::Relaxed) {
+        if let Some(card) = card {
+            flush_place(&CardIndex::new(card), "the box is stopping");
+        }
+    }
+
+    events[0] = take_plate_event(placed);
+
+    // A download ended in another task. Read every pass so an old result
+    // cannot later be matched to a different figure.
+    if let Some((outcome, outcome_ruid)) = transfer(Transfer::take_outcome) {
+        match placed.answering(outcome_ruid) {
+            // The figure it was for is still on the plate. (The reducer
+            // checks the identity again before acting.)
+            Answering::TheFigure(tag) => {
+                events[1] = Some(match outcome {
+                    Outcome::Completed => Event::ContentReady(tag),
+                    Outcome::Unreachable => Event::ContentMissing(tag, Unavailable::Unreachable),
+                    Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
+                    Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),
+                });
+            }
+            // A different figure is on the plate, for example after a
+            // console `get`. Not passed to the reducer.
+            Answering::AnotherFigure => esp_println::println!(
+                "teddiebox: plate ignoring a fetch outcome for {outcome_ruid:016X} — \
+                 not the figure on the plate"
+            ),
+            // Nobody is waiting; nothing to do.
+            Answering::NoFigure => {}
+        }
+    }
+
+    // The server has answered a question about a cached story. Read every
+    // pass and matched to the figure, like the fetch outcome. Each call is
+    // its own short critical section, with no printing inside: a console
+    // line at 115200 baud would keep interrupts off for milliseconds.
+    let mut settled = None;
+    if let Some((ruid, answer)) = take_answer() {
+        settled =
+            critical_section::with(|cs| REVALIDATION.borrow_ref_mut(cs).answered(ruid, answer));
+        if settled.is_none() {
+            // The question is already over: it timed out, or an earlier
+            // answer settled it. Acting on it could mark a story stale
+            // that is already playing, so it is only printed.
+            esp_println::println!("teddiebox: plate ignoring a late answer about {ruid:016X}");
+        }
+    }
+    if settled.is_none() {
+        settled = critical_section::with(|cs| {
+            REVALIDATION
+                .borrow_ref_mut(cs)
+                .polled(Instant::now().as_millis())
+        });
+        if let Some(teddiebox_download::Settled { ruid, .. }) = settled {
+            esp_println::println!(
+                "teddiebox: plate {ruid:016X} — no answer in {} s, playing what is here",
+                teddiebox_download::PATIENCE_MS / 1_000
+            );
+        }
+    }
+    if let Some(teddiebox_download::Settled {
+        ruid: probed_ruid,
+        answer,
+    }) = settled
+    {
+        match placed.answering(probed_ruid) {
+            Answering::TheFigure(tag) => {
+                // Remembered whatever the answer: a server that was just
+                // unreachable will likely stay so for the session, and
+                // asking again wastes the radio.
+                critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
+                events[2] = Some(Event::Revalidated(tag, freshness_of(answer, tag, card)));
+            }
+            Answering::AnotherFigure => esp_println::println!(
+                "teddiebox: plate ignoring an answer about {probed_ruid:016X} — \
+                 not the figure on the plate"
+            ),
+            Answering::NoFigure => {}
+        }
+    }
+
+    events
+}
+
 /// The core's only clock, fed at most once a second.
 ///
 /// Called from the top of the media loop and from the per-frame `attend`
@@ -1371,6 +1464,144 @@ async fn play_idle_cue(
     }
 }
 
+/// Plays a `taf`, `wav`, `t`, or figure-content request to completion.
+///
+/// Takes the hardware from `i2s_tx`/`wav_buffer` and gives it back before
+/// returning, whether playback finished, failed, or was refused because
+/// nothing was mounted or the hardware was already claimed — every path
+/// through here is one media-loop pass, so it never blocks the caller past
+/// that.
+#[allow(clippy::too_many_arguments)]
+async fn play_story(
+    card: Option<&storage::Mounted>,
+    request: u8,
+    i2s_tx: &mut Option<esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>>,
+    wav_buffer: &mut Option<esp_hal::dma::DmaTxStreamBuf>,
+    quiet_since: &mut Option<Instant>,
+    reducer: &mut Core,
+    placed: &mut Placed,
+    last_tick_fed: &mut u64,
+) {
+    let Some(card) = card else {
+        return;
+    };
+    // Checked before taking either: taking both and then matching
+    // would drop one if the other was missing.
+    if i2s_tx.is_none() || wav_buffer.is_none() {
+        esp_println::println!(
+            "teddiebox: the audio hardware is already claimed — rb to run another"
+        );
+        return;
+    }
+    let (Some(tx), Some(buffer)) = (i2s_tx.take(), wav_buffer.take()) else {
+        return;
+    };
+
+    // Clear any stop, skip or cue left over from before, or it would act
+    // on this playback.
+    audio::STOP.store(false, Ordering::Relaxed);
+    audio::SKIP.store(audio::SKIP_NONE, Ordering::Relaxed);
+    audio::CUE.store(audio::CUE_NONE, Ordering::Relaxed);
+    // The idle loop may have asked for a power-down in the moment before
+    // this request arrived; this undoes it. Harmless when the output is
+    // already up.
+    i2c_bus::request_output(i2c_bus::OUTPUT_UP);
+    *quiet_since = None;
+
+    // Set while feeding the DMA, so the download leaves the radio alone.
+    // Always cleared afterwards, even on failure, or the download would
+    // pause for ever.
+    PLAYING.store(true, Ordering::Relaxed);
+    if request == REQUEST_WAV {
+        if let Err(reason) = audio::play_first_wav(card, tx, buffer).await {
+            esp_println::println!("teddiebox: playback failed — {reason}");
+        }
+    } else {
+        let source = match request {
+            REQUEST_CONTENT => audio::Source::Content {
+                directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
+                file: CONTENT_FILE.load(Ordering::Relaxed),
+            },
+            REQUEST_CACHE => audio::Source::Cache {
+                directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
+                file: CONTENT_FILE.load(Ordering::Relaxed),
+            },
+            _ => audio::Source::First,
+        };
+        // Only a story with a known path has a position to keep. A
+        // console `taf` plays `Source::First`, and `CONTENT_DIRECTORY`
+        // then still names the previous story, so without this check its
+        // position would be overwritten.
+        let identified = matches!(request, REQUEST_CONTENT | REQUEST_CACHE);
+        let stock = request == REQUEST_CONTENT;
+        let dir = CONTENT_DIRECTORY.load(Ordering::Relaxed);
+        let file = CONTENT_FILE.load(Ordering::Relaxed);
+        let from = match critical_section::with(|cs| {
+            core::mem::replace(&mut *PLAY_FROM.borrow_ref_mut(cs), Position::Start)
+        }) {
+            // Cleared either way, so the next story does not start at
+            // this figure's position.
+            from if identified => from,
+            _ => Position::Start,
+        };
+        // Called on every frame, because a story is one pass of this loop
+        // and can last half an hour: lifting the figure, ear presses and
+        // the idle clock must still be handled.
+        let mut attend = || {
+            if let Some(event) = take_plate_event(placed) {
+                apply(reducer, card, event, placed.token());
+            }
+            apply_ear_events(reducer, card, placed.token());
+            feed_tick(reducer, card, placed.token(), last_tick_fed);
+
+            // Keeps the reducer's position current; it is what gets
+            // saved when the figure is lifted.
+            reducer.note_position(Position::Exact {
+                page: audio::PAGE.load(Ordering::Relaxed),
+            });
+        };
+        // The hardware is returned, so another story can play without a
+        // reboot.
+        let (outcome, tx, buffer) =
+            audio::play_taf(card, tx, buffer, source, from, &mut attend).await;
+        if let Err(reason) = outcome {
+            esp_println::println!("teddiebox: playback failed — {reason}");
+        }
+        if matches!(outcome, Ok(audio::Finish::Ended)) {
+            if identified {
+                // A finished story starts again from the beginning next
+                // time. Written as page 0 rather than deleted: `storage`
+                // cannot delete, and page 0 is the header, so it means
+                // the same as no file.
+                let mut out = [0u8; MAX_POSITION];
+                let len = position::render(0, &mut out);
+                let _ = card.write_position(stock, dir, file, &out[..len]);
+                // Also drop the RAM copy, which would otherwise win over
+                // the card.
+                forget_place(((dir as u64) << 32) | file as u64);
+            }
+            // The reducer cannot learn this any other way. Sent for
+            // every story that ends, including console playback, so the
+            // reducer returns to idle.
+            apply(reducer, card, Event::PlaybackEnded, placed.token());
+        }
+        // Cleared only by the announcement's own playback, but whatever
+        // the outcome, or a failed announcement would block the shutdown
+        // for ever.
+        if dir == ANNOUNCING_DIRECTORY.load(Ordering::Relaxed)
+            && file == ANNOUNCING_FILE.load(Ordering::Relaxed)
+        {
+            ANNOUNCING.store(false, Ordering::Relaxed);
+        }
+        *i2s_tx = Some(tx);
+        *wav_buffer = Some(buffer);
+        // The output stays up a while, so a press just after the story
+        // does not click; the idle loop powers it down.
+        *quiet_since = Some(Instant::now());
+    }
+    PLAYING.store(false, Ordering::Relaxed);
+}
+
 /// Owns the I2S peripheral and the SD card, runs the reducer, plays stories
 /// and sounds, writes downloads to the card, and serves the console commands
 /// that need this hardware.
@@ -1442,95 +1673,7 @@ async fn media(
 
         // Events are handled before the request is read, so a `Play` decided
         // here starts in the same pass.
-        let mut events: [Option<Event>; 3] = [None, None, None];
-
-        // Checked first, because the card is about to become unwritable.
-        if FLUSH_PLACE.swap(false, Ordering::Relaxed) {
-            if let Some(card) = card.as_ref() {
-                flush_place(&CardIndex::new(card), "the box is stopping");
-            }
-        }
-
-        events[0] = take_plate_event(&mut placed);
-
-        // A download ended in another task. Read every pass so an old result
-        // cannot later be matched to a different figure.
-        if let Some((outcome, outcome_ruid)) = transfer(Transfer::take_outcome) {
-            match placed.answering(outcome_ruid) {
-                // The figure it was for is still on the plate. (The reducer
-                // checks the identity again before acting.)
-                Answering::TheFigure(tag) => {
-                    events[1] = Some(match outcome {
-                        Outcome::Completed => Event::ContentReady(tag),
-                        Outcome::Unreachable => {
-                            Event::ContentMissing(tag, Unavailable::Unreachable)
-                        }
-                        Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
-                        Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),
-                    });
-                }
-                // A different figure is on the plate, for example after a
-                // console `get`. Not passed to the reducer.
-                Answering::AnotherFigure => esp_println::println!(
-                    "teddiebox: plate ignoring a fetch outcome for {outcome_ruid:016X} — \
-                     not the figure on the plate"
-                ),
-                // Nobody is waiting; nothing to do.
-                Answering::NoFigure => {}
-            }
-        }
-
-        // The server has answered a question about a cached story. Read every
-        // pass and matched to the figure, like the fetch outcome. Each call is
-        // its own short critical section, with no printing inside: a console
-        // line at 115200 baud would keep interrupts off for milliseconds.
-        let mut settled = None;
-        if let Some((ruid, answer)) = take_answer() {
-            settled =
-                critical_section::with(|cs| REVALIDATION.borrow_ref_mut(cs).answered(ruid, answer));
-            if settled.is_none() {
-                // The question is already over: it timed out, or an earlier
-                // answer settled it. Acting on it could mark a story stale
-                // that is already playing, so it is only printed.
-                esp_println::println!("teddiebox: plate ignoring a late answer about {ruid:016X}");
-            }
-        }
-        if settled.is_none() {
-            settled = critical_section::with(|cs| {
-                REVALIDATION
-                    .borrow_ref_mut(cs)
-                    .polled(Instant::now().as_millis())
-            });
-            if let Some(teddiebox_download::Settled { ruid, .. }) = settled {
-                esp_println::println!(
-                    "teddiebox: plate {ruid:016X} — no answer in {} s, playing what is here",
-                    teddiebox_download::PATIENCE_MS / 1_000
-                );
-            }
-        }
-        if let Some(teddiebox_download::Settled {
-            ruid: probed_ruid,
-            answer,
-        }) = settled
-        {
-            match placed.answering(probed_ruid) {
-                Answering::TheFigure(tag) => {
-                    // Remembered whatever the answer: a server that was just
-                    // unreachable will likely stay so for the session, and
-                    // asking again wastes the radio.
-                    critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
-                    events[2] = Some(Event::Revalidated(
-                        tag,
-                        freshness_of(answer, tag, card.as_ref()),
-                    ));
-                }
-                Answering::AnotherFigure => esp_println::println!(
-                    "teddiebox: plate ignoring an answer about {probed_ruid:016X} — \
-                     not the figure on the plate"
-                ),
-                Answering::NoFigure => {}
-            }
-        }
+        let events = gather_events(card.as_ref(), &mut placed);
 
         // Once the jingle is over and the plate is empty, do the slow part of
         // the first network request in advance. A figure already on the plate
@@ -1700,124 +1843,17 @@ async fn media(
             }
 
             REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT | REQUEST_CACHE => {
-                let Some(card) = card.as_ref() else {
-                    continue;
-                };
-                // Checked before taking either: taking both and then matching
-                // would drop one if the other was missing.
-                if i2s_tx.is_none() || wav_buffer.is_none() {
-                    esp_println::println!(
-                        "teddiebox: the audio hardware is already claimed — rb to run another"
-                    );
-                    continue;
-                }
-                let (Some(tx), Some(buffer)) = (i2s_tx.take(), wav_buffer.take()) else {
-                    continue;
-                };
-
-                // Clear any stop, skip or cue left over from before, or it
-                // would act on this playback.
-                audio::STOP.store(false, Ordering::Relaxed);
-                audio::SKIP.store(audio::SKIP_NONE, Ordering::Relaxed);
-                audio::CUE.store(audio::CUE_NONE, Ordering::Relaxed);
-                // The idle loop may have asked for a power-down in the moment
-                // before this request arrived; this undoes it. Harmless when
-                // the output is already up.
-                i2c_bus::request_output(i2c_bus::OUTPUT_UP);
-                quiet_since = None;
-
-                // Set while feeding the DMA, so the download leaves the radio
-                // alone. Always cleared afterwards, even on failure, or the
-                // download would pause for ever.
-                PLAYING.store(true, Ordering::Relaxed);
-                if request == REQUEST_WAV {
-                    if let Err(reason) = audio::play_first_wav(card, tx, buffer).await {
-                        esp_println::println!("teddiebox: playback failed — {reason}");
-                    }
-                } else {
-                    let source = match request {
-                        REQUEST_CONTENT => audio::Source::Content {
-                            directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
-                            file: CONTENT_FILE.load(Ordering::Relaxed),
-                        },
-                        REQUEST_CACHE => audio::Source::Cache {
-                            directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
-                            file: CONTENT_FILE.load(Ordering::Relaxed),
-                        },
-                        _ => audio::Source::First,
-                    };
-                    // Only a story with a known path has a position to keep.
-                    // A console `taf` plays `Source::First`, and
-                    // `CONTENT_DIRECTORY` then still names the previous story,
-                    // so without this check its position would be overwritten.
-                    let identified = matches!(request, REQUEST_CONTENT | REQUEST_CACHE);
-                    let stock = request == REQUEST_CONTENT;
-                    let dir = CONTENT_DIRECTORY.load(Ordering::Relaxed);
-                    let file = CONTENT_FILE.load(Ordering::Relaxed);
-                    let from = match critical_section::with(|cs| {
-                        core::mem::replace(&mut *PLAY_FROM.borrow_ref_mut(cs), Position::Start)
-                    }) {
-                        // Cleared either way, so the next story does not
-                        // start at this figure's position.
-                        from if identified => from,
-                        _ => Position::Start,
-                    };
-                    // Called on every frame, because a story is one pass of
-                    // this loop and can last half an hour: lifting the figure,
-                    // ear presses and the idle clock must still be handled.
-                    let mut attend = || {
-                        if let Some(event) = take_plate_event(&mut placed) {
-                            apply(&mut reducer, card, event, placed.token());
-                        }
-                        apply_ear_events(&mut reducer, card, placed.token());
-                        feed_tick(&mut reducer, card, placed.token(), &mut last_tick_fed);
-
-                        // Keeps the reducer's position current; it is what
-                        // gets saved when the figure is lifted.
-                        reducer.note_position(Position::Exact {
-                            page: audio::PAGE.load(Ordering::Relaxed),
-                        });
-                    };
-                    // The hardware is returned, so another story can play
-                    // without a reboot.
-                    let (outcome, tx, buffer) =
-                        audio::play_taf(card, tx, buffer, source, from, &mut attend).await;
-                    if let Err(reason) = outcome {
-                        esp_println::println!("teddiebox: playback failed — {reason}");
-                    }
-                    if matches!(outcome, Ok(audio::Finish::Ended)) {
-                        if identified {
-                            // A finished story starts again from the
-                            // beginning next time. Written as page 0 rather
-                            // than deleted: `storage` cannot delete, and page 0
-                            // is the header, so it means the same as no file.
-                            let mut out = [0u8; MAX_POSITION];
-                            let len = position::render(0, &mut out);
-                            let _ = card.write_position(stock, dir, file, &out[..len]);
-                            // Also drop the RAM copy, which would otherwise
-                            // win over the card.
-                            forget_place(((dir as u64) << 32) | file as u64);
-                        }
-                        // The reducer cannot learn this any other way. Sent
-                        // for every story that ends, including console
-                        // playback, so the reducer returns to idle.
-                        apply(&mut reducer, card, Event::PlaybackEnded, placed.token());
-                    }
-                    // Cleared only by the announcement's own playback, but
-                    // whatever the outcome, or a failed announcement would
-                    // block the shutdown for ever.
-                    if dir == ANNOUNCING_DIRECTORY.load(Ordering::Relaxed)
-                        && file == ANNOUNCING_FILE.load(Ordering::Relaxed)
-                    {
-                        ANNOUNCING.store(false, Ordering::Relaxed);
-                    }
-                    i2s_tx = Some(tx);
-                    wav_buffer = Some(buffer);
-                    // The output stays up a while, so a press just after the
-                    // story does not click; the idle loop powers it down.
-                    quiet_since = Some(Instant::now());
-                }
-                PLAYING.store(false, Ordering::Relaxed);
+                play_story(
+                    card.as_ref(),
+                    request,
+                    &mut i2s_tx,
+                    &mut wav_buffer,
+                    &mut quiet_since,
+                    &mut reducer,
+                    &mut placed,
+                    &mut last_tick_fed,
+                )
+                .await;
             }
 
             _ => {}
