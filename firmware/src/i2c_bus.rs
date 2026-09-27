@@ -20,6 +20,9 @@ use tlv320dac3100::Tlv320Dac3100;
 
 use crate::{inputs, park_task, PARKED};
 
+/// The bus every codec and accelerometer call in this file runs over.
+type Bus = I2c<'static, esp_hal::Blocking>;
+
 /// Brings up the codec, then finds the accelerometer, runs its click
 /// detection, and sends [`Event::Slap`] when a click is on the axis
 /// `board::side_for_click` maps to a side. Also handles codec requests from
@@ -29,6 +32,113 @@ use crate::{inputs, park_task, PARKED};
 /// audio codec, which also answers there.
 #[embassy_executor::task]
 pub(crate) async fn i2c_bus(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Output<'static>) {
+    let Some((mut accel, mut dac_delay, address, mut slap)) = bring_up_bus(i2c, &mut reset).await
+    else {
+        return;
+    };
+
+    // Starts at the limit, so the first pass reads the headset register at
+    // once: a box that boots with headphones in should know within the first
+    // pass, not after ~600 ms.
+    let mut since_detect: u32 = HEADSET_DETECT_EVERY;
+    // Starts matching `HEADPHONES_IN`, so booting with nothing plugged in
+    // sends no event. Kept here rather than read from the static, because
+    // `hp 1` sets the static, and a forced routing must not be undone by
+    // polls that read an unchanged register.
+    let mut last_detect = false;
+    // Only logged when it changes, not on every poll, so a failed codec does
+    // not flood the console.
+    let mut detect_failed = false;
+    // Also only logged once: with no card mounted nothing reads
+    // `INPUT_EVENTS`, so the send below would fail on every poll.
+    let mut detect_dropped = false;
+    let mut slap_refractory: u8 = 0;
+
+    loop {
+        // Nothing to do for the rest of this power-on: see `PARKED`.
+        if PARKED.load(Ordering::Relaxed) {
+            park_task().await;
+        }
+
+        let speaker = SPEAKER_REQUEST.swap(0, Ordering::Relaxed);
+        if let request @ (SPEAKER_MUTE | SPEAKER_UNMUTE | SPEAKER_RESUME) = speaker {
+            accel = handle_speaker(accel, address, &mut dac_delay, request);
+            continue;
+        }
+        if HEADPHONE_REPORT.swap(false, Ordering::Relaxed) {
+            accel = handle_headphone_report(accel, address);
+            continue;
+        }
+        let volume = VOLUME_REQUEST.swap(NO_VOLUME, Ordering::Relaxed);
+        if volume != NO_VOLUME {
+            accel = handle_volume(accel, address, volume);
+            continue;
+        }
+        let output = OUTPUT_REQUEST.swap(0, Ordering::Relaxed);
+        if output == OUTPUT_UP && OUTPUT_IS_UP.load(Ordering::Relaxed) {
+            continue;
+        }
+        if let request @ (OUTPUT_DOWN | OUTPUT_UP) = output {
+            accel = handle_output(accel, address, &mut dac_delay, request);
+            continue;
+        }
+        if CODEC_POWER_DOWN.swap(false, Ordering::Relaxed) {
+            accel = handle_power_down(accel, address, &mut dac_delay);
+            continue;
+        }
+        if CODEC_REINIT.swap(false, Ordering::Relaxed) {
+            accel = handle_reinit(accel, address, &mut dac_delay);
+            continue;
+        }
+        if CODEC_SHUTDOWN.load(Ordering::Relaxed) {
+            // The accelerometer holds the bus, so take it back for the codec.
+            let bus = accel.release();
+            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+            match dac.power_down(&mut dac_delay) {
+                Ok(()) => esp_println::println!("teddiebox: codec quiet"),
+                Err(tlv320dac3100::Error::StillPowered) => {
+                    esp_println::println!("teddiebox: codec output stages still powered")
+                }
+                Err(_) => esp_println::println!("teddiebox: codec would not power down"),
+            }
+            CODEC_QUIET.store(true, Ordering::Relaxed);
+            // Only the reset follows a shutdown.
+            return;
+        }
+
+        handle_click(&mut accel, slap.confirmed, &mut slap_refractory);
+        slap_refractory = slap_refractory.saturating_sub(1);
+
+        slap.rearm(&mut accel);
+
+        since_detect += 1;
+        if since_detect >= HEADSET_DETECT_EVERY {
+            since_detect = 0;
+            accel = poll_headset(
+                accel,
+                address,
+                &mut last_detect,
+                &mut detect_failed,
+                &mut detect_dropped,
+            );
+        }
+
+        select(
+            Timer::after(Duration::from_millis(ACCEL_POLL_MS)),
+            CODEC_WAKE.wait(),
+        )
+        .await;
+    }
+}
+
+/// Resets the codec, configures it, then finds and starts the accelerometer.
+///
+/// Returns `None` if no accelerometer answered or it would not start — the
+/// task has nothing left to do then.
+async fn bring_up_bus(
+    i2c: Bus,
+    reset: &mut Output<'static>,
+) -> Option<(Lis3dh<Bus>, esp_hal::delay::Delay, u8, SlapArm)> {
     // Reset the codec first: it may still be running, half-configured, from
     // before the last reboot.
     let hold = board::dac_reset(true);
@@ -92,377 +202,383 @@ pub(crate) async fn i2c_bus(i2c: I2c<'static, esp_hal::Blocking>, mut reset: Out
 
     let Some(address) = address else {
         esp_println::println!("teddiebox: no LIS3DH at 0x18 or 0x19");
-        return;
+        return None;
     };
 
     esp_println::println!("teddiebox: LIS3DH at {address:#04x}");
     let mut accel = Lis3dh::new(bus, address);
-    // Starts at the limit, so the first pass reads the headset register at
-    // once: a box that boots with headphones in should know within the first
-    // pass, not after ~600 ms.
-    let mut since_detect: u32 = HEADSET_DETECT_EVERY;
-    // Starts matching `HEADPHONES_IN`, so booting with nothing plugged in
-    // sends no event. Kept here rather than read from the static, because
-    // `hp 1` sets the static, and a forced routing must not be undone by
-    // polls that read an unchanged register.
-    let mut last_detect = false;
-    // Only logged when it changes, not on every poll, so a failed codec does
-    // not flood the console.
-    let mut detect_failed = false;
-    // Also only logged once: with no card mounted nothing reads
-    // `INPUT_EVENTS`, so the send below would fail on every poll.
-    let mut detect_dropped = false;
-    // `armed_threshold` is the last value a write was *attempted* with;
-    // `armed` is only set by a successful write. The re-arm below checks
-    // `armed`, not just a changed threshold, so a failed write is retried.
-    //
-    // `confirmed_threshold` is the last value a write actually succeeded
-    // with, for printing only. Only set on success, because the click print
-    // shows it as the value the chip is using.
-    let mut armed_threshold = SLAP_THRESHOLD.load(Ordering::Relaxed);
-    let mut armed = false;
-    let mut failure_reported = false;
-    let mut confirmed_threshold: Option<u8> = None;
-    let mut slap_refractory: u8 = 0;
-    let mut armed_limit: u8 = SLAP_TIME_LIMIT.load(Ordering::Relaxed);
     if accel.init().is_err() {
         esp_println::println!("teddiebox: LIS3DH would not start");
-        return;
+        return None;
     }
 
-    match accel.enable_click(ClickConfig {
-        // Y only; see `SLAP_AXES` and `board::side_for_click`.
-        axes: SLAP_AXES,
-        threshold: armed_threshold,
-        time_limit: SLAP_TIME_LIMIT.load(Ordering::Relaxed),
-    }) {
-        Ok(()) => {
-            armed = true;
-            confirmed_threshold = Some(armed_threshold);
-        }
-        Err(_) => {
-            esp_println::println!(
-                "teddiebox: LIS3DH would not take a click config — \
-                 slaps will not be detected until the threshold is set from the console"
-            );
-            // Reported once; the loop below retries quietly until the write
-            // succeeds or a different threshold is set.
-            failure_reported = true;
+    let mut slap = SlapArm::new();
+    slap.arm_initial(&mut accel);
+
+    Some((accel, dac_delay, address, slap))
+}
+
+/// The accelerometer's click detector, re-armed whenever the console changes
+/// `SLAP_THRESHOLD` or `SLAP_TIME_LIMIT`, or the last write failed.
+///
+/// `threshold`/`limit` are the last values a write was *attempted* with;
+/// `armed` is only set by a successful write, so a failed write is retried.
+/// `confirmed` is the last value a write actually succeeded with, kept only
+/// for printing — it is what the chip is using, unlike `threshold`, which may
+/// have failed to apply.
+struct SlapArm {
+    threshold: u8,
+    limit: u8,
+    armed: bool,
+    failure_reported: bool,
+    confirmed: Option<u8>,
+}
+
+impl SlapArm {
+    fn new() -> Self {
+        Self {
+            threshold: SLAP_THRESHOLD.load(Ordering::Relaxed),
+            limit: SLAP_TIME_LIMIT.load(Ordering::Relaxed),
+            armed: false,
+            failure_reported: false,
+            confirmed: None,
         }
     }
 
-    loop {
-        // Nothing to do for the rest of this power-on: see `PARKED`.
-        if PARKED.load(Ordering::Relaxed) {
-            park_task().await;
+    fn config(&self) -> ClickConfig {
+        ClickConfig {
+            // Y only; see `SLAP_AXES` and `board::side_for_click`.
+            axes: SLAP_AXES,
+            threshold: self.threshold,
+            time_limit: self.limit,
         }
+    }
 
-        let speaker = SPEAKER_REQUEST.swap(0, Ordering::Relaxed);
-        {
-            if let request @ (SPEAKER_MUTE | SPEAKER_UNMUTE | SPEAKER_RESUME) = speaker {
-                let bus = accel.release();
-                let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-                let outcome = match request {
-                    SPEAKER_RESUME => dac.resume_speaker(&mut dac_delay),
-                    SPEAKER_UNMUTE => dac.unmute_speaker(&mut dac_delay),
-                    _ => dac.mute_speaker(),
-                };
-                match outcome {
-                    Ok(()) => esp_println::println!(
-                        "teddiebox: speaker {}",
-                        match request {
-                            SPEAKER_RESUME => "powered and unmuted",
-                            SPEAKER_UNMUTE => "unmuted",
-                            _ => "muted",
-                        }
-                    ),
-                    Err(_) => esp_println::println!("teddiebox: speaker would not change"),
-                }
-                let bus = dac.release();
-                accel = Lis3dh::new(bus, address);
-                continue;
+    /// Arms the accelerometer for the first time. Its own failure message,
+    /// distinct from a later re-arm's: the box has not yet said anything
+    /// about slap detection.
+    fn arm_initial(&mut self, accel: &mut Lis3dh<Bus>) {
+        match accel.enable_click(self.config()) {
+            Ok(()) => {
+                self.armed = true;
+                self.confirmed = Some(self.threshold);
+            }
+            Err(_) => {
+                esp_println::println!(
+                    "teddiebox: LIS3DH would not take a click config — \
+                     slaps will not be detected until the threshold is set from the console"
+                );
+                // Reported once; `rearm` retries quietly until the write
+                // succeeds or a different threshold is set.
+                self.failure_reported = true;
             }
         }
-        if HEADPHONE_REPORT.swap(false, Ordering::Relaxed) {
-            let bus = accel.release();
-            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-            let reading = dac
-                .headset_detect_raw()
-                .and_then(|detect| Ok((detect, dac.headset_status_raw()?)));
-            let bus = dac.release();
-            accel = Lis3dh::new(bus, address);
-            match reading {
-                // `detect` is register 67: D7 means detection is on, and D6-D5
-                // show the last headset type, even after it is removed.
-                // `status` is register 46, whose D4 shows whether a plug is in
-                // now; this is what the box uses. The routing is the box's own
-                // state, which `hp 1` can force.
-                Ok((detect, status)) => esp_println::println!(
-                    "teddiebox: headset detect {:#04x} status {:#04x}, says {}, routing to {}",
-                    detect,
-                    status,
-                    if status & tlv320dac3100::HEADSET_INSERTED != 0 {
-                        "in"
-                    } else {
-                        "out"
-                    },
-                    if HEADPHONES_IN.load(Ordering::Relaxed) {
-                        "headphones"
-                    } else {
-                        "speaker"
-                    }
-                ),
-                Err(_) => esp_println::println!("teddiebox: headset detect unreadable"),
-            }
-            continue;
-        }
-        let volume = VOLUME_REQUEST.swap(NO_VOLUME, Ordering::Relaxed);
-        if volume != NO_VOLUME {
-            let bus = accel.release();
-            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-            match dac.set_volume_db(volume) {
-                Ok(()) => esp_println::println!("teddiebox: codec volume {volume} dB"),
-                Err(_) => esp_println::println!("teddiebox: codec volume would not change"),
-            }
-            let bus = dac.release();
-            accel = Lis3dh::new(bus, address);
-            continue;
-        }
-        let output = OUTPUT_REQUEST.swap(0, Ordering::Relaxed);
-        if output == OUTPUT_UP && OUTPUT_IS_UP.load(Ordering::Relaxed) {
-            continue;
-        }
-        if let request @ (OUTPUT_DOWN | OUTPUT_UP) = output {
-            let bus = accel.release();
-            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-            let up = request == OUTPUT_UP;
-            let speaker = !HEADPHONES_IN.load(Ordering::Relaxed);
-            let outcome = if up {
-                dac.start_output(&mut dac_delay, speaker)
-            } else {
-                dac.stop_output()
-            };
-            match outcome {
-                Ok(()) => {
-                    OUTPUT_IS_UP.store(up, Ordering::Relaxed);
-                    esp_println::println!(
-                        "teddiebox: codec output {}{}",
-                        if up { "up" } else { "down" },
-                        if up && !speaker { " (headphones)" } else { "" }
-                    )
-                }
-                Err(_) => {
-                    // Counted as down whichever way it failed, so the next
-                    // request reruns the whole power-up: a stray click is
-                    // better than a speaker left muted until a restart.
-                    OUTPUT_IS_UP.store(false, Ordering::Relaxed);
-                    esp_println::println!("teddiebox: codec output would not change")
-                }
-            }
-            let bus = dac.release();
-            accel = Lis3dh::new(bus, address);
-            continue;
-        }
-        if CODEC_POWER_DOWN.swap(false, Ordering::Relaxed) {
-            let bus = accel.release();
-            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-            match dac.power_down(&mut dac_delay) {
-                Ok(()) => {
-                    OUTPUT_IS_UP.store(false, Ordering::Relaxed);
-                    esp_println::println!("teddiebox: codec powered down")
-                }
-                Err(_) => esp_println::println!("teddiebox: codec would not power down"),
-            }
-            let bus = dac.release();
-            accel = Lis3dh::new(bus, address);
-            continue;
-        }
-        if CODEC_REINIT.swap(false, Ordering::Relaxed) {
-            // Power down first, so every run is a real start-up.
-            let bus = accel.release();
-            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-            let _ = dac.power_down(&mut dac_delay);
-            OUTPUT_IS_UP.store(false, Ordering::Relaxed);
-            match dac
-                .reset()
-                .and_then(|()| codec_bring_up(&mut dac, &mut dac_delay))
-            {
-                Ok(()) => {
-                    let _ = dac.set_volume_db(BOOT_VOLUME_DB);
-                    match dac.power_flags() {
-                        Ok(f) => esp_println::println!(
-                            "teddiebox: codec re-inited dac_l={} class_d_l={} hpl={}",
-                            f.left_dac,
-                            f.left_class_d,
-                            f.hpl_driver
-                        ),
-                        Err(_) => esp_println::println!("teddiebox: codec flags unreadable"),
-                    }
-                }
-                Err(_) => esp_println::println!("teddiebox: codec would not re-init"),
-            }
-            let bus = dac.release();
-            accel = Lis3dh::new(bus, address);
-            continue;
-        }
-        if CODEC_SHUTDOWN.load(Ordering::Relaxed) {
-            // The accelerometer holds the bus, so take it back for the codec.
-            let bus = accel.release();
-            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-            match dac.power_down(&mut dac_delay) {
-                Ok(()) => esp_println::println!("teddiebox: codec quiet"),
-                Err(tlv320dac3100::Error::StillPowered) => {
-                    esp_println::println!("teddiebox: codec output stages still powered")
-                }
-                Err(_) => esp_println::println!("teddiebox: codec would not power down"),
-            }
-            CODEC_QUIET.store(true, Ordering::Relaxed);
-            // Only the reset follows a shutdown.
-            return;
-        }
-        match accel.take_click() {
-            Ok(Some(click)) => {
-                // Always printed: clicks are rare, and this is used to
-                // calibrate. `raw` is included because the datasheet is unclear
-                // about CLICK_SRC's bits. With more than one axis bit set,
-                // `take_click` picks X, then Y, then Z, so MULTI-AXIS is
-                // printed to show that others were dropped.
-                let axes_set = (click.raw & 0b111).count_ones();
-                // Prints `confirmed_threshold`, the value the chip is using,
-                // not `armed_threshold`, which may have failed to apply.
-                match confirmed_threshold {
-                    Some(threshold) => esp_println::println!(
-                        "teddiebox: click {:?} {} raw {:#04x} threshold {}{}",
-                        click.axis,
-                        if click.negative { "-" } else { "+" },
-                        click.raw,
-                        clamped_threshold(threshold),
-                        if axes_set > 1 { " MULTI-AXIS" } else { "" }
-                    ),
-                    None => esp_println::println!(
-                        "teddiebox: click {:?} {} raw {:#04x} threshold unconfirmed{}",
-                        click.axis,
-                        if click.negative { "-" } else { "+" },
-                        click.raw,
-                        if axes_set > 1 { " MULTI-AXIS" } else { "" }
-                    ),
-                }
-                let axis = match click.axis {
-                    ClickAxis::X => board::Axis::X,
-                    ClickAxis::Y => board::Axis::Y,
-                    ClickAxis::Z => board::Axis::Z,
-                };
-                if let Some(side) = board::side_for_click(axis, click.negative) {
-                    if slap_refractory > 0 {
-                        // Printed, because during calibration the rebounds
-                        // show whether the window and threshold are right.
-                        esp_println::println!("teddiebox: slap ignored, within refractory");
-                    } else {
-                        slap_refractory = SLAP_REFRACTORY_POLLS;
-                        if inputs::INPUT_EVENTS.try_send(Event::Slap(side)).is_err() {
-                            esp_println::println!("teddiebox: input queue full, slap dropped");
-                        }
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(_) => esp_println::println!("teddiebox: LIS3DH click read failed"),
-        }
+    }
 
-        slap_refractory = slap_refractory.saturating_sub(1);
-
+    /// Re-arms the accelerometer if the console changed the threshold or
+    /// time limit, or the last write failed.
+    fn rearm(&mut self, accel: &mut Lis3dh<Bus>) {
         let wanted = SLAP_THRESHOLD.load(Ordering::Relaxed);
         let wanted_limit = SLAP_TIME_LIMIT.load(Ordering::Relaxed);
-        if !armed || wanted != armed_threshold || wanted_limit != armed_limit {
-            // A new value gets its own failure line even if the last one was
-            // already reported, so it does not look ignored.
-            let threshold_changed = wanted != armed_threshold || wanted_limit != armed_limit;
-            armed_threshold = wanted;
-            armed_limit = wanted_limit;
-            // `armed` is only set when the write succeeds, so the success line
-            // is true and a failed write is retried on the next pass.
-            match accel.enable_click(ClickConfig {
-                axes: SLAP_AXES,
-                threshold: wanted,
-                time_limit: wanted_limit,
-            }) {
-                Ok(()) => {
-                    armed = true;
-                    failure_reported = false;
-                    confirmed_threshold = Some(wanted);
+        if self.armed && wanted == self.threshold && wanted_limit == self.limit {
+            return;
+        }
+        // A new value gets its own failure line even if the last one was
+        // already reported, so it does not look ignored.
+        let threshold_changed = wanted != self.threshold || wanted_limit != self.limit;
+        self.threshold = wanted;
+        self.limit = wanted_limit;
+        // `armed` is only set when the write succeeds, so the success line
+        // is true and a failed write is retried on the next pass.
+        match accel.enable_click(self.config()) {
+            Ok(()) => {
+                self.armed = true;
+                self.failure_reported = false;
+                self.confirmed = Some(wanted);
+                esp_println::println!(
+                    "teddiebox: slap threshold {} limit {}",
+                    clamped_threshold(wanted),
+                    wanted_limit
+                );
+            }
+            Err(_) => {
+                self.armed = false;
+                // Logged once, not on every 200 ms retry, so it does not
+                // bury the click prints.
+                if !self.failure_reported || threshold_changed {
                     esp_println::println!(
-                        "teddiebox: slap threshold {} limit {}",
-                        clamped_threshold(wanted),
-                        wanted_limit
+                        "teddiebox: slap threshold {wanted} NOT applied, LIS3DH write failed"
                     );
-                }
-                Err(_) => {
-                    armed = false;
-                    // Logged once, not on every 200 ms retry, so it does not
-                    // bury the click prints.
-                    if !failure_reported || threshold_changed {
-                        esp_println::println!(
-                            "teddiebox: slap threshold {wanted} NOT applied, LIS3DH write failed"
-                        );
-                        failure_reported = true;
-                    }
+                    self.failure_reported = true;
                 }
             }
         }
-
-        since_detect += 1;
-        if since_detect >= HEADSET_DETECT_EVERY {
-            since_detect = 0;
-            // Give the bus back to the accelerometer before acting on the
-            // result, so a full input queue cannot leave the codec holding it.
-            let bus = accel.release();
-            let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
-            let reading = dac.headphones_connected();
-            let bus = dac.release();
-            accel = Lis3dh::new(bus, address);
-            match reading {
-                Ok(now) if now != last_detect => {
-                    detect_failed = false;
-                    // `HEADPHONES_IN`, which the codec bring-up reads, is
-                    // stored at once. `last_detect` only changes once the
-                    // event is sent, so a failed send is retried on the next
-                    // poll instead of leaving the reducer out of step.
-                    HEADPHONES_IN.store(now, Ordering::Relaxed);
-                    if inputs::INPUT_EVENTS
-                        .try_send(Event::Headphones(now))
-                        .is_err()
-                    {
-                        if !detect_dropped {
-                            esp_println::println!(
-                                "teddiebox: input queue full, jack change dropped"
-                            );
-                            detect_dropped = true;
-                        }
-                    } else {
-                        last_detect = now;
-                        detect_dropped = false;
-                        esp_println::println!(
-                            "teddiebox: headphones {}",
-                            if now { "in" } else { "out" }
-                        );
-                    }
-                }
-                Ok(_) => detect_failed = false,
-                Err(_) => {
-                    if !detect_failed {
-                        esp_println::println!("teddiebox: headset detect unreadable");
-                        detect_failed = true;
-                    }
-                }
-            }
-        }
-
-        select(
-            Timer::after(Duration::from_millis(ACCEL_POLL_MS)),
-            CODEC_WAKE.wait(),
-        )
-        .await;
     }
+}
+
+/// Hands the codec sole use of the bus for one operation, then gives it back
+/// to the accelerometer. Every codec request is exactly this dance around a
+/// different codec call, so it only has to be got right once.
+fn with_codec<R>(
+    accel: Lis3dh<Bus>,
+    address: u8,
+    f: impl FnOnce(&mut Tlv320Dac3100<Bus>) -> R,
+) -> (Lis3dh<Bus>, R) {
+    let bus = accel.release();
+    let mut dac = Tlv320Dac3100::new(bus, tlv320dac3100::DEFAULT_ADDRESS);
+    let result = f(&mut dac);
+    let bus = dac.release();
+    (Lis3dh::new(bus, address), result)
+}
+
+fn handle_speaker(
+    accel: Lis3dh<Bus>,
+    address: u8,
+    delay: &mut esp_hal::delay::Delay,
+    request: u8,
+) -> Lis3dh<Bus> {
+    let (accel, outcome) = with_codec(accel, address, |dac| match request {
+        SPEAKER_RESUME => dac.resume_speaker(delay),
+        SPEAKER_UNMUTE => dac.unmute_speaker(delay),
+        _ => dac.mute_speaker(),
+    });
+    match outcome {
+        Ok(()) => esp_println::println!(
+            "teddiebox: speaker {}",
+            match request {
+                SPEAKER_RESUME => "powered and unmuted",
+                SPEAKER_UNMUTE => "unmuted",
+                _ => "muted",
+            }
+        ),
+        Err(_) => esp_println::println!("teddiebox: speaker would not change"),
+    }
+    accel
+}
+
+fn handle_headphone_report(accel: Lis3dh<Bus>, address: u8) -> Lis3dh<Bus> {
+    let (accel, reading) = with_codec(accel, address, |dac| {
+        dac.headset_detect_raw()
+            .and_then(|detect| Ok((detect, dac.headset_status_raw()?)))
+    });
+    match reading {
+        // `detect` is register 67: D7 means detection is on, and D6-D5
+        // show the last headset type, even after it is removed. `status`
+        // is register 46, whose D4 shows whether a plug is in now; this
+        // is what the box uses. The routing is the box's own state, which
+        // `hp 1` can force.
+        Ok((detect, status)) => esp_println::println!(
+            "teddiebox: headset detect {:#04x} status {:#04x}, says {}, routing to {}",
+            detect,
+            status,
+            if status & tlv320dac3100::HEADSET_INSERTED != 0 {
+                "in"
+            } else {
+                "out"
+            },
+            if HEADPHONES_IN.load(Ordering::Relaxed) {
+                "headphones"
+            } else {
+                "speaker"
+            }
+        ),
+        Err(_) => esp_println::println!("teddiebox: headset detect unreadable"),
+    }
+    accel
+}
+
+fn handle_volume(accel: Lis3dh<Bus>, address: u8, volume: i8) -> Lis3dh<Bus> {
+    let (accel, outcome) = with_codec(accel, address, |dac| dac.set_volume_db(volume));
+    match outcome {
+        Ok(()) => esp_println::println!("teddiebox: codec volume {volume} dB"),
+        Err(_) => esp_println::println!("teddiebox: codec volume would not change"),
+    }
+    accel
+}
+
+fn handle_output(
+    accel: Lis3dh<Bus>,
+    address: u8,
+    delay: &mut esp_hal::delay::Delay,
+    request: u8,
+) -> Lis3dh<Bus> {
+    let up = request == OUTPUT_UP;
+    let speaker = !HEADPHONES_IN.load(Ordering::Relaxed);
+    let (accel, outcome) = with_codec(accel, address, |dac| {
+        if up {
+            dac.start_output(delay, speaker)
+        } else {
+            dac.stop_output()
+        }
+    });
+    match outcome {
+        Ok(()) => {
+            OUTPUT_IS_UP.store(up, Ordering::Relaxed);
+            esp_println::println!(
+                "teddiebox: codec output {}{}",
+                if up { "up" } else { "down" },
+                if up && !speaker { " (headphones)" } else { "" }
+            )
+        }
+        Err(_) => {
+            // Counted as down whichever way it failed, so the next
+            // request reruns the whole power-up: a stray click is
+            // better than a speaker left muted until a restart.
+            OUTPUT_IS_UP.store(false, Ordering::Relaxed);
+            esp_println::println!("teddiebox: codec output would not change")
+        }
+    }
+    accel
+}
+
+fn handle_power_down(
+    accel: Lis3dh<Bus>,
+    address: u8,
+    delay: &mut esp_hal::delay::Delay,
+) -> Lis3dh<Bus> {
+    let (accel, outcome) = with_codec(accel, address, |dac| dac.power_down(delay));
+    match outcome {
+        Ok(()) => {
+            OUTPUT_IS_UP.store(false, Ordering::Relaxed);
+            esp_println::println!("teddiebox: codec powered down")
+        }
+        Err(_) => esp_println::println!("teddiebox: codec would not power down"),
+    }
+    accel
+}
+
+fn handle_reinit(
+    accel: Lis3dh<Bus>,
+    address: u8,
+    delay: &mut esp_hal::delay::Delay,
+) -> Lis3dh<Bus> {
+    let (accel, ()) = with_codec(accel, address, |dac| {
+        // Power down first, so every run is a real start-up.
+        let _ = dac.power_down(delay);
+        OUTPUT_IS_UP.store(false, Ordering::Relaxed);
+        match dac.reset().and_then(|()| codec_bring_up(dac, delay)) {
+            Ok(()) => {
+                let _ = dac.set_volume_db(BOOT_VOLUME_DB);
+                match dac.power_flags() {
+                    Ok(f) => esp_println::println!(
+                        "teddiebox: codec re-inited dac_l={} class_d_l={} hpl={}",
+                        f.left_dac,
+                        f.left_class_d,
+                        f.hpl_driver
+                    ),
+                    Err(_) => esp_println::println!("teddiebox: codec flags unreadable"),
+                }
+            }
+            Err(_) => esp_println::println!("teddiebox: codec would not re-init"),
+        }
+    });
+    accel
+}
+
+/// Reads one pending click from the accelerometer, if any, and turns a click
+/// on the mapped side into a slap event.
+///
+/// Always printed: clicks are rare, and this is used to calibrate.
+fn handle_click(
+    accel: &mut Lis3dh<Bus>,
+    confirmed_threshold: Option<u8>,
+    slap_refractory: &mut u8,
+) {
+    match accel.take_click() {
+        Ok(Some(click)) => {
+            // `raw` is included because the datasheet is unclear about
+            // CLICK_SRC's bits. With more than one axis bit set,
+            // `take_click` picks X, then Y, then Z, so MULTI-AXIS is
+            // printed to show that others were dropped.
+            let axes_set = (click.raw & 0b111).count_ones();
+            // Prints `confirmed_threshold`, the value the chip is using,
+            // not the console's last-asked value, which may have failed
+            // to apply.
+            match confirmed_threshold {
+                Some(threshold) => esp_println::println!(
+                    "teddiebox: click {:?} {} raw {:#04x} threshold {}{}",
+                    click.axis,
+                    if click.negative { "-" } else { "+" },
+                    click.raw,
+                    clamped_threshold(threshold),
+                    if axes_set > 1 { " MULTI-AXIS" } else { "" }
+                ),
+                None => esp_println::println!(
+                    "teddiebox: click {:?} {} raw {:#04x} threshold unconfirmed{}",
+                    click.axis,
+                    if click.negative { "-" } else { "+" },
+                    click.raw,
+                    if axes_set > 1 { " MULTI-AXIS" } else { "" }
+                ),
+            }
+            let axis = match click.axis {
+                ClickAxis::X => board::Axis::X,
+                ClickAxis::Y => board::Axis::Y,
+                ClickAxis::Z => board::Axis::Z,
+            };
+            if let Some(side) = board::side_for_click(axis, click.negative) {
+                if *slap_refractory > 0 {
+                    // Printed, because during calibration the rebounds
+                    // show whether the window and threshold are right.
+                    esp_println::println!("teddiebox: slap ignored, within refractory");
+                } else {
+                    *slap_refractory = SLAP_REFRACTORY_POLLS;
+                    if inputs::INPUT_EVENTS.try_send(Event::Slap(side)).is_err() {
+                        esp_println::println!("teddiebox: input queue full, slap dropped");
+                    }
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(_) => esp_println::println!("teddiebox: LIS3DH click read failed"),
+    }
+}
+
+/// Polls the headset-detect register and tells the reducer when it changes.
+///
+/// Only logged when it changes or fails, not on every poll, so a failed
+/// codec or a full input queue does not flood the console.
+fn poll_headset(
+    accel: Lis3dh<Bus>,
+    address: u8,
+    last_detect: &mut bool,
+    detect_failed: &mut bool,
+    detect_dropped: &mut bool,
+) -> Lis3dh<Bus> {
+    // Give the bus back to the accelerometer before acting on the result, so
+    // a full input queue cannot leave the codec holding it.
+    let (accel, reading) = with_codec(accel, address, |dac| dac.headphones_connected());
+    match reading {
+        Ok(now) if now != *last_detect => {
+            *detect_failed = false;
+            // `HEADPHONES_IN`, which the codec bring-up reads, is stored
+            // at once. `last_detect` only changes once the event is sent,
+            // so a failed send is retried on the next poll instead of
+            // leaving the reducer out of step.
+            HEADPHONES_IN.store(now, Ordering::Relaxed);
+            if inputs::INPUT_EVENTS
+                .try_send(Event::Headphones(now))
+                .is_err()
+            {
+                if !*detect_dropped {
+                    esp_println::println!("teddiebox: input queue full, jack change dropped");
+                    *detect_dropped = true;
+                }
+            } else {
+                *last_detect = now;
+                *detect_dropped = false;
+                esp_println::println!("teddiebox: headphones {}", if now { "in" } else { "out" });
+            }
+        }
+        Ok(_) => *detect_failed = false,
+        Err(_) => {
+            if !*detect_failed {
+                esp_println::println!("teddiebox: headset detect unreadable");
+                *detect_failed = true;
+            }
+        }
+    }
+    accel
 }
 
 /// Scans the I2C bus once and names what answers.
