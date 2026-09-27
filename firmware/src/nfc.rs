@@ -637,6 +637,174 @@ pub(crate) static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
 /// pass is never seen, which is fine.
 pub(crate) static PLATE_TAG: Signal<CriticalSectionRawMutex, Seen> = Signal::new();
 
+/// Serves one console `nfc` command, if a request is pending.
+async fn handle_console_request(reader: &mut Reader, request: u8) {
+    match request {
+        NFC_INVENTORY => {
+            reader.inventory();
+
+            // Checks the antenna is connected. With our own field off, the
+            // RSSI register shows RF from outside, such as a phone, which
+            // proves the coil reaches the chip. Nothing else can tell a
+            // disconnected antenna from an empty plate.
+            esp_println::println!(
+                "teddiebox: nfc listening for an external field for 6 s — \
+                 hold an NFC phone against the plate"
+            );
+            reader.set_field(false);
+            let mut peak = 0u8;
+            for _ in 0..60 {
+                peak = peak.max(reader.rssi());
+                Timer::after(Duration::from_millis(100)).await;
+            }
+            reader.set_field(true);
+            if peak == 0 {
+                esp_println::println!(
+                    "teddiebox: nfc heard nothing at all — the antenna is not coupled"
+                );
+            } else {
+                esp_println::println!(
+                    "teddiebox: nfc external field peaked at {peak:#04x} — the antenna works"
+                );
+            }
+        }
+        NFC_UNLOCK => {
+            let password = NFC_PASSWORD.load(Ordering::Relaxed);
+            if password == 0 {
+                esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
+            } else {
+                reader.unlock(password);
+            }
+        }
+        NFC_FORCE_UNLOCK => {
+            let password = NFC_PASSWORD.load(Ordering::Relaxed);
+            if password == 0 {
+                esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
+            } else {
+                reader.force_unlock(password);
+            }
+        }
+        NFC_LOCK => {
+            let password = NFC_PASSWORD.load(Ordering::Relaxed);
+            if password == 0 {
+                esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
+            } else {
+                reader.lock(password);
+            }
+        }
+        NFC_READ_MEMORY => {
+            let range = NFC_MEM_RANGE.load(Ordering::Relaxed);
+            reader.dump_memory((range >> 8) as u8, range as u8);
+        }
+        NFC_READ_TOKEN => match reader.read_token() {
+            Some(token) => {
+                critical_section::with(|cs| *TAG_TOKEN.borrow_ref_mut(cs) = Some(token));
+                // The length, never the value.
+                esp_println::println!(
+                    "teddiebox: nfc token read, {} bytes — `get` will send it",
+                    token.len()
+                );
+            }
+            None => esp_println::println!(
+                "teddiebox: nfc token unreadable — unlock first with `pw` then `slix`"
+            ),
+        },
+        _ => {}
+    }
+}
+
+/// Polls the plate if it is due, and tells the media task about any change.
+///
+/// **Switching polling on forgets what the plate held.** `Presence` reports
+/// changes, not states, so a figure it already believes present is not
+/// reported again. While polling was off the figure may have been swapped or
+/// removed, so start fresh. Otherwise `plate on` with a figure already on the
+/// plate reports nothing and the story never starts, even though the reader
+/// works.
+fn poll_plate(
+    reader: &mut Reader,
+    presence: &mut Presence,
+    was_polling: &mut bool,
+    next_poll: &mut Instant,
+    misses: &mut u16,
+    believed_present: &mut bool,
+) {
+    let polling = PLATE_POLLING.load(Ordering::Relaxed);
+    if polling && !*was_polling {
+        *presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
+        *believed_present = false;
+        *misses = 0;
+        *next_poll = Instant::now();
+    }
+    *was_polling = polling;
+
+    if !polling || Instant::now() < *next_poll {
+        return;
+    }
+
+    let password = NFC_PASSWORD.load(Ordering::Relaxed);
+
+    // Which request is cheapest depends on what was there last time.
+    // Always sending the full unlock caused 49 audio DMA restarts in 70 s
+    // of playback, against 0 with polling off, because every unanswered
+    // exchange blocks this task for the whole `IRQ_POLL_ATTEMPTS` window.
+    let seen = if *believed_present {
+        // An unlocked figure stays unlocked until its field is switched
+        // off, so a plain inventory answers. It also re-reads the UID,
+        // which notices a figure being swapped.
+        reader.identify()
+    } else if reader.tag_present() {
+        // Something is there but not yet identified. Only this case
+        // sends the password.
+        reader.inventory_unlocked(password)
+    } else {
+        // The usual case: one unanswered exchange and nothing else.
+        None
+    };
+    // Counts polls in a row that found nothing, and prints the run length
+    // when a figure answers again. The radio can cause false departures
+    // (23 in ten minutes were seen), and the run lengths show whether
+    // allowing more misses would help.
+    //
+    // Based on `seen` only, not `believed_present`, which is the previous
+    // poll's result and would stop the count at one.
+    if seen.is_none() {
+        *misses = misses.saturating_add(1);
+    } else {
+        if *misses > 0 {
+            esp_println::println!("teddiebox: plate answered again after {misses} missed polls");
+        }
+        *misses = 0;
+    }
+    *believed_present = seen.is_some();
+
+    let event = presence.feed(seen.map(TagUid));
+    *next_poll = Instant::now() + Duration::from_millis(u64::from(presence.poll_again_in_ms()));
+    let Some(event) = event else {
+        return;
+    };
+    // Printed, so the plate's state is visible even when the reducer does
+    // nothing about it.
+    match event {
+        TagEvent::Arrived(TagUid(uid)) => {
+            esp_println::println!("teddiebox: plate tag arrived {:016X}", TagUid(uid).ruid())
+        }
+        TagEvent::Left => {
+            esp_println::println!("teddiebox: plate tag left after {misses} missed polls")
+        }
+    }
+    match event {
+        TagEvent::Arrived(TagUid(uid)) => {
+            // Read the token now: it is only readable while the figure is
+            // on the plate and unlocked, and teddyCloud needs it to fetch
+            // the story from the cloud.
+            let token = reader.read_token();
+            PLATE_TAG.signal(Seen::Figure { uid, token });
+        }
+        TagEvent::Left => PLATE_TAG.signal(Seen::Nothing),
+    }
+}
+
 /// Brings the NFC reader up on first use, polls the plate, and serves the
 /// console `nfc` commands.
 ///
@@ -685,78 +853,11 @@ pub(crate) async fn nfc_reader(
             park_task().await;
         }
 
-        match NFC_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
-            NFC_INVENTORY => {
-                reader.inventory();
-
-                // Checks the antenna is connected. With our own field off, the
-                // RSSI register shows RF from outside, such as a phone, which
-                // proves the coil reaches the chip. Nothing else can tell a
-                // disconnected antenna from an empty plate.
-                esp_println::println!(
-                    "teddiebox: nfc listening for an external field for 6 s — \
-                     hold an NFC phone against the plate"
-                );
-                reader.set_field(false);
-                let mut peak = 0u8;
-                for _ in 0..60 {
-                    peak = peak.max(reader.rssi());
-                    Timer::after(Duration::from_millis(100)).await;
-                }
-                reader.set_field(true);
-                if peak == 0 {
-                    esp_println::println!(
-                        "teddiebox: nfc heard nothing at all — the antenna is not coupled"
-                    );
-                } else {
-                    esp_println::println!(
-                        "teddiebox: nfc external field peaked at {peak:#04x} — the antenna works"
-                    );
-                }
-            }
-            NFC_UNLOCK => {
-                let password = NFC_PASSWORD.load(Ordering::Relaxed);
-                if password == 0 {
-                    esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
-                } else {
-                    reader.unlock(password);
-                }
-            }
-            NFC_FORCE_UNLOCK => {
-                let password = NFC_PASSWORD.load(Ordering::Relaxed);
-                if password == 0 {
-                    esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
-                } else {
-                    reader.force_unlock(password);
-                }
-            }
-            NFC_LOCK => {
-                let password = NFC_PASSWORD.load(Ordering::Relaxed);
-                if password == 0 {
-                    esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
-                } else {
-                    reader.lock(password);
-                }
-            }
-            NFC_READ_MEMORY => {
-                let range = NFC_MEM_RANGE.load(Ordering::Relaxed);
-                reader.dump_memory((range >> 8) as u8, range as u8);
-            }
-            NFC_READ_TOKEN => match reader.read_token() {
-                Some(token) => {
-                    critical_section::with(|cs| *TAG_TOKEN.borrow_ref_mut(cs) = Some(token));
-                    // The length, never the value.
-                    esp_println::println!(
-                        "teddiebox: nfc token read, {} bytes — `get` will send it",
-                        token.len()
-                    );
-                }
-                None => esp_println::println!(
-                    "teddiebox: nfc token unreadable — unlock first with `pw` then `slix`"
-                ),
-            },
-            _ => {}
-        }
+        handle_console_request(
+            &mut reader,
+            NFC_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed),
+        )
+        .await;
 
         // Printed when polling stops, summarising the run by its slowest
         // reply.
@@ -769,93 +870,19 @@ pub(crate) async fn nfc_reader(
             );
         }
 
-        let polling = PLATE_POLLING.load(Ordering::Relaxed);
-        // **Switching polling on forgets what the plate held.** `Presence`
-        // reports changes, not states, so a figure it already believes present
-        // is not reported again. While polling was off the figure may have
-        // been swapped or removed, so start fresh. Otherwise `plate on` with a
-        // figure already on the plate reports nothing and the story never
-        // starts, even though the reader works.
-        if polling && !was_polling {
-            presence = Presence::new(ARRIVALS_TO_AGREE, MISSES_TO_LEAVE);
-            believed_present = false;
-            misses = 0;
-            next_poll = Instant::now();
-        }
-        was_polling = polling;
-
-        if polling && Instant::now() >= next_poll {
-            let password = NFC_PASSWORD.load(Ordering::Relaxed);
-
-            // Which request is cheapest depends on what was there last time.
-            // Always sending the full unlock caused 49 audio DMA restarts in
-            // 70 s of playback, against 0 with polling off, because every
-            // unanswered exchange blocks this task for the whole
-            // `IRQ_POLL_ATTEMPTS` window.
-            let seen = if believed_present {
-                // An unlocked figure stays unlocked until its field is
-                // switched off, so a plain inventory answers. It also re-reads
-                // the UID, which notices a figure being swapped.
-                reader.identify()
-            } else if reader.tag_present() {
-                // Something is there but not yet identified. Only this case
-                // sends the password.
-                reader.inventory_unlocked(password)
-            } else {
-                // The usual case: one unanswered exchange and nothing else.
-                None
-            };
-            // Counts polls in a row that found nothing, and prints the run
-            // length when a figure answers again. The radio can cause false
-            // departures (23 in ten minutes were seen), and the run lengths
-            // show whether allowing more misses would help.
-            //
-            // Based on `seen` only, not `believed_present`, which is the
-            // previous poll's result and would stop the count at one.
-            if seen.is_none() {
-                misses = misses.saturating_add(1);
-            } else {
-                if misses > 0 {
-                    esp_println::println!(
-                        "teddiebox: plate answered again after {misses} missed polls"
-                    );
-                }
-                misses = 0;
-            }
-            believed_present = seen.is_some();
-
-            let event = presence.feed(seen.map(TagUid));
-            next_poll =
-                Instant::now() + Duration::from_millis(u64::from(presence.poll_again_in_ms()));
-            if let Some(event) = event {
-                // Printed, so the plate's state is visible even when the
-                // reducer does nothing about it.
-                match event {
-                    TagEvent::Arrived(TagUid(uid)) => esp_println::println!(
-                        "teddiebox: plate tag arrived {:016X}",
-                        TagUid(uid).ruid()
-                    ),
-                    TagEvent::Left => esp_println::println!(
-                        "teddiebox: plate tag left after {misses} missed polls"
-                    ),
-                }
-                match event {
-                    TagEvent::Arrived(TagUid(uid)) => {
-                        // Read the token now: it is only readable while the
-                        // figure is on the plate and unlocked, and teddyCloud
-                        // needs it to fetch the story from the cloud.
-                        let token = reader.read_token();
-                        PLATE_TAG.signal(Seen::Figure { uid, token });
-                    }
-                    TagEvent::Left => PLATE_TAG.signal(Seen::Nothing),
-                }
-            }
-        }
+        poll_plate(
+            &mut reader,
+            &mut presence,
+            &mut was_polling,
+            &mut next_poll,
+            &mut misses,
+            &mut believed_present,
+        );
 
         // Console requests are still answered within 100 ms; the plate is
         // read when `presence` asked for it, which can be sooner.
         let console_due = Instant::now() + Duration::from_millis(100);
-        Timer::at(if polling {
+        Timer::at(if PLATE_POLLING.load(Ordering::Relaxed) {
             next_poll.min(console_due)
         } else {
             console_due
