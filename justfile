@@ -149,3 +149,24 @@ console:
 fix:
     cargo fmt --all
     cd firmware && cargo fmt --all
+
+# Not a CI gate: there is no agreed complexity budget to fail a build against,
+# so this stays a feedback tool, not an enforced one. Per-file complexity
+# (scc) finds which files carry more complexity than their size accounts for;
+# per-function complexity (complexity-report.py) finds which functions inside
+# a flagged file it's actually concentrated in.
+
+# size and complexity report: `just complexity` for a summary, or
+# `just complexity path/to/file.rs` for per-function cyclomatic/cognitive
+# complexity in one file
+complexity file="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "{{file}}" ]; then
+        tokei firmware/src crates
+        echo
+        scc firmware/src crates --by-file -s complexity -n 20
+    else
+        rust-code-analysis-cli -p "{{file}}" -m -O json \
+            | python3 scripts/complexity-report.py
+    fi

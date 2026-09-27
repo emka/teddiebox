@@ -212,6 +212,13 @@
             # flags, and needs the same versions every time.
             pkgs.espflash
             pkgs.esptool
+            # `just complexity`: size, per-file complexity, and per-function
+            # cyclomatic/cognitive complexity, so the accidental-complexity
+            # signals that found main.rs's god-functions stay a repeatable
+            # command rather than an ad-hoc nix shell.
+            pkgs.tokei
+            pkgs.scc
+            pkgs.rust-code-analysis
           ];
 
           # bindgen finds libclang by this variable and by nothing else.
