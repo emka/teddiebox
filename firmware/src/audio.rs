@@ -561,6 +561,126 @@ pub async fn play_taf(
 type Reclaimed = (Finish, I2sTx<'static, Blocking>, DmaTxStreamBuf);
 type PlaybackError = (&'static str, I2sTx<'static, Blocking>, DmaTxStreamBuf);
 
+/// Resolves `source` to an open file and its size.
+///
+/// A `.TAF` in the root is used first, so a specific file can be tested.
+/// Otherwise the card's own content is used, so nothing has to be written to
+/// the card.
+fn open_source(card: &Mounted, source: Source) -> Result<(RawFile, u32), &'static str> {
+    match source {
+        Source::Content { directory, file } => card.open_content(directory, file),
+        Source::Cache { directory, file } => card.open_cache(directory, file),
+        Source::First => match card.find_by_extension(b"TAF") {
+            Some((name, size)) => {
+                esp_println::println!("teddiebox: taf /{name}, {size} bytes");
+                card.open_file(name).map(|handle| (handle, size))
+            }
+            None => card
+                .open_first_tonie()
+                .ok_or("no .TAF in the root and no CONTENT/<hex>/500304E0 on the card"),
+        },
+    }
+}
+
+/// A skip drops the partly pushed frame and plays its cue before the new
+/// chapter. The audio already in the DMA buffer (up to `BUFFER_BYTES`) still
+/// plays first, so a little of the old chapter is heard; clearing it would
+/// mean restarting the transfer, which clicks. A skip that cannot move plays
+/// nothing.
+///
+/// After a skip, the caller's PCM checksum no longer matches a full decode on
+/// the host.
+fn handle_skip(
+    decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>,
+    pending: &mut core::ops::Range<usize>,
+    instead: &mut Option<CueSamples>,
+    end_after_cue: &mut bool,
+) {
+    match SKIP.swap(SKIP_NONE, Ordering::Relaxed) {
+        SKIP_NONE => {}
+        n if n > 0 => match decoder.next_chapter() {
+            Ok(Skip::To(chapter)) => {
+                esp_println::println!("teddiebox: taf skipped to chapter {chapter}");
+                *pending = 0..0;
+                *instead = Some(Cue::SkipForward.samples());
+                *end_after_cue = false;
+            }
+            // Skipping past the last chapter ends the story, on its cue.
+            Ok(Skip::PastTheEnd) => {
+                esp_println::println!("teddiebox: taf skipped past the last chapter");
+                *pending = 0..0;
+                *instead = Some(Cue::SkipForward.samples());
+                *end_after_cue = true;
+            }
+            Err(_) => esp_println::println!("teddiebox: taf could not skip forward"),
+        },
+        _ => match decoder.previous_chapter() {
+            Ok(chapter) => {
+                esp_println::println!("teddiebox: taf skipped back to chapter {chapter}");
+                *pending = 0..0;
+                *instead = Some(Cue::SkipBack.samples());
+                *end_after_cue = false;
+            }
+            Err(_) => esp_println::println!("teddiebox: taf could not skip back"),
+        },
+    }
+}
+
+/// The bench-only progress line, printed at most once per `LOG_EVERY`.
+///
+/// Prints the checksum, if one is kept, and the decode cost so far, not only
+/// at the end, since a whole Tonie is over half an hour. `taf2wav --frames N`
+/// decodes the same number of frames on the host.
+///
+/// `dma_done`/`dma_available` are read at the call site rather than taking
+/// the transfer itself: a stopped DMA reads as a *full* buffer (100%, no
+/// underruns), and these two tell that apart from the cushion's own numbers.
+#[allow(clippy::too_many_arguments)]
+fn log_progress(
+    last_log: &mut Instant,
+    started: Instant,
+    frames: u32,
+    cushion: &Cushion,
+    pcm_crc: Option<Crc32>,
+    decode_us: u64,
+    dma_done: bool,
+    dma_available: usize,
+    pending_len: usize,
+    longest_gap_us: u64,
+) {
+    if !BENCH || last_log.elapsed() < LOG_EVERY {
+        return;
+    }
+    *last_log = Instant::now();
+    let so_far = started.elapsed().as_micros().max(1);
+    esp_println::println!(
+        "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns, crc32 {}, decode {}%",
+        so_far / 1_000_000,
+        cushion.percent(),
+        cushion.low_water_percent(),
+        cushion.underruns(),
+        Shown(pcm_crc.map(|crc| crc.finish())),
+        decode_us * 100 / so_far
+    );
+    esp_println::println!(
+        "teddiebox: taf   dma done {}, available {} bytes, pending {}",
+        dma_done,
+        dma_available,
+        pending_len
+    );
+    let card_us = PAGE_READ_US.load(Ordering::Relaxed);
+    esp_println::println!(
+        "teddiebox: taf   longest card read {} ms, longest loop gap {} ms",
+        PAGE_READ_MAX_US.load(Ordering::Relaxed) / 1000,
+        longest_gap_us / 1000
+    );
+    esp_println::println!(
+        "teddiebox: taf   of that, card reads {}% and decode {}%",
+        card_us * 100 / so_far,
+        decode_us.saturating_sub(card_us) * 100 / so_far
+    );
+}
+
 async fn play_taf_inner(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
@@ -574,23 +694,7 @@ async fn play_taf_inner(
         return Err(("the decoder is already in use", i2s_tx, buffer));
     };
 
-    // A `.TAF` in the root is used first, so a specific file can be tested.
-    // Otherwise the card's own content is used, so nothing has to be written
-    // to the card.
-    let opened = match source {
-        Source::Content { directory, file } => card.open_content(directory, file),
-        Source::Cache { directory, file } => card.open_cache(directory, file),
-        Source::First => match card.find_by_extension(b"TAF") {
-            Some((name, size)) => {
-                esp_println::println!("teddiebox: taf /{name}, {size} bytes");
-                card.open_file(name).map(|handle| (handle, size))
-            }
-            None => card
-                .open_first_tonie()
-                .ok_or("no .TAF in the root and no CONTENT/<hex>/500304E0 on the card"),
-        },
-    };
-    let (file, size) = match opened {
+    let (file, size) = match open_source(card, source) {
         Ok(pair) => pair,
         Err(reason) => {
             release_scratch();
@@ -728,34 +832,7 @@ async fn play_taf_inner(
         // clicks. A skip that cannot move plays nothing.
         //
         // After a skip, `pcm_crc` no longer matches a full decode on the host.
-        match SKIP.swap(SKIP_NONE, Ordering::Relaxed) {
-            SKIP_NONE => {}
-            n if n > 0 => match decoder.next_chapter() {
-                Ok(Skip::To(chapter)) => {
-                    esp_println::println!("teddiebox: taf skipped to chapter {chapter}");
-                    pending = 0..0;
-                    instead = Some(Cue::SkipForward.samples());
-                    end_after_cue = false;
-                }
-                // Skipping past the last chapter ends the story, on its cue.
-                Ok(Skip::PastTheEnd) => {
-                    esp_println::println!("teddiebox: taf skipped past the last chapter");
-                    pending = 0..0;
-                    instead = Some(Cue::SkipForward.samples());
-                    end_after_cue = true;
-                }
-                Err(_) => esp_println::println!("teddiebox: taf could not skip forward"),
-            },
-            _ => match decoder.previous_chapter() {
-                Ok(chapter) => {
-                    esp_println::println!("teddiebox: taf skipped back to chapter {chapter}");
-                    pending = 0..0;
-                    instead = Some(Cue::SkipBack.samples());
-                    end_after_cue = false;
-                }
-                Err(_) => esp_println::println!("teddiebox: taf could not skip back"),
-            },
-        }
+        handle_skip(&mut decoder, &mut pending, &mut instead, &mut end_after_cue);
         if let Some(cue) = take_cue() {
             over = Some(cue.samples());
         }
@@ -854,42 +931,18 @@ async fn play_taf_inner(
             stalled = 0;
         }
 
-        if BENCH && last_log.elapsed() >= LOG_EVERY {
-            last_log = Instant::now();
-            let so_far = started.elapsed().as_micros().max(1);
-            // Print the checksum, if one is kept, and the decode cost so far,
-            // not only at the end, since a whole Tonie is over half an hour.
-            // `taf2wav --frames N` decodes the same number of frames on the
-            // host.
-            esp_println::println!(
-                "teddiebox: taf {} s, {frames} frames, buffer {}% (low {}%), {} underruns, crc32 {}, decode {}%",
-                so_far / 1_000_000,
-                cushion.percent(),
-                cushion.low_water_percent(),
-                cushion.underruns(),
-                Shown(pcm_crc.map(|crc| crc.finish())),
-                decode_us * 100 / so_far
-            );
-            // A stopped DMA reads as a *full* buffer (100%, no underruns).
-            // These values tell the two apart.
-            esp_println::println!(
-                "teddiebox: taf   dma done {}, available {} bytes, pending {}",
-                transfer.is_done(),
-                transfer.available_bytes(),
-                pending.len()
-            );
-            let card_us = PAGE_READ_US.load(Ordering::Relaxed);
-            esp_println::println!(
-                "teddiebox: taf   longest card read {} ms, longest loop gap {} ms",
-                PAGE_READ_MAX_US.load(Ordering::Relaxed) / 1000,
-                longest_gap_us / 1000
-            );
-            esp_println::println!(
-                "teddiebox: taf   of that, card reads {}% and decode {}%",
-                card_us * 100 / so_far,
-                decode_us.saturating_sub(card_us) * 100 / so_far
-            );
-        }
+        log_progress(
+            &mut last_log,
+            started,
+            frames,
+            &cushion,
+            pcm_crc,
+            decode_us,
+            transfer.is_done(),
+            transfer.available_bytes(),
+            pending.len(),
+            longest_gap_us,
+        );
 
         yield_now().await;
         longest_gap_us = longest_gap_us.max(last_pass.elapsed().as_micros());
