@@ -16,6 +16,7 @@ mod nfc;
 mod ota;
 mod pins;
 mod portal;
+mod setup;
 mod sleep;
 mod stack;
 mod storage;
@@ -2522,92 +2523,20 @@ async fn main(spawner: Spawner) {
     // Active low, so held reads low. In setup mode the ears are not read
     // again.
     if larger.is_low() && smaller.is_low() {
-        esp_println::println!("teddiebox: both ears held — setup portal");
-
-        // Nothing drains `INPUT_EVENTS` here: the reducer lives in the media
-        // task and that is never spawned. Told now rather than discovered
-        // later, so `sense` keeps its readings to the console instead of
-        // filling an eight-slot queue and then complaining about it once
-        // every two seconds for as long as the portal is up.
-        battery::SETUP_MODE.store(true, Ordering::Relaxed);
-
-        // Nothing before this point brings the card up: the rest of the boot
-        // does that lazily, inside `media`, on the first command that needs
-        // it. Setup mode never reaches `media`, so the same bus and the same
-        // rail are brought up here instead, once, so `portal::run` has the
-        // card it needs to read and rewrite `CONFIG.TXT`.
-        board.apply(gates.power(Rail::Storage, true));
-        Timer::after(Duration::from_millis(50)).await;
-
-        // In other modes the main loop below shows `LED_REQUEST`. This branch
-        // never reaches that loop, so it sets the LED directly.
-        let paint = |state: LedState| {
-            if let Some(rgb) = rgb.as_ref() {
-                if let Ok(lit) = gates.led(colour_for(state)) {
-                    rgb.apply(&lit, board::LED_DUTY);
-                }
-            }
-        };
-
-        // Taken before the card is mounted, because the failure path below
-        // parks, which is an `await`: anything alive across it becomes part
-        // of this task's future, in `.bss`. Doing this first keeps the
-        // 812-byte `Mounted` out of the future.
-        let Some(scratch) = audio::take_scratch_bytes() else {
-            esp_println::println!(
-                "teddiebox: portal cannot have the decode scratch — it is in use"
-            );
-            paint(LedState::Error);
-            portal::park().await
-        };
-
-        // The access point starts even without a card: the page then says
-        // what is wrong, and only saving is refused. The console prints the
-        // exact reason.
-        let card = match Spi::new(p.SPI2, storage::init_config()) {
-            Ok(spi) => {
-                let spi = spi
-                    .with_sck(p.GPIO35)
-                    .with_mosi(p.GPIO38)
-                    .with_miso(p.GPIO36);
-                let cs = Output::new(p.GPIO34, Level::High, OutputConfig::default());
-                match storage::Mounted::open(spi, cs, esp_hal::delay::Delay::new()) {
-                    Ok(card) => Some(card),
-                    Err(reason) => {
-                        esp_println::println!(
-                            "teddiebox: portal could not mount the card — {reason}"
-                        );
-                        None
-                    }
-                }
-            }
-            Err(_) => {
-                esp_println::println!("teddiebox: portal's SPI would not configure");
-                None
-            }
-        };
-
-        let seed = net::seed();
-
-        // Setup mode reuses the decoder's scratch memory. `portal::run`'s
-        // future (socket buffers, the card and the radio's `StackResources`)
-        // is moved into the 51,712 bytes of `audio::SCRATCH`, which the
-        // decoder does not use in this mode, so only a pointer stays in this
-        // task's future. That keeps the stack as large as without the portal;
-        // `portal::place` has the numbers.
-        //
-        // The scratch is taken through the same check the decoder uses, so
-        // both can never have it at once.
-        let Some(portal) = portal::place(
-            scratch,
-            portal::run(p.WIFI, p.UART0, p.GPIO44, card, seed, paint),
-        ) else {
-            // `place` has already printed what did not fit. Park rather than
-            // reset: the ears may still be held, so a reset would come
-            // straight back here.
-            portal::park().await
-        };
-        portal.await
+        setup::enter(
+            &mut board,
+            &mut gates,
+            rgb.as_ref(),
+            p.SPI2,
+            p.GPIO35,
+            p.GPIO38,
+            p.GPIO36,
+            p.GPIO34,
+            p.WIFI,
+            p.UART0,
+            p.GPIO44,
+        )
+        .await
     }
 
     spawner.spawn(net(p.WIFI, p.SHA, p.RSA, p.AES).unwrap());
