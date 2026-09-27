@@ -539,7 +539,9 @@ fn write_sidecar(card: &storage::Mounted, dir: u32, file: u32, sidecar: Option<S
 /// faster while one is.
 fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWrite>) -> bool {
     let writing = write.is_some();
-    match transfer(|t| t.next(writing)) {
+    let work = transfer(|t| t.next(writing));
+    let dropping = work == Work::Drop;
+    match work {
         Work::Idle | Work::Discard => return false,
         // Brief and writes nothing, like `Wait`. Reported as busy so the loop
         // keeps polling fast.
@@ -549,7 +551,7 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
             return true;
         }
         Work::Wait => return true,
-        Work::Drain => {}
+        Work::Drain | Work::Drop => {}
         Work::Open {
             path,
             placement,
@@ -613,6 +615,9 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         let taken = critical_section::with(|cs| DOWNLOAD_PIPE.borrow_ref_mut(cs).read(&mut buf));
         if taken == 0 {
             break;
+        }
+        if dropping {
+            continue;
         }
         if let Err(reason) = active.writer.write(&mut sink, &buf[..taken]) {
             esp_println::println!("teddiebox: get write failed — {reason}");

@@ -82,6 +82,12 @@ pub enum Work {
     /// Move what is in the pipe onto the open file, then call
     /// [`Transfer::finish`].
     Drain,
+    /// Empty the pipe without writing, then call [`Transfer::finish`].
+    ///
+    /// A write to the file failed. Appending anything after it would leave a
+    /// gap in the middle of the story that a later resume would build on;
+    /// stopping keeps what is on the card a clean prefix of the file.
+    Drop,
 }
 
 /// How a download that reached the card came out.
@@ -113,6 +119,10 @@ pub struct Transfer {
     /// Set when the figure is lifted or the card cannot be written, so the
     /// producer stops rather than filling a pipe nobody drains.
     aborted: bool,
+    /// Set when a write to the card failed. The bytes of that write left the
+    /// pipe without reaching the card, so the card can never catch up with
+    /// what was sent.
+    broken: bool,
     outcomes: Outcomes,
 }
 
@@ -143,6 +153,7 @@ impl Transfer {
             },
             sent: 0,
             aborted: false,
+            broken: false,
             outcomes: Outcomes::new(),
         }
     }
@@ -248,6 +259,7 @@ impl Transfer {
             Phase::Idle => Work::Idle,
             Phase::Asking => Work::Plan(self.path),
             Phase::Planned => Work::Wait,
+            Phase::Running | Phase::Ended if writing && self.broken => Work::Drop,
             Phase::Running | Phase::Ended if writing => Work::Drain,
             Phase::Ended if self.sent == 0 => {
                 self.phase = Phase::Idle;
@@ -310,25 +322,29 @@ impl Transfer {
     }
 
     /// Writing to the open file failed. Reported as for
-    /// [`Transfer::open_failed`], and the producer is stopped; the transfer
-    /// stays where it is.
+    /// [`Transfer::open_failed`]. The producer is stopped, the rest of the
+    /// pipe is dropped rather than written, and the file is finished once the
+    /// producer has ended.
     pub fn write_failed(&mut self) {
         self.outcomes.report(Outcome::Unreachable);
         self.aborted = true;
+        self.broken = true;
     }
 
-    /// Ends the download if everything the producer sent is on the card.
+    /// Ends the download once the producer has stopped and nothing more will
+    /// reach the card.
     ///
-    /// `written` is how many bytes of this body reached the card. Done only
-    /// when the producer has stopped *and* all it sent is written; otherwise
-    /// the file would lose what was still in the pipe.
+    /// `written` is how many bytes of this body reached the card. Normally
+    /// that must have caught up with what was sent, or the file would lose
+    /// what was still in the pipe. After a failed write it never will, so the
+    /// download ends as soon as the producer does.
     ///
     /// A stopped transfer is not necessarily a whole story, so this compares
     /// where the body started plus what was written against the server's
     /// length. A short one reports `Unreachable` unless it was abandoned, in
     /// which case the reducer has already moved on.
     pub fn finish(&mut self, written: u32) -> Option<Finished> {
-        if self.phase != Phase::Ended || written < self.sent {
+        if self.phase != Phase::Ended || (written < self.sent && !self.broken) {
             return None;
         }
         let whole = is_whole(self.head.at, written, self.head.total);
@@ -339,6 +355,7 @@ impl Transfer {
         }
         self.phase = Phase::Idle;
         self.aborted = false;
+        self.broken = false;
         Some(Finished {
             whole,
             at: self.head.at,
@@ -824,5 +841,31 @@ mod tests {
         transfer.planned(nothing_cached());
         transfer.ended(Some(Outcome::Unreachable));
         assert_eq!(transfer.next(false), Work::Discard);
+    }
+
+    #[test]
+    fn a_failed_write_finishes_once_the_producer_stops_despite_the_bytes_it_lost() {
+        let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
+        transfer.sent(1_024);
+        // The second 512-byte chunk left the pipe but never reached the card.
+        transfer.write_failed();
+        transfer.ended(None);
+        assert_eq!(
+            transfer.finish(512),
+            Some(Finished {
+                whole: false,
+                at: 0,
+                written: 512,
+                total: Some(4_000),
+            })
+        );
+    }
+
+    #[test]
+    fn nothing_more_is_written_after_a_failed_write() {
+        let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
+        transfer.sent(1_024);
+        transfer.write_failed();
+        assert_eq!(transfer.next(true), Work::Drop);
     }
 }
