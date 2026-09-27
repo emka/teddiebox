@@ -39,7 +39,10 @@ use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::i2s::master::{Channels, DataFormat, I2s, TdmConfig};
-use esp_hal::peripherals::LPWR;
+use esp_hal::peripherals::{
+    DMA_CH0, GPIO1, GPIO10, GPIO11, GPIO12, GPIO13, GPIO2, GPIO3, GPIO34, GPIO35, GPIO36, GPIO38,
+    GPIO4, I2S0, LPWR, SPI2, SPI3,
+};
 use esp_hal::rtc_cntl::{reset_reason, SocResetReason};
 use esp_hal::spi::master::Spi;
 use esp_hal::system::Cpu;
@@ -2463,6 +2466,177 @@ async fn net(
     }
 }
 
+/// Brings up the I2S/SD and NFC hardware and spawns the tasks that use them.
+///
+/// Both peripherals share the storage rail, so a failure here only prints —
+/// a missing card or reader still lets the box boot for everything else.
+#[allow(clippy::too_many_arguments)]
+fn bring_up_media_and_nfc(
+    spawner: Spawner,
+    board: &mut BoardPins<'_>,
+    gates: &mut Gates,
+    i2s0: I2S0<'static>,
+    dma_ch0: DMA_CH0<'static>,
+    i2s_bclk: GPIO11<'static>,
+    i2s_ws: GPIO12<'static>,
+    i2s_dout: GPIO10<'static>,
+    spi2: SPI2<'static>,
+    sd_sck: GPIO35<'static>,
+    sd_mosi: GPIO38<'static>,
+    sd_miso: GPIO36<'static>,
+    sd_cs: GPIO34<'static>,
+    spi3: SPI3<'static>,
+    nfc_sck: GPIO4<'static>,
+    nfc_mosi: GPIO2<'static>,
+    nfc_miso: GPIO3<'static>,
+    nfc_cs: GPIO1<'static>,
+    nfc_irq: GPIO13<'static>,
+) {
+    match (
+        I2s::new(
+            i2s0,
+            dma_ch0,
+            TdmConfig::new_tdm_philips()
+                .with_sample_rate(Rate::from_hz(tone::SAMPLE_RATE_HZ))
+                .with_data_format(DataFormat::Data16Channel16)
+                .with_channels(Channels::STEREO),
+        ),
+        Spi::new(spi2, storage::init_config()),
+    ) {
+        (Ok(i2s), Ok(spi)) => {
+            let i2s_tx = i2s
+                .i2s_tx
+                .with_bclk(i2s_bclk)
+                .with_ws(i2s_ws)
+                .with_dout(i2s_dout)
+                .build();
+            let spi = spi.with_sck(sd_sck).with_mosi(sd_mosi).with_miso(sd_miso);
+            // Starts high (not selected): a card is selected when this line
+            // goes low.
+            let cs = Output::new(sd_cs, Level::High, OutputConfig::default());
+
+            let tone_buffer = esp_hal::dma_loop_buffer!(tone::SINE.len() * 4);
+            // About 170 ms of audio at 48 kHz stereo 16-bit. Its low-water
+            // mark is measured to check the size.
+            let wav_buffer = esp_hal::dma_tx_stream_buffer!(audio::BUFFER_BYTES);
+
+            spawner.spawn(media(spi, cs, i2s_tx, tone_buffer, wav_buffer).unwrap());
+
+            match Spi::new(spi3, nfc::bus_config()) {
+                Ok(nfc_spi) => {
+                    let nfc_spi = nfc_spi
+                        .with_sck(nfc_sck)
+                        .with_mosi(nfc_mosi)
+                        .with_miso(nfc_miso);
+                    let nfc_cs = Output::new(nfc_cs, Level::High, OutputConfig::default());
+                    let nfc_irq = Input::new(nfc_irq, InputConfig::default());
+                    // The storage rail (gate 47) also powers the reader, so
+                    // switch it on here when polling is on from boot, as
+                    // `plate on` does. Before the spawn, because the task
+                    // waits only 50 ms before talking to the reader.
+                    if nfc::PLATE_POLLING.load(Ordering::Relaxed) {
+                        board.apply(gates.power(Rail::Storage, true));
+                    }
+                    spawner.spawn(nfc::nfc_reader(nfc_spi, nfc_cs, nfc_irq).unwrap());
+                }
+                Err(_) => esp_println::println!("teddiebox: NFC SPI would not configure"),
+            }
+        }
+        (Err(_), _) => esp_println::println!("teddiebox: I2S would not configure"),
+        (_, Err(_)) => esp_println::println!("teddiebox: SPI would not configure"),
+    }
+}
+
+/// On a wake with an empty pack, shows red and goes back to sleep before the
+/// codec, card, radio or jingle start. Speaking would draw near-full power
+/// for seconds on every ear press, draining the unprotected cells below the
+/// cutoff; red costs only milliamps.
+///
+/// Only on a wake from deep sleep. A cold boot on a flat pack still starts
+/// and announces the problem.
+async fn sleep_if_pack_empty_on_wake(
+    board: &mut BoardPins<'_>,
+    gates: &mut Gates,
+    rgb: Option<&led::Rgb<'_>>,
+    lpwr: &mut Option<LPWR<'static>>,
+) {
+    if reset_reason(Cpu::ProCpu) != Some(SocResetReason::CoreDeepSleep) {
+        return;
+    }
+    let Some(mv) = battery::pack_says_empty().await else {
+        return;
+    };
+    esp_println::println!("teddiebox: pack {mv} mV on wake — below the cutoff, going back");
+    if let Some(rgb) = rgb {
+        if let Ok(red) = gates.led(colour_for(LedState::BatteryCritical)) {
+            rgb.apply(&red, board::LED_DUTY);
+        }
+    }
+    Timer::after(Duration::from_secs(2)).await;
+    go_dark(board, gates, rgb).await;
+    if let Err(reason) = sleep_now(lpwr).await {
+        esp_println::println!("teddiebox: sleep not armed — {reason}, carrying on awake");
+    }
+}
+
+/// Starts a sound the box has asked for, such as a warning.
+///
+/// Called from the run loop, which controls the rails.
+fn start_pending_sound(board: &mut BoardPins<'_>, gates: &mut Gates) {
+    let pending = SOUND_REQUEST.swap(NO_SOUND, Ordering::Relaxed);
+    if pending == NO_SOUND {
+        return;
+    }
+    board.apply(gates.power(Rail::Storage, true));
+    i2c_bus::request_output(i2c_bus::OUTPUT_UP);
+    CONTENT_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
+    CONTENT_FILE.store(pending, Ordering::Relaxed);
+    // Set here rather than by the media task, so there is no moment when
+    // the announcement is queued but not marked. The file is recorded so
+    // only its own playback clears the flag.
+    ANNOUNCING_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
+    ANNOUNCING_FILE.store(pending, Ordering::Relaxed);
+    ANNOUNCING.store(true, Ordering::Relaxed);
+    REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
+}
+
+/// The box said it is turning off. Saves the position, dims the lights, asks
+/// for deep sleep, and — if that could not be armed — parks so nothing keeps
+/// draining the pack with no way to wake it.
+async fn shut_down(
+    board: &mut BoardPins<'_>,
+    gates: &mut Gates,
+    rgb: Option<&led::Rgb<'_>>,
+    lpwr: &mut Option<LPWR<'static>>,
+) {
+    // Last chance to save the position. Ask the media task and wait, but
+    // only briefly: losing the position is better than a box that will
+    // not turn off.
+    FLUSH_PLACE.store(true, Ordering::Relaxed);
+    for _ in 0..20 {
+        if !FLUSH_PLACE.load(Ordering::Relaxed) {
+            break;
+        }
+        Timer::after(Duration::from_millis(25)).await;
+    }
+    // The reason was already printed by `perform`.
+    esp_println::println!("teddiebox: going dark");
+    go_dark(board, gates, rgb).await;
+    // Deep sleep, because a park keeps the CPU and PLLs running (tens of
+    // milliamps) and would keep draining the pack. `autosleep off` parks
+    // instead.
+    if AUTO_SLEEP.load(Ordering::Relaxed) {
+        if let Err(reason) = sleep_now(lpwr).await {
+            esp_println::println!("teddiebox: sleep not armed — {reason}, parking instead");
+        }
+    }
+    // Sound and lights are off; now stop every task. Reached for a park,
+    // and when sleep could not be armed: a box that drains can be
+    // recharged, but one asleep with no way to wake is stuck.
+    PARKED.store(true, Ordering::Relaxed);
+    park_task().await;
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -2617,67 +2791,15 @@ async fn main(spawner: Spawner) {
     // Audio out on I2S: DIN 10, BCLK 11, WCLK 12, at the rate the codec's PLL
     // was configured for. The SD card is SPI2 on CLK 35, MOSI 38, MISO 36 with
     // CS 34, created at the specification's 400 kHz initialisation rate;
-    // storage.rs raises it once the card has identified itself.
-    //
-    // Both go to the media task, which serves everything that needs them.
-    match (
-        I2s::new(
-            p.I2S0,
-            p.DMA_CH0,
-            TdmConfig::new_tdm_philips()
-                .with_sample_rate(Rate::from_hz(tone::SAMPLE_RATE_HZ))
-                .with_data_format(DataFormat::Data16Channel16)
-                .with_channels(Channels::STEREO),
-        ),
-        Spi::new(p.SPI2, storage::init_config()),
-    ) {
-        (Ok(i2s), Ok(spi)) => {
-            let i2s_tx = i2s
-                .i2s_tx
-                .with_bclk(p.GPIO11)
-                .with_ws(p.GPIO12)
-                .with_dout(p.GPIO10)
-                .build();
-            let spi = spi
-                .with_sck(p.GPIO35)
-                .with_mosi(p.GPIO38)
-                .with_miso(p.GPIO36);
-            // Starts high (not selected): a card is selected when this line
-            // goes low.
-            let cs = Output::new(p.GPIO34, Level::High, OutputConfig::default());
-
-            let tone_buffer = esp_hal::dma_loop_buffer!(tone::SINE.len() * 4);
-            // About 170 ms of audio at 48 kHz stereo 16-bit. Its low-water
-            // mark is measured to check the size.
-            let wav_buffer = esp_hal::dma_tx_stream_buffer!(audio::BUFFER_BYTES);
-
-            spawner.spawn(media(spi, cs, i2s_tx, tone_buffer, wav_buffer).unwrap());
-
-            // The reader is on its own bus: SCLK 4, MOSI 2, MISO 3, CS 1, with
-            // IRQ on 13. It shares only the power rail with the card.
-            match Spi::new(p.SPI3, nfc::bus_config()) {
-                Ok(nfc_spi) => {
-                    let nfc_spi = nfc_spi
-                        .with_sck(p.GPIO4)
-                        .with_mosi(p.GPIO2)
-                        .with_miso(p.GPIO3);
-                    let nfc_cs = Output::new(p.GPIO1, Level::High, OutputConfig::default());
-                    let nfc_irq = Input::new(p.GPIO13, InputConfig::default());
-                    // The storage rail (gate 47) also powers the reader, so
-                    // switch it on here when polling is on from boot, as
-                    // `plate on` does. Before the spawn, because the task
-                    // waits only 50 ms before talking to the reader.
-                    if nfc::PLATE_POLLING.load(Ordering::Relaxed) {
-                        board.apply(gates.power(Rail::Storage, true));
-                    }
-                    spawner.spawn(nfc::nfc_reader(nfc_spi, nfc_cs, nfc_irq).unwrap());
-                }
-                Err(_) => esp_println::println!("teddiebox: NFC SPI would not configure"),
-            }
-        }
-        (Err(_), _) => esp_println::println!("teddiebox: I2S would not configure"),
-        (_, Err(_)) => esp_println::println!("teddiebox: SPI would not configure"),
-    }
+    // storage.rs raises it once the card has identified itself. Both go to
+    // the media task, which serves everything that needs them. The NFC
+    // reader is on its own bus: SCLK 4, MOSI 2, MISO 3, CS 1, with IRQ on 13;
+    // it shares only the power rail with the card.
+    bring_up_media_and_nfc(
+        spawner, &mut board, &mut gates, p.I2S0, p.DMA_CH0, p.GPIO11, p.GPIO12, p.GPIO10, p.SPI2,
+        p.GPIO35, p.GPIO38, p.GPIO36, p.GPIO34, p.SPI3, p.GPIO4, p.GPIO2, p.GPIO3, p.GPIO1,
+        p.GPIO13,
+    );
 
     // Devices need a moment after their rail comes up. Without this the
     // accelerometer misses the scan but answers a few milliseconds later.
@@ -2703,28 +2825,7 @@ async fn main(spawner: Spawner) {
     // colour.
     let mut shown = LedState::Booting;
 
-    // On a wake with an empty pack, show red and go back to sleep before the
-    // codec, card, radio or jingle start. Speaking would draw near-full power
-    // for seconds on every ear press, draining the unprotected cells below
-    // the cutoff; red costs only milliamps.
-    //
-    // Only on a wake from deep sleep. A cold boot on a flat pack still starts
-    // and announces the problem.
-    if reset_reason(Cpu::ProCpu) == Some(SocResetReason::CoreDeepSleep) {
-        if let Some(mv) = battery::pack_says_empty().await {
-            esp_println::println!("teddiebox: pack {mv} mV on wake — below the cutoff, going back");
-            if let Some(rgb) = rgb.as_ref() {
-                if let Ok(red) = gates.led(colour_for(LedState::BatteryCritical)) {
-                    rgb.apply(&red, board::LED_DUTY);
-                }
-            }
-            Timer::after(Duration::from_secs(2)).await;
-            go_dark(&mut board, &mut gates, rgb.as_ref()).await;
-            if let Err(reason) = sleep_now(&mut lpwr).await {
-                esp_println::println!("teddiebox: sleep not armed — {reason}, carrying on awake");
-            }
-        }
-    }
+    sleep_if_pack_empty_on_wake(&mut board, &mut gates, rgb.as_ref(), &mut lpwr).await;
 
     loop {
         if let Some(rgb) = rgb.as_ref() {
@@ -2760,50 +2861,12 @@ async fn main(spawner: Spawner) {
 
         // A sound the box wants to play, such as a warning. Started here,
         // because this loop controls the rails.
-        let pending = SOUND_REQUEST.swap(NO_SOUND, Ordering::Relaxed);
-        if pending != NO_SOUND {
-            board.apply(gates.power(Rail::Storage, true));
-            i2c_bus::request_output(i2c_bus::OUTPUT_UP);
-            CONTENT_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
-            CONTENT_FILE.store(pending, Ordering::Relaxed);
-            // Set here rather than by the media task, so there is no moment
-            // when the announcement is queued but not marked. The file is
-            // recorded so only its own playback clears the flag.
-            ANNOUNCING_DIRECTORY.store(LANGUAGE.content_directory(), Ordering::Relaxed);
-            ANNOUNCING_FILE.store(pending, Ordering::Relaxed);
-            ANNOUNCING.store(true, Ordering::Relaxed);
-            REQUEST.store(REQUEST_CONTENT, Ordering::Relaxed);
-        }
+        start_pending_sound(&mut board, &mut gates);
 
         // The box said it is turning off. Do it once the announcement has
         // finished.
         if SHUTTING_DOWN.load(Ordering::Relaxed) && !ANNOUNCING.load(Ordering::Relaxed) {
-            // Last chance to save the position. Ask the media task and wait,
-            // but only briefly: losing the position is better than a box that
-            // will not turn off.
-            FLUSH_PLACE.store(true, Ordering::Relaxed);
-            for _ in 0..20 {
-                if !FLUSH_PLACE.load(Ordering::Relaxed) {
-                    break;
-                }
-                Timer::after(Duration::from_millis(25)).await;
-            }
-            // The reason was already printed by `perform`.
-            esp_println::println!("teddiebox: going dark");
-            go_dark(&mut board, &mut gates, rgb.as_ref()).await;
-            // Deep sleep, because a park keeps the CPU and PLLs running (tens
-            // of milliamps) and would keep draining the pack. `autosleep off`
-            // parks instead.
-            if AUTO_SLEEP.load(Ordering::Relaxed) {
-                if let Err(reason) = sleep_now(&mut lpwr).await {
-                    esp_println::println!("teddiebox: sleep not armed — {reason}, parking instead");
-                }
-            }
-            // Sound and lights are off; now stop every task. Reached for a
-            // park, and when sleep could not be armed: a box that drains can
-            // be recharged, but one asleep with no way to wake is stuck.
-            PARKED.store(true, Ordering::Relaxed);
-            park_task().await;
+            shut_down(&mut board, &mut gates, rgb.as_ref(), &mut lpwr).await;
         }
 
         let mut buf = [0u8; 16];
