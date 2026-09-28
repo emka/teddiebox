@@ -281,11 +281,18 @@ impl Core {
 
     pub fn handle<I: ContentIndex>(&mut self, event: Event, index: &I) -> Actions {
         let mut actions = Actions::new();
+        self.update_clock(event);
+        if self.dispatch(event, index, &mut actions) {
+            self.refresh_led(&mut actions);
+        }
+        actions
+    }
 
-        // Events with a timestamp use it; the others use the last tick, the
-        // only clock the core has. Battery and charger events are not
-        // activity: the box samples its battery even when unused, and counting
-        // that would keep it awake forever.
+    /// Events with a timestamp use it; the others use the last tick, the
+    /// only clock the core has. Battery and charger events are not
+    /// activity: the box samples its battery even when unused, and counting
+    /// that would keep it awake forever.
+    fn update_clock(&mut self, event: Event) {
         match event {
             Event::Tick(now) => self.last_tick = now,
             Event::EarDown(_, at) | Event::EarHeld(_, at) | Event::EarUp(_, at) => {
@@ -304,7 +311,17 @@ impl Core {
             }
             Event::Battery { .. } | Event::Charger(_) | Event::TrackFinished => {}
         }
+    }
 
+    /// Applies the event and returns whether the LED should be refreshed
+    /// afterward — false only for an ear edge that turned out to be a
+    /// no-op (already released, or already used for a skip/step).
+    fn dispatch<I: ContentIndex>(
+        &mut self,
+        event: Event,
+        index: &I,
+        actions: &mut Actions,
+    ) -> bool {
         match event {
             Event::Tick(now) => {
                 // While the box is in use, keep moving the last-activity time
@@ -326,7 +343,7 @@ impl Core {
                 // and the release does nothing, so one press is one step.
                 self.ear_spent[ear as usize] = !self.ears_skip;
                 if !self.ears_skip {
-                    self.step_volume(ear, &mut actions);
+                    self.step_volume(ear, actions);
                 }
             }
 
@@ -334,7 +351,7 @@ impl Core {
             // skip per press, however long the ear is held.
             Event::EarHeld(ear, _) => {
                 if self.ear_down[ear as usize].is_none() || self.ear_spent[ear as usize] {
-                    return actions;
+                    return false;
                 }
                 self.ear_spent[ear as usize] = true;
                 let _ = actions.push(match ear {
@@ -347,73 +364,32 @@ impl Core {
                 let was_down = self.ear_down[ear as usize].take().is_some();
                 // Ignore a release without a press.
                 if !was_down {
-                    return actions;
+                    return false;
                 }
                 // The press was already used (for a skip or a volume step).
                 if self.ear_spent[ear as usize] {
                     self.ear_spent[ear as usize] = false;
-                    return actions;
+                    return false;
                 }
-                self.step_volume(ear, &mut actions);
+                self.step_volume(ear, actions);
             }
 
-            Event::TagPresent(tag) => {
-                let a = self.playback.on_tag_present(tag, index);
-                for act in a {
-                    let _ = actions.push(act);
-                }
-            }
-
-            Event::TagAbsent => {
-                let a = self.playback.on_tag_absent();
-                for act in a {
-                    let _ = actions.push(act);
-                }
-            }
-
+            Event::TagPresent(tag) => extend(actions, self.playback.on_tag_present(tag, index)),
+            Event::TagAbsent => extend(actions, self.playback.on_tag_absent()),
             Event::ContentReady(tag) => {
-                let a = self.playback.on_content_ready(tag, index);
-                for act in a {
-                    let _ = actions.push(act);
-                }
+                extend(actions, self.playback.on_content_ready(tag, index));
             }
-
             Event::Revalidated(tag, freshness) => {
-                let a = self.playback.on_revalidated(tag, freshness, index);
-                for act in a {
-                    let _ = actions.push(act);
-                }
+                extend(actions, self.playback.on_revalidated(tag, freshness, index));
             }
-
             Event::ContentMissing(tag, why) => {
-                let a = self.playback.on_content_missing(tag, why);
-                for act in a {
-                    let _ = actions.push(act);
-                }
+                extend(actions, self.playback.on_content_missing(tag, why));
             }
 
             Event::Battery {
                 pack_mv,
                 under_load,
-            } => {
-                // Warn when the level settles into Low or Critical. Warning on
-                // both catches a fast drop that skips Low.
-                if let Some(BatteryLevel::Low | BatteryLevel::Critical) =
-                    self.battery.update(pack_mv, under_load)
-                {
-                    let _ = actions.push(Action::PlayPrompt(Prompt::BatteryLow));
-                }
-
-                // Shut down at the hard cutoff, not at Critical.
-                // `must_shut_down` stays true once set (a pack whose voltage
-                // recovers without load is still empty), so only act on the
-                // first time it becomes true.
-                if self.battery.must_shut_down() && !self.announced_shutdown {
-                    self.announced_shutdown = true;
-                    let _ = actions.push(Action::PlayPrompt(Prompt::BatteryCritical));
-                    let _ = actions.push(Action::PowerOff(PowerOffReason::PackEmpty));
-                }
-            }
+            } => self.handle_battery(pack_mv, under_load, actions),
 
             Event::Charger(on) => {
                 self.charging = on;
@@ -423,12 +399,7 @@ impl Core {
                 let _ = actions.push(Action::NextTrack);
             }
 
-            Event::PlaybackEnded => {
-                let a = self.playback.on_playback_ended();
-                for act in a {
-                    let _ = actions.push(act);
-                }
-            }
+            Event::PlaybackEnded => extend(actions, self.playback.on_playback_ended()),
 
             Event::Slap(side) => {
                 let _ = actions.push(match side {
@@ -457,9 +428,27 @@ impl Core {
                 });
             }
         }
+        true
+    }
 
-        self.refresh_led(&mut actions);
-        actions
+    /// Warns when the level settles into Low or Critical (warning on both
+    /// catches a fast drop that skips Low), then shuts down at the hard
+    /// cutoff, not at Critical.
+    ///
+    /// `must_shut_down` stays true once set (a pack whose voltage recovers
+    /// without load is still empty), so only act on the first time it
+    /// becomes true.
+    fn handle_battery(&mut self, pack_mv: u16, under_load: bool, actions: &mut Actions) {
+        if let Some(BatteryLevel::Low | BatteryLevel::Critical) =
+            self.battery.update(pack_mv, under_load)
+        {
+            let _ = actions.push(Action::PlayPrompt(Prompt::BatteryLow));
+        }
+        if self.battery.must_shut_down() && !self.announced_shutdown {
+            self.announced_shutdown = true;
+            let _ = actions.push(Action::PlayPrompt(Prompt::BatteryCritical));
+            let _ = actions.push(Action::PowerOff(PowerOffReason::PackEmpty));
+        }
     }
 
     /// Appends a `SetLed` action when the indicator should change.
@@ -469,6 +458,13 @@ impl Core {
             self.led = want;
             let _ = actions.push(Action::SetLed(want));
         }
+    }
+}
+
+/// Appends every action `new` yields, in order.
+fn extend(actions: &mut Actions, new: impl IntoIterator<Item = Action>) {
+    for act in new {
+        let _ = actions.push(act);
     }
 }
 
