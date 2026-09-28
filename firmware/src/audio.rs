@@ -898,6 +898,34 @@ fn next_chunk(
     }
 }
 
+/// Opens the file and stands up the decoder: finds and opens the TAF, then
+/// starts the Opus and TAF decoders on it. Every failure past `open_source`
+/// closes the file, matching the caller's own later failure paths.
+fn open_taf<'s>(
+    card: &'s Mounted,
+    source: Source,
+    opus_scratch: &'s mut OpusState,
+) -> Result<(RawFile, TafDecoder<CardPages<'s>, LibOpus<'s>>), &'static str> {
+    let (file, size) = open_source(card, source)?;
+    esp_println::println!("teddiebox: taf {size} bytes");
+    let pages = CardPages::new(card, file, size);
+
+    let opus = match LibOpus::new(opus_scratch) {
+        Ok(opus) => opus,
+        Err(_) => {
+            card.close_file(file);
+            return Err("the Opus decoder would not start");
+        }
+    };
+    match TafDecoder::open(pages, opus) {
+        Ok(decoder) => Ok((file, decoder)),
+        Err(_) => {
+            card.close_file(file);
+            Err("not a readable TAF file")
+        }
+    }
+}
+
 /// Seeks to a saved position, if any. A replaced or re-downloaded story may
 /// not have the saved page any more; then it plays from the beginning.
 fn seek_to_start(decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>, from: Position) {
@@ -926,30 +954,11 @@ async fn play_taf_inner(
         return Err(("the decoder is already in use", i2s_tx, buffer));
     };
 
-    let (file, size) = match open_source(card, source) {
+    let (file, mut decoder) = match open_taf(card, source, &mut scratch.opus) {
         Ok(pair) => pair,
         Err(reason) => {
             release_scratch();
             return Err((reason, i2s_tx, buffer));
-        }
-    };
-    esp_println::println!("teddiebox: taf {size} bytes");
-    let pages = CardPages::new(card, file, size);
-
-    let opus = match LibOpus::new(&mut scratch.opus) {
-        Ok(opus) => opus,
-        Err(_) => {
-            card.close_file(file);
-            release_scratch();
-            return Err(("the Opus decoder would not start", i2s_tx, buffer));
-        }
-    };
-    let mut decoder = match TafDecoder::open(pages, opus) {
-        Ok(decoder) => decoder,
-        Err(_) => {
-            card.close_file(file);
-            release_scratch();
-            return Err(("not a readable TAF file", i2s_tx, buffer));
         }
     };
     esp_println::println!(
