@@ -26,9 +26,6 @@ allow = [
     "BSL-1.0",
     "ISC",
     "MIT",
-    # The University of Illinois/NCSA licence, BSD-style: LLVM's libFuzzer,
-    # which libfuzzer-sys builds for fuzz/.
-    "NCSA",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
@@ -37,6 +34,14 @@ allow = [
 # their own; they are not distributed.
 private = { ignore = true }
 unused-allowed-license = "allow"
+# This file serves all three workspaces, and only fuzz/ has libfuzzer-sys.
+unused-license-exception = "allow"
+# The University of Illinois/NCSA licence is BSD-style, and covers LLVM's
+# libFuzzer, which libfuzzer-sys builds for fuzz/. Allowed for that crate
+# only, so no other NCSA code arrives without a look.
+exceptions = [
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
 
 [bans]
 # Duplicate versions come in through the esp-rs and embassy dependency trees
