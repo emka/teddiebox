@@ -14,7 +14,7 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
-heapless = { version = "0.8", default-features = false }
+heapless = { version = "0.9", default-features = false }
 libfuzzer-sys = "0.4"
 teddiebox-cloud = { path = "../crates/teddiebox-cloud" }
 teddiebox-config = { path = "../crates/teddiebox-config" }

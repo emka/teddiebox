@@ -299,7 +299,7 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-io",
  "embedded-sdmmc-types",
- "heapless 0.9.3",
+ "heapless",
  "hex-literal",
  "thiserror",
 ]
@@ -391,16 +391,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
 dependencies = [
  "byteorder",
-]
-
-[[package]]
-name = "heapless"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
-dependencies = [
- "hash32",
- "stable_deref_trait",
 ]
 
 [[package]]
@@ -826,7 +816,7 @@ version = "0.1.0"
 dependencies = [
  "embedded-io",
  "embedded-io-async",
- "heapless 0.8.0",
+ "heapless",
  "pollster",
  "proptest",
 ]
@@ -835,21 +825,21 @@ dependencies = [
 name = "teddiebox-config"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless",
 ]
 
 [[package]]
 name = "teddiebox-console"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless",
 ]
 
 [[package]]
 name = "teddiebox-core"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless",
  "teddiebox-board",
 ]
 
@@ -857,7 +847,7 @@ dependencies = [
 name = "teddiebox-download"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless",
  "teddiebox-cloud",
  "teddiebox-taf",
 ]
@@ -877,7 +867,7 @@ version = "0.1.0"
 name = "teddiebox-ota"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless",
  "proptest",
 ]
 
@@ -885,7 +875,7 @@ dependencies = [
 name = "teddiebox-portal"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless",
  "proptest",
  "teddiebox-config",
 ]
@@ -894,7 +884,7 @@ dependencies = [
 name = "teddiebox-taf"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless",
  "proptest",
 ]
 

@@ -2839,28 +2839,28 @@ version = "0.1.0"
 dependencies = [
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
- "heapless 0.8.0",
+ "heapless 0.9.3",
 ]
 
 [[package]]
 name = "teddiebox-config"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.3",
 ]
 
 [[package]]
 name = "teddiebox-console"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.3",
 ]
 
 [[package]]
 name = "teddiebox-core"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.3",
  "teddiebox-board",
 ]
 
@@ -2868,7 +2868,7 @@ dependencies = [
 name = "teddiebox-download"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.3",
  "teddiebox-cloud",
  "teddiebox-taf",
 ]
@@ -2895,7 +2895,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp-storage",
- "heapless 0.8.0",
+ "heapless 0.9.3",
  "lis3dh",
  "mbedtls-rs",
  "portable-atomic",
@@ -2932,14 +2932,14 @@ version = "0.1.0"
 name = "teddiebox-ota"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.3",
 ]
 
 [[package]]
 name = "teddiebox-portal"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.3",
  "teddiebox-config",
 ]
 
@@ -2947,7 +2947,7 @@ dependencies = [
 name = "teddiebox-taf"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.3",
 ]
 
 [[package]]
