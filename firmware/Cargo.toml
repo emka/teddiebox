@@ -16,6 +16,10 @@ unsafe_op_in_unsafe_fn = "warn"
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"
 
+# Listed for its features, not its code: see `esp-storage` below.
+[package.metadata.cargo-machete]
+ignored = ["esp-storage"]
+
 [dependencies]
 teddiebox-core = { path = "../crates/teddiebox-core" }
 teddiebox-board = { path = "../crates/teddiebox-board" }

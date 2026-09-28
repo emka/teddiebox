@@ -197,6 +197,9 @@
             # `just lint-workflows`: the CI workflows, including the shell in
             # their `run:` steps, which it hands to the shellcheck above.
             pkgs.actionlint
+            # `just machete`: dependencies no code uses, which in firmware/
+            # cost flash and build time.
+            pkgs.cargo-machete
             # mbedtls-rs-sys runs bindgen over MbedTLS's headers, and bindgen
             # loads libclang at run time to do it. The C itself is compiled by
             # the Xtensa GCC above; this is only the header parser.

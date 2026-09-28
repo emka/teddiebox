@@ -11,7 +11,7 @@
 check: quick lint host-tests device-checks images
 
 # the gates that compile nothing, so CI reports them first
-quick: fmt deny lint-scripts lint-workflows
+quick: fmt deny lint-scripts lint-workflows machete
 
 # the host test suite and the bench scripts' self-tests
 host-tests: test scripts
@@ -57,6 +57,15 @@ lint-scripts:
 # actionlint over .github/workflows/
 lint-workflows:
     actionlint
+
+# A dependency nothing uses still costs build time, and in firmware/ it can
+# cost flash. cargo-machete reads source rather than compiling it, so it
+# covers both workspaces from here in seconds; a dependency listed only for
+# its features is named in that crate's `[package.metadata.cargo-machete]`.
+
+# dependencies declared but not used, in both workspaces
+machete:
+    cargo machete
 
 lint: vendor
     cargo clippy --workspace --all-targets -- -D warnings
