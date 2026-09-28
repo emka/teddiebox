@@ -2326,6 +2326,103 @@ fn report_address(stack: &embassy_net::Stack<'_>) {
     }
 }
 
+/// Scans and prints what answered.
+async fn scan_and_report(radio: &mut net::Radio<'_>) {
+    esp_println::println!("teddiebox: net scanning");
+    // `AccessPointInfo` is `Clone` but not `Copy`, so the array repeat
+    // syntax will not build it.
+    let mut seen: [_; SCAN_LIMIT] = core::array::from_fn(|_| Default::default());
+
+    match select(radio.scan(&mut seen), Timer::after(SCAN_TIMEOUT)).await {
+        Either::First(Ok(0)) => esp_println::println!(
+            "teddiebox: net heard nothing — radio came up, no access point in range"
+        ),
+        Either::First(Ok(found)) => {
+            for ap in &seen[..found] {
+                esp_println::println!(
+                    "teddiebox: net   {} ch{} {} dBm {:?}",
+                    ap.ssid.as_str(),
+                    ap.channel,
+                    ap.signal_strength,
+                    ap.auth_method
+                );
+            }
+            esp_println::println!("teddiebox: net {found} access points");
+            // A full list means the driver stopped collecting; the
+            // highest channels were left out.
+            if found == SCAN_LIMIT {
+                esp_println::println!(
+                    "teddiebox: net   list is truncated at {SCAN_LIMIT} — \
+                     the high channels were not reached"
+                );
+            }
+        }
+        Either::First(Err(e)) => esp_println::println!("teddiebox: net scan failed — {e:?}"),
+        // No answer at all. The driver sends `ScanDone` even when it finds
+        // nothing, so this means the radio never started.
+        Either::Second(()) => esp_println::println!(
+            "teddiebox: net scan timed out after {} s — the radio never answered",
+            SCAN_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+/// Comes up to fetch or probe a figure with the radio off.
+///
+/// The radio is switched on for it and off again afterwards: the plate is
+/// read less reliably while the radio runs, and there is no other reason to
+/// stay connected.
+async fn serve_get(
+    radio: &mut net::Radio<'_>,
+    tls: Option<&tls::Client>,
+    schedule: &mut teddiebox_wifikey::schedule::Schedule,
+) {
+    let Some(FetchRequest { ruid, probe, .. }) =
+        critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs))
+    else {
+        esp_println::println!("teddiebox: get has no request queued — nothing to fetch");
+        return;
+    };
+    // Recorded before anything can end the fetch.
+    transfer(|t| t.start(ruid));
+    esp_println::println!(
+        "teddiebox: net coming up {}",
+        if probe {
+            "to ask about a figure"
+        } else {
+            "for a story"
+        }
+    );
+    // Put back for `bring_up`'s loop to serve; the read at the top of the
+    // caller's loop took it out.
+    NET_REQUEST.store(NET_GET, Ordering::Relaxed);
+    let gave_up = bring_up(radio, tls, schedule, false).await;
+    // If `bring_up` failed before its loop, the request is still queued.
+    // Clear it, or the same fetch would be retried for ever, and the
+    // retries interrupt playback (up to 291 audio DMA restarts in 263 s,
+    // measured).
+    if gave_up.is_some() {
+        NET_REQUEST.store(REQUEST_NONE, Ordering::Relaxed);
+    }
+    // Answer a probe that is still unanswered: the reducer keeps the
+    // figure silent until it hears back, and a network failure is no
+    // reason not to play the card's copy.
+    if probe {
+        if !answer_waiting() {
+            esp_println::println!("teddiebox: net would not come up to ask — playing what is here");
+            probe_ended(ruid);
+        }
+    // If `bring_up` could not connect (no credentials, join failed, no
+    // address), nobody else reports it, so report it here, with the right
+    // reason: a wrong passphrase should not be announced as a network
+    // fault.
+    } else if transfer(|t| {
+        t.could_not_connect(outcome_for(gave_up.unwrap_or(Unavailable::Unreachable)))
+    }) {
+        esp_println::println!("teddiebox: net would not come up for it");
+    }
+}
+
 /// Brings the radio up on demand and reports what it hears.
 ///
 /// Also serves the console `net` commands. A scan needs no credentials, card
@@ -2353,47 +2450,7 @@ async fn net(
         // Read the request once. Reading it twice would let the first read
         // swallow a request meant for the second.
         match NET_REQUEST.swap(REQUEST_NONE, Ordering::Relaxed) {
-            NET_SCAN => {
-                esp_println::println!("teddiebox: net scanning");
-                // `AccessPointInfo` is `Clone` but not `Copy`, so the array
-                // repeat syntax will not build it.
-                let mut seen: [_; SCAN_LIMIT] = core::array::from_fn(|_| Default::default());
-
-                match select(radio.scan(&mut seen), Timer::after(SCAN_TIMEOUT)).await {
-                    Either::First(Ok(0)) => esp_println::println!(
-                        "teddiebox: net heard nothing — radio came up, no access point in range"
-                    ),
-                    Either::First(Ok(found)) => {
-                        for ap in &seen[..found] {
-                            esp_println::println!(
-                                "teddiebox: net   {} ch{} {} dBm {:?}",
-                                ap.ssid.as_str(),
-                                ap.channel,
-                                ap.signal_strength,
-                                ap.auth_method
-                            );
-                        }
-                        esp_println::println!("teddiebox: net {found} access points");
-                        // A full list means the driver stopped collecting; the
-                        // highest channels were left out.
-                        if found == SCAN_LIMIT {
-                            esp_println::println!(
-                                "teddiebox: net   list is truncated at {SCAN_LIMIT} — \
-                             the high channels were not reached"
-                            );
-                        }
-                    }
-                    Either::First(Err(e)) => {
-                        esp_println::println!("teddiebox: net scan failed — {e:?}")
-                    }
-                    // No answer at all. The driver sends `ScanDone` even when it
-                    // finds nothing, so this means the radio never started.
-                    Either::Second(()) => esp_println::println!(
-                        "teddiebox: net scan timed out after {} s — the radio never answered",
-                        SCAN_TIMEOUT.as_secs()
-                    ),
-                }
-            }
+            NET_SCAN => scan_and_report(&mut radio).await,
             // From the console: any failure is printed inside, and no figure
             // is waiting for the result.
             NET_UP => {
@@ -2423,60 +2480,7 @@ async fn net(
             NET_STATUS | NET_DOWN | NET_TLS => {
                 esp_println::println!("teddiebox: net is down")
             }
-            // A fetch or probe with the radio off. The radio is switched on
-            // for it and off again afterwards: the plate is read less reliably
-            // while the radio runs, and there is no other reason to stay
-            // connected.
-            NET_GET => match critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs)) {
-                None => {
-                    esp_println::println!("teddiebox: get has no request queued — nothing to fetch")
-                }
-                Some(FetchRequest { ruid, probe, .. }) => {
-                    // Recorded before anything can end the fetch.
-                    transfer(|t| t.start(ruid));
-                    esp_println::println!(
-                        "teddiebox: net coming up {}",
-                        if probe {
-                            "to ask about a figure"
-                        } else {
-                            "for a story"
-                        }
-                    );
-                    // Put back for `bring_up`'s loop to serve; the read at the
-                    // top of this loop took it out.
-                    NET_REQUEST.store(NET_GET, Ordering::Relaxed);
-                    let gave_up = bring_up(&mut radio, tls.as_ref(), &mut schedule, false).await;
-                    // If `bring_up` failed before its loop, the request is
-                    // still queued. Clear it, or the same fetch would be
-                    // retried for ever, and the retries interrupt playback (up
-                    // to 291 audio DMA restarts in 263 s, measured).
-                    if gave_up.is_some() {
-                        NET_REQUEST.store(REQUEST_NONE, Ordering::Relaxed);
-                    }
-                    // Answer a probe that is still unanswered: the reducer
-                    // keeps the figure silent until it hears back, and a
-                    // network failure is no reason not to play the card's copy.
-                    if probe {
-                        if !answer_waiting() {
-                            esp_println::println!(
-                                "teddiebox: net would not come up to ask — playing what is here"
-                            );
-                            probe_ended(ruid);
-                        }
-                    }
-                    // If `bring_up` could not connect (no credentials, join
-                    // failed, no address), nobody else reports it, so report
-                    // it here, with the right reason: a wrong passphrase
-                    // should not be announced as a network fault.
-                    else if transfer(|t| {
-                        t.could_not_connect(outcome_for(
-                            gave_up.unwrap_or(Unavailable::Unreachable),
-                        ))
-                    }) {
-                        esp_println::println!("teddiebox: net would not come up for it");
-                    }
-                }
-            },
+            NET_GET => serve_get(&mut radio, tls.as_ref(), &mut schedule).await,
             // Idle with the radio off: the only time deriving the Wi-Fi key or
             // writing it to flash does not delay a connection.
             _ => wifikey::pass(&mut schedule, credentials, PLAYING.load(Ordering::Relaxed)),
