@@ -74,13 +74,10 @@ pub fn split(update_url: &str) -> Result<UpdateUrl, OtaError> {
     if path.ends_with('/') {
         return Err(OtaError::MalformedUrl);
     }
-    // A fragment is never sent to a server, and no query string is
-    // expected; refuse both rather than send them in the request line.
-    if path.contains('#') || path.contains('?') {
-        return Err(OtaError::MalformedUrl);
-    }
     // The same check `resolve_image` applies to the manifest's part. The
-    // resolved image path joins both parts, so both must be checked.
+    // resolved image path joins both parts, so both must be checked. It also
+    // refuses a `#fragment`, which is never sent to a server, and a query
+    // string, which no server here expects.
     if !is_path_safe(path) {
         return Err(OtaError::MalformedUrl);
     }
