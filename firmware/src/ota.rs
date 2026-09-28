@@ -73,6 +73,46 @@ fn current_state() -> Option<(AppPartitionSubType, OtaImageState)> {
     Some((current, state))
 }
 
+/// Opens `otadata`, printing exactly why if it could not.
+///
+/// Shared by [`confirm_boot_or_revert`]'s first-boot path and
+/// [`mark_valid`], which both need the open `Ota` and both narrate every
+/// failure the same way. The revert path narrates differently (only its
+/// own first line, then silence) and [`current_state`] needs no narration
+/// at all, so neither uses this.
+fn open_otadata_verbose<'f>(
+    flash: &'f mut crate::flash::Flash,
+    buffer: &'f mut [u8; PARTITION_TABLE_MAX_LEN],
+) -> Option<Ota<'f, 'static>> {
+    let table = match partitions::read_partition_table(flash, buffer) {
+        Ok(table) => table,
+        Err(trouble) => {
+            esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
+            return None;
+        }
+    };
+    let otadata = match table.find_partition(PartitionType::Data(DataPartitionSubType::Ota)) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            esp_println::println!(
+                "teddiebox: ota has no otadata partition — this flash cannot update"
+            );
+            return None;
+        }
+        Err(trouble) => {
+            esp_println::println!("teddiebox: ota cannot find otadata — {trouble:?}");
+            return None;
+        }
+    };
+    match Ota::new(otadata.as_flash_region(flash), 2) {
+        Ok(ota) => Some(ota),
+        Err(trouble) => {
+            esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
+            None
+        }
+    }
+}
+
 /// The first thing `main` calls, before anything that could itself crash.
 ///
 /// This box's bootloader never changes the OTA state: a slot set to `New`
@@ -90,35 +130,8 @@ pub fn confirm_boot_or_revert() {
         teddiebox_ota::BootAction::ConfirmFirstBoot => {
             let mut flash = crate::flash::flash();
             let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-            let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
-                Ok(table) => table,
-                Err(trouble) => {
-                    esp_println::println!(
-                        "teddiebox: ota cannot read the partition table — {trouble:?}"
-                    );
-                    return;
-                }
-            };
-            let otadata = match table.find_partition(PartitionType::Data(DataPartitionSubType::Ota))
-            {
-                Ok(Some(entry)) => entry,
-                Ok(None) => {
-                    esp_println::println!(
-                        "teddiebox: ota has no otadata partition — this flash cannot update"
-                    );
-                    return;
-                }
-                Err(trouble) => {
-                    esp_println::println!("teddiebox: ota cannot find otadata — {trouble:?}");
-                    return;
-                }
-            };
-            let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), 2) {
-                Ok(ota) => ota,
-                Err(trouble) => {
-                    esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
-                    return;
-                }
+            let Some(mut ota) = open_otadata_verbose(&mut flash, &mut buffer) else {
+                return;
             };
             match ota.set_current_ota_state(OtaImageState::PendingVerify) {
                 Ok(()) => esp_println::println!(
@@ -178,32 +191,8 @@ pub fn mark_valid() {
     };
     let mut flash = crate::flash::flash();
     let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-    let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
-        Ok(table) => table,
-        Err(trouble) => {
-            esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
-            return;
-        }
-    };
-    let otadata = match table.find_partition(PartitionType::Data(DataPartitionSubType::Ota)) {
-        Ok(Some(entry)) => entry,
-        Ok(None) => {
-            esp_println::println!(
-                "teddiebox: ota has no otadata partition — this flash cannot update"
-            );
-            return;
-        }
-        Err(trouble) => {
-            esp_println::println!("teddiebox: ota cannot find otadata — {trouble:?}");
-            return;
-        }
-    };
-    let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), 2) {
-        Ok(ota) => ota,
-        Err(trouble) => {
-            esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
-            return;
-        }
+    let Some(mut ota) = open_otadata_verbose(&mut flash, &mut buffer) else {
+        return;
     };
     match ota.set_current_ota_state(OtaImageState::Valid) {
         Ok(()) => esp_println::println!("teddiebox: ota confirmed — marked Valid"),
