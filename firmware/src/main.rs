@@ -1532,89 +1532,118 @@ async fn play_story(
             esp_println::println!("teddiebox: playback failed — {reason}");
         }
     } else {
-        let source = match request {
-            REQUEST_CONTENT => audio::Source::Content {
-                directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
-                file: CONTENT_FILE.load(Ordering::Relaxed),
-            },
-            REQUEST_CACHE => audio::Source::Cache {
-                directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
-                file: CONTENT_FILE.load(Ordering::Relaxed),
-            },
-            _ => audio::Source::First,
-        };
-        // Only a story with a known path has a position to keep. A
-        // console `taf` plays `Source::First`, and `CONTENT_DIRECTORY`
-        // then still names the previous story, so without this check its
-        // position would be overwritten.
-        let identified = matches!(request, REQUEST_CONTENT | REQUEST_CACHE);
-        let stock = request == REQUEST_CONTENT;
-        let dir = CONTENT_DIRECTORY.load(Ordering::Relaxed);
-        let file = CONTENT_FILE.load(Ordering::Relaxed);
-        let from = match critical_section::with(|cs| {
-            core::mem::replace(&mut *PLAY_FROM.borrow_ref_mut(cs), Position::Start)
-        }) {
-            // Cleared either way, so the next story does not start at
-            // this figure's position.
-            from if identified => from,
-            _ => Position::Start,
-        };
-        // Called on every frame, because a story is one pass of this loop
-        // and can last half an hour: lifting the figure, ear presses and
-        // the idle clock must still be handled.
-        let mut attend = || {
-            if let Some(event) = take_plate_event(placed) {
-                apply(reducer, card, event, placed.token());
-            }
-            apply_ear_events(reducer, card, placed.token());
-            feed_tick(reducer, card, placed.token(), last_tick_fed);
-
-            // Keeps the reducer's position current; it is what gets
-            // saved when the figure is lifted.
-            reducer.note_position(Position::Exact {
-                page: audio::PAGE.load(Ordering::Relaxed),
-            });
-        };
-        // The hardware is returned, so another story can play without a
-        // reboot.
-        let (outcome, tx, buffer) =
-            audio::play_taf(card, tx, buffer, source, from, &mut attend).await;
-        if let Err(reason) = outcome {
-            esp_println::println!("teddiebox: playback failed — {reason}");
-        }
-        if matches!(outcome, Ok(audio::Finish::Ended)) {
-            if identified {
-                // A finished story starts again from the beginning next
-                // time. Written as page 0 rather than deleted: `storage`
-                // cannot delete, and page 0 is the header, so it means
-                // the same as no file.
-                let mut out = [0u8; MAX_POSITION];
-                let len = position::render(0, &mut out);
-                let _ = card.write_position(stock, dir, file, &out[..len]);
-                // Also drop the RAM copy, which would otherwise win over
-                // the card.
-                forget_place(((dir as u64) << 32) | file as u64);
-            }
-            // The reducer cannot learn this any other way. Sent for
-            // every story that ends, including console playback, so the
-            // reducer returns to idle.
-            apply(reducer, card, Event::PlaybackEnded, placed.token());
-        }
-        // Cleared only by the announcement's own playback, but whatever
-        // the outcome, or a failed announcement would block the shutdown
-        // for ever.
-        if dir == ANNOUNCING_DIRECTORY.load(Ordering::Relaxed)
-            && file == ANNOUNCING_FILE.load(Ordering::Relaxed)
-        {
-            ANNOUNCING.store(false, Ordering::Relaxed);
-        }
-        *i2s_tx = Some(tx);
-        *wav_buffer = Some(buffer);
-        // The output stays up a while, so a press just after the story
-        // does not click; the idle loop powers it down.
-        *quiet_since = Some(Instant::now());
+        play_taf_story(
+            card,
+            request,
+            tx,
+            buffer,
+            i2s_tx,
+            wav_buffer,
+            quiet_since,
+            reducer,
+            placed,
+            last_tick_fed,
+        )
+        .await;
     }
     PLAYING.store(false, Ordering::Relaxed);
+}
+
+/// Plays a `taf`, `play`, or figure-content request's story, then returns
+/// the hardware and records where playback ended.
+#[allow(clippy::too_many_arguments)]
+async fn play_taf_story(
+    card: &storage::Mounted,
+    request: u8,
+    tx: esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>,
+    buffer: esp_hal::dma::DmaTxStreamBuf,
+    i2s_tx: &mut Option<esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>>,
+    wav_buffer: &mut Option<esp_hal::dma::DmaTxStreamBuf>,
+    quiet_since: &mut Option<Instant>,
+    reducer: &mut Core,
+    placed: &mut Placed,
+    last_tick_fed: &mut u64,
+) {
+    let source = match request {
+        REQUEST_CONTENT => audio::Source::Content {
+            directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
+            file: CONTENT_FILE.load(Ordering::Relaxed),
+        },
+        REQUEST_CACHE => audio::Source::Cache {
+            directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
+            file: CONTENT_FILE.load(Ordering::Relaxed),
+        },
+        _ => audio::Source::First,
+    };
+    // Only a story with a known path has a position to keep. A console
+    // `taf` plays `Source::First`, and `CONTENT_DIRECTORY` then still
+    // names the previous story, so without this check its position
+    // would be overwritten.
+    let identified = matches!(request, REQUEST_CONTENT | REQUEST_CACHE);
+    let stock = request == REQUEST_CONTENT;
+    let dir = CONTENT_DIRECTORY.load(Ordering::Relaxed);
+    let file = CONTENT_FILE.load(Ordering::Relaxed);
+    let from = match critical_section::with(|cs| {
+        core::mem::replace(&mut *PLAY_FROM.borrow_ref_mut(cs), Position::Start)
+    }) {
+        // Cleared either way, so the next story does not start at this
+        // figure's position.
+        from if identified => from,
+        _ => Position::Start,
+    };
+    // Called on every frame, because a story is one pass of this loop
+    // and can last half an hour: lifting the figure, ear presses and the
+    // idle clock must still be handled.
+    let mut attend = || {
+        if let Some(event) = take_plate_event(placed) {
+            apply(reducer, card, event, placed.token());
+        }
+        apply_ear_events(reducer, card, placed.token());
+        feed_tick(reducer, card, placed.token(), last_tick_fed);
+
+        // Keeps the reducer's position current; it is what gets saved
+        // when the figure is lifted.
+        reducer.note_position(Position::Exact {
+            page: audio::PAGE.load(Ordering::Relaxed),
+        });
+    };
+    // The hardware is returned, so another story can play without a
+    // reboot.
+    let (outcome, tx, buffer) = audio::play_taf(card, tx, buffer, source, from, &mut attend).await;
+    if let Err(reason) = outcome {
+        esp_println::println!("teddiebox: playback failed — {reason}");
+    }
+    if matches!(outcome, Ok(audio::Finish::Ended)) {
+        if identified {
+            // A finished story starts again from the beginning next
+            // time. Written as page 0 rather than deleted: `storage`
+            // cannot delete, and page 0 is the header, so it means the
+            // same as no file.
+            let mut out = [0u8; MAX_POSITION];
+            let len = position::render(0, &mut out);
+            let _ = card.write_position(stock, dir, file, &out[..len]);
+            // Also drop the RAM copy, which would otherwise win over the
+            // card.
+            forget_place(((dir as u64) << 32) | file as u64);
+        }
+        // The reducer cannot learn this any other way. Sent for every
+        // story that ends, including console playback, so the reducer
+        // returns to idle.
+        apply(reducer, card, Event::PlaybackEnded, placed.token());
+    }
+    // Cleared only by the announcement's own playback, but whatever the
+    // outcome, or a failed announcement would block the shutdown for
+    // ever.
+    if dir == ANNOUNCING_DIRECTORY.load(Ordering::Relaxed)
+        && file == ANNOUNCING_FILE.load(Ordering::Relaxed)
+    {
+        ANNOUNCING.store(false, Ordering::Relaxed);
+    }
+    *i2s_tx = Some(tx);
+    *wav_buffer = Some(buffer);
+    // The output stays up a while, so a press just after the story does
+    // not click; the idle loop powers it down.
+    *quiet_since = Some(Instant::now());
 }
 
 /// Owns the I2S peripheral and the SD card, runs the reducer, plays stories
