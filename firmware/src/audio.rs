@@ -63,6 +63,21 @@ type Blocking = esp_hal::Blocking;
 ///
 /// Can only run once per boot, like the test tone: it takes the DMA buffer
 /// for good. Use `rb` to play it again.
+/// The bench-only progress line, printed at most once per `LOG_EVERY`.
+fn log_wav_progress(last_log: &mut Instant, started: Instant, cushion: &Cushion) {
+    if last_log.elapsed() < LOG_EVERY {
+        return;
+    }
+    *last_log = Instant::now();
+    esp_println::println!(
+        "teddiebox: wav {} s, buffer {}% (low {}%), {} underruns",
+        started.elapsed().as_secs(),
+        cushion.percent(),
+        cushion.low_water_percent(),
+        cushion.underruns()
+    );
+}
+
 pub async fn play_first_wav(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
@@ -151,16 +166,7 @@ pub async fn play_first_wav(
             Timer::after(BUFFER_FULL_WAIT).await;
         }
 
-        if last_log.elapsed() >= LOG_EVERY {
-            last_log = Instant::now();
-            esp_println::println!(
-                "teddiebox: wav {} s, buffer {}% (low {}%), {} underruns",
-                started.elapsed().as_secs(),
-                cushion.percent(),
-                cushion.low_water_percent(),
-                cushion.underruns()
-            );
-        }
+        log_wav_progress(&mut last_log, started, &cushion);
 
         yield_now().await;
     }
