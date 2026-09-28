@@ -833,6 +833,66 @@ fn restart_if_stopped(
     }
 }
 
+enum NextChunk {
+    Ready(core::ops::Range<usize>),
+    End,
+    DecodeFailed,
+}
+
+/// Produces the next chunk to push once `pending` has run out: from a
+/// take-the-story's-place cue if one is playing, otherwise the next decoded
+/// frame (mixing in an over-the-story cue and updating the checksum and page
+/// position as it goes), or `End`/`DecodeFailed` once there is nothing left.
+/// No `.await` here — this is bounded decode work, not the real-time feed.
+#[allow(clippy::too_many_arguments)]
+fn next_chunk(
+    decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>,
+    pcm: &mut [i16; MAX_FRAME_SAMPLES],
+    instead: &mut Option<CueSamples>,
+    over: &mut Option<CueSamples>,
+    end_after_cue: bool,
+    pcm_crc: &mut Option<Crc32>,
+    frames: &mut u32,
+    decode_us: &mut u64,
+) -> NextChunk {
+    if let Some(cue) = instead.as_mut() {
+        if cue.fill(&mut pcm[..CUE_CHUNK]) {
+            *instead = None;
+        }
+        return NextChunk::Ready(0..CUE_CHUNK * 2);
+    }
+    if end_after_cue {
+        return NextChunk::End;
+    }
+
+    let began = Instant::now();
+    let decoded = decoder.next_frame(pcm);
+    *decode_us += began.elapsed().as_micros();
+
+    match decoded {
+        Ok(Some(samples)) => {
+            if let Some(crc) = pcm_crc.as_mut() {
+                crc.update(as_bytes(&pcm[..samples]));
+            }
+            // After the checksum, which covers the story alone.
+            if let Some(cue) = over.as_mut() {
+                if cue.mix_into(&mut pcm[..samples]) {
+                    *over = None;
+                }
+            }
+            *frames += 1;
+            // Published for position memory, which cannot reach the decoder.
+            PAGE.store(decoder.page(), Ordering::Relaxed);
+            NextChunk::Ready(0..samples * 2)
+        }
+        Ok(None) => NextChunk::End,
+        Err(_) => {
+            esp_println::println!("teddiebox: taf decode failed after {frames} frames");
+            NextChunk::DecodeFailed
+        }
+    }
+}
+
 async fn play_taf_inner(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
@@ -987,41 +1047,18 @@ async fn play_taf_inner(
         cushion.observe(BUFFER_BYTES.saturating_sub(transfer.available_bytes()) as u32);
 
         if pending.is_empty() {
-            if let Some(cue) = instead.as_mut() {
-                if cue.fill(&mut scratch.pcm[..CUE_CHUNK]) {
-                    instead = None;
-                }
-                pending = 0..CUE_CHUNK * 2;
-            } else if end_after_cue {
-                break;
-            } else {
-                let began = Instant::now();
-                let decoded = decoder.next_frame(&mut scratch.pcm);
-                decode_us += began.elapsed().as_micros();
-
-                match decoded {
-                    Ok(Some(samples)) => {
-                        if let Some(crc) = pcm_crc.as_mut() {
-                            crc.update(as_bytes(&scratch.pcm[..samples]));
-                        }
-                        // After the checksum, which covers the story alone.
-                        if let Some(cue) = over.as_mut() {
-                            if cue.mix_into(&mut scratch.pcm[..samples]) {
-                                over = None;
-                            }
-                        }
-                        pending = 0..samples * 2;
-                        frames += 1;
-                        // Published for position memory, which cannot reach the
-                        // decoder.
-                        PAGE.store(decoder.page(), Ordering::Relaxed);
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        esp_println::println!("teddiebox: taf decode failed after {frames} frames");
-                        break;
-                    }
-                }
+            match next_chunk(
+                &mut decoder,
+                &mut scratch.pcm,
+                &mut instead,
+                &mut over,
+                end_after_cue,
+                &mut pcm_crc,
+                &mut frames,
+                &mut decode_us,
+            ) {
+                NextChunk::Ready(range) => pending = range,
+                NextChunk::End | NextChunk::DecodeFailed => break,
             }
         }
 
