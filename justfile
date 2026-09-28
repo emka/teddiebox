@@ -11,7 +11,7 @@
 check: quick lint host-tests device-checks images
 
 # the gates that compile nothing, so CI reports them first
-quick: fmt deny
+quick: fmt deny lint-scripts
 
 # the host test suite and the bench scripts' self-tests
 host-tests: test scripts
@@ -40,6 +40,15 @@ fmt:
 deny: vendor
     cargo deny --manifest-path Cargo.toml --config deny.toml check
     cargo deny --manifest-path firmware/Cargo.toml --config deny.toml check
+
+# The bench scripts flash the box, record hours-long runs and parse the
+# firmware's output, and no compiler checks them.
+
+# shellcheck and ruff over scripts/
+lint-scripts:
+    shellcheck scripts/*.sh
+    ruff check scripts/
+    ruff format --check scripts/
 
 lint: vendor
     cargo clippy --workspace --all-targets -- -D warnings
