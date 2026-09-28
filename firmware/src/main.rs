@@ -387,10 +387,8 @@ fn probe_ended(ruid: u64) {
 /// network fault.
 fn why_unavailable(error: &tls::Error) -> Unavailable {
     match error {
-        tls::Error::NoContent
-        | tls::Error::Cloud(teddiebox_cloud::CloudError::UnexpectedStatus(403 | 404)) => {
-            Unavailable::NoContent
-        }
+        tls::Error::NoContent => Unavailable::NoContent,
+        tls::Error::Cloud(cloud) if cloud.means_no_content() => Unavailable::NoContent,
         _ => Unavailable::Unreachable,
     }
 }
