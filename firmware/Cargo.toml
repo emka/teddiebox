@@ -51,7 +51,7 @@ esp-println = { version = "0.18", default-features = false, features = [
     "uart",
     "critical-section",
 ] }
-esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println"] }
+esp-backtrace = { version = "0.20", features = ["esp32s3", "panic-handler", "println", "custom-halt"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
 # Listed only to turn `critical-section` on. `esp-bootloader-esp-idf` pulls
 # in `esp-storage` with default features off, which turns `critical-section`

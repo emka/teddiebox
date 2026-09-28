@@ -119,19 +119,26 @@ fn drain_console() {
 
 /// Reboots into the ROM's UART download mode.
 ///
-/// The ROM checks a bit in the RTC's OPTION1 register as well as the GPIO0
-/// strapping pin, so the firmware can ask for download mode on the next
-/// reset, without shorting J100 (see HARDWARE.md) or a power cycle.
-///
 /// The power rails go down first, so GPIO45 (a strapping pin) is low at
-/// reset.
+/// reset. See [`request_download_mode_and_reset`] for the reset itself.
 fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
     esp_println::println!("teddiebox: rebooting into download mode");
     drain_console();
     board.apply_all(&gates.release_for_reset());
+    request_download_mode_and_reset()
+}
 
-    // Re-enable the USB pads before rebooting.
-    //
+/// Sets the ROM's download-mode request bit, re-enables the USB pads, and
+/// resets.
+///
+/// The ROM checks a bit in the RTC's OPTION1 register as well as the GPIO0
+/// strapping pin, so the firmware can ask for download mode on the next
+/// reset, without shorting J100 (see HARDWARE.md) or a power cycle.
+///
+/// Shared by `reboot_to_download`, which powers the rails down first, and
+/// `custom_halt` below, which cannot: the box is already crashed, its state
+/// unknown, and the power-down sequence itself touches hardware.
+fn request_download_mode_and_reset() -> ! {
     // GPIO19 is the chip's USB D- line, and esp-hal disables the USB pads when
     // it becomes the red LED output. `USB_DEVICE.conf0()` survives a software
     // reset, and download mode starts USB Serial/JTAG as well as UART0
@@ -149,6 +156,20 @@ fn reboot_to_download(board: &mut BoardPins, gates: &mut Gates) -> ! {
         .modify(|_, w| w.force_download_boot().set_bit());
 
     esp_hal::system::software_reset()
+}
+
+/// Called by `esp-backtrace` (the `custom-halt` feature) once it has
+/// printed the panic message and backtrace, in place of its default
+/// `loop {}`.
+///
+/// A panicked box looks identical to a hung one from the console, and both
+/// need a physical recovery (see HARDWARE.md) unless something puts the box
+/// into download mode on its own. This does: the same request that `dl`
+/// makes, so a panic during bring-up or playback still leaves the box
+/// flashable without opening it.
+#[unsafe(no_mangle)]
+extern "Rust" fn custom_halt() -> ! {
+    request_download_mode_and_reset()
 }
 
 /// What the reducer last decided the LED should say.
