@@ -1,0 +1,72 @@
+name: Mutants
+# Run by hand only, for the crates named: the whole workspace is hours of
+# billed minutes, and a missed mutant needs judgement rather than a red
+# build. See `just mutants`.
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Crates to mutate, space-separated, e.g. teddiebox-taf teddiebox-ota"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    # A cap on what one mistaken dispatch can bill.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+
+      # The same store the CI gates restore; see ci.yml.
+      - name: Cache the Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
+      # cargo-mutants only warns about a crate it cannot find and reports
+      # nothing missed, so a mistyped name would look like a clean result.
+      # Exit status 2 means some mutants were missed and 3 that some timed
+      # out: both are the report this run exists to produce, not a failure.
+      - name: just mutants
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          args=()
+          for p in $PACKAGES; do
+            [[ "$p" =~ ^[a-z0-9-]+$ && -f "crates/$p/Cargo.toml" ]] ||
+              { echo "::error::no crate crates/$p"; exit 1; }
+            args+=(-p "$p")
+          done
+          [ "${#args[@]}" -gt 0 ] || { echo "::error::name at least one crate"; exit 1; }
+          status=0
+          nix develop --command just mutants "${args[@]}" || status=$?
+          [ "$status" -eq 0 ] || [ "$status" -eq 2 ] || [ "$status" -eq 3 ]
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Missed mutants"
+            echo
+            if [ -s mutants.out/missed.txt ]; then
+              echo '```'
+              cat mutants.out/missed.txt
+              echo '```'
+            else
+              echo "None."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants.out
+          path: mutants.out
