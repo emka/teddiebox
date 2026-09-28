@@ -19,6 +19,17 @@ pub struct ContentPath {
     pub file: u32,
 }
 
+/// Renders `value` as eight upper-case hex digits, the way FAT holds a
+/// Toniebox content name.
+pub fn hex8(value: u32) -> [u8; 8] {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = [0u8; 8];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = DIGITS[((value >> (28 - 4 * i)) & 0xF) as usize];
+    }
+    out
+}
+
 /// Maps a tag's UID to where its content lives on the card.
 ///
 /// `uid` is in the order the reader returns it (least significant byte
@@ -35,7 +46,7 @@ pub fn content_path(uid: [u8; 8]) -> ContentPath {
 
 #[cfg(test)]
 mod tests {
-    use super::{content_path, ContentPath};
+    use super::{content_path, hex8, ContentPath};
 
     /// A real Tonie, stored on a real card at `CONTENT/1C2D3E4F/500304E0`.
     #[test]
@@ -73,5 +84,25 @@ mod tests {
                 file: 0xDDCCBBAA,
             }
         );
+    }
+
+    #[test]
+    fn hex8_renders_a_real_directory_name() {
+        assert_eq!(hex8(0x1C2D3E4F), *b"1C2D3E4F");
+    }
+
+    #[test]
+    fn hex8_pads_a_small_value_with_leading_zeros() {
+        assert_eq!(hex8(0x0000_00E0), *b"000000E0");
+    }
+
+    #[test]
+    fn hex8_uses_upper_case_digits() {
+        assert_eq!(hex8(0xABCDEF01), *b"ABCDEF01");
+    }
+
+    #[test]
+    fn hex8_renders_the_maximum_value() {
+        assert_eq!(hex8(0xFFFF_FFFF), *b"FFFFFFFF");
     }
 }
