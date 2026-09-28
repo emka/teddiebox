@@ -476,6 +476,382 @@ mod tests {
     }
 }
 
+/// What deciding which reader call to make next needs from the NFC reader.
+///
+/// Narrow on purpose: `unlock`, `lock`, `dump_memory` and the rest are console
+/// commands with no decision in them, wired straight to the real reader in
+/// `firmware/`. Only the calls [`PlatePoll::poll`] chooses between are here,
+/// so the choice can be exercised on the host against a fake.
+pub trait PlateReader {
+    /// Re-reads an already-identified figure. Answers only while it is still
+    /// there and still unlocked.
+    fn identify(&mut self) -> Option<[u8; 8]>;
+    /// Whether anything at all answers the plate, unlocked or not.
+    fn tag_present(&mut self) -> bool;
+    /// Identifies whatever is on the plate, unlocking it with `password`
+    /// first. The one call that sends the password, so it is only made when
+    /// [`Self::tag_present`] found something to unlock.
+    fn inventory_unlocked(&mut self, password: u32) -> Option<[u8; 8]>;
+}
+
+/// What one call to [`PlatePoll::poll`] found, once it actually polled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Polled {
+    /// A change in what is on the plate, if the readings agree on one.
+    pub event: Option<TagEvent>,
+    /// Set when this poll answered after a run of misses: how long the run
+    /// was, worth telling the console. `None` on a poll that already
+    /// answered last time, so nothing interrupted.
+    pub resumed_after_misses: Option<u16>,
+    /// Consecutive polls that have found nothing, including this one.
+    /// Zero whenever this poll answered; meaningful alongside
+    /// `event == Some(TagEvent::Left)`, which only fires on a miss.
+    pub misses_now: u16,
+}
+
+/// Polls the plate on the schedule [`Presence`] sets, picking the cheapest
+/// reader call each time.
+///
+/// Owns everything the schedule depends on, so the caller only threads a
+/// reader, whether polling is switched on, the password and the clock
+/// through [`poll`](Self::poll).
+pub struct PlatePoll {
+    presence: Presence,
+    arrivals_to_agree: u8,
+    misses_to_leave: u8,
+    was_polling: bool,
+    believed_present: bool,
+    misses: u16,
+    next_poll_ms: u64,
+}
+
+impl PlatePoll {
+    pub const fn new(arrivals_to_agree: u8, misses_to_leave: u8) -> Self {
+        Self {
+            presence: Presence::new(arrivals_to_agree, misses_to_leave),
+            arrivals_to_agree,
+            misses_to_leave,
+            was_polling: false,
+            believed_present: false,
+            misses: 0,
+            next_poll_ms: 0,
+        }
+    }
+
+    /// When the plate is next due to be read, in the same clock as
+    /// [`poll`](Self::poll)'s `now_ms`.
+    ///
+    /// Meaningless while polling is off: the caller decides how it schedules
+    /// itself then.
+    pub const fn next_poll_ms(&self) -> u64 {
+        self.next_poll_ms
+    }
+
+    /// Polls `reader` if switching on or due, and reports what happened.
+    ///
+    /// `None` when nothing was asked of `reader` this call: polling is off,
+    /// or the next poll is not due yet at `now_ms`.
+    ///
+    /// **Switching polling on forgets what the plate held.** [`Presence`]
+    /// reports changes, not states, so a figure it already believed present
+    /// would not be reported again — and while polling was off the figure
+    /// may have left or been swapped. Turning polling on always starts
+    /// fresh, whatever `reader` says on the first poll after.
+    pub fn poll(
+        &mut self,
+        reader: &mut impl PlateReader,
+        polling: bool,
+        password: u32,
+        now_ms: u64,
+    ) -> Option<Polled> {
+        if polling && !self.was_polling {
+            self.presence = Presence::new(self.arrivals_to_agree, self.misses_to_leave);
+            self.believed_present = false;
+            self.misses = 0;
+            self.next_poll_ms = now_ms;
+        }
+        self.was_polling = polling;
+
+        if !polling || now_ms < self.next_poll_ms {
+            return None;
+        }
+
+        // Which request is cheapest depends on what was there last time.
+        // Always sending the full unlock caused 49 audio DMA restarts in
+        // 70 s of playback, against 0 with polling off, because every
+        // unanswered exchange blocks the reader task for the whole
+        // IRQ_POLL_ATTEMPTS window.
+        let seen = if self.believed_present {
+            reader.identify()
+        } else if reader.tag_present() {
+            reader.inventory_unlocked(password)
+        } else {
+            None
+        };
+
+        let misses_before = self.misses;
+        self.misses = if seen.is_none() {
+            self.misses.saturating_add(1)
+        } else {
+            0
+        };
+        self.believed_present = seen.is_some();
+
+        let event = self.presence.feed(seen.map(TagUid));
+        self.next_poll_ms = now_ms + u64::from(self.presence.poll_again_in_ms());
+
+        Some(Polled {
+            event,
+            resumed_after_misses: (seen.is_some() && misses_before > 0).then_some(misses_before),
+            misses_now: self.misses,
+        })
+    }
+}
+
+#[cfg(test)]
+mod plate_poll_tests {
+    use super::*;
+
+    const UID: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    const PASSWORD: u32 = 0xDEAD_BEEF;
+
+    #[derive(Default)]
+    struct FakeReader {
+        identify: Option<[u8; 8]>,
+        tag_present: bool,
+        inventory_unlocked: Option<[u8; 8]>,
+        identify_calls: u8,
+        tag_present_calls: u8,
+        inventory_unlocked_calls: u8,
+        inventory_unlocked_password: Option<u32>,
+    }
+
+    impl PlateReader for FakeReader {
+        fn identify(&mut self) -> Option<[u8; 8]> {
+            self.identify_calls += 1;
+            self.identify
+        }
+
+        fn tag_present(&mut self) -> bool {
+            self.tag_present_calls += 1;
+            self.tag_present
+        }
+
+        fn inventory_unlocked(&mut self, password: u32) -> Option<[u8; 8]> {
+            self.inventory_unlocked_calls += 1;
+            self.inventory_unlocked_password = Some(password);
+            self.inventory_unlocked
+        }
+    }
+
+    #[test]
+    fn polling_off_never_touches_the_reader() {
+        let mut poll = PlatePoll::new(2, 4);
+        let mut reader = FakeReader::default();
+
+        assert_eq!(poll.poll(&mut reader, false, PASSWORD, 0), None);
+        assert_eq!(reader.identify_calls, 0);
+        assert_eq!(reader.tag_present_calls, 0);
+        assert_eq!(reader.inventory_unlocked_calls, 0);
+    }
+
+    #[test]
+    fn not_due_yet_returns_none_without_touching_the_reader() {
+        let mut poll = PlatePoll::new(2, 4);
+        let mut first = FakeReader::default();
+        poll.poll(&mut first, true, PASSWORD, 0);
+
+        let mut second = FakeReader::default();
+        assert_eq!(poll.poll(&mut second, true, PASSWORD, 0), None);
+        assert_eq!(second.identify_calls, 0);
+        assert_eq!(second.tag_present_calls, 0);
+        assert_eq!(second.inventory_unlocked_calls, 0);
+    }
+
+    #[test]
+    fn neither_present_nor_believed_polls_nothing_further() {
+        let mut poll = PlatePoll::new(2, 4);
+        let mut reader = FakeReader {
+            tag_present: false,
+            ..FakeReader::default()
+        };
+
+        poll.poll(&mut reader, true, PASSWORD, 0);
+        assert_eq!(reader.tag_present_calls, 1);
+        assert_eq!(reader.identify_calls, 0);
+        assert_eq!(reader.inventory_unlocked_calls, 0);
+    }
+
+    #[test]
+    fn a_figure_not_yet_believed_present_is_unlocked_with_the_password() {
+        let mut poll = PlatePoll::new(2, 4);
+        let mut reader = FakeReader {
+            tag_present: true,
+            inventory_unlocked: Some(UID),
+            ..FakeReader::default()
+        };
+
+        poll.poll(&mut reader, true, PASSWORD, 0);
+        assert_eq!(reader.tag_present_calls, 1);
+        assert_eq!(reader.inventory_unlocked_calls, 1);
+        assert_eq!(reader.inventory_unlocked_password, Some(PASSWORD));
+        assert_eq!(reader.identify_calls, 0);
+    }
+
+    #[test]
+    fn a_figure_believed_present_is_only_re_identified() {
+        let mut poll = PlatePoll::new(2, 4);
+        let mut first = FakeReader {
+            tag_present: true,
+            inventory_unlocked: Some(UID),
+            ..FakeReader::default()
+        };
+        poll.poll(&mut first, true, PASSWORD, 0); // believed_present becomes true
+
+        let mut second = FakeReader {
+            identify: Some(UID),
+            ..FakeReader::default()
+        };
+        poll.poll(&mut second, true, PASSWORD, 1000);
+        assert_eq!(second.identify_calls, 1);
+        assert_eq!(second.tag_present_calls, 0);
+        assert_eq!(second.inventory_unlocked_calls, 0);
+    }
+
+    /// The documented reason polling has to reset on: without it, turning
+    /// polling back on with the same figure still on the plate would poll it
+    /// as already-believed-present forever, when a swap or a lift while
+    /// polling was off is exactly what the next poll needs to notice.
+    #[test]
+    fn switching_polling_on_forgets_a_previously_believed_figure() {
+        let mut poll = PlatePoll::new(2, 4);
+        let mut first = FakeReader {
+            tag_present: true,
+            inventory_unlocked: Some(UID),
+            ..FakeReader::default()
+        };
+        poll.poll(&mut first, true, PASSWORD, 0); // believed_present becomes true
+
+        let mut while_off = FakeReader::default();
+        assert_eq!(poll.poll(&mut while_off, false, PASSWORD, 1000), None);
+
+        let mut after_on = FakeReader {
+            tag_present: false,
+            ..FakeReader::default()
+        };
+        poll.poll(&mut after_on, true, PASSWORD, 2000);
+        assert_eq!(
+            after_on.tag_present_calls, 1,
+            "a forgotten figure is asked for like a new one, not re-identified"
+        );
+        assert_eq!(after_on.identify_calls, 0);
+    }
+
+    #[test]
+    fn a_miss_is_not_reported_until_the_plate_answers_again() {
+        let mut poll = PlatePoll::new(2, 4);
+        let empty = || FakeReader {
+            tag_present: false,
+            ..FakeReader::default()
+        };
+
+        assert_eq!(
+            poll.poll(&mut empty(), true, PASSWORD, 0)
+                .unwrap()
+                .resumed_after_misses,
+            None
+        );
+        assert_eq!(
+            poll.poll(&mut empty(), true, PASSWORD, 1000)
+                .unwrap()
+                .resumed_after_misses,
+            None
+        );
+
+        let mut answers = FakeReader {
+            tag_present: true,
+            inventory_unlocked: Some(UID),
+            ..FakeReader::default()
+        };
+        assert_eq!(
+            poll.poll(&mut answers, true, PASSWORD, 2000)
+                .unwrap()
+                .resumed_after_misses,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_first_ever_answer_reports_no_resume() {
+        let mut poll = PlatePoll::new(2, 4);
+        let mut reader = FakeReader {
+            tag_present: true,
+            inventory_unlocked: Some(UID),
+            ..FakeReader::default()
+        };
+
+        assert_eq!(
+            poll.poll(&mut reader, true, PASSWORD, 0)
+                .unwrap()
+                .resumed_after_misses,
+            None
+        );
+    }
+
+    #[test]
+    fn an_arrival_needs_two_agreeing_reads_like_presence_alone() {
+        let mut poll = PlatePoll::new(2, 4);
+        // Once the first poll finds it, later polls believe it present and
+        // switch to `identify`, so every reader here must answer either way.
+        let make_reader = || FakeReader {
+            tag_present: true,
+            inventory_unlocked: Some(UID),
+            identify: Some(UID),
+            ..FakeReader::default()
+        };
+
+        assert_eq!(
+            poll.poll(&mut make_reader(), true, PASSWORD, 0)
+                .unwrap()
+                .event,
+            None
+        );
+        assert_eq!(
+            poll.poll(&mut make_reader(), true, PASSWORD, 20)
+                .unwrap()
+                .event,
+            Some(TagEvent::Arrived(TagUid(UID)))
+        );
+    }
+
+    #[test]
+    fn four_misses_leave_with_the_full_run_length() {
+        let mut poll = PlatePoll::new(2, 4);
+        let make_reader = || FakeReader {
+            tag_present: true,
+            inventory_unlocked: Some(UID),
+            identify: Some(UID),
+            ..FakeReader::default()
+        };
+        poll.poll(&mut make_reader(), true, PASSWORD, 0);
+        poll.poll(&mut make_reader(), true, PASSWORD, 20); // Arrived
+
+        let empty = || FakeReader {
+            tag_present: false,
+            ..FakeReader::default()
+        };
+        let mut now = 1000;
+        let mut last = None;
+        for _ in 0..4 {
+            last = poll.poll(&mut empty(), true, PASSWORD, now);
+            now += 1000;
+        }
+        let last = last.unwrap();
+        assert_eq!(last.event, Some(TagEvent::Left));
+        assert_eq!(last.misses_now, 4);
+    }
+}
+
 /// What the reader last said about the plate.
 ///
 /// The token travels with the uid in one value, not in a separate message:
