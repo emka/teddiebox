@@ -56,7 +56,7 @@ use teddiebox_console::CommandWatch;
 use teddiebox_core::cue::Cue;
 use teddiebox_core::pipe::Pipe;
 use teddiebox_core::place::PendingPlace;
-use teddiebox_core::plate::{Answering, Placed, Settlement};
+use teddiebox_core::plate::{Placed, Settlement};
 use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::sounds::{Language, Sound};
 use teddiebox_core::tone;
@@ -1393,22 +1393,22 @@ fn gather_revalidation(card: Option<&storage::Mounted>, placed: &Placed) -> Opti
         ruid: probed_ruid,
         answer,
     } = settled?;
-    match placed.answering(probed_ruid) {
-        Answering::TheFigure(tag) => {
-            // Remembered whatever the answer: a server that was just
-            // unreachable will likely stay so for the session, and asking
-            // again wastes the radio.
-            critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
-            Some(Event::Revalidated(tag, freshness_of(answer, tag, card)))
-        }
-        Answering::AnotherFigure => {
+    match placed.answering(probed_ruid).resolve(|tag| {
+        // Remembered whatever the answer: a server that was just
+        // unreachable will likely stay so for the session, and asking
+        // again wastes the radio.
+        critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
+        Event::Revalidated(tag, freshness_of(answer, tag, card))
+    }) {
+        Settlement::ForTheFigure(event) => Some(event),
+        Settlement::ForAnotherFigure => {
             esp_println::println!(
                 "teddiebox: plate ignoring an answer about {probed_ruid:016X} — \
                  not the figure on the plate"
             );
             None
         }
-        Answering::NoFigure => None,
+        Settlement::NothingWaiting => None,
     }
 }
 

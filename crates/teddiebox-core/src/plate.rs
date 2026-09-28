@@ -573,12 +573,12 @@ impl Placed {
     }
 }
 
-/// What a finished download means for the reducer, once it is known which
-/// figure (if any) it was for.
+/// What answering the plate a certain way means for the reducer, once it is
+/// known whether the answer is still about the figure it was asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Settlement {
-    /// The figure it was for is still on the plate.
-    ForTheFigure(Event),
+pub enum Settlement<T> {
+    /// The figure it was about is still on the plate.
+    ForTheFigure(T),
     /// A different figure is on the plate now, for example after a console
     /// `get`. Worth telling the user about; not passed to the reducer.
     ForAnotherFigure,
@@ -586,23 +586,35 @@ pub enum Settlement {
     NothingWaiting,
 }
 
+impl Answering {
+    /// Calls `settle` with the figure an answer was about, but only when that
+    /// figure is still the one on the plate.
+    ///
+    /// Shared by every place that turns a late answer into a reducer event —
+    /// a finished download, a revalidation — so which of the three cases
+    /// applies is decided once, the same way, whatever the answer is.
+    pub fn resolve<T>(self, settle: impl FnOnce(TagUid) -> T) -> Settlement<T> {
+        match self {
+            Answering::TheFigure(tag) => Settlement::ForTheFigure(settle(tag)),
+            Answering::AnotherFigure => Settlement::ForAnotherFigure,
+            Answering::NoFigure => Settlement::NothingWaiting,
+        }
+    }
+}
+
 /// Turns a finished download's outcome into what the reducer should be told,
 /// given whose figure it was for.
 pub fn settle_fetch_outcome(
     answering: Answering,
     outcome: teddiebox_download::Outcome,
-) -> Settlement {
+) -> Settlement<Event> {
     use teddiebox_download::Outcome;
-    match answering {
-        Answering::TheFigure(tag) => Settlement::ForTheFigure(match outcome {
-            Outcome::Completed => Event::ContentReady(tag),
-            Outcome::Unreachable => Event::ContentMissing(tag, Unavailable::Unreachable),
-            Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
-            Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),
-        }),
-        Answering::AnotherFigure => Settlement::ForAnotherFigure,
-        Answering::NoFigure => Settlement::NothingWaiting,
-    }
+    answering.resolve(|tag| match outcome {
+        Outcome::Completed => Event::ContentReady(tag),
+        Outcome::Unreachable => Event::ContentMissing(tag, Unavailable::Unreachable),
+        Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
+        Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),
+    })
 }
 
 #[cfg(test)]
@@ -757,6 +769,37 @@ mod settle_fetch_outcome_tests {
         assert_eq!(
             settle_fetch_outcome(Answering::NoFigure, Outcome::Completed),
             Settlement::NothingWaiting
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    const A: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
+
+    #[test]
+    fn resolving_the_figure_on_the_plate_calls_settle_with_it() {
+        assert_eq!(
+            Answering::TheFigure(A).resolve(Event::ContentReady),
+            Settlement::ForTheFigure(Event::ContentReady(A))
+        );
+    }
+
+    #[test]
+    fn resolving_another_figure_never_calls_settle() {
+        assert_eq!(
+            Answering::AnotherFigure.resolve(|_| panic!("must not be called")),
+            Settlement::<Event>::ForAnotherFigure
+        );
+    }
+
+    #[test]
+    fn resolving_with_nobody_waiting_never_calls_settle() {
+        assert_eq!(
+            Answering::NoFigure.resolve(|_| panic!("must not be called")),
+            Settlement::<Event>::NothingWaiting
         );
     }
 }
