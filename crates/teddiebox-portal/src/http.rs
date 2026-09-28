@@ -75,6 +75,20 @@ pub fn parse(buf: &[u8]) -> Result<Request<'_>, RequestError> {
     })
 }
 
+/// Whether `buffer` holds a whole request: the headers, and as much body as
+/// `Content-Length` promises.
+///
+/// Returns `Ok(false)` rather than the parsed [`Request`], because the
+/// caller needs the buffer back mutably to read more while the answer is
+/// `false`.
+pub fn is_complete(buffer: &[u8]) -> Result<bool, RequestError> {
+    match parse(buffer) {
+        Ok(request) => Ok(buffer.len() - request.header_len >= request.content_length),
+        Err(RequestError::Incomplete) => Ok(false),
+        Err(other) => Err(other),
+    }
+}
+
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
@@ -276,5 +290,32 @@ Connection: close\r\n\r\n"
     fn the_largest_length_still_fits_the_head_buffer() {
         let built = head(Status::TooLarge, usize::MAX);
         assert!(built.ends_with(b"\r\n\r\n"));
+    }
+
+    #[test]
+    fn headers_still_arriving_are_not_complete() {
+        assert_eq!(is_complete(b"GET / HTT"), Ok(false));
+    }
+
+    #[test]
+    fn headers_done_but_body_still_arriving_is_not_complete() {
+        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 20\r\n\r\nconfig=";
+        assert_eq!(is_complete(raw), Ok(false));
+    }
+
+    #[test]
+    fn headers_and_the_whole_body_are_complete() {
+        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 12\r\n\r\nconfig=ssid=";
+        assert_eq!(is_complete(raw), Ok(true));
+    }
+
+    #[test]
+    fn a_request_with_no_body_is_complete_at_the_blank_line() {
+        assert_eq!(is_complete(GET), Ok(true));
+    }
+
+    #[test]
+    fn a_malformed_request_is_an_error_not_incomplete() {
+        assert_eq!(is_complete(b"GET\r\n\r\n"), Err(RequestError::Malformed));
     }
 }
