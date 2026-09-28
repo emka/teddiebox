@@ -1648,6 +1648,111 @@ async fn play_taf_story(
     *quiet_since = Some(Instant::now());
 }
 
+/// Asks the net task to prime the connection once, the first time the plate
+/// is empty after the jingle. A figure already on the plate does this work
+/// itself, and one placed during priming uses the same connection.
+fn maybe_prime_net(primed: &mut bool, configured: bool, placed: &Placed) {
+    if *primed
+        || !configured
+        || placed.figure().is_some()
+        || !STARTUP_SOUNDED.load(Ordering::Relaxed)
+        || ANNOUNCING.load(Ordering::Relaxed)
+        || PLAYING.load(Ordering::Relaxed)
+    {
+        return;
+    }
+    *primed = true;
+    if battery::pack_too_low_to_prime() {
+        esp_println::println!("teddiebox: net not priming — the pack is low");
+    } else if NET_REQUEST
+        .compare_exchange(
+            REQUEST_NONE,
+            NET_PRIME,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        esp_println::println!("teddiebox: net priming the connection for the first figure");
+    }
+}
+
+/// Plays a pending cue, powers the output down after the linger, and lets a
+/// download progress in the gap — the loop pass when nothing else has been
+/// requested.
+async fn handle_idle(
+    i2s_tx: &mut Option<esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>>,
+    wav_buffer: &mut Option<esp_hal::dma::DmaTxStreamBuf>,
+    quiet_since: &mut Option<Instant>,
+    card: Option<&storage::Mounted>,
+    download: &mut Option<CacheWrite>,
+) {
+    if let Some(cue) = audio::take_cue() {
+        // Only a cue that played leaves the output up to be powered down
+        // later; one that could not play (the console tone holds the
+        // hardware) must not power that tone off.
+        if play_idle_cue(cue, i2s_tx, wav_buffer).await {
+            *quiet_since = Some(Instant::now());
+        }
+        return;
+    }
+    if quiet_since.is_some_and(|since| since.elapsed() >= OUTPUT_LINGER)
+        && REQUEST.load(Ordering::Relaxed) == REQUEST_NONE
+    {
+        i2c_bus::request_output(i2c_bus::OUTPUT_DOWN);
+        *quiet_since = None;
+    }
+    // Serviced when idle, so a download progresses in the gaps without
+    // blocking the loop.
+    let downloading = service_download(card, download);
+    // A late drain stalls the socket, so poll fast while downloading.
+    let gap = if downloading { 5 } else { 100 };
+    Timer::after(Duration::from_millis(gap)).await;
+}
+
+/// Mounts the card the first time a request needs it. Returns `true` when
+/// the caller should skip the rest of this pass: the bus is gone, or the
+/// mount attempt (which used up the bus either way) failed.
+async fn mount_card_if_needed(
+    request: u8,
+    card: &mut Option<storage::Mounted>,
+    bus: &mut Option<(Spi<'static, esp_hal::Blocking>, Output<'static>)>,
+    configured: &mut bool,
+) -> bool {
+    if !matches!(
+        request,
+        REQUEST_WALK
+            | REQUEST_WAV
+            | REQUEST_TAF
+            | REQUEST_CONTENT
+            | REQUEST_CACHE
+            | REQUEST_PCM
+            | REQUEST_CRC
+    ) || card.is_some()
+    {
+        return false;
+    }
+    let Some((spi, cs)) = bus.take() else {
+        esp_println::println!("teddiebox: the card bus is gone — reboot to retry");
+        return true;
+    };
+    Timer::after(Duration::from_millis(50)).await;
+    match storage::Mounted::open(spi, cs, esp_hal::delay::Delay::new()) {
+        Ok(mounted) => {
+            read_configuration_once(&mounted, configured);
+            CARD_MOUNTED.store(true, Ordering::Relaxed);
+            *card = Some(mounted);
+            false
+        }
+        // The attempt used up the bus, so the card cannot be retried
+        // without a restart.
+        Err(reason) => {
+            esp_println::println!("teddiebox: sd failed — {reason}");
+            true
+        }
+    }
+}
+
 /// Owns the I2S peripheral and the SD card, runs the reducer, plays stories
 /// and sounds, writes downloads to the card, and serves the console commands
 /// that need this hardware.
@@ -1725,28 +1830,7 @@ async fn media(
         // the first network request in advance. A figure already on the plate
         // does this work itself, and one placed during priming uses the same
         // connection.
-        if !primed
-            && configured
-            && placed.figure().is_none()
-            && STARTUP_SOUNDED.load(Ordering::Relaxed)
-            && !ANNOUNCING.load(Ordering::Relaxed)
-            && !PLAYING.load(Ordering::Relaxed)
-        {
-            primed = true;
-            if battery::pack_too_low_to_prime() {
-                esp_println::println!("teddiebox: net not priming — the pack is low");
-            } else if NET_REQUEST
-                .compare_exchange(
-                    REQUEST_NONE,
-                    NET_PRIME,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                esp_println::println!("teddiebox: net priming the connection for the first figure");
-            }
-        }
+        maybe_prime_net(&mut primed, configured, &placed);
 
         // Every pass, not only when a figure moved: ear presses are
         // independent of the plate.
@@ -1778,62 +1862,22 @@ async fn media(
 
         let request = REQUEST.swap(REQUEST_NONE, Ordering::Relaxed);
         if request == REQUEST_NONE {
-            if let Some(cue) = audio::take_cue() {
-                // Only a cue that played leaves the output up to be powered
-                // down later; one that could not play (the console tone holds
-                // the hardware) must not power that tone off.
-                if play_idle_cue(cue, &mut i2s_tx, &mut wav_buffer).await {
-                    quiet_since = Some(Instant::now());
-                }
-                continue;
-            }
-            if quiet_since.is_some_and(|since| since.elapsed() >= OUTPUT_LINGER)
-                && REQUEST.load(Ordering::Relaxed) == REQUEST_NONE
-            {
-                i2c_bus::request_output(i2c_bus::OUTPUT_DOWN);
-                quiet_since = None;
-            }
-            // Serviced when idle, so a download progresses in the gaps without
-            // blocking the loop.
-            let downloading = service_download(card.as_ref(), &mut download);
-            // A late drain stalls the socket, so poll fast while downloading.
-            let gap = if downloading { 5 } else { 100 };
-            Timer::after(Duration::from_millis(gap)).await;
+            handle_idle(
+                &mut i2s_tx,
+                &mut wav_buffer,
+                &mut quiet_since,
+                card.as_ref(),
+                &mut download,
+            )
+            .await;
             continue;
         }
 
         // The console loop switched the storage rail on before setting the
         // request; wait briefly for the supply to settle before using the
         // card.
-        if matches!(
-            request,
-            REQUEST_WALK
-                | REQUEST_WAV
-                | REQUEST_TAF
-                | REQUEST_CONTENT
-                | REQUEST_CACHE
-                | REQUEST_PCM
-                | REQUEST_CRC
-        ) && card.is_none()
-        {
-            let Some((spi, cs)) = bus.take() else {
-                esp_println::println!("teddiebox: the card bus is gone — reboot to retry");
-                continue;
-            };
-            Timer::after(Duration::from_millis(50)).await;
-            match storage::Mounted::open(spi, cs, esp_hal::delay::Delay::new()) {
-                Ok(mounted) => {
-                    read_configuration_once(&mounted, &mut configured);
-                    CARD_MOUNTED.store(true, Ordering::Relaxed);
-                    card = Some(mounted)
-                }
-                Err(reason) => {
-                    // The attempt used up the bus, so the card cannot be
-                    // retried without a restart.
-                    esp_println::println!("teddiebox: sd failed — {reason}");
-                    continue;
-                }
-            }
+        if mount_card_if_needed(request, &mut card, &mut bus, &mut configured).await {
+            continue;
         }
 
         match request {
