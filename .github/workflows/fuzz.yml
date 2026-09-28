@@ -1,0 +1,57 @@
+name: Fuzz
+# Run by hand only. A fuzzing run finds different inputs each time, so it
+# cannot give a commit a verdict, and every minute of it is billed.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "One target from `cargo fuzz list`, or empty for all"
+        default: ""
+      seconds:
+        description: "Seconds per target"
+        default: "300"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+
+      # The same store the CI gates restore; see ci.yml.
+      - name: Cache the Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
+      # Each run starts from the inputs earlier runs found interesting, so
+      # the search keeps going deeper rather than starting over. A cache
+      # entry cannot be overwritten, hence one per run and the newest
+      # restored.
+      - name: Cache the corpus
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: just fuzz
+        env:
+          TARGET: ${{ inputs.target }}
+          SECONDS_PER_TARGET: ${{ inputs.seconds }}
+        run: nix develop --command just fuzz "$TARGET" "$SECONDS_PER_TARGET"
+
+      # The input that crashed or hung a target, to replay locally with
+      # `cargo fuzz run -s none <target> <file>`.
+      - name: Keep what failed
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
