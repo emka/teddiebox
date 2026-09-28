@@ -70,10 +70,11 @@ jobs:
       # caching them roughly doubles the size to store what cargo will happily
       # regenerate.
       #
-      # Both lockfiles key it: firmware/ is its own cargo workspace with its own
-      # lockfile, and a change to either should invalidate. `restore-keys` means
-      # a lockfile bump still starts from the previous cache and fetches only
-      # what actually changed, rather than everything.
+      # Every workspace's lockfile keys it: firmware/, fuzz/ and the link check
+      # are cargo workspaces of their own, and a change to any should
+      # invalidate. `restore-keys` means a lockfile bump still starts from the
+      # previous cache and fetches only what actually changed, rather than
+      # everything.
       #
       # The gate is in the key because each gate downloads a different set of
       # crates, and a cache is saved only by the first job to finish with its
@@ -86,9 +87,33 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ matrix.gate }}-${{ hashFiles('Cargo.lock', 'firmware/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ matrix.gate }}-${{ hashFiles('Cargo.lock', 'firmware/Cargo.lock', 'fuzz/Cargo.lock', 'tools/xtensa-linkcheck/Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ matrix.gate }}-
+
+      # What each gate compiled, so a run rebuilds only this repository's
+      # crates rather than every dependency; the lint gate alone spent about
+      # four and a half minutes compiling from nothing. Between 0.2 and
+      # 1.3 GB per gate.
+      #
+      # firmware/vendor comes along because its crates are path dependencies,
+      # which cargo judges by modification time: re-vendored each run, they
+      # would rebuild MbedTLS every time. Each vendor script's stamp still
+      # re-vendors a copy its patches no longer match.
+      #
+      # No fallback to an older key: a cache is never overwritten, so an old
+      # one grown by every dependency bump would only get bigger. A change to
+      # a lockfile or the toolchain costs one cold build.
+      - name: Cache build output
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            target
+            firmware/target
+            firmware/vendor
+            fuzz/target
+            tools/xtensa-linkcheck/target
+          key: target-${{ runner.os }}-${{ matrix.gate }}-${{ hashFiles('Cargo.lock', 'firmware/Cargo.lock', 'fuzz/Cargo.lock', 'tools/xtensa-linkcheck/Cargo.lock', 'flake.lock', 'scripts/vendor-*.sh') }}
 
       # The password is baked in at build time (see firmware/src/nfc.rs), from
       # a secret rather than the repository, and only the `images` gate
@@ -97,5 +122,9 @@ jobs:
       # somebody types `pw`. Never echo it; workflow logs are public.
       - name: just ${{ matrix.gate }}
         env:
+          # Incremental state speeds up rebuilding the same crate while it
+          # is edited, which a CI run never does, and would double what the
+          # build cache stores.
+          CARGO_INCREMENTAL: "0"
           TEDDIEBOX_SLIX_PASSWORD: ${{ matrix.gate == 'images' && secrets.TEDDIEBOX_SLIX_PASSWORD || '' }}
         run: nix develop --command just ${{ matrix.gate }}
