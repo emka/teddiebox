@@ -177,6 +177,23 @@
       {
         packages = {
           inherit opusHost opusDevice xtensaGcc;
+
+          # What evaluating this flake reads but no package refers to: the
+          # flake inputs, and the esp-idf checkout nixpkgs-esp-dev reads its
+          # tool versions from while evaluating. CI collects garbage before
+          # saving its Nix store; built as a GC root there, this keeps them,
+          # or every job fetches esp-idf with its submodules again, 85 s.
+          ci-gc-roots = pkgs.linkFarm "ci-gc-roots" [
+            { name = "nixpkgs"; path = nixpkgs; }
+            { name = "flake-utils"; path = flake-utils; }
+            { name = "systems"; path = flake-utils.inputs.systems; }
+            { name = "nixpkgs-esp-dev"; path = nixpkgs-esp-dev; }
+            { name = "nixpkgs-esp-dev-nixpkgs"; path = nixpkgs-esp-dev.inputs.nixpkgs; }
+            {
+              name = "esp-idf";
+              path = nixpkgs-esp-dev.packages.${system}.esp-idf-xtensa.src;
+            }
+          ];
         };
 
         devShells.default = pkgs.mkShell ({

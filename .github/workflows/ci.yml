@@ -79,7 +79,8 @@ jobs:
           restore-prefixes-first-match: nix-${{ runner.os }}-
           # Before saving, drop every path the dev shell no longer needs, or
           # each flake bump would store the previous toolchain alongside the
-          # new one. The shell's profile, set in the gate step, keeps it.
+          # new one. The shell's profile and the flake's ci-gc-roots, both
+          # made in the gate step, keep what the next job needs.
           gc-max-store-size-linux: 0
 
       # The firmware pins esp-radio to a git revision (see firmware/Cargo.toml),
@@ -151,6 +152,7 @@ jobs:
           TEDDIEBOX_SLIX_PASSWORD: ${{ matrix.gate == 'images' && secrets.TEDDIEBOX_SLIX_PASSWORD || '' }}
         run: |
           df -h /
+          nix build .#ci-gc-roots --out-link "$RUNNER_TEMP/ci-gc-roots"
           nix develop --profile "$RUNNER_TEMP/dev-shell" --command just ${{ matrix.gate }}
 
   # The one check the branch rules on main require. They name checks, and the
