@@ -300,14 +300,20 @@ pub fn status() {
 /// and idle, or during a download.
 ///
 /// Writes to the slot that is *not* running, where a real update writes.
-pub fn write_probe() {
-    let mut flash = crate::flash::flash();
-    let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
-    let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
+/// Finds the slot the probe should write into: not the one running.
+///
+/// Prints which slot it found and how big it is (or exactly why it could
+/// not), then hands back the region to write through and its size — no
+/// flash write happens before this returns.
+fn locate_spare_slot<'f>(
+    flash: &'f mut crate::flash::Flash,
+    buffer: &'f mut [u8; PARTITION_TABLE_MAX_LEN],
+) -> Option<(Region<'f, 'static>, u32)> {
+    let table = match partitions::read_partition_table(flash, buffer) {
         Ok(table) => table,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
-            return;
+            return None;
         }
     };
 
@@ -315,7 +321,7 @@ pub fn write_probe() {
         Ok(Some(entry)) => entry,
         _ => {
             esp_println::println!("teddiebox: ota cannot tell which slot is running — not writing");
-            return;
+            return None;
         }
     };
     let running = if booted.label_as_str() == "ota_1" {
@@ -329,11 +335,11 @@ pub fn write_probe() {
         Ok(Some(entry)) => entry,
         Ok(None) => {
             esp_println::println!("teddiebox: ota has no second app slot — nothing to write into");
-            return;
+            return None;
         }
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot find the spare slot — {trouble:?}");
-            return;
+            return None;
         }
     };
     let slot_bytes = entry.len();
@@ -342,7 +348,15 @@ pub fn write_probe() {
         "teddiebox: ota probing {label} ({slot_bytes} bytes) while running from {running_name}"
     );
 
-    let mut region = Region(entry.as_flash_region(&mut flash));
+    Some((Region(entry.as_flash_region(flash)), slot_bytes))
+}
+
+pub fn write_probe() {
+    let mut flash = crate::flash::flash();
+    let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
+    let Some((mut region, slot_bytes)) = locate_spare_slot(&mut flash, &mut buffer) else {
+        return;
+    };
     let mut sectors = Sectors::new(slot_bytes);
     let started = Instant::now();
 
