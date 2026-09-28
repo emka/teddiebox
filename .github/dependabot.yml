@@ -1,0 +1,68 @@
+version: 2
+
+# A cooldown holds an update back until the version has survived three days:
+# a release minutes old is the one most likely to be yanked or superseded,
+# and nothing here needs a same-day bump. Cooldowns apply to version updates
+# only; a fix for a published advisory is proposed at once.
+#
+# The prefix is explicit: `build` with `include: scope` gives
+# "build(deps): ...", a Conventional Commit, and this repository merges by
+# rebase, so the bot's message lands on main as written.
+#
+# Every pull request runs all of CI, and minutes are billed, so updates are
+# weekly, grouped, and at most three open at a time.
+updates:
+  # Not firmware/: its manifest patches three crates in from firmware/vendor/,
+  # which exists only once the vendor scripts have run, so Dependabot cannot
+  # resolve it. Its esp-hal crates are also pinned together to one git
+  # revision and only move together, by hand.
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /fuzz
+      - /tools/xtensa-linkcheck
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # flake.lock: the toolchain and every tool the gates run. Grouped because
+  # any change to it misses the Nix store cache, and one combined bump is one
+  # cold run instead of one per input. Flake inputs are commits, not semver
+  # versions, so there are no update types to group by.
+  - package-ecosystem: nix
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      flake-inputs:
+        patterns: ["*"]
