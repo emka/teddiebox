@@ -427,123 +427,122 @@ def main():
         ap.error("--every must be 1-255 (the firmware takes one byte)")
 
     con = Console(args.port)
-    out = open(args.out, "w", buffering=1)
-    out.write("# teddiebox pack run\n")
-    out.write(f"# started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    out.write(f"# interval {args.every} s\n")
-    if args.discharge_only:
-        out.write("# mode discharge-only\n")
-    out.write("phase,wall_s,ms,raw,mv,playing,charger_raw\n")
+    with open(args.out, "w", buffering=1) as out:
+        out.write("# teddiebox pack run\n")
+        out.write(f"# started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        out.write(f"# interval {args.every} s\n")
+        if args.discharge_only:
+            out.write("# mode discharge-only\n")
+        out.write("phase,wall_s,ms,raw,mv,playing,charger_raw\n")
 
-    started = time.time()
-    phase = opening_phase(args.discharge_only)
-    detector = (
-        None
-        if args.discharge_only
-        else FullCharge(
-            drop_mv=args.drop_mv,
-            plateau_s=args.plateau_min * 60,
-            min_charge_s=args.min_charge_min * 60,
+        started = time.time()
+        phase = opening_phase(args.discharge_only)
+        detector = (
+            None
+            if args.discharge_only
+            else FullCharge(
+                drop_mv=args.drop_mv,
+                plateau_s=args.plateau_min * 60,
+                min_charge_s=args.min_charge_min * 60,
+            )
         )
-    )
-    last_sample_at = time.time()
-    last_report = 0.0
-    samples = 0
-    opened = False
+        last_sample_at = time.time()
+        last_report = 0.0
+        samples = 0
+        opened = False
 
-    def arm():
-        # `awake on` because a run is hours of the box deliberately doing
-        # nothing, which is what the idle timeout exists to end. An armed
-        # batlog also counts as use, so this is belt and braces — but the
-        # firmware forgets both on a reset, and a reset mid-run is exactly
-        # when it would matter.
-        con.send("awake on")
-        time.sleep(0.3)
-        con.send(f"batlog {args.every:02X}")
+        def arm():
+            # `awake on` because a run is hours of the box deliberately doing
+            # nothing, which is what the idle timeout exists to end. An armed
+            # batlog also counts as use, so this is belt and braces — but the
+            # firmware forgets both on a reset, and a reset mid-run is exactly
+            # when it would matter.
+            con.send("awake on")
+            time.sleep(0.3)
+            con.send(f"batlog {args.every:02X}")
 
-    say("Arming the box. Do not unplug the serial adapter until this finishes.")
-    arm()
+        say("Arming the box. Do not unplug the serial adapter until this finishes.")
+        arm()
 
-    try:
-        while True:
-            got_line = False
-            for line in con.lines(timeout=5):
-                got_line = True
+        try:
+            while True:
+                got_line = False
+                for line in con.lines(timeout=5):
+                    got_line = True
 
-                # A reset loses `awake on` and the armed log, and a run that
-                # quietly stopped recording looks exactly like a flat pack.
-                if "painting the stack" in line:
-                    say("The box reset. Re-arming.")
-                    time.sleep(2)
-                    arm()
-                    continue
+                    # A reset loses `awake on` and the armed log, and a run that
+                    # quietly stopped recording looks exactly like a flat pack.
+                    if "painting the stack" in line:
+                        say("The box reset. Re-arming.")
+                        time.sleep(2)
+                        arm()
+                        continue
 
-                sample = parse_batlog(line)
-                if sample is None:
-                    continue
+                    sample = parse_batlog(line)
+                    if sample is None:
+                        continue
 
-                last_sample_at = time.time()
-                wall = last_sample_at - started
-                on_charge = charger_present(sample["charger_raw"])
+                    last_sample_at = time.time()
+                    wall = last_sample_at - started
+                    on_charge = charger_present(sample["charger_raw"])
 
-                if not opened:
-                    opened = True
-                    opening = opening_message(args.discharge_only, on_charge)
-                    if opening:
-                        say(opening)
+                    if not opened:
+                        opened = True
+                        opening = opening_message(args.discharge_only, on_charge)
+                        if opening:
+                            say(opening)
 
-                full = (
-                    phase == "charge"
-                    and on_charge
-                    and detector is not None
-                    and detector.update(wall, sample["mv"])
-                )
-                moved_to = next_phase(phase, on_charge, full)
-                if moved_to != phase:
-                    say(
-                        transition_message(
-                            phase,
-                            moved_to,
-                            detector.reason if detector else None,
-                            args.discharge_only,
+                    full = (
+                        phase == "charge"
+                        and on_charge
+                        and detector is not None
+                        and detector.update(wall, sample["mv"])
+                    )
+                    moved_to = next_phase(phase, on_charge, full)
+                    if moved_to != phase:
+                        say(
+                            transition_message(
+                                phase,
+                                moved_to,
+                                detector.reason if detector else None,
+                                args.discharge_only,
+                            )
                         )
+                        phase = moved_to
+
+                    out.write(
+                        f"{phase},{wall:.1f},{sample['ms']},{sample['raw']},"
+                        f"{sample['mv']},{sample['playing']},{sample['charger_raw']}\n"
                     )
-                    phase = moved_to
+                    samples += 1
 
-                out.write(
-                    f"{phase},{wall:.1f},{sample['ms']},{sample['raw']},"
-                    f"{sample['mv']},{sample['playing']},{sample['charger_raw']}\n"
-                )
-                samples += 1
+                    if time.time() - last_report > 60:
+                        last_report = time.time()
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] {phase}: "
+                            f"{sample['mv']} mV, {samples} samples",
+                            flush=True,
+                        )
 
-                if time.time() - last_report > 60:
-                    last_report = time.time()
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] {phase}: "
-                        f"{sample['mv']} mV, {samples} samples",
-                        flush=True,
+                quiet_for = time.time() - last_sample_at
+                if phase == "discharge" and quiet_for > args.quiet_end_min * 60:
+                    say(
+                        f"The box has said nothing for {quiet_for / 60:.1f} minutes. "
+                        "Taking that as the end of the discharge."
                     )
-
-            quiet_for = time.time() - last_sample_at
-            if phase == "discharge" and quiet_for > args.quiet_end_min * 60:
-                say(
-                    f"The box has said nothing for {quiet_for / 60:.1f} minutes. "
-                    "Taking that as the end of the discharge."
-                )
-                break
-            if phase in ("charge", "full") and (
-                time.time() - started > args.max_charge_h * 3600
-            ):
-                say("Charging has run past --max-charge-h. Stopping.")
-                break
-            if not got_line and quiet_for > args.quiet_end_min * 60:
-                say("No output at all. Is the box on, and the adapter plugged in?")
-                break
-    except KeyboardInterrupt:
-        say("Interrupted. The file holds everything recorded so far.")
-    finally:
-        out.close()
-        con.close()
+                    break
+                if phase in ("charge", "full") and (
+                    time.time() - started > args.max_charge_h * 3600
+                ):
+                    say("Charging has run past --max-charge-h. Stopping.")
+                    break
+                if not got_line and quiet_for > args.quiet_end_min * 60:
+                    say("No output at all. Is the box on, and the adapter plugged in?")
+                    break
+        except KeyboardInterrupt:
+            say("Interrupted. The file holds everything recorded so far.")
+        finally:
+            con.close()
 
     print(f"\nWrote {samples} samples to {args.out}")
     return 0

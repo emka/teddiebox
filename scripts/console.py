@@ -16,6 +16,7 @@ that has this file open, and miss a `cat /dev/ttyUSB0` or a stray picocom.
 `--self-test` runs the logic below without a box attached.
 """
 import argparse
+import contextlib
 import os
 import select
 import subprocess
@@ -157,37 +158,35 @@ def main():
     # A port in the wrong mode shows nothing, which looks like a dead box.
     subprocess.run(["stty", "-F", args.port, "115200", "raw", "-echo"], check=True)
 
-    log = open(args.log, "wb") if args.log else None
-    fd = os.open(args.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    print(
-        f"--- {args.port} at 115200. Type a command; Ctrl-C or Ctrl-D leaves.",
-        file=sys.stderr,
-    )
-    try:
-        while True:
-            ready, _, _ = select.select([fd, sys.stdin], [], [], 0.2)
-            if fd in ready:
-                try:
-                    chunk = os.read(fd, 4096)
-                except BlockingIOError:
-                    chunk = b""
-                if chunk:
-                    sys.stdout.write(chunk.decode("utf-8", "replace"))
-                    sys.stdout.flush()
-                    if log:
-                        log.write(chunk)
-                        log.flush()
-            if sys.stdin in ready:
-                line = sys.stdin.readline()
-                if not line:
-                    break
-                os.write(fd, frame(line))
-    except KeyboardInterrupt:
-        pass
-    finally:
-        os.close(fd)
-        if log:
-            log.close()
+    with open(args.log, "wb") if args.log else contextlib.nullcontext() as log:
+        fd = os.open(args.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        print(
+            f"--- {args.port} at 115200. Type a command; Ctrl-C or Ctrl-D leaves.",
+            file=sys.stderr,
+        )
+        try:
+            while True:
+                ready, _, _ = select.select([fd, sys.stdin], [], [], 0.2)
+                if fd in ready:
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except BlockingIOError:
+                        chunk = b""
+                    if chunk:
+                        sys.stdout.write(chunk.decode("utf-8", "replace"))
+                        sys.stdout.flush()
+                        if log:
+                            log.write(chunk)
+                            log.flush()
+                if sys.stdin in ready:
+                    line = sys.stdin.readline()
+                    if not line:
+                        break
+                    os.write(fd, frame(line))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            os.close(fd)
     print("\n--- port released", file=sys.stderr)
 
 
