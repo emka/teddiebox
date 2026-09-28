@@ -1,4 +1,4 @@
-//! Decodes the fixtures and checks the result is what `fixturegen` encoded:
+//! Decodes the fixtures and checks the result is what they were encoded from:
 //! 440 Hz on the left, 660 Hz on the right.
 //!
 //! The tolerances are wide, so subtly wrong audio would still pass. Checking

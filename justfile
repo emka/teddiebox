@@ -10,8 +10,8 @@
 # everything CI runs; what to run before committing
 check: fmt lint host-tests device-checks images
 
-# the host test suite, the bench scripts' self-tests and the fixtures
-host-tests: test scripts fixtures
+# the host test suite and the bench scripts' self-tests
+host-tests: test scripts
 
 # the library crates and the decoder against the device target
 device-checks: cross link
@@ -72,21 +72,6 @@ cross:
 # link the decode path into a real image
 link:
     ./scripts/xtensa-link-check.sh
-
-# The committed fixtures are the evidence base for every format claim in the
-# parser, so a generator that has drifted from them invalidates it quietly.
-# Generation is byte-reproducible, which is what makes this a plain diff
-# rather than a fuzzy comparison.
-
-# committed fixtures still match their generator
-fixtures:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    out="$(mktemp -d)"
-    trap 'rm -rf "$out"' EXIT
-    cargo run -q -p fixturegen -- "$out/sine.taf"
-    diff "$out/sine.taf" crates/teddiebox-taf/tests/data/sine.taf
-    diff "$out/chapters.taf" crates/teddiebox-taf/tests/data/chapters.taf
 
 # the device firmware compiles and links for the target
 firmware: vendor

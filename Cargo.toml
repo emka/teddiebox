@@ -18,7 +18,6 @@ members = [
     "crates/tlv320dac3100",
     "crates/trf7962a",
     "tools/fat-assumptions",
-    "tools/fixturegen",
     "tools/identity-image",
     "tools/taf2wav",
 ]

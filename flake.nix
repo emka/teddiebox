@@ -183,23 +183,8 @@
           packages = [
             toolchain
             xtensaGcc
-            # toniefile (fixturegen only) links libopus through pkg-config,
-            # and falls back to a cmake build of its own if it can't find it.
-            #
-            # It gets the same fixed-point, intrinsics-free build the decoder
-            # uses, not the nixpkgs one. nixpkgs builds libopus float with
-            # run-time CPU detection, so its encoder picks NEON or AVX kernels
-            # by host and the same input encodes to different bytes on
-            # different machines — which is not a codec that can produce a
-            # fixture the repository commits and CI re-derives.
-            pkgs.pkg-config
-            opusHost
+            # mbedtls-rs-sys builds MbedTLS for the device with cmake.
             pkgs.cmake
-            # toniefile's build script shells out to protoc via prost-build.
-            # The crate vendors a prebuilt protoc binary that NixOS can't
-            # run (it's dynamically linked against a generic glibc), so we
-            # supply one from nixpkgs instead.
-            pkgs.protobuf
             # The recipes in ./justfile mirror the CI gates, so a commit can be
             # checked the way the pipeline will check it.
             pkgs.just
@@ -223,10 +208,6 @@
 
           # bindgen finds libclang by this variable and by nothing else.
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
-
-          # Tell prost-build to use the nixpkgs protoc rather than its
-          # vendored binary.
-          PROTOC = "${pkgs.protobuf}/bin/protoc";
         }
         // builtins.listToAttrs [
           (opusEnv hostTarget opusHost)

@@ -3,9 +3,11 @@
 //! These tests do not test our code. They fail if the format assumptions the
 //! parser relies on stop holding.
 //!
-//! The fixture was generated with `tools/fixturegen` from the `toniefile`
-//! crate (audio_id `0x1234_5678`, 5 s of stereo tone: 440 Hz left, 660 Hz
-//! right, so a swapped channel can be detected).
+//! The fixture was written by the `toniefile` crate 0.1.1, a TAF writer
+//! independent of this repository (audio_id `0x1234_5678`, 5 s of stereo
+//! tone: 440 Hz left, 660 Hz right, so a swapped channel can be detected). It
+//! is frozen test data that nothing here regenerates, so the parser is checked
+//! against another implementation's reading of the format, not its own.
 
 use teddiebox_taf::PAGE_SIZE;
 
@@ -103,6 +105,9 @@ fn find_capture_pattern(data: &[u8], from: usize) -> Option<usize> {
 fn the_real_fixture_header_parses() {
     let page: &[u8; PAGE_SIZE] = FIXTURE[0..PAGE_SIZE].try_into().unwrap();
     let h = teddiebox_taf::TonieHeader::parse(page).expect("header should parse");
-    assert_eq!(h.audio_id, 0x1234_5678, "audio id set by fixturegen");
+    assert_eq!(
+        h.audio_id, 0x1234_5678,
+        "audio id the fixture was written with"
+    );
     assert!(h.data_length > 0);
 }
