@@ -29,7 +29,20 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    # An update goes into the first group it matches.
     groups:
+      # hmac and sha1 are built on digest's traits, and Hmac<Sha1> only
+      # compiles when both use the same digest, so they arrive as one pull
+      # request, major versions included.
+      rustcrypto:
+        patterns: ["hmac", "sha1", "sha2", "digest"]
+      # A new major version is a different crate to the compiler, so one
+      # workspace moving without the others breaks every type they share.
+      # One pull request per dependency, across all three directories.
+      major:
+        patterns: ["*"]
+        update-types: [major]
+        group-by: dependency-name
       minor-and-patch:
         patterns: ["*"]
         update-types: [minor, patch]
