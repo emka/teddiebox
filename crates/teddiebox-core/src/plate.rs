@@ -9,7 +9,7 @@
 //! needs several readings that agree — an arrival, a departure by absence, and
 //! a departure because another figure replaced it.
 
-use crate::{Event, TagUid};
+use crate::{Event, TagUid, Unavailable};
 
 /// Consecutive readings of the same tag before it counts as arrived.
 ///
@@ -573,6 +573,38 @@ impl Placed {
     }
 }
 
+/// What a finished download means for the reducer, once it is known which
+/// figure (if any) it was for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settlement {
+    /// The figure it was for is still on the plate.
+    ForTheFigure(Event),
+    /// A different figure is on the plate now, for example after a console
+    /// `get`. Worth telling the user about; not passed to the reducer.
+    ForAnotherFigure,
+    /// Nobody is waiting; nothing to do.
+    NothingWaiting,
+}
+
+/// Turns a finished download's outcome into what the reducer should be told,
+/// given whose figure it was for.
+pub fn settle_fetch_outcome(
+    answering: Answering,
+    outcome: teddiebox_download::Outcome,
+) -> Settlement {
+    use teddiebox_download::Outcome;
+    match answering {
+        Answering::TheFigure(tag) => Settlement::ForTheFigure(match outcome {
+            Outcome::Completed => Event::ContentReady(tag),
+            Outcome::Unreachable => Event::ContentMissing(tag, Unavailable::Unreachable),
+            Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
+            Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),
+        }),
+        Answering::AnotherFigure => Settlement::ForAnotherFigure,
+        Answering::NoFigure => Settlement::NothingWaiting,
+    }
+}
+
 #[cfg(test)]
 mod placed_tests {
     use super::*;
@@ -668,5 +700,63 @@ mod placed_tests {
         let placed = Placed::empty();
 
         assert_eq!(placed.answering(A.ruid()), Answering::NoFigure);
+    }
+}
+
+#[cfg(test)]
+mod settle_fetch_outcome_tests {
+    use super::*;
+    use teddiebox_download::Outcome;
+
+    const A: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
+
+    #[test]
+    fn a_completed_download_for_the_figure_on_the_plate_makes_content_ready() {
+        assert_eq!(
+            settle_fetch_outcome(Answering::TheFigure(A), Outcome::Completed),
+            Settlement::ForTheFigure(Event::ContentReady(A))
+        );
+    }
+
+    #[test]
+    fn an_unreachable_server_for_the_figure_on_the_plate_reports_why() {
+        assert_eq!(
+            settle_fetch_outcome(Answering::TheFigure(A), Outcome::Unreachable),
+            Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::Unreachable))
+        );
+    }
+
+    #[test]
+    fn no_content_for_the_figure_on_the_plate_reports_why() {
+        assert_eq!(
+            settle_fetch_outcome(Answering::TheFigure(A), Outcome::NoContent),
+            Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::NoContent))
+        );
+    }
+
+    #[test]
+    fn a_refused_join_for_the_figure_on_the_plate_reports_why() {
+        assert_eq!(
+            settle_fetch_outcome(Answering::TheFigure(A), Outcome::Refused),
+            Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::Refused))
+        );
+    }
+
+    /// A console `get` that finished while another figure replaced the one it
+    /// was fetching for must not be reported for that figure.
+    #[test]
+    fn an_outcome_for_another_figure_is_not_settled_against_the_one_on_the_plate() {
+        assert_eq!(
+            settle_fetch_outcome(Answering::AnotherFigure, Outcome::Completed),
+            Settlement::ForAnotherFigure
+        );
+    }
+
+    #[test]
+    fn an_outcome_with_nobody_waiting_settles_nothing() {
+        assert_eq!(
+            settle_fetch_outcome(Answering::NoFigure, Outcome::Completed),
+            Settlement::NothingWaiting
+        );
     }
 }

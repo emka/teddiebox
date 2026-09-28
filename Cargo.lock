@@ -848,6 +848,7 @@ version = "0.1.0"
 dependencies = [
  "heapless",
  "teddiebox-board",
+ "teddiebox-download",
 ]
 
 [[package]]

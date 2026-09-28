@@ -153,6 +153,16 @@ version = "0.1.0"
 dependencies = [
  "heapless",
  "teddiebox-board",
+ "teddiebox-download",
+]
+
+[[package]]
+name = "teddiebox-download"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "teddiebox-cloud",
+ "teddiebox-taf",
 ]
 
 [[package]]

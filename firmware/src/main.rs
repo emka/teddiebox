@@ -56,7 +56,7 @@ use teddiebox_console::CommandWatch;
 use teddiebox_core::cue::Cue;
 use teddiebox_core::pipe::Pipe;
 use teddiebox_core::place::PendingPlace;
-use teddiebox_core::plate::{Answering, Placed};
+use teddiebox_core::plate::{Answering, Placed, Settlement};
 use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::sounds::{Language, Sound};
 use teddiebox_core::tone;
@@ -1339,18 +1339,13 @@ fn gather_events(card: Option<&storage::Mounted>, placed: &mut Placed) -> [Optio
 /// figure.
 fn gather_fetch_outcome(placed: &Placed) -> Option<Event> {
     let (outcome, outcome_ruid) = transfer(Transfer::take_outcome)?;
-    match placed.answering(outcome_ruid) {
+    match teddiebox_core::plate::settle_fetch_outcome(placed.answering(outcome_ruid), outcome) {
         // The figure it was for is still on the plate. (The reducer checks
         // the identity again before acting.)
-        Answering::TheFigure(tag) => Some(match outcome {
-            Outcome::Completed => Event::ContentReady(tag),
-            Outcome::Unreachable => Event::ContentMissing(tag, Unavailable::Unreachable),
-            Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
-            Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),
-        }),
+        Settlement::ForTheFigure(event) => Some(event),
         // A different figure is on the plate, for example after a console
         // `get`. Not passed to the reducer.
-        Answering::AnotherFigure => {
+        Settlement::ForAnotherFigure => {
             esp_println::println!(
                 "teddiebox: plate ignoring a fetch outcome for {outcome_ruid:016X} — \
                  not the figure on the plate"
@@ -1358,7 +1353,7 @@ fn gather_fetch_outcome(placed: &Placed) -> Option<Event> {
             None
         }
         // Nobody is waiting; nothing to do.
-        Answering::NoFigure => None,
+        Settlement::NothingWaiting => None,
     }
 }
 

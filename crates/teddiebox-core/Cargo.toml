@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 teddiebox-board = { path = "../teddiebox-board" }
+teddiebox-download = { path = "../teddiebox-download" }
 heapless.workspace = true
 
 [lints]
