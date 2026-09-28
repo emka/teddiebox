@@ -50,6 +50,16 @@ jobs:
         with:
           extra_nix_config: "experimental-features = nix-command flakes"
 
+      # Entering the dev shell from an empty store fetches the whole toolchain
+      # from cache.nixos.org and GitHub, which took about three minutes in
+      # every job before its gate could start. Every job enters the same
+      # shell, so whichever job saves first stores what all of them need.
+      - name: Cache the Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
       # The firmware pins esp-radio to a git revision (see firmware/Cargo.toml),
       # which costs roughly 190 MB of clones per run and makes a GitHub outage
       # enough to red an otherwise-good build. Caching the downloads removes
