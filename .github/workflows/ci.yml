@@ -135,3 +135,18 @@ jobs:
           CARGO_INCREMENTAL: "0"
           TEDDIEBOX_SLIX_PASSWORD: ${{ matrix.gate == 'images' && secrets.TEDDIEBOX_SLIX_PASSWORD || '' }}
         run: nix develop --command just ${{ matrix.gate }}
+
+  # The one check the branch rules on main require. They name checks, and the
+  # gate jobs are named after whatever `check:` lists, so requiring them one
+  # by one would quietly stop requiring a gate added later. This passes only
+  # when every gate job did; a failed or skipped one fails it.
+  all-gates:
+    name: all gates
+    needs: [gates, check]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GATES: ${{ needs.gates.result }}
+          CHECK: ${{ needs.check.result }}
+        run: '[ "$GATES" = success ] && [ "$CHECK" = success ]'
