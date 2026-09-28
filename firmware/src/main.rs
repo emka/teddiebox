@@ -2907,6 +2907,7 @@ async fn main(spawner: Spawner) {
     esp_println::println!("teddiebox: painting the stack");
     stack::paint();
     esp_println::println!("teddiebox: stack painted");
+    esp_println::println!("teddiebox: version {}", env!("TEDDIEBOX_VERSION"));
 
     // Only the radio stack (esp-radio and TLS) allocates; libopus must not
     // (it panics instead of allocating).
