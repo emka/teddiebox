@@ -53,7 +53,9 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 echo "vendoring mbedtls-rs $VERSION"
-curl -fsSL -o "$work/crate.tar.gz" \
+# Retried: a transient error from crates.io otherwise fails a whole CI gate,
+# and the checksum below still rejects anything but the expected file.
+curl -fsSL --retry 3 --retry-all-errors -o "$work/crate.tar.gz" \
     "https://static.crates.io/crates/mbedtls-rs/mbedtls-rs-$VERSION.crate"
 
 got="$(sha256sum "$work/crate.tar.gz" | cut -d' ' -f1)"
