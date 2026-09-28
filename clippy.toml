@@ -1,0 +1,3 @@
+# A panicking assertion is how a test fails, so `unwrap_used` applies only to
+# code that ships.
+allow-unwrap-in-tests = true

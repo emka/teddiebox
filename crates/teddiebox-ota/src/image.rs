@@ -37,11 +37,10 @@ pub fn image_version(image_head: &[u8]) -> Result<&str, OtaError> {
     if image_head.len() < DESCRIPTOR_END {
         return Err(OtaError::NotAnImage);
     }
-    let magic = u32::from_le_bytes(
-        image_head[MAGIC_OFFSET..MAGIC_OFFSET + 4]
-            .try_into()
-            .unwrap(),
-    );
+    let Some(magic) = image_head[MAGIC_OFFSET..].first_chunk::<4>() else {
+        return Err(OtaError::NotAnImage);
+    };
+    let magic = u32::from_le_bytes(*magic);
     if magic != MAGIC_WORD {
         return Err(OtaError::NotAnImage);
     }

@@ -11,6 +11,10 @@
 //!
 //! Not run in CI: timing on a shared runner is unreliable.
 
+// A benchmark harness, never shipped: a failed unwrap stops the run, which is
+// what the lint is not meant to prevent.
+#![allow(clippy::unwrap_used)]
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use teddiebox_audio::{LibOpus, OpusDecode, OpusState, CHANNELS, MAX_FRAME_SAMPLES};

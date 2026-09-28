@@ -4,6 +4,11 @@
 //! The tolerances are wide, so subtly wrong audio would still pass. Checking
 //! the device's output exactly needs reference PCM, not these tests.
 
+// The helpers below are test code too, but outside a `#[test]` function,
+// where `allow-unwrap-in-tests` does not reach. A failed unwrap here is a
+// failed test, which is what the lint is not meant to prevent.
+#![allow(clippy::unwrap_used)]
+
 use teddiebox_audio::{LibOpus, OpusState, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE};
 use teddiebox_taf::SlicePages;
 
