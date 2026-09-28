@@ -1,0 +1,8 @@
+HTTP/1.1 100 Continue
+
+HTTP/1.1 206 Partial Content
+Content-Length: 2
+Content-Range: bytes 4096-4097/69632
+ETag: "5f3a-1"
+
+OK

@@ -1,0 +1,5 @@
+# teddiebox update
+version = 0.1.0-3-gabc123
+sha256 = 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+length = 1048576
+image = teddiebox.bin

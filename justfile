@@ -24,22 +24,24 @@ images: firmware firmware-release
 
 # formatting, the gate no test or review will catch
 #
-# firmware/ is its own workspace (see firmware/Cargo.toml), so it is not
-# reached by the root `--all` and must be checked separately, from inside
-# firmware/ so cargo picks up firmware/.cargo/config.toml.
+# firmware/ and fuzz/ are workspaces of their own (see their Cargo.toml), so
+# the root `--all` does not reach them and each is checked from inside, where
+# cargo picks up firmware/.cargo/config.toml.
 fmt:
     cargo fmt --all --check
     cd firmware && cargo fmt --all --check
+    cd fuzz && cargo fmt --all --check
 
 # Known advisories, licences and dependency sources, against the policy in
-# deny.toml. Both workspaces, because the dependencies that ship are all in
-# firmware/'s. firmware/ needs the vendored crates because its manifest
+# deny.toml. Every workspace: the dependencies that ship are all in
+# firmware/'s, and no copyleft code belongs in the tools either. firmware/ needs the vendored crates because its manifest
 # patches them in.
 
 # dependencies against the advisory database and the licence policy
 deny: vendor
     cargo deny --manifest-path Cargo.toml --config deny.toml check
     cargo deny --manifest-path firmware/Cargo.toml --config deny.toml check
+    cargo deny --manifest-path fuzz/Cargo.toml --config deny.toml check
 
 # The bench scripts flash the box, record hours-long runs and parse the
 # firmware's output, and no compiler checks them.
@@ -73,6 +75,9 @@ lint: vendor
     # no `test` crate, so building a test harness for it fails outright.
     # There is nothing under cfg(test) in firmware/ to lint anyway.
     cd firmware && cargo clippy --workspace -- -D warnings
+    # The fuzz targets call the parsers' public API, so a change there must
+    # not leave them unbuildable until the next time someone fuzzes.
+    cd fuzz && cargo clippy -- -D warnings
 
 test: vendor
     cargo test --workspace
@@ -180,13 +185,53 @@ identity:
 console:
     ./scripts/console.py
 
+# The parsers read what a card, a server or any device on the portal's open
+# access point sends. The property tests check what their generators aim
+# at; the fuzzer searches for what they missed, guided by coverage. Not a
+# gate: a run finds different inputs each time, so it cannot give a commit a
+# verdict. A crash or a hang is saved under fuzz/artifacts/<target>/ and
+# replays with `cargo fuzz run -s none <target> <file>`.
+#
+# No sanitizer: the esp toolchain ships none, and the code under test is safe
+# Rust, where a panic, an overflow or a hang is what there is to find.
+# `-timeout` turns an input that takes longer than 10 s into a failure, so a
+# parser that loops is reported instead of running out the clock.
+#
+# Random bytes rarely get past a parser's first check, so each target starts
+# from well-formed inputs in fuzz/seeds/ (the TAF reader from the committed
+# fixtures) and mutates with the format's tokens from fuzz/dict/. Without
+# them, four minutes never produced a response with two `1xx` preambles.
+
+# fuzz every parser, or one: `just fuzz`, `just fuzz taf_reader 600`
+fuzz target="" seconds="60":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    targets="{{target}}"
+    [ -n "$targets" ] || targets="$(cargo fuzz list)"
+    for t in $targets; do
+        echo "--- $t, {{seconds}} s"
+        seeds=()
+        [ -d "fuzz/seeds/$t" ] && seeds=("fuzz/seeds/$t")
+        [ "$t" = taf_reader ] && seeds=(crates/teddiebox-taf/tests/data)
+        dict=()
+        case "$t" in
+            cloud_head | portal_http) dict=(-dict=fuzz/dict/http.dict) ;;
+            ota_* | portal_form) dict=(-dict=fuzz/dict/keyvalue.dict) ;;
+            taf_*) dict=(-dict=fuzz/dict/taf.dict) ;;
+        esac
+        mkdir -p "fuzz/corpus/$t"
+        cargo fuzz run -s none "$t" "fuzz/corpus/$t" "${seeds[@]}" -- \
+            -max_total_time={{seconds}} -timeout=10 "${dict[@]}"
+    done
+
 # format the tree rather than checking it
 #
-# Both workspaces, like `fmt`: formatting only the root would leave
-# `just check` failing on firmware/.
+# Every workspace, like `fmt`: formatting only the root would leave
+# `just check` failing on firmware/ or fuzz/.
 fix:
     cargo fmt --all
     cd firmware && cargo fmt --all
+    cd fuzz && cargo fmt --all
 
 # Not a CI gate: there is no agreed complexity budget to fail a build against,
 # so this stays a feedback tool, not an enforced one. Per-file complexity

@@ -26,6 +26,9 @@ allow = [
     "BSL-1.0",
     "ISC",
     "MIT",
+    # The University of Illinois/NCSA licence, BSD-style: LLVM's libFuzzer,
+    # which libfuzzer-sys builds for fuzz/.
+    "NCSA",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",

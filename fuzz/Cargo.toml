@@ -1,0 +1,92 @@
+[package]
+name = "teddiebox-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# A workspace of its own, as cargo-fuzz expects: libfuzzer-sys only links
+# when cargo-fuzz builds it, which `cargo test --workspace` at the root does
+# not.
+[workspace]
+
+[dependencies]
+heapless = { version = "0.8", default-features = false }
+libfuzzer-sys = "0.4"
+teddiebox-cloud = { path = "../crates/teddiebox-cloud" }
+teddiebox-config = { path = "../crates/teddiebox-config" }
+teddiebox-ota = { path = "../crates/teddiebox-ota" }
+teddiebox-portal = { path = "../crates/teddiebox-portal" }
+teddiebox-taf = { path = "../crates/teddiebox-taf" }
+
+# Overflow checks stay on in the fuzzing build, so arithmetic that wraps on
+# hostile input is reported rather than hidden.
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[[bin]]
+name = "taf_header"
+path = "fuzz_targets/taf_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "taf_reader"
+path = "fuzz_targets/taf_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ota_manifest"
+path = "fuzz_targets/ota_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ota_url"
+path = "fuzz_targets/ota_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ota_image"
+path = "fuzz_targets/ota_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cloud_head"
+path = "fuzz_targets/cloud_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "portal_http"
+path = "fuzz_targets/portal_http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "portal_dhcp"
+path = "fuzz_targets/portal_dhcp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "portal_form"
+path = "fuzz_targets/portal_form.rs"
+test = false
+doc = false
+bench = false
