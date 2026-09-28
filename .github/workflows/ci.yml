@@ -1,6 +1,11 @@
 name: CI
 on: [push, pull_request, workflow_dispatch]
 
+# Every job only reads the repository. The token is otherwise granted the
+# repository's default scope, in a workflow that runs pull requests' code.
+permissions:
+  contents: read
+
 jobs:
   # The gates are whatever `just check` depends on, read from the justfile, so
   # `just check` locally runs exactly what the pipeline runs and a gate cannot
