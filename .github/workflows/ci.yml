@@ -26,7 +26,7 @@ jobs:
     outputs:
       gates: ${{ steps.read.outputs.gates }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - id: read
         run: |
           gates="$(sed -n 's/^check: *//p' justfile | jq -Rce 'split(" ") | map(select(length > 0)) | select(length > 0)')"
@@ -45,8 +45,8 @@ jobs:
         gate: ${{ fromJSON(needs.gates.outputs.gates) }}
     name: ${{ matrix.gate }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v30
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
         with:
           extra_nix_config: "experimental-features = nix-command flakes"
 
@@ -70,7 +70,7 @@ jobs:
       # key: a shared key would usually be saved by `fmt`, which downloads
       # nothing.
       - name: Cache cargo downloads
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry/index
