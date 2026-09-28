@@ -1,13 +1,20 @@
 name: CI
-on: [push, pull_request, workflow_dispatch]
+# Pushes to main and pull requests: a branch with a pull request would
+# otherwise be checked twice per commit, once for each event, and every run
+# is billed. A branch without one can still be run from the Actions tab.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 # Every job only reads the repository. The token is otherwise granted the
 # repository's default scope, in a workflow that runs pull requests' code.
 permissions:
   contents: read
 
-# A newer push to a branch makes a running check of the older one moot, so it
-# is cancelled. Not on main: there every commit keeps its own verdict, so a
+# A newer push to a pull request makes a running check of the older one
+# moot, so it is cancelled. Not on main: there every commit keeps its own verdict, so a
 # red one can be pinned to the commit that caused it. That takes a group per
 # commit, because a group also drops a queued run when a newer one arrives,
 # whatever `cancel-in-progress` says.
