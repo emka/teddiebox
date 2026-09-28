@@ -117,9 +117,15 @@ cross:
 link:
     ./scripts/xtensa-link-check.sh
 
-# the device firmware compiles and links for the target
+# Both image recipes end in scripts/check-budget.sh: the stack region against
+# the deepest use measured on the box, and the image against its OTA slot.
+# They build to the same path, so each checks its own image straight after
+# building it.
+
+# the device firmware compiles, links, and fits
 firmware: vendor
     cd firmware && cargo build --release
+    ./scripts/check-budget.sh
 
 # `TEDDIEBOX_RELEASE` is off unless set, so `just firmware` and `just flash`
 # build a development image. Setting it leaves `dl` as the only console
@@ -131,6 +137,7 @@ firmware: vendor
 # the same image without the bench console commands
 firmware-release: vendor
     cd firmware && TEDDIEBOX_RELEASE=1 cargo build --release
+    ./scripts/check-budget.sh
 
 # firmware/Cargo.toml replaces three crates with patched copies of the
 # published ones (`mbedtls-rs-sys`, `mbedtls-rs` and `smoltcp`), and cargo
