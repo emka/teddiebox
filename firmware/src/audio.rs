@@ -709,6 +709,45 @@ fn log_progress(
     );
 }
 
+/// Fills the buffer before starting the transfer, as `prefill` does for
+/// WAV: an empty buffer would run out before the first sample arrived.
+///
+/// No `.await` in here — this is bounded decode-and-push, not the DMA
+/// feed loop. Returns the still-pending byte range from the last frame
+/// decoded (the caller's main loop continues pushing it) and the frame
+/// count so far.
+fn prefill_taf(
+    decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>,
+    pcm: &mut [i16; MAX_FRAME_SAMPLES],
+    buffer: &mut DmaTxStreamBuf,
+    pcm_crc: &mut Option<Crc32>,
+) -> Result<(core::ops::Range<usize>, u32), &'static str> {
+    let mut frames: u32 = 0;
+    let mut pending: core::ops::Range<usize> = 0..0;
+    loop {
+        if pending.is_empty() {
+            match decoder.next_frame(pcm) {
+                Ok(Some(samples)) => {
+                    if let Some(crc) = pcm_crc.as_mut() {
+                        crc.update(as_bytes(&pcm[..samples]));
+                    }
+                    frames += 1;
+                    pending = 0..samples * 2;
+                }
+                Ok(None) => break,
+                Err(_) => return Err("the first frames would not decode"),
+            }
+        }
+        let pushed = buffer.push(&as_bytes(pcm)[pending.clone()]);
+        pending.start += pushed;
+        if pushed == 0 {
+            // The buffer is full; the rest stays pending for the loop below.
+            break;
+        }
+    }
+    Ok((pending, frames))
+}
+
 async fn play_taf_inner(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
@@ -775,34 +814,15 @@ async fn play_taf_inner(
     // A CRC-32 of the decoded samples, when `PCM_CRC` asks for one, to compare
     // with `taf2wav` output on the host. It includes the pre-fill frames.
     let mut pcm_crc = PCM_CRC.load(Ordering::Relaxed).then(Crc32::new);
-    let mut frames: u32 = 0;
-
-    let mut pending: core::ops::Range<usize> = 0..0;
-    loop {
-        if pending.is_empty() {
-            match decoder.next_frame(&mut scratch.pcm) {
-                Ok(Some(samples)) => {
-                    if let Some(crc) = pcm_crc.as_mut() {
-                        crc.update(as_bytes(&scratch.pcm[..samples]));
-                    }
-                    frames += 1;
-                    pending = 0..samples * 2;
-                }
-                Ok(None) => break,
-                Err(_) => {
-                    card.close_file(file);
-                    release_scratch();
-                    return Err(("the first frames would not decode", i2s_tx, buffer));
-                }
+    let (mut pending, mut frames) =
+        match prefill_taf(&mut decoder, &mut scratch.pcm, &mut buffer, &mut pcm_crc) {
+            Ok(pair) => pair,
+            Err(reason) => {
+                card.close_file(file);
+                release_scratch();
+                return Err((reason, i2s_tx, buffer));
             }
-        }
-        let pushed = buffer.push(&as_bytes(&scratch.pcm)[pending.clone()]);
-        pending.start += pushed;
-        if pushed == 0 {
-            // The buffer is full; the rest stays pending for the loop below.
-            break;
-        }
-    }
+        };
 
     let mut transfer = match i2s_tx.write(buffer) {
         Ok(transfer) => transfer,
