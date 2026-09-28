@@ -127,7 +127,7 @@ fn start_wav_transfer(
     format: &WavFormat,
     i2s_tx: I2sTx<'static, Blocking>,
     mut buffer: DmaTxStreamBuf,
-) -> Result<(I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>, usize), &'static str> {
+) -> Result<(Transfer, usize), &'static str> {
     let filled = prefill(card, file, &mut buffer, format.data_len as usize)?;
     // Prefill may read more than fits, so seek back to where the buffer ends.
     card.seek(file, format.data_offset + filled as u32)?;
@@ -588,6 +588,7 @@ pub async fn play_taf(
 
 type Reclaimed = (Finish, I2sTx<'static, Blocking>, DmaTxStreamBuf);
 type PlaybackError = (&'static str, I2sTx<'static, Blocking>, DmaTxStreamBuf);
+type Transfer = I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>;
 
 /// Resolves `source` to an open file and its size.
 ///
@@ -795,8 +796,8 @@ fn log_taf_summary(
 }
 
 enum DmaRestart {
-    NotNeeded(I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>),
-    Restarted(I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>),
+    NotNeeded(Transfer),
+    Restarted(Transfer),
     Failed(PlaybackError),
 }
 
@@ -806,7 +807,7 @@ enum DmaRestart {
 /// under load, even with the buffer two-thirds full — so check for it and
 /// restart on the same buffer. It never touches the frame-decode state.
 fn restart_if_stopped(
-    transfer: I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>,
+    transfer: Transfer,
     restarts: &mut u32,
     frames: u32,
     started: Instant,
@@ -926,6 +927,25 @@ fn open_taf<'s>(
     }
 }
 
+/// Pre-fills the buffer, as the WAV path does — an empty buffer would run
+/// out before the first sample arrived — and starts the I2S transfer.
+fn prefill_and_start(
+    decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>,
+    pcm: &mut [i16; MAX_FRAME_SAMPLES],
+    mut buffer: DmaTxStreamBuf,
+    pcm_crc: &mut Option<Crc32>,
+    i2s_tx: I2sTx<'static, Blocking>,
+) -> Result<(core::ops::Range<usize>, u32, Transfer), PlaybackError> {
+    let (pending, frames) = match prefill_taf(decoder, pcm, &mut buffer, pcm_crc) {
+        Ok(pair) => pair,
+        Err(reason) => return Err((reason, i2s_tx, buffer)),
+    };
+    match i2s_tx.write(buffer) {
+        Ok(transfer) => Ok((pending, frames, transfer)),
+        Err((_, tx, buffer)) => Err(("I2S would not start", tx, buffer)),
+    }
+}
+
 /// Seeks to a saved position, if any. A replaced or re-downloaded story may
 /// not have the saved page any more; then it plays from the beginning.
 fn seek_to_start(decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>, from: Position) {
@@ -949,7 +969,7 @@ async fn play_taf_inner(
     from: Position,
     on_frame: &mut dyn FnMut(),
 ) -> Result<Reclaimed, PlaybackError> {
-    let mut buffer = emptied(buffer);
+    let buffer = emptied(buffer);
     let Some(scratch) = take_scratch() else {
         return Err(("the decoder is already in use", i2s_tx, buffer));
     };
@@ -969,30 +989,18 @@ async fn play_taf_inner(
 
     seek_to_start(&mut decoder, from);
 
-    // Fill the buffer before starting, as the WAV path does: an empty buffer
-    // would run out before the first sample arrived.
-    //
     // A CRC-32 of the decoded samples, when `PCM_CRC` asks for one, to compare
     // with `taf2wav` output on the host. It includes the pre-fill frames.
     let mut pcm_crc = PCM_CRC.load(Ordering::Relaxed).then(Crc32::new);
-    let (mut pending, mut frames) =
-        match prefill_taf(&mut decoder, &mut scratch.pcm, &mut buffer, &mut pcm_crc) {
-            Ok(pair) => pair,
-            Err(reason) => {
+    let (mut pending, mut frames, mut transfer) =
+        match prefill_and_start(&mut decoder, &mut scratch.pcm, buffer, &mut pcm_crc, i2s_tx) {
+            Ok(triple) => triple,
+            Err(err) => {
                 card.close_file(file);
                 release_scratch();
-                return Err((reason, i2s_tx, buffer));
+                return Err(err);
             }
         };
-
-    let mut transfer = match i2s_tx.write(buffer) {
-        Ok(transfer) => transfer,
-        Err((_, tx, buffer)) => {
-            card.close_file(file);
-            release_scratch();
-            return Err(("I2S would not start", tx, buffer));
-        }
-    };
 
     let mut cushion = Cushion::new(BUFFER_BYTES as u32);
     cushion.start();
