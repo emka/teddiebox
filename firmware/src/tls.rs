@@ -459,14 +459,11 @@ pub fn client_config<'a>(creds: Option<Credentials<'a>>) -> ClientSessionConfig<
 ///
 /// Writes the host with a NUL appended, as `mbedtls` requires.
 fn split_server(server: &str, name: &mut [u8; MAX_NAME]) -> Result<(usize, u16), Error> {
-    let (host, port) = server.rsplit_once(':').ok_or(Error::MalformedServer)?;
-    let port: u16 = port.parse().map_err(|_| Error::MalformedServer)?;
+    // The split itself is host-tested in `teddiebox_config`; every reason it
+    // can fail collapses to `MalformedServer` here.
+    let (host, port) = teddiebox_config::split_host_port(server, name.len() - 1)
+        .map_err(|_| Error::MalformedServer)?;
     let bytes = host.as_bytes();
-    // Refuse a name that does not fit rather than cutting it short, which
-    // would resolve to the wrong host or none.
-    if bytes.is_empty() || bytes.len() + 1 > name.len() {
-        return Err(Error::MalformedServer);
-    }
     name[..bytes.len()].copy_from_slice(bytes);
     name[bytes.len()] = 0;
     Ok((bytes.len() + 1, port))

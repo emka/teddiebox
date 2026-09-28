@@ -166,6 +166,40 @@ fn is_host_port(value: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
 }
 
+/// Why [`split_host_port`] could not split a `host:port` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitHostPortError {
+    /// There is no `:` to split on.
+    NoPort,
+    /// What follows the last `:` is not a `u16`.
+    BadPort,
+    /// The host is empty.
+    EmptyHost,
+    /// The host is longer than the caller's buffer.
+    HostTooLong,
+}
+
+/// Splits `host:port`, the way `server` is written in `CONFIG.TXT`, and
+/// checks the host fits in `max_host_len` bytes.
+///
+/// Splits on the **last** `:`, so a value that is already only characters
+/// [`is_host_port`] accepts never needs a bracketed IPv6 form: nothing here
+/// has ever carried one.
+pub fn split_host_port(
+    value: &str,
+    max_host_len: usize,
+) -> Result<(&str, u16), SplitHostPortError> {
+    let (host, port) = value.rsplit_once(':').ok_or(SplitHostPortError::NoPort)?;
+    let port: u16 = port.parse().map_err(|_| SplitHostPortError::BadPort)?;
+    if host.is_empty() {
+        return Err(SplitHostPortError::EmptyHost);
+    }
+    if host.len() > max_host_len {
+        return Err(SplitHostPortError::HostTooLong);
+    }
+    Ok((host, port))
+}
+
 /// The box's current configuration: what the card says, plus anything typed
 /// at the console.
 ///
@@ -990,6 +1024,62 @@ mod tests {
         assert_eq!(
             merged.update_url.as_deref(),
             Some("https://card/teddiebox.txt")
+        );
+    }
+
+    #[test]
+    fn a_host_and_port_split_on_the_last_colon() {
+        assert_eq!(
+            split_host_port("teddycloud.local:443", 80),
+            Ok(("teddycloud.local", 443))
+        );
+    }
+
+    #[test]
+    fn a_value_with_no_colon_has_no_port() {
+        assert_eq!(
+            split_host_port("teddycloud.local", 80),
+            Err(SplitHostPortError::NoPort)
+        );
+    }
+
+    #[test]
+    fn a_port_that_is_not_a_number_is_refused() {
+        assert_eq!(
+            split_host_port("teddycloud.local:https", 80),
+            Err(SplitHostPortError::BadPort)
+        );
+    }
+
+    #[test]
+    fn a_port_above_u16_is_refused() {
+        assert_eq!(
+            split_host_port("teddycloud.local:65536", 80),
+            Err(SplitHostPortError::BadPort)
+        );
+    }
+
+    #[test]
+    fn an_empty_host_is_refused() {
+        assert_eq!(
+            split_host_port(":443", 80),
+            Err(SplitHostPortError::EmptyHost)
+        );
+    }
+
+    #[test]
+    fn a_host_longer_than_the_buffer_is_refused_rather_than_truncated() {
+        assert_eq!(
+            split_host_port("teddycloud.local:443", 5),
+            Err(SplitHostPortError::HostTooLong)
+        );
+    }
+
+    #[test]
+    fn a_host_exactly_at_the_limit_is_accepted() {
+        assert_eq!(
+            split_host_port("teddycloud.local:443", "teddycloud.local".len()),
+            Ok(("teddycloud.local", 443))
         );
     }
 }
