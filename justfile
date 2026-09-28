@@ -54,11 +54,13 @@ lint-scripts:
 
 # A mistake in a workflow shows only when GitHub runs it, which costs a push
 # and billed minutes, and a broken expression can quietly skip a gate rather
-# than fail it.
+# than fail it. A mistake in the Dependabot config shows only as an error in
+# a tab nobody watches, while updates quietly stop.
 
-# actionlint over .github/workflows/
+# actionlint over .github/workflows/, and the Dependabot config's schema
 lint-workflows:
     actionlint
+    check-jsonschema --builtin-schema vendor.dependabot .github/dependabot.yml
 
 # A dependency nothing uses still costs build time, and in firmware/ it can
 # cost flash. cargo-machete reads source rather than compiling it, so it

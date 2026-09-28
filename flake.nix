@@ -195,8 +195,10 @@
             pkgs.shellcheck
             pkgs.ruff
             # `just lint-workflows`: the CI workflows, including the shell in
-            # their `run:` steps, which it hands to the shellcheck above.
+            # their `run:` steps, which it hands to the shellcheck above, and
+            # the Dependabot config against its schema.
             pkgs.actionlint
+            pkgs.check-jsonschema
             # `just machete`: dependencies no code uses, which in firmware/
             # cost flash and build time.
             pkgs.cargo-machete
