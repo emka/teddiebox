@@ -109,15 +109,6 @@ pub enum ConfigTrouble {
 
 const TONIE_AUDIO_FILE: &str = "500304E0";
 
-/// Writes `value` as eight upper-case hex digits, the way FAT holds a
-/// Toniebox content name.
-fn write_hex8(out: &mut [u8; 8], value: u32) {
-    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-    for (i, slot) in out.iter_mut().enumerate() {
-        *slot = DIGITS[((value >> (28 - 4 * i)) & 0xF) as usize];
-    }
-}
-
 /// Longest path the walk will print.
 const MAX_PATH: usize = 64;
 
@@ -478,10 +469,8 @@ impl Mounted {
         directory: u32,
         file: u32,
     ) -> Result<(RawFile, u32), &'static str> {
-        let mut folder_name = [0u8; 8];
-        let mut file_name = [0u8; 8];
-        write_hex8(&mut folder_name, directory);
-        write_hex8(&mut file_name, file);
+        let folder_name = teddiebox_download::hex8(directory);
+        let file_name = teddiebox_download::hex8(file);
         let folder_name =
             core::str::from_utf8(&folder_name).map_err(|_| "the directory name is not text")?;
         let file_name =
@@ -664,10 +653,8 @@ impl Mounted {
         file: u32,
         mode: Mode,
     ) -> Result<RawFile, &'static str> {
-        let mut folder_name = [0u8; 8];
-        let mut file_name = [0u8; 8];
-        write_hex8(&mut folder_name, directory);
-        write_hex8(&mut file_name, file);
+        let folder_name = teddiebox_download::hex8(directory);
+        let file_name = teddiebox_download::hex8(file);
         let folder_name =
             core::str::from_utf8(&folder_name).map_err(|_| "the directory name is not text")?;
         let file_name =
@@ -703,10 +690,8 @@ impl Mounted {
     /// that cannot be read proves nothing, so the content counts as
     /// incomplete.
     pub fn read_sidecar(&self, directory: u32, file: u32, buffer: &mut [u8]) -> Option<usize> {
-        let mut folder_name = [0u8; 8];
-        let mut stem = [0u8; 8];
-        write_hex8(&mut folder_name, directory);
-        write_hex8(&mut stem, file);
+        let folder_name = teddiebox_download::hex8(directory);
+        let stem = teddiebox_download::hex8(file);
         let folder_name = core::str::from_utf8(&folder_name).ok()?;
 
         let mut file_name = [0u8; 12];
@@ -749,10 +734,8 @@ impl Mounted {
         file: u32,
         bytes: &[u8],
     ) -> Result<(), &'static str> {
-        let mut folder_name = [0u8; 8];
-        let mut stem = [0u8; 8];
-        write_hex8(&mut folder_name, directory);
-        write_hex8(&mut stem, file);
+        let folder_name = teddiebox_download::hex8(directory);
+        let stem = teddiebox_download::hex8(file);
         let folder_name =
             core::str::from_utf8(&folder_name).map_err(|_| "the directory name is not text")?;
 
@@ -804,10 +787,8 @@ impl Mounted {
         file: u32,
         buffer: &mut [u8],
     ) -> Option<usize> {
-        let mut folder_name = [0u8; 8];
-        let mut stem = [0u8; 8];
-        write_hex8(&mut folder_name, directory);
-        write_hex8(&mut stem, file);
+        let folder_name = teddiebox_download::hex8(directory);
+        let stem = teddiebox_download::hex8(file);
         let folder_name = core::str::from_utf8(&folder_name).ok()?;
 
         let mut file_name = [0u8; 12];
@@ -851,10 +832,8 @@ impl Mounted {
         file: u32,
         bytes: &[u8],
     ) -> Result<(), &'static str> {
-        let mut folder_name = [0u8; 8];
-        let mut stem = [0u8; 8];
-        write_hex8(&mut folder_name, directory);
-        write_hex8(&mut stem, file);
+        let folder_name = teddiebox_download::hex8(directory);
+        let stem = teddiebox_download::hex8(file);
         let folder_name =
             core::str::from_utf8(&folder_name).map_err(|_| "the directory name is not text")?;
 
