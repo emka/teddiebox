@@ -1,6 +1,7 @@
 //! Sequential and chapter-addressed reading over a `PageSource`.
 
 use crate::{PacketCursor, PageSource, TafError, TonieHeader, PAGE_SIZE};
+use heapless::Vec;
 
 /// Buffer size that can hold any packet a TAF file can contain.
 ///
@@ -45,19 +46,39 @@ pub struct TafReader<S: PageSource> {
 }
 
 impl<S: PageSource> TafReader<S> {
-    pub fn open(mut source: S) -> Result<Self, TafError> {
+    pub fn open(source: S) -> Result<Self, TafError> {
         if source.page_count() < 2 {
             return Err(TafError::MalformedHeader);
         }
-        let mut page = [0u8; PAGE_SIZE];
-        source.read_page(0, &mut page).map_err(|_| TafError::Io)?;
-        let header = TonieHeader::parse(&page)?;
+
+        // Built before the header is known, so page 0 can be read straight
+        // into `page` — a second on-stack 4096-byte buffer here, on top of
+        // this one and `TafDecoder`'s own `packet`, is what a real box's
+        // stack guard cannot absorb during the card read this makes.
+        let mut reader = Self {
+            source,
+            header: TonieHeader {
+                audio_id: 0,
+                data_length: 0,
+                chapter_pages: Vec::new(),
+            },
+            page_index: 0,
+            page: [0u8; PAGE_SIZE],
+            cursor: PacketCursor::EMPTY,
+            last_usable_page: 0,
+            stream_serial: None,
+        };
+        reader
+            .source
+            .read_page(0, &mut reader.page)
+            .map_err(|_| TafError::Io)?;
+        reader.header = TonieHeader::parse(&reader.page)?;
 
         // The header declares how many bytes of Ogg stream follow it. Fewer
         // pages means the file was cut short; playing it would silently stop
         // the story early.
-        let declared_pages = header.data_length.div_ceil(PAGE_SIZE as u32);
-        let available_pages = source.page_count() - 1;
+        let declared_pages = reader.header.data_length.div_ceil(PAGE_SIZE as u32);
+        let available_pages = reader.source.page_count() - 1;
         if available_pages < declared_pages {
             return Err(TafError::TruncatedFile);
         }
@@ -68,16 +89,8 @@ impl<S: PageSource> TafReader<S> {
         if declared_pages == 0 {
             return Err(TafError::MalformedHeader);
         }
+        reader.last_usable_page = declared_pages;
 
-        let mut reader = Self {
-            source,
-            header,
-            page_index: 0,
-            page,
-            cursor: PacketCursor::EMPTY,
-            last_usable_page: declared_pages,
-            stream_serial: None,
-        };
         reader.load_page(1)?;
         Ok(reader)
     }
