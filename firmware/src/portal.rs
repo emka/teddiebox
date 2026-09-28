@@ -332,7 +332,7 @@ enum Received {
 async fn receive(socket: &mut TcpSocket<'_>, buffer: &mut [u8]) -> Received {
     let mut filled = 0;
     loop {
-        match complete(&buffer[..filled]) {
+        match http::is_complete(&buffer[..filled]) {
             Ok(true) => return Received::Request(filled),
             Ok(false) => {}
             Err(http::RequestError::TooLarge) => {
@@ -472,18 +472,6 @@ async fn serve_console(
         // Polled, because `read_buffered` does not block and the other three
         // futures must keep running.
         Timer::after(Duration::from_millis(50)).await;
-    }
-}
-
-/// Whether what has arrived so far is a whole request.
-///
-/// Returns a `bool` rather than the `Request`, because the caller needs the
-/// buffer back mutably when the answer is `false`.
-fn complete(buffer: &[u8]) -> Result<bool, http::RequestError> {
-    match http::parse(buffer) {
-        Ok(request) => Ok(buffer.len() - request.header_len >= request.content_length),
-        Err(http::RequestError::Incomplete) => Ok(false),
-        Err(other) => Err(other),
     }
 }
 
