@@ -1,0 +1,53 @@
+# cargo-deny's policy for both cargo workspaces, the root and firmware/.
+# `just deny` runs it against each, passing this file explicitly because
+# firmware/ is a workspace of its own.
+#
+# Each workspace meets only some of the entries below, so an entry one of
+# them does not use is not reported.
+
+[advisories]
+# Every entry is an advisory with no fix available to this project, and the
+# reason it does not reach the box. Any other advisory fails the build.
+unused-ignored-advisory = "allow"
+ignore = [
+    # A proc-macro, so it runs only at compile time. esp-hal depends on it.
+    { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained; compile-time macro used by esp-hal" },
+]
+
+[licenses]
+# Permissive licences only: no copyleft code in the project, and none in the
+# firmware image.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# The tools under tools/ are `publish = false` and declare no licence of
+# their own; they are not distributed.
+private = { ignore = true }
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicate versions come in through the esp-rs and embassy dependency trees
+# (two heapless versions reach the firmware through embassy-net), where
+# nothing in this repository can unify them.
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+unused-allowed-source = "allow"
+# The firmware pins esp-radio and its blobs to revisions not yet on
+# crates.io; see firmware/Cargo.toml.
+allow-git = [
+    "https://github.com/esp-rs/esp-hal.git",
+    "https://github.com/esp-rs/esp-wifi-sys.git",
+]

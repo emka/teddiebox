@@ -8,7 +8,10 @@
 # gate starts, so the entries are groups of gates rather than single ones.
 
 # everything CI runs; what to run before committing
-check: fmt lint host-tests device-checks images
+check: quick lint host-tests device-checks images
+
+# the gates that compile nothing, so CI reports them first
+quick: fmt deny
 
 # the host test suite and the bench scripts' self-tests
 host-tests: test scripts
@@ -27,6 +30,16 @@ images: firmware firmware-release
 fmt:
     cargo fmt --all --check
     cd firmware && cargo fmt --all --check
+
+# Known advisories, licences and dependency sources, against the policy in
+# deny.toml. Both workspaces, because the dependencies that ship are all in
+# firmware/'s. firmware/ needs the vendored crates because its manifest
+# patches them in.
+
+# dependencies against the advisory database and the licence policy
+deny: vendor
+    cargo deny --manifest-path Cargo.toml --config deny.toml check
+    cargo deny --manifest-path firmware/Cargo.toml --config deny.toml check
 
 lint: vendor
     cargo clippy --workspace --all-targets -- -D warnings

@@ -77,8 +77,8 @@ jobs:
       #
       # The gate is in the key because each gate downloads a different set of
       # crates, and a cache is saved only by the first job to finish with its
-      # key: a shared key would usually be saved by `fmt`, which downloads
-      # nothing.
+      # key: a shared key would usually be saved by the quickest job, which
+      # downloads the least.
       - name: Cache cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
