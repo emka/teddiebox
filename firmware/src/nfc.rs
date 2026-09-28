@@ -640,58 +640,10 @@ pub(crate) static PLATE_TAG: Signal<CriticalSectionRawMutex, Seen> = Signal::new
 /// Serves one console `nfc` command, if a request is pending.
 async fn handle_console_request(reader: &mut Reader, request: u8) {
     match request {
-        NFC_INVENTORY => {
-            reader.inventory();
-
-            // Checks the antenna is connected. With our own field off, the
-            // RSSI register shows RF from outside, such as a phone, which
-            // proves the coil reaches the chip. Nothing else can tell a
-            // disconnected antenna from an empty plate.
-            esp_println::println!(
-                "teddiebox: nfc listening for an external field for 6 s — \
-                 hold an NFC phone against the plate"
-            );
-            reader.set_field(false);
-            let mut peak = 0u8;
-            for _ in 0..60 {
-                peak = peak.max(reader.rssi());
-                Timer::after(Duration::from_millis(100)).await;
-            }
-            reader.set_field(true);
-            if peak == 0 {
-                esp_println::println!(
-                    "teddiebox: nfc heard nothing at all — the antenna is not coupled"
-                );
-            } else {
-                esp_println::println!(
-                    "teddiebox: nfc external field peaked at {peak:#04x} — the antenna works"
-                );
-            }
-        }
-        NFC_UNLOCK => {
-            let password = NFC_PASSWORD.load(Ordering::Relaxed);
-            if password == 0 {
-                esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
-            } else {
-                reader.unlock(password);
-            }
-        }
-        NFC_FORCE_UNLOCK => {
-            let password = NFC_PASSWORD.load(Ordering::Relaxed);
-            if password == 0 {
-                esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
-            } else {
-                reader.force_unlock(password);
-            }
-        }
-        NFC_LOCK => {
-            let password = NFC_PASSWORD.load(Ordering::Relaxed);
-            if password == 0 {
-                esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
-            } else {
-                reader.lock(password);
-            }
-        }
+        NFC_INVENTORY => probe_antenna(reader).await,
+        NFC_UNLOCK => with_password(|password| reader.unlock(password)),
+        NFC_FORCE_UNLOCK => with_password(|password| reader.force_unlock(password)),
+        NFC_LOCK => with_password(|password| reader.lock(password)),
         NFC_READ_MEMORY => {
             let range = NFC_MEM_RANGE.load(Ordering::Relaxed);
             reader.dump_memory((range >> 8) as u8, range as u8);
@@ -710,6 +662,42 @@ async fn handle_console_request(reader: &mut Reader, request: u8) {
             ),
         },
         _ => {}
+    }
+}
+
+/// Checks the antenna is connected. With our own field off, the RSSI
+/// register shows RF from outside, such as a phone, which proves the coil
+/// reaches the chip. Nothing else can tell a disconnected antenna from an
+/// empty plate.
+async fn probe_antenna(reader: &mut Reader) {
+    reader.inventory();
+    esp_println::println!(
+        "teddiebox: nfc listening for an external field for 6 s — \
+         hold an NFC phone against the plate"
+    );
+    reader.set_field(false);
+    let mut peak = 0u8;
+    for _ in 0..60 {
+        peak = peak.max(reader.rssi());
+        Timer::after(Duration::from_millis(100)).await;
+    }
+    reader.set_field(true);
+    if peak == 0 {
+        esp_println::println!("teddiebox: nfc heard nothing at all — the antenna is not coupled");
+    } else {
+        esp_println::println!(
+            "teddiebox: nfc external field peaked at {peak:#04x} — the antenna works"
+        );
+    }
+}
+
+/// Runs `action` with the console password, or says why it can't.
+fn with_password(action: impl FnOnce(u32)) {
+    let password = NFC_PASSWORD.load(Ordering::Relaxed);
+    if password == 0 {
+        esp_println::println!("teddiebox: nfc no password set — type `pw <8 hex>`");
+    } else {
+        action(password);
     }
 }
 
