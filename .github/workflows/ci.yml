@@ -59,12 +59,14 @@ jobs:
 
       # The runner's disk filled up in a run that followed a nixpkgs bump: the
       # previous store, the new toolchain and the build cache together did
-      # not fit. These preinstalled SDKs are nothing any gate uses.
+      # not fit. These preinstalled SDKs are nothing any gate uses, and
+      # deleting them frees about 21 GB. It takes about two minutes, so it
+      # runs in the background, alongside the cache restores below; the free
+      # space is logged again before the gate.
       - name: Make room on the runner
         run: |
           df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
-          df -h /
+          sudo nohup rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache >/dev/null 2>&1 &
 
       # Entering the dev shell from an empty store fetches the whole toolchain
       # from cache.nixos.org and GitHub, which took about three minutes in
@@ -147,7 +149,9 @@ jobs:
           # build cache stores.
           CARGO_INCREMENTAL: "0"
           TEDDIEBOX_SLIX_PASSWORD: ${{ matrix.gate == 'images' && secrets.TEDDIEBOX_SLIX_PASSWORD || '' }}
-        run: nix develop --profile "$RUNNER_TEMP/dev-shell" --command just ${{ matrix.gate }}
+        run: |
+          df -h /
+          nix develop --profile "$RUNNER_TEMP/dev-shell" --command just ${{ matrix.gate }}
 
   # The one check the branch rules on main require. They name checks, and the
   # gate jobs are named after whatever `check:` lists, so requiring them one
