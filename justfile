@@ -231,6 +231,19 @@ fuzz target="" seconds="60":
             -max_total_time={{seconds}} -timeout=10 "${dict[@]}"
     done
 
+# Mutation testing: cargo-mutants changes the code one small way at a time
+# (a `<` for a `<=`, a body replaced by `Default::default()`) and reports
+# each change no test notices. A missed mutant is a behaviour no test pins
+# down, or code that does nothing. Not a gate: the whole workspace is some
+# 1,900 mutants and hours of building, and a missed one needs judgement,
+# not an automatic red. Settings are in .cargo/mutants.toml; results land in
+# mutants.out/, with the missed ones in mutants.out/missed.txt. Set
+# MUTANTS_JOBS to change how many run at once (each is a build).
+
+# mutation testing: `just mutants`, or `just mutants -p teddiebox-taf`
+mutants *args:
+    cargo mutants --jobs "${MUTANTS_JOBS:-4}" {{args}}
+
 # format the tree rather than checking it
 #
 # Every workspace, like `fmt`: formatting only the root would leave

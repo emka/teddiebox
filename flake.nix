@@ -202,6 +202,8 @@
             pkgs.cargo-machete
             # `just fuzz`: coverage-guided fuzzing of the parsers in fuzz/.
             pkgs.cargo-fuzz
+            # `just mutants`: which changes to the code no test notices.
+            pkgs.cargo-mutants
             # mbedtls-rs-sys runs bindgen over MbedTLS's headers, and bindgen
             # loads libclang at run time to do it. The C itself is compiled by
             # the Xtensa GCC above; this is only the header parser.

@@ -1,0 +1,10 @@
+# cargo-mutants: see `just mutants`.
+
+# The crates the box runs. tools/ are host programs for the bench.
+examine_globs = ["crates/**"]
+
+# A mutant counts as caught only by its own crate's tests, which are that
+# crate's specification; one that only a dependent crate notices is still a
+# gap in them. It also cuts each mutant's build and test run from the whole
+# workspace to one crate.
+test_workspace = false

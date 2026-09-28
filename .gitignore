@@ -25,3 +25,7 @@
 # Background agent worktrees. These are git repositories of their own and
 # have no business in this history.
 /.claude/worktrees/
+
+# cargo-mutants output, a report rather than a deliverable; see `just mutants`.
+/mutants.out/
+/mutants.out.old/
