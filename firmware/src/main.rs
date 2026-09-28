@@ -1810,6 +1810,32 @@ fn start_tone(
     }
 }
 
+async fn dump_pcm_if_mounted(card: Option<&storage::Mounted>) {
+    let Some(card) = card else {
+        return;
+    };
+    let frames = PCM_FRAMES.load(Ordering::Relaxed);
+    if let Err(reason) = audio::dump_pcm(card, frames).await {
+        esp_println::println!("teddiebox: pcm failed — {reason}");
+    }
+}
+
+async fn checksum_cache_if_mounted(card: Option<&storage::Mounted>) {
+    let Some(card) = card else {
+        return;
+    };
+    let directory = CONTENT_DIRECTORY.load(Ordering::Relaxed);
+    let file = CONTENT_FILE.load(Ordering::Relaxed);
+    match card.checksum_cache(directory, file).await {
+        Ok((size, crc)) => esp_println::println!(
+            "teddiebox: crc /CACHE/{directory:08X}/{file:08X} {size} {crc:08X}"
+        ),
+        Err(reason) => esp_println::println!(
+            "teddiebox: crc /CACHE/{directory:08X}/{file:08X} failed — {reason}"
+        ),
+    }
+}
+
 /// Owns the I2S peripheral and the SD card, runs the reducer, plays stories
 /// and sounds, writes downloads to the card, and serves the console commands
 /// that need this hardware.
@@ -1938,29 +1964,8 @@ async fn media(
                 &mut _tone_transfer,
             ),
 
-            REQUEST_PCM => {
-                if let Some(card) = card.as_ref() {
-                    let frames = PCM_FRAMES.load(Ordering::Relaxed);
-                    if let Err(reason) = audio::dump_pcm(card, frames).await {
-                        esp_println::println!("teddiebox: pcm failed — {reason}");
-                    }
-                }
-            }
-
-            REQUEST_CRC => {
-                if let Some(card) = card.as_ref() {
-                    let directory = CONTENT_DIRECTORY.load(Ordering::Relaxed);
-                    let file = CONTENT_FILE.load(Ordering::Relaxed);
-                    match card.checksum_cache(directory, file).await {
-                        Ok((size, crc)) => esp_println::println!(
-                            "teddiebox: crc /CACHE/{directory:08X}/{file:08X} {size} {crc:08X}"
-                        ),
-                        Err(reason) => esp_println::println!(
-                            "teddiebox: crc /CACHE/{directory:08X}/{file:08X} failed — {reason}"
-                        ),
-                    }
-                }
-            }
+            REQUEST_PCM => dump_pcm_if_mounted(card.as_ref()).await,
+            REQUEST_CRC => checksum_cache_if_mounted(card.as_ref()).await,
 
             REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT | REQUEST_CACHE => {
                 play_story(
