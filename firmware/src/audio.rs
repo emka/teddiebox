@@ -794,6 +794,45 @@ fn log_taf_summary(
     );
 }
 
+enum DmaRestart {
+    NotNeeded(I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>),
+    Restarted(I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>),
+    Failed(PlaybackError),
+}
+
+/// `DmaTxStreamBuf` keeps a descriptor list that ends in a null `next`; if the
+/// DMA reaches the end before the CPU adds the next descriptor, it stops and
+/// does not restart by itself. This can happen on any append, more often
+/// under load, even with the buffer two-thirds full — so check for it and
+/// restart on the same buffer. It never touches the frame-decode state.
+fn restart_if_stopped(
+    transfer: I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>,
+    restarts: &mut u32,
+    frames: u32,
+    started: Instant,
+) -> DmaRestart {
+    if !transfer.is_done() {
+        return DmaRestart::NotNeeded(transfer);
+    }
+    *restarts += 1;
+    // Print when: restarts at the first frame point at the pre-fill;
+    // restarts spread through playback are the descriptor race.
+    esp_println::println!(
+        "teddiebox: taf restart {restarts} at frame {frames}, {} ms in",
+        started.elapsed().as_millis()
+    );
+    let (tx, buf) = transfer.stop();
+    match tx.write(buf) {
+        Ok(transfer) => DmaRestart::Restarted(transfer),
+        Err((_, tx, buffer)) => {
+            esp_println::println!(
+                "teddiebox: taf could not restart the DMA after {frames} frames"
+            );
+            DmaRestart::Failed(("the DMA would not restart", tx, buffer))
+        }
+    }
+}
+
 async fn play_taf_inner(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
@@ -933,36 +972,17 @@ async fn play_taf_inner(
         // Checked before the buffer level, which cannot show this:
         // `available_bytes` counts descriptors the CPU owns, so it reads 0
         // both when the buffer is full and when the DMA has stopped.
-        //
-        // The DMA has stopped. `DmaTxStreamBuf` keeps a descriptor list that
-        // ends in a null `next`; if the DMA reaches the end before the CPU
-        // adds the next descriptor, it stops and does not restart by itself.
-        // This can happen on any append, more often under load, even with the
-        // buffer two-thirds full.
-        //
-        // So restart the transfer and carry on: a gap of a few milliseconds is
-        // a glitch, but otherwise the story would go silent.
-        if transfer.is_done() {
-            restarts += 1;
-            // Print when: restarts at the first frame point at the pre-fill;
-            // restarts spread through playback are the descriptor race.
-            esp_println::println!(
-                "teddiebox: taf restart {restarts} at frame {frames}, {} ms in",
-                started.elapsed().as_millis()
-            );
-            let (tx, buf) = transfer.stop();
-            transfer = match tx.write(buf) {
-                Ok(started) => started,
-                Err((_, tx, buffer)) => {
-                    esp_println::println!(
-                        "teddiebox: taf could not restart the DMA after {frames} frames"
-                    );
-                    card.close_file(file);
-                    release_scratch();
-                    return Err(("the DMA would not restart", tx, buffer));
-                }
-            };
-            continue;
+        match restart_if_stopped(transfer, &mut restarts, frames, started) {
+            DmaRestart::NotNeeded(t) => transfer = t,
+            DmaRestart::Restarted(t) => {
+                transfer = t;
+                continue;
+            }
+            DmaRestart::Failed(err) => {
+                card.close_file(file);
+                release_scratch();
+                return Err(err);
+            }
         }
         cushion.observe(BUFFER_BYTES.saturating_sub(transfer.available_bytes()) as u32);
 
