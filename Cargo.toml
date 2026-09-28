@@ -34,6 +34,9 @@ embedded-hal = "1.0"
 embedded-hal-mock = { version = "0.11", features = ["eh1"] }
 embedded-io = "0.7"
 embedded-io-async = "0.7"
+# Property tests. Without the fork and timeout features: the properties are
+# plain functions of their input, and a test process forking is not.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 # Inherited by every crate under crates/, not by tools/, which are host
 # programs rather than code that runs on the box.
