@@ -6,6 +6,15 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 
+# A newer push to a branch makes a running check of the older one moot, so it
+# is cancelled. Not on main: there every commit keeps its own verdict, so a
+# red one can be pinned to the commit that caused it. That takes a group per
+# commit, because a group also drops a queued run when a newer one arrives,
+# whatever `cancel-in-progress` says.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # The gates are whatever `just check` depends on, read from the justfile, so
   # `just check` locally runs exactly what the pipeline runs and a gate cannot
