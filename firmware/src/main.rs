@@ -1778,6 +1778,38 @@ async fn mount_card_if_needed(
     }
 }
 
+/// Starts the console test tone. The tone plays until a restart, so
+/// nothing may power its output down.
+fn start_tone(
+    i2s_tx: &mut Option<esp_hal::i2s::master::I2sTx<'static, esp_hal::Blocking>>,
+    tone_buffer: &mut Option<esp_hal::dma::DmaLoopBuf>,
+    quiet_since: &mut Option<Instant>,
+    tone_transfer: &mut Option<
+        esp_hal::i2s::master::I2sTxDmaTransfer<
+            'static,
+            esp_hal::Blocking,
+            esp_hal::dma::DmaLoopBuf,
+        >,
+    >,
+) {
+    *quiet_since = None;
+    let (Some(tx), Some(buffer)) = (i2s_tx.take(), tone_buffer.take()) else {
+        esp_println::println!("teddiebox: I2S is already in use");
+        return;
+    };
+    match tx.write(buffer) {
+        Ok(transfer) => {
+            esp_println::println!(
+                "teddiebox: playing {} Hz at {} Hz",
+                tone::TONE_HZ,
+                tone::SAMPLE_RATE_HZ
+            );
+            *tone_transfer = Some(transfer);
+        }
+        Err(_) => esp_println::println!("teddiebox: I2S would not start"),
+    }
+}
+
 /// Owns the I2S peripheral and the SD card, runs the reducer, plays stories
 /// and sounds, writes downloads to the card, and serves the console commands
 /// that need this hardware.
@@ -1899,26 +1931,12 @@ async fn media(
                 }
             }
 
-            REQUEST_TONE => {
-                // The tone plays until a restart, so nothing may power its
-                // output down.
-                quiet_since = None;
-                let (Some(tx), Some(buffer)) = (i2s_tx.take(), tone_buffer.take()) else {
-                    esp_println::println!("teddiebox: I2S is already in use");
-                    continue;
-                };
-                match tx.write(buffer) {
-                    Ok(transfer) => {
-                        esp_println::println!(
-                            "teddiebox: playing {} Hz at {} Hz",
-                            tone::TONE_HZ,
-                            tone::SAMPLE_RATE_HZ
-                        );
-                        _tone_transfer = Some(transfer);
-                    }
-                    Err(_) => esp_println::println!("teddiebox: I2S would not start"),
-                }
-            }
+            REQUEST_TONE => start_tone(
+                &mut i2s_tx,
+                &mut tone_buffer,
+                &mut quiet_since,
+                &mut _tone_transfer,
+            ),
 
             REQUEST_PCM => {
                 if let Some(card) = card.as_ref() {
