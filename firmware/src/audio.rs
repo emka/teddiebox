@@ -14,7 +14,7 @@ use embassy_futures::yield_now;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_sdmmc::RawFile;
 use esp_hal::dma::DmaTxStreamBuf;
-use esp_hal::i2s::master::I2sTx;
+use esp_hal::i2s::master::{I2sTx, I2sTxDmaTransfer};
 use teddiebox_core::checksum::Crc32;
 use teddiebox_core::cue::{Cue, CueSamples};
 use teddiebox_core::cushion::Cushion;
@@ -78,12 +78,12 @@ fn log_wav_progress(last_log: &mut Instant, started: Instant, cushion: &Cushion)
     );
 }
 
-pub async fn play_first_wav(
-    card: &Mounted,
-    i2s_tx: I2sTx<'static, Blocking>,
-    buffer: DmaTxStreamBuf,
-) -> Result<(), &'static str> {
-    let mut buffer = emptied(buffer);
+/// Finds, opens and validates the WAV file to play, positioned at its data.
+///
+/// Every failure past `open_file` propagates without closing the file
+/// except the codec mismatch, matching the caller's own later failure
+/// paths (`prefill`, the I2S write) — none of them close it either.
+fn open_wav(card: &Mounted) -> Result<(RawFile, WavFormat), &'static str> {
     let Some((name, size)) = card.find_by_extension(b"WAV") else {
         return Err("no .WAV in the card's root directory");
     };
@@ -112,23 +112,45 @@ pub async fn play_first_wav(
     }
 
     card.seek(file, format.data_offset)?;
+    Ok((file, format))
+}
 
-    // Fill the buffer before starting: `write()` starts the transfer at once,
-    // and an empty buffer would run out before the first sample arrived.
+/// Pre-fills the buffer and starts the I2S transfer.
+///
+/// Fills the buffer before starting: `write()` starts the transfer at once,
+/// and an empty buffer would run out before the first sample arrived.
+/// Returns the transfer and the bytes still to read — a file shorter than
+/// the buffer is completely pre-filled, and `remaining` is then zero.
+fn start_wav_transfer(
+    card: &Mounted,
+    file: RawFile,
+    format: &WavFormat,
+    i2s_tx: I2sTx<'static, Blocking>,
+    mut buffer: DmaTxStreamBuf,
+) -> Result<(I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>, usize), &'static str> {
     let filled = prefill(card, file, &mut buffer, format.data_len as usize)?;
     // Prefill may read more than fits, so seek back to where the buffer ends.
     card.seek(file, format.data_offset + filled as u32)?;
     esp_println::println!("teddiebox: wav buffer {filled} bytes pre-filled");
 
-    // A file shorter than the buffer is completely pre-filled.
-    let mut remaining = (format.data_len as usize).saturating_sub(filled);
-    let mut transfer = match i2s_tx.write(buffer) {
-        Ok(transfer) => transfer,
+    let remaining = (format.data_len as usize).saturating_sub(filled);
+    match i2s_tx.write(buffer) {
+        Ok(transfer) => Ok((transfer, remaining)),
         Err(_) => {
             card.close_file(file);
-            return Err("I2S would not start");
+            Err("I2S would not start")
         }
-    };
+    }
+}
+
+pub async fn play_first_wav(
+    card: &Mounted,
+    i2s_tx: I2sTx<'static, Blocking>,
+    buffer: DmaTxStreamBuf,
+) -> Result<(), &'static str> {
+    let buffer = emptied(buffer);
+    let (file, format) = open_wav(card)?;
+    let (mut transfer, mut remaining) = start_wav_transfer(card, file, &format, i2s_tx, buffer)?;
 
     // Measured against the whole buffer: `available_bytes` reports free
     // space across all of it.
