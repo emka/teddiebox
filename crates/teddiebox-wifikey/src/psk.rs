@@ -5,7 +5,7 @@
 //! a turn in between. Both output blocks advance together, so one round is
 //! two HMACs.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 
 type HmacSha1 = Hmac<Sha1>;
