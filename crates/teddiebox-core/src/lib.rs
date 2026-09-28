@@ -337,42 +337,11 @@ impl Core {
                 }
             }
 
-            Event::EarDown(ear, at) => {
-                self.ear_down[ear as usize] = Some(at);
-                // With skipping off, the press changes the volume right away
-                // and the release does nothing, so one press is one step.
-                self.ear_spent[ear as usize] = !self.ears_skip;
-                if !self.ears_skip {
-                    self.step_volume(ear, actions);
-                }
-            }
-
+            Event::EarDown(ear, at) => self.handle_ear_down(ear, at, actions),
             // A hold skips a chapter while the ear is still down. Only one
             // skip per press, however long the ear is held.
-            Event::EarHeld(ear, _) => {
-                if self.ear_down[ear as usize].is_none() || self.ear_spent[ear as usize] {
-                    return false;
-                }
-                self.ear_spent[ear as usize] = true;
-                let _ = actions.push(match ear {
-                    Ear::Larger => Action::NextTrack,
-                    Ear::Smaller => Action::PrevTrack,
-                });
-            }
-
-            Event::EarUp(ear, _) => {
-                let was_down = self.ear_down[ear as usize].take().is_some();
-                // Ignore a release without a press.
-                if !was_down {
-                    return false;
-                }
-                // The press was already used (for a skip or a volume step).
-                if self.ear_spent[ear as usize] {
-                    self.ear_spent[ear as usize] = false;
-                    return false;
-                }
-                self.step_volume(ear, actions);
-            }
+            Event::EarHeld(ear, _) => return self.handle_ear_held(ear, actions),
+            Event::EarUp(ear, _) => return self.handle_ear_up(ear, actions),
 
             Event::TagPresent(tag) => extend(actions, self.playback.on_tag_present(tag, index)),
             Event::TagAbsent => extend(actions, self.playback.on_tag_absent()),
@@ -414,21 +383,62 @@ impl Core {
             // Change the output and its volume, nothing else. The story keeps
             // playing, so a child who pulls the plug does not lose their
             // place.
-            Event::Headphones(plugged) => {
-                self.output = if plugged {
-                    Output::Headphones
-                } else {
-                    Output::Speaker
-                };
-                let _ = actions.push(Action::SetOutput(self.output));
-                let step = self.volumes[self.output as usize].current();
-                let _ = actions.push(Action::SetVolume {
-                    step,
-                    db: db_for(self.output, step),
-                });
-            }
+            Event::Headphones(plugged) => self.handle_headphones(plugged, actions),
         }
         true
+    }
+
+    fn handle_ear_down(&mut self, ear: Ear, at: Millis, actions: &mut Actions) {
+        self.ear_down[ear as usize] = Some(at);
+        // With skipping off, the press changes the volume right away and
+        // the release does nothing, so one press is one step.
+        self.ear_spent[ear as usize] = !self.ears_skip;
+        if !self.ears_skip {
+            self.step_volume(ear, actions);
+        }
+    }
+
+    /// Returns `false` if the ear was already released or already used —
+    /// nothing changed, so the caller should not refresh the LED either.
+    fn handle_ear_held(&mut self, ear: Ear, actions: &mut Actions) -> bool {
+        if self.ear_down[ear as usize].is_none() || self.ear_spent[ear as usize] {
+            return false;
+        }
+        self.ear_spent[ear as usize] = true;
+        let _ = actions.push(match ear {
+            Ear::Larger => Action::NextTrack,
+            Ear::Smaller => Action::PrevTrack,
+        });
+        true
+    }
+
+    /// Returns `false` for a release without a matching press, or one
+    /// already used for a skip or a volume step — nothing changed.
+    fn handle_ear_up(&mut self, ear: Ear, actions: &mut Actions) -> bool {
+        let was_down = self.ear_down[ear as usize].take().is_some();
+        if !was_down {
+            return false;
+        }
+        if self.ear_spent[ear as usize] {
+            self.ear_spent[ear as usize] = false;
+            return false;
+        }
+        self.step_volume(ear, actions);
+        true
+    }
+
+    fn handle_headphones(&mut self, plugged: bool, actions: &mut Actions) {
+        self.output = if plugged {
+            Output::Headphones
+        } else {
+            Output::Speaker
+        };
+        let _ = actions.push(Action::SetOutput(self.output));
+        let step = self.volumes[self.output as usize].current();
+        let _ = actions.push(Action::SetVolume {
+            step,
+            db: db_for(self.output, step),
+        });
     }
 
     /// Warns when the level settles into Low or Critical (warning on both
