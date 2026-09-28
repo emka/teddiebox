@@ -57,6 +57,7 @@ impl<'a> LibOpus<'a> {
     ///
     /// TAF is always 48 kHz stereo, so nothing here is configurable.
     pub fn new(state: &'a mut OpusState) -> Result<Self, AudioError> {
+        // SAFETY: takes no pointers; 2 is a channel count libopus accepts.
         let needed = unsafe { sys::opus_decoder_get_size(CHANNELS as c_int) };
         if needed < 0 || needed as usize > OPUS_STATE_BYTES {
             // Cannot happen while `the_reservation_covers_what_libopus_asks_for`
@@ -123,6 +124,7 @@ mod tests {
 
     #[test]
     fn the_reservation_covers_what_libopus_asks_for() {
+        // SAFETY: takes no pointers; 2 is a channel count libopus accepts.
         let needed = unsafe { sys::opus_decoder_get_size(CHANNELS as c_int) };
         assert!(
             needed > 0 && (needed as usize) <= OPUS_STATE_BYTES,

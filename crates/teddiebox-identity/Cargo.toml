@@ -9,3 +9,6 @@ license.workspace = true
 # heavier than a format crate wants; if it ever bites, lift `checksum.rs` into
 # its own crate rather than copying the polynomial.
 teddiebox-core = { path = "../teddiebox-core" }
+
+[lints]
+workspace = true

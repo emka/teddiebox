@@ -66,6 +66,9 @@ unsafe extern "C" fn __memcpy_chk(
     if len > dest_len {
         abort();
     }
+    // SAFETY: `len` fits the destination (checked above), and the caller
+    // upholds `memcpy`'s contract: both regions valid for `len` bytes and not
+    // overlapping.
     unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dest as *mut u8, len) };
     dest
 }
@@ -85,6 +88,8 @@ unsafe extern "C" fn __memset_chk(
     if len > dest_len {
         abort();
     }
+    // SAFETY: `len` fits the destination (checked above), and the caller
+    // upholds `memset`'s contract: `dest` writable for `len` bytes.
     unsafe { core::ptr::write_bytes(dest as *mut u8, value as u8, len) };
     dest
 }
@@ -105,6 +110,8 @@ unsafe extern "C" fn __memmove_chk(
     if len > dest_len {
         abort();
     }
+    // SAFETY: `len` fits the destination (checked above), and the caller
+    // upholds `memmove`'s contract: both regions valid for `len` bytes.
     unsafe { core::ptr::copy(src as *const u8, dest as *mut u8, len) };
     dest
 }

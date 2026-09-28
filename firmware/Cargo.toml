@@ -8,6 +8,14 @@ license = "MIT OR Apache-2.0"
 # candidates and must not affect the host lockfile.
 [workspace]
 
+# The same unsafe-code lints as the root workspace's crates, which this
+# workspace cannot inherit.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
 [dependencies]
 teddiebox-core = { path = "../crates/teddiebox-core" }
 teddiebox-board = { path = "../crates/teddiebox-board" }

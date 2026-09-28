@@ -8,3 +8,6 @@ license.workspace = true
 heapless.workspace = true
 teddiebox-cloud = { path = "../teddiebox-cloud" }
 teddiebox-taf = { path = "../teddiebox-taf" }
+
+[lints]
+workspace = true

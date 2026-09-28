@@ -69,6 +69,7 @@ mod tests {
     fn the_linked_libopus_reports_a_stereo_decoder_state_size() {
         // Checks the library is found, linked and callable. The declarations
         // above cannot be checked by the compiler.
+        // SAFETY: takes no pointers; 2 is a channel count libopus accepts.
         let size = unsafe { opus_decoder_get_size(2) };
         assert!(
             size > 0,

@@ -9,3 +9,6 @@ embedded-hal.workspace = true
 
 [dev-dependencies]
 embedded-hal-mock.workspace = true
+
+[lints]
+workspace = true

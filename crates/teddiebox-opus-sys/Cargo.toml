@@ -6,3 +6,6 @@ license.workspace = true
 links = "opus"
 
 [dependencies]
+
+[lints]
+workspace = true

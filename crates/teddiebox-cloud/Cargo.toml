@@ -11,3 +11,6 @@ embedded-io-async.workspace = true
 
 [dev-dependencies]
 pollster = "1.0"
+
+[lints]
+workspace = true
