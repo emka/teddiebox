@@ -1,11 +1,23 @@
-# Every gate CI runs, in the order it runs them.
+# Every gate CI runs.
 #
 # These recipes exist so a commit can be checked exactly the way the pipeline
-# will check it. If a gate is added to .github/workflows/ci.yml it belongs here
-# too, or the two drift and this stops being worth running.
+# will check it. CI reads the dependency list of `check` and runs each entry
+# as a job of its own, in parallel, so a gate added here is a gate in CI.
+#
+# Each CI job spends about three minutes entering the Nix dev shell before its
+# gate starts, so the entries are groups of gates rather than single ones.
 
 # everything CI runs; what to run before committing
-check: fmt lint test scripts cross link fixtures firmware firmware-release
+check: fmt lint host-tests device-checks images
+
+# the host test suite, the bench scripts' self-tests and the fixtures
+host-tests: test scripts fixtures
+
+# the library crates and the decoder against the device target
+device-checks: cross link
+
+# both firmware images
+images: firmware firmware-release
 
 # formatting, the gate no test or review will catch
 #
@@ -63,6 +75,8 @@ link:
 
 # The committed fixtures are the evidence base for every format claim in the
 # parser, so a generator that has drifted from them invalidates it quietly.
+# Generation is byte-reproducible, which is what makes this a plain diff
+# rather than a fuzzy comparison.
 
 # committed fixtures still match their generator
 fixtures:

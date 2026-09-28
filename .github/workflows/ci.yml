@@ -2,8 +2,34 @@ name: CI
 on: [push, pull_request, workflow_dispatch]
 
 jobs:
-  check:
+  # The gates are whatever `just check` depends on, read from the justfile, so
+  # `just check` locally runs exactly what the pipeline runs and a gate cannot
+  # be added to one without the other. Plain text parsing rather than `just
+  # --dump`: this job would otherwise spend three minutes entering the Nix
+  # shell to produce a list.
+  gates:
     runs-on: ubuntu-latest
+    outputs:
+      gates: ${{ steps.read.outputs.gates }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: read
+        run: |
+          gates="$(sed -n 's/^check: *//p' justfile | jq -Rce 'split(" ") | map(select(length > 0)) | select(length > 0)')"
+          echo "gates=$gates" >> "$GITHUB_OUTPUT"
+
+  # One job per gate, so a red build names the gate that failed and a slow gate
+  # does not hold back the others. Why each gate exists is documented beside
+  # its recipe in the justfile.
+  check:
+    needs: gates
+    runs-on: ubuntu-latest
+    strategy:
+      # Report every failing gate, not only the first.
+      fail-fast: false
+      matrix:
+        gate: ${{ fromJSON(needs.gates.outputs.gates) }}
+    name: ${{ matrix.gate }}
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v30
@@ -24,6 +50,11 @@ jobs:
       # lockfile, and a change to either should invalidate. `restore-keys` means
       # a lockfile bump still starts from the previous cache and fetches only
       # what actually changed, rather than everything.
+      #
+      # The gate is in the key because each gate downloads a different set of
+      # crates, and a cache is saved only by the first job to finish with its
+      # key: a shared key would usually be saved by `fmt`, which downloads
+      # nothing.
       - name: Cache cargo downloads
         uses: actions/cache@v4
         with:
@@ -31,53 +62,16 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'firmware/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ matrix.gate }}-${{ hashFiles('Cargo.lock', 'firmware/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-${{ matrix.gate }}-
 
-      # Each gate below is a justfile recipe, so `just check` locally runs
-      # exactly what the pipeline runs. The steps stay separate only so a red
-      # build names the gate that failed; why each gate exists is documented
-      # beside its recipe in the justfile.
-
-      - name: Format
-        run: nix develop --command just fmt
-
-      - name: Lint
-        run: nix develop --command just lint
-
-      - name: Test
-        run: nix develop --command just test
-
-      # The helper scripts parse what the firmware prints, so a reworded line
-      # can break them without breaking a build.
-      - name: Bench script self-tests
-        run: nix develop --command just scripts
-
-      - name: Cross-compile check
-        run: nix develop --command just cross
-
-      - name: Link check
-        run: nix develop --command just link
-
-      # Generation is byte-reproducible, which is what makes this a plain diff
-      # rather than a fuzzy comparison.
-      - name: Fixtures match their generator
-        run: nix develop --command just fixtures
-
-      # The password is baked in at build time (see firmware/src/main.rs), from
-      # a secret rather than the repository. A fork or a PR without the secret
-      # gets an empty value, which builds an image with no password: nothing
-      # is unlocked until somebody types `pw`. Never echo it; workflow logs
-      # are public.
-      - name: Firmware builds and links
+      # The password is baked in at build time (see firmware/src/nfc.rs), from
+      # a secret rather than the repository, and only the `images` gate
+      # builds an image. A fork or a PR without the secret gets an empty value,
+      # which builds an image with no password: nothing is unlocked until
+      # somebody types `pw`. Never echo it; workflow logs are public.
+      - name: just ${{ matrix.gate }}
         env:
-          TEDDIEBOX_SLIX_PASSWORD: ${{ secrets.TEDDIEBOX_SLIX_PASSWORD }}
-        run: nix develop --command just firmware
-
-      # The image without the `bench` console commands. Built here so this
-      # configuration cannot stop compiling without anyone noticing.
-      - name: Firmware builds without the bench commands
-        env:
-          TEDDIEBOX_SLIX_PASSWORD: ${{ secrets.TEDDIEBOX_SLIX_PASSWORD }}
-        run: nix develop --command just firmware-release
+          TEDDIEBOX_SLIX_PASSWORD: ${{ matrix.gate == 'images' && secrets.TEDDIEBOX_SLIX_PASSWORD || '' }}
+        run: nix develop --command just ${{ matrix.gate }}
