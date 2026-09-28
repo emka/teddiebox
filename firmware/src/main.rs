@@ -1306,36 +1306,49 @@ fn gather_events(card: Option<&storage::Mounted>, placed: &mut Placed) -> [Optio
     }
 
     events[0] = take_plate_event(placed);
+    events[1] = gather_fetch_outcome(placed);
+    events[2] = gather_revalidation(card, placed);
 
-    // A download ended in another task. Read every pass so an old result
-    // cannot later be matched to a different figure.
-    if let Some((outcome, outcome_ruid)) = transfer(Transfer::take_outcome) {
-        match placed.answering(outcome_ruid) {
-            // The figure it was for is still on the plate. (The reducer
-            // checks the identity again before acting.)
-            Answering::TheFigure(tag) => {
-                events[1] = Some(match outcome {
-                    Outcome::Completed => Event::ContentReady(tag),
-                    Outcome::Unreachable => Event::ContentMissing(tag, Unavailable::Unreachable),
-                    Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
-                    Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),
-                });
-            }
-            // A different figure is on the plate, for example after a
-            // console `get`. Not passed to the reducer.
-            Answering::AnotherFigure => esp_println::println!(
+    events
+}
+
+/// A download that ended in another task, matched to the figure it was for.
+///
+/// Read every pass so an old result cannot later be matched to a different
+/// figure.
+fn gather_fetch_outcome(placed: &Placed) -> Option<Event> {
+    let (outcome, outcome_ruid) = transfer(Transfer::take_outcome)?;
+    match placed.answering(outcome_ruid) {
+        // The figure it was for is still on the plate. (The reducer checks
+        // the identity again before acting.)
+        Answering::TheFigure(tag) => Some(match outcome {
+            Outcome::Completed => Event::ContentReady(tag),
+            Outcome::Unreachable => Event::ContentMissing(tag, Unavailable::Unreachable),
+            Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
+            Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),
+        }),
+        // A different figure is on the plate, for example after a console
+        // `get`. Not passed to the reducer.
+        Answering::AnotherFigure => {
+            esp_println::println!(
                 "teddiebox: plate ignoring a fetch outcome for {outcome_ruid:016X} — \
                  not the figure on the plate"
-            ),
-            // Nobody is waiting; nothing to do.
-            Answering::NoFigure => {}
+            );
+            None
         }
+        // Nobody is waiting; nothing to do.
+        Answering::NoFigure => None,
     }
+}
 
-    // The server has answered a question about a cached story. Read every
-    // pass and matched to the figure, like the fetch outcome. Each call is
-    // its own short critical section, with no printing inside: a console
-    // line at 115200 baud would keep interrupts off for milliseconds.
+/// The server's answer to a revalidation question, settled either by that
+/// answer arriving or by the patience timeout, matched to the figure it was
+/// about.
+///
+/// Read every pass, like the fetch outcome. Each call is its own short
+/// critical section, with no printing inside: a console line at 115200 baud
+/// would keep interrupts off for milliseconds.
+fn gather_revalidation(card: Option<&storage::Mounted>, placed: &Placed) -> Option<Event> {
     let mut settled = None;
     if let Some((ruid, answer)) = take_answer() {
         settled =
@@ -1360,28 +1373,27 @@ fn gather_events(card: Option<&storage::Mounted>, placed: &mut Placed) -> [Optio
             );
         }
     }
-    if let Some(teddiebox_download::Settled {
+    let teddiebox_download::Settled {
         ruid: probed_ruid,
         answer,
-    }) = settled
-    {
-        match placed.answering(probed_ruid) {
-            Answering::TheFigure(tag) => {
-                // Remembered whatever the answer: a server that was just
-                // unreachable will likely stay so for the session, and
-                // asking again wastes the radio.
-                critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
-                events[2] = Some(Event::Revalidated(tag, freshness_of(answer, tag, card)));
-            }
-            Answering::AnotherFigure => esp_println::println!(
+    } = settled?;
+    match placed.answering(probed_ruid) {
+        Answering::TheFigure(tag) => {
+            // Remembered whatever the answer: a server that was just
+            // unreachable will likely stay so for the session, and asking
+            // again wastes the radio.
+            critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
+            Some(Event::Revalidated(tag, freshness_of(answer, tag, card)))
+        }
+        Answering::AnotherFigure => {
+            esp_println::println!(
                 "teddiebox: plate ignoring an answer about {probed_ruid:016X} — \
                  not the figure on the plate"
-            ),
-            Answering::NoFigure => {}
+            );
+            None
         }
+        Answering::NoFigure => None,
     }
-
-    events
 }
 
 /// The core's only clock, fed at most once a second.
