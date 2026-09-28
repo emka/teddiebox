@@ -9,7 +9,10 @@ proves nothing on its own. This says how far apart the two are instead.
 Reads a console capture containing `teddiebox: pcm <frame> <hex>` lines and the
 WAV that `taf2wav` produced from the same file.
 """
-import argparse, re, sys, wave
+import argparse
+import re
+import sys
+import wave
 
 ap = argparse.ArgumentParser()
 ap.add_argument("capture", help="console capture containing the pcm lines")

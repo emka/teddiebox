@@ -20,7 +20,6 @@ comes off, for a pack you have already charged some other way.
 import argparse
 import os
 import pty
-import re
 import select
 import sys
 import termios

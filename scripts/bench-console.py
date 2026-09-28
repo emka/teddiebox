@@ -6,7 +6,14 @@ and one that takes seconds both work, and the port is released the moment the
 marker arrives. Releasing it matters: a reader left holding /dev/ttyUSB0 blocks
 every flashing tool afterwards.
 """
-import argparse, os, re, select, sys, termios, time, tty
+import argparse
+import os
+import re
+import select
+import sys
+import termios
+import time
+import tty
 
 
 def configure(fd):
@@ -34,7 +41,7 @@ def self_test():
 
         configure(child)
 
-        iflag, oflag, cflag, lflag, ispeed, ospeed, cc = termios.tcgetattr(child)
+        _iflag, _oflag, _cflag, lflag, ispeed, ospeed, _cc = termios.tcgetattr(child)
         assert ispeed == termios.B115200, ispeed
         assert ospeed == termios.B115200, ospeed
         assert not lflag & termios.ICANON, "still line-buffered"
