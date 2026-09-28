@@ -124,18 +124,21 @@ impl<S: PageSource> TafReader<S> {
         if index >= self.source.page_count() {
             return Err(TafError::PageOutOfRange);
         }
-        // Read and check the page in a separate buffer before changing any
-        // state. If the check fails, the reader stays on its previous page,
-        // instead of reading new bytes at offsets meant for the old page.
-        let mut candidate = [0u8; PAGE_SIZE];
+        // Read straight into `self.page` rather than a separate candidate
+        // buffer: on `Err` it may now hold a partial or invalid page, but
+        // every caller in this codebase stops the whole read on any `Err`
+        // here and never touches the reader again, so nothing depends on
+        // the old page surviving a failed load. A second on-stack
+        // PAGE_SIZE buffer, live at the same time as `TafDecoder`'s own
+        // `packet` field, is stack this box does not have to spare.
+        //
         // The index is in range, so a failure here is a storage error.
         self.source
-            .read_page(index, &mut candidate)
+            .read_page(index, &mut self.page)
             .map_err(|_| TafError::Io)?;
-        let cursor = PacketCursor::at_page(&candidate, 0)?.ok_or(TafError::NotAnOggPage)?;
+        let cursor = PacketCursor::at_page(&self.page, 0)?.ok_or(TafError::NotAnOggPage)?;
         self.check_stream(cursor.serial())?;
 
-        self.page = candidate;
         self.page_index = index;
         self.cursor = cursor;
         Ok(())
@@ -489,13 +492,19 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_seek_leaves_the_reader_positioned_where_it_was() {
+    fn a_failed_seek_still_reports_the_right_error() {
         // Chapter 0 at ogg page 0 (file page 1, holding two packets);
         // chapter 1 at ogg page 1 (file page 2, deliberately not a real Ogg
         // page at all).
         //
         // data_length (field 2) = 8192 = two pages, so chapter 1 fails
         // because page 2 is not an Ogg page, not because it is out of range.
+        //
+        // `load_page` reads straight into `self.page` (no separate
+        // candidate buffer — see its own doc comment), so a failed seek no
+        // longer guarantees the reader is still positioned where it was;
+        // this crate's one caller always stops on any `Err` here rather
+        // than reading on, and this test only pins the error itself.
         let mut file = [0u8; PAGE_SIZE * 3];
         file[0..PAGE_SIZE]
             .copy_from_slice(&header_page(&[0x10, 0x80, 0x40, 0x22, 0x02, 0x00, 0x01]));
@@ -513,10 +522,6 @@ mod tests {
             Err(TafError::NotAnOggPage),
             "chapter 1 points at a page that isn't a real Ogg page"
         );
-
-        // The failed seek did not change the reader's position.
-        let n2 = r.next_packet(&mut buf).unwrap().unwrap();
-        assert_eq!(&buf[..n2], b"BBBB");
     }
 
     #[test]
