@@ -336,6 +336,17 @@ pub enum Finish {
     Stopped,
 }
 
+impl From<bool> for Finish {
+    /// `stopped` as returned by the playback loop.
+    fn from(stopped: bool) -> Self {
+        if stopped {
+            Finish::Stopped
+        } else {
+            Finish::Ended
+        }
+    }
+}
+
 /// Set to ask whatever is playing to skip a chapter at the next frame:
 /// [`SKIP_FORWARD`] or [`SKIP_BACK`].
 ///
@@ -826,9 +837,7 @@ fn restart_if_stopped(
     match tx.write(buf) {
         Ok(transfer) => DmaRestart::Restarted(transfer),
         Err((_, tx, buffer)) => {
-            esp_println::println!(
-                "teddiebox: taf could not restart the DMA after {frames} frames"
-            );
+            esp_println::println!("teddiebox: taf could not restart the DMA after {frames} frames");
             DmaRestart::Failed(("the DMA would not restart", tx, buffer))
         }
     }
@@ -1138,10 +1147,5 @@ async fn play_taf_inner(
     log_taf_summary(
         started, frames, stopped, &cushion, restarts, pcm_crc, decode_us,
     );
-    let finish = if stopped {
-        Finish::Stopped
-    } else {
-        Finish::Ended
-    };
-    Ok((finish, i2s_tx, buffer))
+    Ok((Finish::from(stopped), i2s_tx, buffer))
 }
