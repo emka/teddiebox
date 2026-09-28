@@ -1710,6 +1710,31 @@ async fn handle_idle(
     Timer::after(Duration::from_millis(gap)).await;
 }
 
+/// Applies whatever this pass's [`gather_events`] found to the reducer, if
+/// any did.
+fn apply_plate_events(
+    events: [Option<Event>; 3],
+    reducer: &mut Core,
+    card: Option<&storage::Mounted>,
+    placed: &Placed,
+) {
+    if !events.iter().any(Option::is_some) {
+        return;
+    }
+    match card {
+        Some(mounted) => {
+            for event in events.into_iter().flatten() {
+                apply(reducer, mounted, event, placed.token());
+            }
+        }
+        // Without a card the figure cannot be handled; at least say so on
+        // the console.
+        None => esp_println::println!(
+            "teddiebox: plate no card mounted — the figure cannot be answered"
+        ),
+    }
+}
+
 /// Mounts the card the first time a request needs it. Returns `true` when
 /// the caller should skip the rest of this pass: the bus is gone, or the
 /// mount attempt (which used up the bus either way) failed.
@@ -1845,20 +1870,7 @@ async fn media(
             feed_tick(&mut reducer, mounted, placed.token(), &mut last_tick_fed);
         }
 
-        if events.iter().any(Option::is_some) {
-            match card.as_ref() {
-                Some(mounted) => {
-                    for event in events.into_iter().flatten() {
-                        apply(&mut reducer, mounted, event, placed.token());
-                    }
-                }
-                // Without a card the figure cannot be handled; at least say
-                // so on the console.
-                None => esp_println::println!(
-                    "teddiebox: plate no card mounted — the figure cannot be answered"
-                ),
-            }
-        }
+        apply_plate_events(events, &mut reducer, card.as_ref(), &placed);
 
         let request = REQUEST.swap(REQUEST_NONE, Ordering::Relaxed);
         if request == REQUEST_NONE {
