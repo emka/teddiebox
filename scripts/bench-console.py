@@ -6,6 +6,7 @@ and one that takes seconds both work, and the port is released the moment the
 marker arrives. Releasing it matters: a reader left holding /dev/ttyUSB0 blocks
 every flashing tool afterwards.
 """
+
 import argparse
 import os
 import re

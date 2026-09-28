@@ -11,6 +11,7 @@ to which functions actually carry that weight.
 
 `--self-test` runs the parsing below without invoking rust-code-analysis-cli.
 """
+
 import argparse
 import io
 import json

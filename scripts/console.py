@@ -15,6 +15,7 @@ that has this file open, and miss a `cat /dev/ttyUSB0` or a stray picocom.
 
 `--self-test` runs the logic below without a box attached.
 """
+
 import argparse
 import contextlib
 import os
@@ -109,9 +110,7 @@ def self_test():
         assert len(owners) == 1, owners
         assert owners[0].startswith("123 cat "), owners
         assert port_owners(port, proc_root=proc, my_pid=123) == []
-        assert port_owners(elsewhere, proc_root=proc) == [
-            "124 python3 scripts/bench-console.py"
-        ]
+        assert port_owners(elsewhere, proc_root=proc) == ["124 python3 scripts/bench-console.py"]
         # A second holder of the same port is reported too, rather than the
         # first one found standing in for all of them.
         fake("127", ["picocom", port], [port])

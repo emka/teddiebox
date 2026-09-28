@@ -9,6 +9,7 @@ proves nothing on its own. This says how far apart the two are instead.
 Reads a console capture containing `teddiebox: pcm <frame> <hex>` lines and the
 WAV that `taf2wav` produced from the same file.
 """
+
 import argparse
 import re
 import sys
@@ -17,8 +18,9 @@ import wave
 ap = argparse.ArgumentParser()
 ap.add_argument("capture", help="console capture containing the pcm lines")
 ap.add_argument("wav", help="what taf2wav decoded from the same TAF")
-ap.add_argument("--tolerance", type=int, default=64,
-                help="largest per-sample difference still called a match")
+ap.add_argument(
+    "--tolerance", type=int, default=64, help="largest per-sample difference still called a match"
+)
 args = ap.parse_args()
 
 line = re.compile(r"teddiebox: pcm (\d+) ([0-9A-F]+)\s*$")
@@ -32,7 +34,7 @@ with open(args.capture, "rb") as f:
         frames += 1
         blob = m.group(2)
         for i in range(0, len(blob), 4):
-            value = int(blob[i:i + 4], 16)
+            value = int(blob[i : i + 4], 16)
             device.append(value - 0x10000 if value >= 0x8000 else value)
 
 if not device:
@@ -42,7 +44,7 @@ with wave.open(args.wav) as w:
     if w.getsampwidth() != 2:
         sys.exit("expected 16-bit samples")
     raw = w.readframes(w.getnframes())
-host = [int.from_bytes(raw[i:i + 2], "little", signed=True) for i in range(0, len(raw), 2)]
+host = [int.from_bytes(raw[i : i + 2], "little", signed=True) for i in range(0, len(raw), 2)]
 
 n = min(len(device), len(host))
 if not n:
@@ -62,14 +64,20 @@ print(f"host peak amplitude   {peak}")
 print(f"rms difference        {(energy / n) ** 0.5:.4f}")
 
 if len(device) != len(host):
-    print("\nNOTE: the two streams are different lengths; only the overlap was "
-          "compared. A length mismatch is a real defect, not a rounding one.")
+    print(
+        "\nNOTE: the two streams are different lengths; only the overlap was "
+        "compared. A length mismatch is a real defect, not a rounding one."
+    )
 
 if abs(worst) <= args.tolerance:
     print(f"\nPASS: every sample is within {args.tolerance} of the host's.")
-    print("Consistent with last-bit rounding in a fixed-point decoder, which is "
-          "what Opus permits between platforms.")
+    print(
+        "Consistent with last-bit rounding in a fixed-point decoder, which is "
+        "what Opus permits between platforms."
+    )
 else:
-    print(f"\nFAIL: a sample differs by {worst}, beyond the {args.tolerance} "
-          "tolerance. That is too large to be rounding.")
+    print(
+        f"\nFAIL: a sample differs by {worst}, beyond the {args.tolerance} "
+        "tolerance. That is too large to be rounding."
+    )
     sys.exit(1)

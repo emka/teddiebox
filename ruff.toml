@@ -1,0 +1,3 @@
+# The bench scripts under scripts/. Ruff's default rules, and the line length
+# rustfmt uses for the Rust code, so both halves of the repository wrap alike.
+line-length = 100

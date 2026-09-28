@@ -17,6 +17,7 @@ comes off, for a pack you have already charged some other way.
 
 `--self-test` runs the logic below without a box attached.
 """
+
 import argparse
 import os
 import pty
@@ -107,8 +108,7 @@ class FullCharge:
 
         if t_s - self.peak_at >= self.plateau_s:
             self.reason = (
-                f"plateau: no new peak above {self.peak_mv} mV "
-                f"for {int(t_s - self.peak_at)} s"
+                f"plateau: no new peak above {self.peak_mv} mV for {int(t_s - self.peak_at)} s"
             )
             return True
 
@@ -170,18 +170,12 @@ def transition_message(old, new, reason, discharge_only):
             return "Charger detected. Charging — this will take hours."
         return "Charger is back on — the discharge is contaminated."
     if new == "full":
-        return (
-            f"Pack looks full ({reason}).\n"
-            "    UNPLUG THE CHARGER NOW. Recording continues."
-        )
+        return f"Pack looks full ({reason}).\n    UNPLUG THE CHARGER NOW. Recording continues."
     if old == "full":
         return "Charger removed. Recording the discharge to cutoff."
     if discharge_only:
         return "Charger is off. Recording the discharge to cutoff."
-    return (
-        "Charger removed before I called it full — "
-        "recording the discharge from here."
-    )
+    return "Charger removed before I called it full — recording the discharge from here."
 
 
 def self_test():
@@ -194,9 +188,9 @@ def self_test():
     assert parse_batlog("teddiebox: alive 7") is None, "not a batlog line"
     assert parse_batlog("batlog,1,2,3") is None, "too few fields"
     assert parse_batlog("batlog,a,b,c,d,e") is None, "non-numeric"
-    assert (
-        parse_batlog("teddiebox: 1,2,3,4,5,6") is None
-    ), "six numeric fields are not enough — it has to be a batlog line"
+    assert parse_batlog("teddiebox: 1,2,3,4,5,6") is None, (
+        "six numeric fields are not enough — it has to be a batlog line"
+    )
     sample = parse_batlog("batlog,123456,3055,3751,0,1957")
     assert sample == {
         "ms": 123456,
@@ -262,15 +256,15 @@ def self_test():
     assert opening_message(discharge_only=False, on_charge=False) == (
         "PLUG THE CHARGER IN NOW. Waiting for it..."
     )
-    assert (
-        opening_message(discharge_only=False, on_charge=True) is None
-    ), "a full run that finds the charger already on says so, not plug it in"
+    assert opening_message(discharge_only=False, on_charge=True) is None, (
+        "a full run that finds the charger already on says so, not plug it in"
+    )
     assert opening_message(discharge_only=True, on_charge=True) == (
         "UNPLUG THE CHARGER NOW. Recording starts the moment it is off."
     )
-    assert (
-        opening_message(discharge_only=True, on_charge=False) is None
-    ), "never tell somebody to unplug a charger that is not plugged in"
+    assert opening_message(discharge_only=True, on_charge=False) is None, (
+        "never tell somebody to unplug a charger that is not plugged in"
+    )
 
     # What the operator is told at each transition. These are the whole of the
     # script's conversation with a person, so they are pinned literally.
@@ -283,16 +277,14 @@ def self_test():
         == "Charger is back on — the discharge is contaminated."
     )
     assert transition_message("charge", "full", "-dV: 3884 mV", False) == (
-        "Pack looks full (-dV: 3884 mV).\n"
-        "    UNPLUG THE CHARGER NOW. Recording continues."
+        "Pack looks full (-dV: 3884 mV).\n    UNPLUG THE CHARGER NOW. Recording continues."
     )
     assert (
         transition_message("full", "discharge", None, False)
         == "Charger removed. Recording the discharge to cutoff."
     )
     assert transition_message("charge", "discharge", None, False) == (
-        "Charger removed before I called it full — "
-        "recording the discharge from here."
+        "Charger removed before I called it full — recording the discharge from here."
     ), "a full run says the charge was cut short, because the pack may not be"
     assert (
         transition_message("charge", "discharge", None, True)
@@ -400,9 +392,7 @@ def main():
         default=10,
         help="minutes before a full-charge call is believed (default 10)",
     )
-    ap.add_argument(
-        "--max-charge-h", type=float, default=10.0, help="give up charging after this"
-    )
+    ap.add_argument("--max-charge-h", type=float, default=10.0, help="give up charging after this")
     ap.add_argument(
         "--quiet-end-min",
         type=float,

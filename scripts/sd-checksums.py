@@ -35,9 +35,7 @@ import zlib
 #
 # The throughput is left out: it measures the bus, not the card, and would
 # never match the host.
-GOOD_LINE = re.compile(
-    r"^teddiebox: sd (?P<path>/\S*) (?P<size>\d+) (?P<crc>[0-9A-F]{8})(?: \(|$)"
-)
+GOOD_LINE = re.compile(r"^teddiebox: sd (?P<path>/\S*) (?P<size>\d+) (?P<crc>[0-9A-F]{8})(?: \(|$)")
 
 # Any other message the walk prints about a file. Kept, because a file that
 # could not be read must not look like a match.
@@ -76,9 +74,7 @@ def from_capture(path):
             raw = raw.strip()
             good = GOOD_LINE.match(raw)
             if good:
-                lines.append(
-                    f"{good['path']} {good['size']} {good['crc']}"
-                )
+                lines.append(f"{good['path']} {good['size']} {good['crc']}")
                 continue
             bad = BAD_LINE.match(raw)
             if bad:
