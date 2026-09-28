@@ -39,9 +39,11 @@ use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::i2s::master::{Channels, DataFormat, I2s, TdmConfig};
+use esp_hal::ledc::timer;
+use esp_hal::ledc::{Ledc, LowSpeed};
 use esp_hal::peripherals::{
-    DMA_CH0, GPIO1, GPIO10, GPIO11, GPIO12, GPIO13, GPIO2, GPIO3, GPIO34, GPIO35, GPIO36, GPIO38,
-    GPIO4, I2S0, LPWR, SPI2, SPI3,
+    DMA_CH0, GPIO1, GPIO10, GPIO11, GPIO12, GPIO13, GPIO17, GPIO18, GPIO19, GPIO2, GPIO3, GPIO34,
+    GPIO35, GPIO36, GPIO38, GPIO4, I2S0, LPWR, SPI2, SPI3,
 };
 use esp_hal::rtc_cntl::{reset_reason, SocResetReason};
 use esp_hal::spi::master::Spi;
@@ -2689,6 +2691,66 @@ async fn shut_down(
     park_task().await;
 }
 
+/// Scans the I2C bus once and spawns the task that owns it from then on.
+fn bring_up_i2c_bus(
+    spawner: Spawner,
+    i2c0: esp_hal::peripherals::I2C0<'static>,
+    sda: esp_hal::peripherals::GPIO5<'static>,
+    scl: esp_hal::peripherals::GPIO6<'static>,
+    reset: esp_hal::peripherals::GPIO26<'static>,
+) {
+    match I2c::new(i2c0, I2cConfig::default()) {
+        Ok(i2c) => {
+            let mut i2c = i2c.with_sda(sda).with_scl(scl);
+            i2c_bus::scan_i2c(&mut i2c);
+            let reset = Output::new(reset, Level::Low, OutputConfig::default());
+            spawner.spawn(i2c_bus::i2c_bus(i2c, reset).unwrap());
+        }
+        Err(_) => esp_println::println!("teddiebox: I2C would not configure"),
+    }
+}
+
+/// Shows whatever `LED_REQUEST` last asked for, in `shown`'s colour if the
+/// value is unreadable — an unknown value can only be a bug, and keeping the
+/// last colour is safer than going dark.
+fn update_led(rgb: Option<&led::Rgb<'_>>, gates: &mut Gates, shown: &mut LedState) {
+    let Some(rgb) = rgb else {
+        return;
+    };
+    if let Some(state) = LedState::from_code(LED_REQUEST.load(Ordering::Relaxed)) {
+        *shown = state;
+    }
+    // Leave the LED dark rather than panic if the rail is ever off here
+    // (no current path does that).
+    if let Ok(lit) = gates.led(colour_for(*shown)) {
+        rgb.apply(&lit, board::LED_DUTY);
+    }
+}
+
+/// Configures the LED's three PWM channels, if the timer and channels claim
+/// cleanly.
+fn init_rgb<'a>(
+    ledc: &'a Ledc<'a>,
+    timer: Result<&'a timer::Timer<'a, LowSpeed>, &()>,
+    red: GPIO19<'a>,
+    green: GPIO18<'a>,
+    blue: GPIO17<'a>,
+) -> Option<led::Rgb<'a>> {
+    match timer {
+        Ok(timer) => match led::Rgb::new(ledc, timer, red, green, blue) {
+            Ok(rgb) => Some(rgb),
+            Err(()) => {
+                esp_println::println!("teddiebox: LED channels would not configure");
+                None
+            }
+        },
+        Err(_) => {
+            esp_println::println!("teddiebox: LED timer would not configure");
+            None
+        }
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default());
@@ -2744,19 +2806,7 @@ async fn main(spawner: Spawner) {
     // it lives long enough.
     let ledc = led::controller(p.LEDC);
     let timer = led::timer(&ledc);
-    let rgb = match timer.as_ref() {
-        Ok(timer) => match led::Rgb::new(&ledc, timer, p.GPIO19, p.GPIO18, p.GPIO17) {
-            Ok(rgb) => Some(rgb),
-            Err(()) => {
-                esp_println::println!("teddiebox: LED channels would not configure");
-                None
-            }
-        },
-        Err(()) => {
-            esp_println::println!("teddiebox: LED timer would not configure");
-            None
-        }
-    };
+    let rgb = init_rgb(&ledc, timer.as_ref(), p.GPIO19, p.GPIO18, p.GPIO17);
 
     // The ears are active low, so they use a pull-up: an unconnected input
     // reads as "not pressed" instead of floating.
@@ -2859,15 +2909,7 @@ async fn main(spawner: Spawner) {
 
     // The codec and the accelerometer are on the rail switched on above, so
     // scan the bus only now.
-    match I2c::new(p.I2C0, I2cConfig::default()) {
-        Ok(i2c) => {
-            let mut i2c = i2c.with_sda(p.GPIO5).with_scl(p.GPIO6);
-            i2c_bus::scan_i2c(&mut i2c);
-            let reset = Output::new(p.GPIO26, Level::Low, OutputConfig::default());
-            spawner.spawn(i2c_bus::i2c_bus(i2c, reset).unwrap());
-        }
-        Err(_) => esp_println::println!("teddiebox: I2C would not configure"),
-    }
+    bring_up_i2c_bus(spawner, p.I2C0, p.GPIO5, p.GPIO6, p.GPIO26);
 
     // The LEDC peripheral holds the colour, so this loop only has to update
     // it often enough that a change shows promptly.
@@ -2880,18 +2922,7 @@ async fn main(spawner: Spawner) {
     sleep_if_pack_empty_on_wake(&mut board, &mut gates, rgb.as_ref(), &mut lpwr).await;
 
     loop {
-        if let Some(rgb) = rgb.as_ref() {
-            // An unknown value can only be a bug; keep the last colour rather
-            // than going dark.
-            if let Some(state) = LedState::from_code(LED_REQUEST.load(Ordering::Relaxed)) {
-                shown = state;
-            }
-            // Leave the LED dark rather than panic if the rail is ever off
-            // here (no current path does that).
-            if let Ok(lit) = gates.led(colour_for(shown)) {
-                rgb.apply(&lit, board::LED_DUTY);
-            }
-        }
+        update_led(rgb.as_ref(), &mut gates, &mut shown);
 
         // The start-up jingle, once the codec is ready.
         //
