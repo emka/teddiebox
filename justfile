@@ -11,7 +11,7 @@
 check: quick lint host-tests device-checks images
 
 # the gates that compile nothing, so CI reports them first
-quick: fmt deny lint-scripts
+quick: fmt deny lint-scripts lint-workflows
 
 # the host test suite and the bench scripts' self-tests
 host-tests: test scripts
@@ -49,6 +49,14 @@ lint-scripts:
     shellcheck scripts/*.sh
     ruff check scripts/
     ruff format --check scripts/
+
+# A mistake in a workflow shows only when GitHub runs it, which costs a push
+# and billed minutes, and a broken expression can quietly skip a gate rather
+# than fail it.
+
+# actionlint over .github/workflows/
+lint-workflows:
+    actionlint
 
 lint: vendor
     cargo clippy --workspace --all-targets -- -D warnings
