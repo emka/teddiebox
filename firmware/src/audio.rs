@@ -748,6 +748,52 @@ fn prefill_taf(
     Ok((pending, frames))
 }
 
+/// The end-of-playback summary: how long it took, how many frames, the
+/// buffer's low water mark, DMA restarts, the checksum if one was kept,
+/// and decode cost as a percentage of real time.
+#[allow(clippy::too_many_arguments)]
+fn log_taf_summary(
+    started: Instant,
+    frames: u32,
+    stopped: bool,
+    cushion: &Cushion,
+    restarts: u32,
+    pcm_crc: Option<Crc32>,
+    decode_us: u64,
+) {
+    let elapsed = started.elapsed();
+    if stopped {
+        esp_println::println!(
+            "teddiebox: taf stopped after {frames} frames, {} s",
+            elapsed.as_secs()
+        );
+    }
+    esp_println::println!(
+        // DMA restarts are reported separately from underruns: the cushion
+        // watches the buffer level and cannot see a stopped DMA, which reads
+        // as full.
+        "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns, {} dma restarts",
+        elapsed.as_secs(),
+        cushion.low_water_percent(),
+        cushion.underruns(),
+        restarts
+    );
+    if let Some(crc) = pcm_crc {
+        esp_println::println!("teddiebox: taf pcm crc32 {:08X}", crc.finish());
+    }
+
+    // Decode time as a percentage of the audio's length. Under 100 means the
+    // box decodes faster than it plays.
+    let played_us = elapsed.as_micros().max(1);
+    let card_us = PAGE_READ_US.load(Ordering::Relaxed);
+    esp_println::println!(
+        "teddiebox: taf feeding the codec used {}% of real time — card reads {}%, decode {}%",
+        decode_us * 100 / played_us,
+        card_us * 100 / played_us,
+        decode_us.saturating_sub(card_us) * 100 / played_us
+    );
+}
+
 async fn play_taf_inner(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
@@ -1009,36 +1055,8 @@ async fn play_taf_inner(
     card.close_file(file);
     release_scratch();
 
-    let elapsed = started.elapsed();
-    if stopped {
-        esp_println::println!(
-            "teddiebox: taf stopped after {frames} frames, {} s",
-            elapsed.as_secs()
-        );
-    }
-    esp_println::println!(
-        // DMA restarts are reported separately from underruns: the cushion
-        // watches the buffer level and cannot see a stopped DMA, which reads
-        // as full.
-        "teddiebox: taf done — {} s, {frames} frames, low water {}%, {} underruns, {} dma restarts",
-        elapsed.as_secs(),
-        cushion.low_water_percent(),
-        cushion.underruns(),
-        restarts
-    );
-    if let Some(crc) = pcm_crc {
-        esp_println::println!("teddiebox: taf pcm crc32 {:08X}", crc.finish());
-    }
-
-    // Decode time as a percentage of the audio's length. Under 100 means the
-    // box decodes faster than it plays.
-    let played_us = elapsed.as_micros().max(1);
-    let card_us = PAGE_READ_US.load(Ordering::Relaxed);
-    esp_println::println!(
-        "teddiebox: taf feeding the codec used {}% of real time — card reads {}%, decode {}%",
-        decode_us * 100 / played_us,
-        card_us * 100 / played_us,
-        decode_us.saturating_sub(card_us) * 100 / played_us
+    log_taf_summary(
+        started, frames, stopped, &cushion, restarts, pcm_crc, decode_us,
     );
     let finish = if stopped {
         Finish::Stopped
