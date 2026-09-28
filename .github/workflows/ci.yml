@@ -57,6 +57,15 @@ jobs:
         with:
           extra_nix_config: "experimental-features = nix-command flakes"
 
+      # The runner's disk filled up in a run that followed a nixpkgs bump: the
+      # previous store, the new toolchain and the build cache together did
+      # not fit. These preinstalled SDKs are nothing any gate uses.
+      - name: Make room on the runner
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          df -h /
+
       # Entering the dev shell from an empty store fetches the whole toolchain
       # from cache.nixos.org and GitHub, which took about three minutes in
       # every job before its gate could start. Every job enters the same
@@ -66,6 +75,10 @@ jobs:
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
+          # Before saving, drop every path the dev shell no longer needs, or
+          # each flake bump would store the previous toolchain alongside the
+          # new one. The shell's profile, set in the gate step, keeps it.
+          gc-max-store-size-linux: 0
 
       # The firmware pins esp-radio to a git revision (see firmware/Cargo.toml),
       # which costs roughly 190 MB of clones per run and makes a GitHub outage
@@ -134,7 +147,7 @@ jobs:
           # build cache stores.
           CARGO_INCREMENTAL: "0"
           TEDDIEBOX_SLIX_PASSWORD: ${{ matrix.gate == 'images' && secrets.TEDDIEBOX_SLIX_PASSWORD || '' }}
-        run: nix develop --command just ${{ matrix.gate }}
+        run: nix develop --profile "$RUNNER_TEMP/dev-shell" --command just ${{ matrix.gate }}
 
   # The one check the branch rules on main require. They name checks, and the
   # gate jobs are named after whatever `check:` lists, so requiring them one
