@@ -893,6 +893,21 @@ fn next_chunk(
     }
 }
 
+/// Seeks to a saved position, if any. A replaced or re-downloaded story may
+/// not have the saved page any more; then it plays from the beginning.
+fn seek_to_start(decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>, from: Position) {
+    let Position::Exact { page } = from else {
+        return;
+    };
+    if decoder.seek_to_page(page).is_err() {
+        esp_println::println!(
+            "teddiebox: taf page {page} is not in this story — starting at the top"
+        );
+    } else {
+        esp_println::println!("teddiebox: taf resuming at page {page}");
+    }
+}
+
 async fn play_taf_inner(
     card: &Mounted,
     i2s_tx: I2sTx<'static, Blocking>,
@@ -938,20 +953,7 @@ async fn play_taf_inner(
         decoder.chapter_count()
     );
 
-    // Where to start. A replaced or re-downloaded story may not have the saved
-    // page any more; then it plays from the beginning.
-    match from {
-        Position::Start => {}
-        Position::Exact { page } => {
-            if decoder.seek_to_page(page).is_err() {
-                esp_println::println!(
-                    "teddiebox: taf page {page} is not in this story — starting at the top"
-                );
-            } else {
-                esp_println::println!("teddiebox: taf resuming at page {page}");
-            }
-        }
-    }
+    seek_to_start(&mut decoder, from);
 
     // Fill the buffer before starting, as the WAV path does: an empty buffer
     // would run out before the first sample arrived.
