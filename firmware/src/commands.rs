@@ -123,19 +123,7 @@ pub(crate) async fn bench(
         // Sets both the static the codec bring-up reads and the event
         // for the reducer, which switches the output and its volume
         // scale together.
-        Some(Command::Headphones(on)) => {
-            i2c_bus::HEADPHONES_IN.store(on, Ordering::Relaxed);
-            esp_println::println!(
-                "teddiebox: headphones forced {}",
-                if on { "in" } else { "out" }
-            );
-            if inputs::INPUT_EVENTS
-                .try_send(Event::Headphones(on))
-                .is_err()
-            {
-                esp_println::println!("teddiebox: input queue full, jack change dropped");
-            }
-        }
+        Some(Command::Headphones(on)) => force_headphones(on),
         Some(Command::NetScan) => {
             NET_REQUEST.store(NET_SCAN, Ordering::Relaxed);
         }
@@ -154,19 +142,7 @@ pub(crate) async fn bench(
         Some(Command::NetDown) => {
             NET_REQUEST.store(NET_DOWN, Ordering::Relaxed);
         }
-        Some(Command::Get(ruid)) => {
-            // One critical section: the token last read by the
-            // console `token` command goes into this request.
-            critical_section::with(|cs| {
-                let token = *nfc::TAG_TOKEN.borrow_ref(cs);
-                *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest {
-                    ruid: u64::from_be_bytes(ruid),
-                    token,
-                    probe: false,
-                });
-            });
-            NET_REQUEST.store(NET_GET, Ordering::Relaxed);
-        }
+        Some(Command::Get(ruid)) => queue_fetch(ruid),
         Some(Command::StackReport) => stack::report(),
         Some(Command::OtaStatus) => ota::status(),
         Some(Command::OtaWriteProbe) => ota::write_probe(),
@@ -251,16 +227,7 @@ pub(crate) async fn bench(
             );
         }
 
-        Some(Command::Plate(on)) => {
-            if !on {
-                nfc::PLATE_REPORT.store(true, Ordering::Relaxed);
-            }
-            if on {
-                board.apply(gates.power(Rail::Storage, true));
-            }
-            nfc::PLATE_POLLING.store(on, Ordering::Relaxed);
-            esp_println::println!("teddiebox: plate polling {}", if on { "on" } else { "off" });
-        }
+        Some(Command::Plate(on)) => set_plate_polling(on, board, gates),
         Some(Command::Password(value)) => {
             nfc::NFC_PASSWORD.store(value, Ordering::Relaxed);
             // Not echoed: it is a credential, and console captures
@@ -291,15 +258,7 @@ pub(crate) async fn bench(
             PCM_FRAMES.store(frames, Ordering::Relaxed);
             REQUEST.store(REQUEST_PCM, Ordering::Relaxed);
         }
-        Some(Command::BatteryLog { seconds }) => {
-            battery::BATLOG_EVERY.store(seconds, Ordering::Relaxed);
-            if seconds == 0 {
-                esp_println::println!("teddiebox: batlog off");
-            } else {
-                esp_println::println!("teddiebox: batlog every {seconds} s");
-                esp_println::println!("batlog,ms,raw,mv,playing,charger_raw");
-            }
-        }
+        Some(Command::BatteryLog { seconds }) => set_batlog(seconds),
         Some(Command::SlapTimeLimit { limit }) => {
             i2c_bus::SLAP_TIME_LIMIT.store(limit, Ordering::Relaxed);
         }
@@ -321,5 +280,57 @@ pub(crate) async fn bench(
             REQUEST.store(REQUEST_WALK, Ordering::Relaxed);
         }
         None => {}
+    }
+}
+
+/// Sets both the static the codec bring-up reads and the event for the
+/// reducer, which switches the output and its volume scale together.
+fn force_headphones(on: bool) {
+    i2c_bus::HEADPHONES_IN.store(on, Ordering::Relaxed);
+    esp_println::println!(
+        "teddiebox: headphones forced {}",
+        if on { "in" } else { "out" }
+    );
+    if inputs::INPUT_EVENTS
+        .try_send(Event::Headphones(on))
+        .is_err()
+    {
+        esp_println::println!("teddiebox: input queue full, jack change dropped");
+    }
+}
+
+/// Queues a `get`, attaching the token last read by the console `token`
+/// command.
+fn queue_fetch(ruid: [u8; 8]) {
+    // One critical section: the token and the request are set together.
+    critical_section::with(|cs| {
+        let token = *nfc::TAG_TOKEN.borrow_ref(cs);
+        *FETCH_REQUEST.borrow_ref_mut(cs) = Some(FetchRequest {
+            ruid: u64::from_be_bytes(ruid),
+            token,
+            probe: false,
+        });
+    });
+    NET_REQUEST.store(NET_GET, Ordering::Relaxed);
+}
+
+fn set_plate_polling(on: bool, board: &mut BoardPins<'_>, gates: &mut Gates) {
+    if !on {
+        nfc::PLATE_REPORT.store(true, Ordering::Relaxed);
+    }
+    if on {
+        board.apply(gates.power(Rail::Storage, true));
+    }
+    nfc::PLATE_POLLING.store(on, Ordering::Relaxed);
+    esp_println::println!("teddiebox: plate polling {}", if on { "on" } else { "off" });
+}
+
+fn set_batlog(seconds: u8) {
+    battery::BATLOG_EVERY.store(seconds, Ordering::Relaxed);
+    if seconds == 0 {
+        esp_println::println!("teddiebox: batlog off");
+    } else {
+        esp_println::println!("teddiebox: batlog every {seconds} s");
+        esp_println::println!("batlog,ms,raw,mv,playing,charger_raw");
     }
 }
