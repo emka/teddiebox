@@ -128,6 +128,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "teddiebox-board"
+version = "0.1.0"
+
+[[package]]
 name = "teddiebox-cloud"
 version = "0.1.0"
 dependencies = [
@@ -144,13 +148,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-core"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "teddiebox-board",
+]
+
+[[package]]
 name = "teddiebox-fuzz"
 version = "0.0.0"
 dependencies = [
- "heapless",
  "libfuzzer-sys",
  "teddiebox-cloud",
  "teddiebox-config",
+ "teddiebox-core",
  "teddiebox-ota",
  "teddiebox-portal",
  "teddiebox-taf",

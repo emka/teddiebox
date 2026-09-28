@@ -30,9 +30,9 @@ use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
-use heapless::String;
 use teddiebox_config::{Config, Settings};
 use teddiebox_console::{MAX_PASSPHRASE, MAX_SSID};
+use teddiebox_core::heapless::String;
 
 use esp_backtrace as _;
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};

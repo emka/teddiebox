@@ -26,6 +26,13 @@ pub use playback::{ContentIndex, Freshness, Playback, Unavailable};
 pub use types::*;
 pub use volume::{db_for, VolumeModel, HEADPHONE_OFFSET_DB};
 
+/// The `heapless` whose `String` and `Vec` this workspace's crates take and
+/// return. The firmware and the fuzz targets are workspaces of their own that
+/// pass these types in, so they use this one rather than declaring their own:
+/// a second declaration can name another major version, which the compiler
+/// treats as different types.
+pub use heapless;
+
 use heapless::Vec;
 
 /// Upper bound on the actions one event may produce.

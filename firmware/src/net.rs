@@ -19,6 +19,7 @@ use esp_radio::wifi::{
     ControllerConfig, DisconnectReason, Interface, Password, Ssid, WifiController, WifiError,
 };
 use teddiebox_config::Config;
+use teddiebox_core::heapless;
 
 /// The network the box raises when both ears are held at boot.
 ///
@@ -308,10 +309,7 @@ impl<'d> Radio<'d> {
                     24,
                 ),
                 gateway: None,
-                // Not `heapless::Vec::new()`: this firmware uses `heapless`
-                // 0.8, but `embassy-net` uses 0.9 for this `Vec`. `Default`
-                // lets the compiler pick the right one.
-                dns_servers: Default::default(),
+                dns_servers: heapless::Vec::new(),
             }),
             &mut self.resources,
             seed,

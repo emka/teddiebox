@@ -8,7 +8,7 @@ use teddiebox_portal::form;
 use teddiebox_portal::submission::{examine, Submission};
 
 fuzz_target!(|data: &[u8]| {
-    let _: Result<heapless::Vec<u8, 64>, _> = form::field(data, "config");
+    let _: Result<teddiebox_core::heapless::Vec<u8, 64>, _> = form::field(data, "config");
     if let Submission::Write(bytes) = examine(data) {
         let text = core::str::from_utf8(&bytes).expect("wrote bytes that are not text");
         assert!(

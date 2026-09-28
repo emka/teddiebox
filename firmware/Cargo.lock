@@ -2921,7 +2921,6 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp-storage",
- "heapless 0.9.3",
  "lis3dh",
  "mbedtls-rs",
  "portable-atomic",
