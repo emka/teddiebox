@@ -839,13 +839,15 @@ enum NextChunk {
     DecodeFailed,
 }
 
-/// Produces the next chunk to push once `pending` has run out: from a
-/// take-the-story's-place cue if one is playing, otherwise the next decoded
-/// frame (mixing in an over-the-story cue and updating the checksum and page
-/// position as it goes), or `End`/`DecodeFailed` once there is nothing left.
-/// No `.await` here — this is bounded decode work, not the real-time feed.
+/// Produces the next chunk to push: `pending` unchanged while it still has
+/// bytes, else from a take-the-story's-place cue if one is playing, else the
+/// next decoded frame (mixing in an over-the-story cue and updating the
+/// checksum and page position as it goes), or `End`/`DecodeFailed` once
+/// there is nothing left. No `.await` here — this is bounded decode work,
+/// not the real-time feed.
 #[allow(clippy::too_many_arguments)]
 fn next_chunk(
+    pending: core::ops::Range<usize>,
     decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>,
     pcm: &mut [i16; MAX_FRAME_SAMPLES],
     instead: &mut Option<CueSamples>,
@@ -855,6 +857,9 @@ fn next_chunk(
     frames: &mut u32,
     decode_us: &mut u64,
 ) -> NextChunk {
+    if !pending.is_empty() {
+        return NextChunk::Ready(pending);
+    }
     if let Some(cue) = instead.as_mut() {
         if cue.fill(&mut pcm[..CUE_CHUNK]) {
             *instead = None;
@@ -1048,20 +1053,19 @@ async fn play_taf_inner(
         }
         cushion.observe(BUFFER_BYTES.saturating_sub(transfer.available_bytes()) as u32);
 
-        if pending.is_empty() {
-            match next_chunk(
-                &mut decoder,
-                &mut scratch.pcm,
-                &mut instead,
-                &mut over,
-                end_after_cue,
-                &mut pcm_crc,
-                &mut frames,
-                &mut decode_us,
-            ) {
-                NextChunk::Ready(range) => pending = range,
-                NextChunk::End | NextChunk::DecodeFailed => break,
-            }
+        match next_chunk(
+            pending,
+            &mut decoder,
+            &mut scratch.pcm,
+            &mut instead,
+            &mut over,
+            end_after_cue,
+            &mut pcm_crc,
+            &mut frames,
+            &mut decode_us,
+        ) {
+            NextChunk::Ready(range) => pending = range,
+            NextChunk::End | NextChunk::DecodeFailed => break,
         }
 
         let pushed = transfer.push(&as_bytes(&scratch.pcm)[pending.clone()]);
