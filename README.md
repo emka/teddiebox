@@ -71,19 +71,6 @@ on the card. A press can then only mean one thing, so the volume moves the
 instant the ear goes down instead of waiting. Chapters are still reachable by
 slapping, so nothing is lost.
 
-### Headphones get their own, quieter volume
-
-The socket on this box is not a switching one: plugging headphones in leaves
-the speaker playing, on stock firmware and on this. So this box does it in
-software — a jack goes in, the speaker goes quiet and the story carries on in
-the headphones; a jack comes out and the speaker comes back. The story never
-stops either way, and nothing has to be pressed.
-
-**Headphones have their own volume.** The ears mean the same thing they always
-did, but the six steps they move are about 12 dB quieter when something is
-plugged in, and each output remembers where it was left: turning the
-headphones down does not leave the speaker quiet when the plug comes out.
-
 ### Its settings can be fixed without a card reader
 
 A box whose `CONFIG.TXT` is wrong or missing cannot reach the network, and on a
@@ -275,10 +262,3 @@ one program may use the port at a time, so `just flash` refuses while a console
 is open.
 
 `HARDWARE.md` covers the board, the wiring and how to get into download mode.
-
-**Tuning the headphone volume.** The 12 dB between the speaker and the
-headphones is an estimate, not tuned against real headphones. Both volume
-scales are written out step by step in `crates/teddiebox-core/src/volume.rs`:
-change the levels in the `HEADPHONES` table to what you want to hear, and the
-`HEADPHONE_OFFSET_DB` constant beside it to the new difference between the two.
-A test checks that they still agree.
