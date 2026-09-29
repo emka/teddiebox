@@ -415,14 +415,26 @@ pub fn arm_boot(slot: u8) {
         0 => AppPartitionSubType::Ota0,
         _ => AppPartitionSubType::Ota1,
     };
+    if select_next_boot(target) {
+        esp_println::println!(
+            "teddiebox: ota armed {target:?} as New — reboot, then `otas`. \
+             PendingVerify means this bootloader rolls back; New means it does not."
+        );
+    }
+}
 
+/// Points `otadata` at `target` in state [`OtaImageState::New`], so the next
+/// boot runs it and [`confirm_boot_or_revert`] treats that boot as its first.
+///
+/// Prints exactly why and returns `false` if it could not.
+fn select_next_boot(target: AppPartitionSubType) -> bool {
     let mut flash = crate::flash::flash();
     let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
     let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
         Ok(table) => table,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
-            return;
+            return false;
         }
     };
 
@@ -430,7 +442,7 @@ pub fn arm_boot(slot: u8) {
         Ok(Some(entry)) => entry,
         _ => {
             esp_println::println!("teddiebox: ota has no otadata partition — nothing to arm");
-            return;
+            return false;
         }
     };
 
@@ -438,7 +450,7 @@ pub fn arm_boot(slot: u8) {
         Ok(ota) => ota,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
-            return;
+            return false;
         }
     };
 
@@ -454,21 +466,17 @@ pub fn arm_boot(slot: u8) {
         esp_println::println!("teddiebox: ota otadata is not initialised — clearing it first");
         if let Err(trouble) = ota.set_current_app_partition(AppPartitionSubType::Factory) {
             esp_println::println!("teddiebox: ota could not clear otadata — {trouble:?}");
-            return;
+            return false;
         }
     }
 
     if let Err(trouble) = ota.set_current_app_partition(target) {
         esp_println::println!("teddiebox: ota could not select {target:?} — {trouble:?}");
-        return;
+        return false;
     }
     if let Err(trouble) = ota.set_current_ota_state(OtaImageState::New) {
         esp_println::println!("teddiebox: ota could not set the state — {trouble:?}");
-        return;
+        return false;
     }
-
-    esp_println::println!(
-        "teddiebox: ota armed {target:?} as New — reboot, then `otas`. \
-         PendingVerify means this bootloader rolls back; New means it does not."
-    );
+    true
 }
