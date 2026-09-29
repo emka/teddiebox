@@ -169,7 +169,7 @@ what the ears do, and the box saying so beats the box deciding for you.
 | `password` | | its passphrase. Everything after the `=` is the password, `#` included — so a passphrase with a hash in it needs no escaping. Leave it empty for an open network |
 | `server` | required | `host:port` of your teddyCloud |
 | `ears_skip` | `yes` | whether holding an ear changes the chapter |
-| `update_url` | | full `https://` URL of an update manifest. Absent means no updates, which is the safe default — there is no address it would be right to guess |
+| `update_url` | | full `https://` URL of an update manifest. Checked when the card is read, but no firmware fetches an update yet |
 | `setup_password` | | the box's own setup passphrase, 8 to 63 characters. See above |
 
 **`server` is the line in this file carrying the weight.** The box checks the
@@ -195,8 +195,8 @@ rather than two. Change either line and the box derives a new key by itself,
 after its first successful join with the new one. Whoever can read the box's
 flash can therefore join your network — but whoever holds the box holds the
 card, where the passphrase already sits in plain text. The partition arrives
-with `just flash`; an update over the air keeps the old partition table, and
-such a box simply joins the slower way.
+with `just flash`; a box whose partition table predates it simply joins the
+slower way.
 
 ## Building it
 
