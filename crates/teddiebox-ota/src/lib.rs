@@ -14,6 +14,7 @@ mod digest;
 mod image;
 mod manifest;
 mod sink;
+mod stage;
 mod url;
 
 pub use boot::{boot_action, BootAction, SlotState};
@@ -21,6 +22,7 @@ pub use decide::{decide, Decision, Refusal};
 pub use image::{image_version, may_activate};
 pub use manifest::{Manifest, FILENAME, MAX_IMAGE_PATH, MAX_MANIFEST, MAX_VERSION};
 pub use sink::{FlashRegionLike, Sectors, SinkError, SECTOR};
+pub use stage::ImageWriter;
 pub use url::{resolve_image, split, UpdateUrl, MAX_HOST, MAX_PATH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
