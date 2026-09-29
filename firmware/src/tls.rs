@@ -830,6 +830,73 @@ pub async fn fetch(
     })
 }
 
+/// Downloads the file at `path` on `server`, passing the body to `sink`, and
+/// returns how many bytes it carried.
+///
+/// For firmware updates, which fetch a manifest and an image by path rather
+/// than a figure's content by uid. `sink` returns `false` to stop the
+/// download, which ends it with [`Error::Abandoned`]. A missing file is
+/// [`Error::NoContent`].
+///
+/// `server` is always the card's `update_url` host, never one a manifest
+/// names; see the trust model in `teddiebox_ota`.
+pub async fn get_path(
+    client: &Client,
+    stack: &Stack<'_>,
+    server: &str,
+    path: &str,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<u32, Error> {
+    let mut name = [0u8; MAX_NAME];
+    let (_host, address, port) = resolve(stack, server, &mut name).await?;
+
+    let mut rx = [0u8; TCP_BUFFER];
+    let mut tx = [0u8; TCP_BUFFER];
+    let mut socket = connect(stack, address, port, &mut rx, &mut tx).await?;
+    socket.set_timeout(Some(IDLE_TIMEOUT));
+
+    let mut session = Session::new(
+        client.tls,
+        socket,
+        &SessionConfig::Client(client_config(client.credentials())),
+    )
+    .map_err(Error::Handshake)?;
+    client.handshake(&mut session).await?;
+
+    let mut request = [0u8; 256];
+    let request_len = teddiebox_cloud::build_path_request(&mut request, path, server, None)
+        .map_err(Error::Cloud)?;
+
+    let mut buf = [0u8; 1024];
+    let mut wire = Reporting::new(&mut session);
+    let opened = stream::begin_prepared(&mut wire, &request[..request_len], &mut buf).await;
+    let (body_length, prefix) = match opened.map_err(|e| wire.explain(e))? {
+        Begun::NotFound | Begun::Unchanged => return Err(Error::NoContent),
+        Begun::Content {
+            body_length,
+            prefix,
+            ..
+        } => (body_length, prefix),
+    };
+
+    let mut received = prefix.len() as u32;
+    if !sink(&buf[prefix]) {
+        return Err(Error::Abandoned);
+    }
+    let mut body = Body::new(body_length, received);
+    while !body.is_complete() {
+        let got = body.read(&mut wire, &mut buf).await;
+        let n = got.map_err(|e| wire.explain(e))?;
+        received += n as u32;
+        if !sink(&buf[..n]) {
+            return Err(Error::Abandoned);
+        }
+    }
+
+    let _ = session.close().await;
+    Ok(received)
+}
+
 /// Keeps the transport error that `CloudError` throws away.
 ///
 /// `teddiebox-cloud` does not know the transport, so its errors are just

@@ -427,7 +427,7 @@ pub fn arm_boot(slot: u8) {
 /// boot runs it and [`confirm_boot_or_revert`] treats that boot as its first.
 ///
 /// Prints exactly why and returns `false` if it could not.
-fn select_next_boot(target: AppPartitionSubType) -> bool {
+pub fn select_next_boot(target: AppPartitionSubType) -> bool {
     let mut flash = crate::flash::flash();
     let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
     let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
@@ -479,4 +479,76 @@ fn select_next_boot(target: AppPartitionSubType) -> bool {
         return false;
     }
     true
+}
+
+/// Where the slot that is not running lies in flash, so an update can be
+/// written there without holding the flash handle between chunks.
+pub struct SpareSlot {
+    /// Absolute flash address of the slot's first byte.
+    pub offset: u32,
+    pub len: u32,
+    /// What `otadata` calls the slot, for [`select_next_boot`].
+    pub target: AppPartitionSubType,
+}
+
+/// Finds the slot the running image is not in.
+///
+/// `None`, after printing why, for a flash with no second app slot or a
+/// partition table that cannot be read.
+pub fn spare_slot() -> Option<SpareSlot> {
+    let mut flash = crate::flash::flash();
+    let mut buffer = [0u8; PARTITION_TABLE_MAX_LEN];
+    let table = match partitions::read_partition_table(&mut flash, &mut buffer) {
+        Ok(table) => table,
+        Err(trouble) => {
+            esp_println::println!("teddiebox: ota cannot read the partition table — {trouble:?}");
+            return None;
+        }
+    };
+    let running = match table.booted_partition() {
+        Ok(Some(entry)) if entry.label_as_str() == "ota_1" => AppPartitionSubType::Ota1,
+        Ok(Some(_)) => AppPartitionSubType::Ota0,
+        _ => {
+            esp_println::println!("teddiebox: ota cannot tell which slot is running");
+            return None;
+        }
+    };
+    let (_, target) = slots(running);
+    match table.find_partition(PartitionType::App(target)) {
+        Ok(Some(entry)) => Some(SpareSlot {
+            offset: entry.offset(),
+            len: entry.len(),
+            target,
+        }),
+        _ => {
+            esp_println::println!("teddiebox: ota has no second app slot to update into");
+            None
+        }
+    }
+}
+
+/// Writes into a [`SpareSlot`] through the flash handle, at slot-relative
+/// offsets.
+///
+/// Uses `write_nor`, which writes without erasing. `FlashStorage::write`,
+/// which `partitions::FlashRegion` uses, reads, erases and rewrites the
+/// whole 4 KB sector on every call: eight erases per sector for 512-byte
+/// writes. [`Sectors`] already erases each sector once before its first
+/// write.
+pub struct SlotWriter<'f> {
+    pub flash: &'f mut crate::flash::Flash,
+    pub offset: u32,
+}
+
+impl FlashRegionLike for SlotWriter<'_> {
+    type Error = esp_storage::FlashStorageError;
+
+    fn erase(&mut self, range: core::ops::Range<u32>) -> Result<(), Self::Error> {
+        self.flash
+            .erase(self.offset + range.start, self.offset + range.end)
+    }
+
+    fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.flash.write_nor(self.offset + offset, bytes)
+    }
 }

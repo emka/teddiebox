@@ -21,6 +21,7 @@ mod sleep;
 mod stack;
 mod storage;
 mod tls;
+mod update;
 mod wifikey;
 
 use core::cell::RefCell;
@@ -2046,7 +2047,12 @@ async fn serve_get_while_connected(
     }
 }
 
-/// Primes the TLS connection, if there is one.
+/// Primes the TLS connection, if there is one, then checks for an update if
+/// the card names where to look.
+///
+/// The one network task of every boot that starts with an empty plate, so
+/// this is where the update check runs. A boot that starts with a figure on
+/// the plate goes straight to its story and does not check.
 async fn prime_while_connected(
     tls: Option<&tls::Client>,
     stack: &embassy_net::Stack<'_>,
@@ -2062,6 +2068,9 @@ async fn prime_while_connected(
             started.elapsed().as_millis()
         ),
         Err(e) => esp_println::println!("teddiebox: net could not prime — {e:?}"),
+    }
+    if let Some(update_url) = &config.update_url {
+        update::check(tls, stack, update_url).await;
     }
 }
 

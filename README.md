@@ -133,7 +133,7 @@ Settings are in `config.txt` in the card's root:
 | `password` | empty | WiFi passphrase. Everything after `=` is used, including `#`. Empty for an open network |
 | `server` | required | `host:port` of your teddyCloud |
 | `ears_skip` | `yes` | holding an ear skips a chapter |
-| `update_url` | none | `https://` URL of an update manifest. Parsed, but not used yet |
+| `update_url` | none | `https://` URL of an update manifest. Without it the box never checks for updates |
 | `setup_password` | `teddiebox` | passphrase of the setup network, 8 to 63 characters |
 
 **Trust `server`.** The box verifies the server's certificate against
@@ -175,11 +175,36 @@ change only that line of `config.txt` and restart the box.
 
 ### Updates over the air
 
-Not implemented yet. Every update is a `just flash`.
+With `update_url` set, the box checks for an update once per boot, after the
+jingle, when the plate is empty. A boot that starts with a figure on the plate
+does not check.
 
-What exists: the flash has two firmware slots. A new image is kept only after
-the card mounts and the codec responds; otherwise it is reverted at the next
-boot. Downloading a manifest and an image is not implemented.
+If the manifest's version differs from the running one, the box downloads the
+image into its spare firmware slot (the LED shows fetching, about 30 s) and
+reboots into it. The new image is kept only after the card mounts and the
+codec responds; otherwise the box goes back to the old one at the next boot.
+
+The download stops, and the box keeps its current firmware, if:
+
+- a story starts, or a figure needs the network;
+- the length, SHA-256 or version inside the image does not match the manifest.
+
+To publish an update:
+
+    TEDDIEBOX_RELEASE=1 just ota-image
+
+This writes `teddiebox.bin` and `teddiebox.txt` to `target/ota/`. Upload both
+to the directory `update_url` names, e.g. `/content/teddiebox/` on teddyCloud's
+port 8443. `update_url` then points at `teddiebox.txt`:
+
+    update_url = https://teddycloud.local:8443/content/teddiebox/teddiebox.txt
+
+The box updates when the version differs, not only when it is newer, so
+publishing an older image rolls every box back to it.
+
+Updates are not signed. Anyone who can write to that directory decides what
+the box runs. The box only ever talks to the host in `update_url`, and
+verifies it against `tcca.der` like every other request.
 
 ## Development
 
