@@ -163,6 +163,13 @@ vendor:
 flash: firmware
     ./scripts/flash.sh
 
+# writes an over-the-air update to target/ota/: the image and its manifest
+#
+# Publish both into the directory `update_url` names. The manifest's version
+# is read out of the image, so the two always agree.
+ota-image: firmware
+    ./scripts/ota-image.sh
+
 # writes the box's TLS identity into the `cert` partition
 #
 # Separate from `just flash` deliberately: an app write never touches a data
