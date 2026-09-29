@@ -12,19 +12,20 @@ stories off the same SD card, and fetches missing ones from a local
 Deliberate departures, not omissions. Everything else aims to behave the way
 the box a child already knows behaves.
 
-### It remembers where a story got to, even after being switched off
+### It remembers where every story got to
 
-A stock box remembers where a story was only until it goes into standby. Put a
-figure back the next day and the story starts again from the beginning.
+A stock box remembers where one story was: the last figure it played. Put that
+figure back, even after standby, and it carries on. Put a different figure on
+in between and the first one starts again from the beginning.
 
-This box remembers the **exact spot**, and keeps remembering it after being
-switched off:
+This box remembers the **exact spot for every story**, and keeps remembering
+it after being switched off:
 
-- **Lift a figure and put it straight back** and the story carries on where it
-  was, as stock does.
-- **Put it back tomorrow** and it still does. The place is written to the card
-  when the box needs the memory for another figure, or when it shuts itself
-  down.
+- **Put the last figure back** and the story carries on where it was, as stock
+  does.
+- **Play another figure in between** and the first one still carries on where
+  it was. The place is written to the card when the box needs the memory for
+  another figure, or when it shuts itself down.
 
 A story played all the way to its end starts from the beginning next time. A
 finished story is not a paused one.
