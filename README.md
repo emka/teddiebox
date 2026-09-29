@@ -27,7 +27,7 @@ teddiebox remembers the position of every story, also across power-off.
 - The position is written to the card when the figure's memory is needed for
   another figure, and at shutdown.
 - A story played to its end starts from the beginning next time.
-- The position is stored in `<STORY>.POS` next to the story on the card. Delete
+- The position is stored in `<story>.pos` next to the story on the card. Delete
   it to start that story from the beginning.
 - A flat battery or a reset loses the position since the last write. Writing
   more often would wear the card.
@@ -39,12 +39,12 @@ teddiebox remembers the position of every story, also across power-off.
 - **Slap the side** of the box: right side forward, left side back.
 
 Because a press could be a hold, volume changes when the ear is released rather
-than when it is pressed. Set `ears_skip = no` in `CONFIG.TXT` to get stock ear
+than when it is pressed. Set `ears_skip = no` in `config.txt` to get stock ear
 behaviour: volume changes on press, and slapping still skips.
 
 ### Setup mode
 
-If `CONFIG.TXT` is wrong or missing, the box can be configured over WiFi
+If `config.txt` is wrong or missing, the box can be configured over WiFi
 without removing the card. See
 [Changing settings without a card reader](#changing-settings-without-a-card-reader).
 
@@ -74,7 +74,7 @@ The light is steady and dim.
   teddiebox sends none of these.
 - **Settings from teddyCloud.** Stock gets its volume limit, slap setting and
   similar settings from the server. teddiebox reads settings only from
-  `CONFIG.TXT`.
+  `config.txt`.
 - **Updates over the air.** See [Updates over the air](#updates-over-the-air).
 
 ## Installation
@@ -86,7 +86,7 @@ The light is steady and dim.
 - A USB serial adapter connected to the box's console.
 - A [teddyCloud](https://github.com/toniebox-reverse-engineering/teddycloud)
   server on your network.
-- The box's certificate files `CLIENT.DER` and `PRIVATE.DER` on the host.
+- The box's certificate files `client.der` and `private.der` on the host.
 - The teddyCloud CA on the SD card at `cert/tcca.der`.
 
 ### Flashing
@@ -111,7 +111,7 @@ The box authenticates to teddyCloud with its own certificate and key. They are
 stored in the `cert` flash partition, not on the card.
 
 1. Set `TEDDIEBOX_IDENTITY_DIR` in `.envrc.local` to the directory holding
-   `CLIENT.DER` and `PRIVATE.DER`.
+   `client.der` and `private.der`.
 2. Run `just identity`.
 3. Check that the box reports its identity from flash at boot.
 
@@ -121,7 +121,7 @@ says so at boot.
 
 ### Configuration
 
-Settings are in `CONFIG.TXT` in the card's root:
+Settings are in `config.txt` in the card's root:
 
 - One `key = value` per line. `#` starts a comment. Blank lines are ignored.
 - Unknown keys are ignored, so newer cards work with older firmware.
@@ -137,7 +137,7 @@ Settings are in `CONFIG.TXT` in the card's root:
 | `setup_password` | `teddiebox` | passphrase of the setup network, 8 to 63 characters |
 
 **Trust `server`.** The box verifies the server's certificate against
-`TCCA.DER` on the card, and sends it its own certificate and the placed
+`tcca.der` on the card, and sends it its own certificate and the placed
 figure's token.
 
 **The WiFi key is stored in flash.** The box derives a key from `ssid` and
@@ -151,7 +151,7 @@ plain text anyway.
 1. Hold both ears while switching the box on, until the light turns on. The box
    starts a WiFi network instead of playing.
 2. Join `teddiebox-setup` with passphrase `teddiebox`.
-3. Open <http://192.168.4.1/>. It shows `CONFIG.TXT` for editing.
+3. Open <http://192.168.4.1/>. It shows `config.txt` for editing.
 4. Press **Save and restart**. The file is checked first; errors are shown on
    the page. The box then restarts.
 
@@ -166,12 +166,12 @@ Security:
   has no reason to trust its certificate. Use setup mode only where that risk
   is acceptable.
 
-Set `setup_password` in `CONFIG.TXT` to use your own passphrase. A box with no
-card, an unreadable card or an unparseable `CONFIG.TXT` still uses the default.
+Set `setup_password` in `config.txt` to use your own passphrase. A box with no
+card, an unreadable card or an unparseable `config.txt` still uses the default.
 
 To reset a forgotten setup passphrase, use the serial console in setup mode:
 `setup pw off` restores the default, `setup pw <new>` sets a new one. Both
-change only that line of `CONFIG.TXT` and restart the box.
+change only that line of `config.txt` and restart the box.
 
 ### Updates over the air
 
