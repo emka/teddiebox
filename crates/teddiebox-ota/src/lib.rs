@@ -16,6 +16,7 @@ mod manifest;
 mod sink;
 mod stage;
 mod url;
+mod verify;
 
 pub use boot::{boot_action, BootAction, SlotState};
 pub use decide::{decide, Decision, Refusal};
@@ -24,6 +25,7 @@ pub use manifest::{Manifest, FILENAME, MAX_IMAGE_PATH, MAX_MANIFEST, MAX_VERSION
 pub use sink::{FlashRegionLike, Sectors, SinkError, SECTOR};
 pub use stage::ImageWriter;
 pub use url::{resolve_image, split, UpdateUrl, MAX_HOST, MAX_PATH};
+pub use verify::verify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OtaError {
@@ -52,6 +54,11 @@ pub enum OtaError {
     /// promised. Refusing it stops the box from reflashing the same image
     /// forever.
     VersionMismatch,
+    /// The body that arrived is not as long as the manifest's `length`.
+    LengthMismatch,
+    /// The body's SHA-256 is not the manifest's `sha256`: the download was
+    /// corrupted, or the image was replaced after the manifest was written.
+    DigestMismatch,
     /// An `update_url` did not start with `https://`. teddyCloud only speaks
     /// TLS, and a plain-HTTP request to it hangs instead of failing, so the
     /// box would look frozen rather than misconfigured.
