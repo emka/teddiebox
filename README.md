@@ -1,264 +1,191 @@
 # teddiebox
 
-Replacement firmware for a Toniebox, written in Rust for the ESP32-S3 board a
-`TONIEBOX-ESP32` rev 1.6.C carries. It reads the same figures, plays the same
-stories off the same SD card, and fetches missing ones from a local
+Replacement firmware for the Toniebox with the ESP32 rev 1.6.C
+board, written in Rust. It reads the same figures, and fetches audio from a local
 [teddyCloud](https://github.com/toniebox-reverse-engineering/teddycloud).
 
-## Why a firmware of its own
+## Motivation
 
-teddyCloud already frees a box from the manufacturer's cloud, but the box
-still runs firmware nobody outside the manufacturer can read or change. So
-what it does, what it reports and what it forgets stay out of reach: it
-remembers one story's place, and the ears do nothing but volume.
+teddyCloud replaces the manufacturer's cloud, but the box still runs closed
+firmware that cannot be improved. This firmware is open, and
+can be extended. It behaves like stock except where noted below.
 
-This firmware is one that can be read, changed and tested. It keeps what a
-child already knows about the box and changes only what makes it better to
-live with.
+## Features different to stock
 
-## What it does on top of stock
+### Configuration file
 
-Deliberate departures, not omissions. Everything else aims to behave the way
-the box a child already knows behaves.
+The firmware is configured by writing `config.txt` on the SD card.
+Editing this file is also possible by booting the box in setup mode (see its own section below).
 
-### It remembers where every story got to
+### Position per story
 
-A stock box remembers where one story was: the last figure it played. Put that
-figure back, even after standby, and it carries on. Put a different figure on
-in between and the first one starts again from the beginning.
+Stock firmware remembers the position of the last figure played, also across standby.
+Playing a different figure in between resets it.
 
-This box remembers the **exact spot for every story**, and keeps remembering
-it after being switched off:
+teddiebox remembers the position of every story, also across power-off.
 
-- **Put the last figure back** and the story carries on where it was, as stock
-  does.
-- **Play another figure in between** and the first one still carries on where
-  it was. The place is written to the card when the box needs the memory for
-  another figure, or when it shuts itself down.
+- The position is written to the card when the figure's memory is needed for
+  another figure, and at shutdown.
+- A story played to its end starts from the beginning next time.
+- The position is stored in `<STORY>.POS` next to the story on the card. Delete
+  it to start that story from the beginning.
+- A flat battery or a reset loses the position since the last write. Writing
+  more often would wear the card.
 
-A story played all the way to its end starts from the beginning next time. A
-finished story is not a paused one.
+### Chapter skip
 
-The place is kept in a small text file called `<STORY>.POS` beside the story on
-the card — one number, which you can read or delete on a laptop. Deleting it
-just means that story starts from the beginning.
+- **Hold an ear** for about half a second: the larger (right) ear skips
+  forward, the smaller one back.
+- **Slap the side** of the box: right side forward, left side back.
 
-What is *not* remembered is an ending nobody chose: if the battery goes flat
-mid-story, or the box is reset, the place falls back to whatever was last
-written to the card. This is a deliberate trade — writing every few seconds to
-survive it would wear the card for a case that leaves the box unusable anyway.
+Because a press could be a hold, volume changes when the ear is released rather
+than when it is pressed. Set `ears_skip = no` in `CONFIG.TXT` to get stock ear
+behaviour: volume changes on press, and slapping still skips.
 
-### The controls do more than volume
+### Setup mode
 
-A stock box's ears do one thing between them: tap the larger for louder, the
-smaller for quieter. This box keeps that and adds holding.
+If `CONFIG.TXT` is wrong or missing, the box can be configured over WiFi
+without removing the card. See
+[Changing settings without a card reader](#changing-settings-without-a-card-reader).
 
-**Holding an ear changes the chapter.** Hold the larger — it is on the right —
-and the story moves on; hold the smaller and it goes back. The chapter changes
-after about half a second, while your finger is still on the ear, so you can
-hear that the box heard you. Letting go does nothing more.
+### Status light
 
-Two meanings on one ear cost something, and it is worth knowing which: until
-that half second is up the box cannot tell a tap from a hold, so the volume
-waits for you to let go.
-
-**A slap on the side of the box also changes the chapter**: the right face
-forward, the left face back. The accelerometer detects the knock itself, so it
-catches one however busy the box is.
-
-**If you would rather have stock's ears**, put `ears_skip = no` in `CONFIG.TXT`
-on the card. A press can then only mean one thing, so the volume moves the
-instant the ear goes down instead of waiting. Chapters are still reachable by
-slapping, so nothing is lost.
-
-### Its settings can be fixed without a card reader
-
-A box whose `CONFIG.TXT` is wrong or missing cannot reach the network, and on a
-stock box there would be nothing to do about it but take the card out. This one
-raises its own WiFi network and serves a page for editing the file; see
-[Changing the settings without a card reader](#changing-the-settings-without-a-card-reader).
-
-### The indicator says more
-
-A stock box does not show a charging colour while it sits idle. This one uses
-the single RGB light to say what it is doing:
+teddiebox uses the light as follows:
 
 | colour | meaning |
 |---|---|
-| green | idle, or playing a story |
-| blue | waiting on the server — fetching a story it does not have, or checking that the one it has is still the current one |
-| orange | the battery is running low |
-| red | a fault, or a battery about to give out |
-| cyan | idle, and on the charger |
-| magenta | the setup page is up |
-| dark | standby |
+| green | idle or playing |
+| blue | waiting on the server: fetching a story, or checking that the cached one is current |
+| orange | battery low |
+| red | fault, or battery about to run out |
+| cyan | idle and charging |
+| magenta | setup page running |
+| off | standby |
 
-It is steady rather than breathing, and deliberately dim: this sits in a
-child's room.
+The light is steady and dim.
 
-## What it does not do yet
+## Missing compared to stock
 
-**Rewind and fast-forward are not implemented.** On a stock box, tilting it
-to one side winds the story back or forward within a chapter. This box does
-nothing when it is tilted: the only way to move through a story is a whole
-chapter at a time, by holding an ear or slapping the side.
+- **Rewind and fast-forward by tilting.** Tilting does nothing. Only whole
+  chapters can be skipped.
+- **Telemetry.** Stock reports events to teddyCloud: figure placed or lifted,
+  ear presses, slaps, tilts, playback start and stop, charger in or out.
+  teddyCloud shows them as the box's live state and publishes them over MQTT.
+  teddiebox sends none of these.
+- **Settings from teddyCloud.** Stock gets its volume limit, slap setting and
+  similar settings from the server. teddiebox reads settings only from
+  `CONFIG.TXT`.
+- **Updates over the air.** See [Updates over the air](#updates-over-the-air).
 
-**It reports nothing to teddyCloud.** A stock box sends a running log of what
-happens to it — a figure placed or lifted, an ear pressed, a slap or a tilt,
-playback starting and stopping, the charger going in or out. teddyCloud shows
-that as the box's live state and passes it on over MQTT, which is how a home
-automation system sees the box. This box only fetches stories, so teddyCloud
-sees nothing between one fetch and the next.
+## Installation
 
-**Settings made in teddyCloud do not reach it.** A stock box collects its
-volume limit, slap setting and the like from the server. This box takes its
-settings from `CONFIG.TXT` alone.
+### Requirements
 
-**It cannot update itself over the air yet.** See
-[Updates over the air](#updates-over-the-air).
-
-## Putting it on a box
-
-### What you need
-
-- A Toniebox with the `TONIEBOX-ESP32` rev 1.6.C board. `HARDWARE.md` covers
-  the board, the wiring and how to get into download mode.
-- A USB serial adapter on the box's console, which shows up as
-  `/dev/ttyUSB0`.
+- A Toniebox with the `TONIEBOX-ESP32` rev 1.6.C board. See `HARDWARE.md` for
+  the board, the wiring and download mode.
+- A USB serial adapter connected to the box's console.
 - A [teddyCloud](https://github.com/toniebox-reverse-engineering/teddycloud)
-  on your network, for the stories the card does not have yet.
-- The box's own `CLIENT.DER` and `PRIVATE.DER`, from `CERT/` on its card,
-  copied somewhere off the card.
+  server on your network.
+- The box's certificate files `CLIENT.DER` and `PRIVATE.DER` on the host.
+- The teddyCloud CA on the SD card at `cert/tcca.der`.
 
 ### Flashing
 
-`just flash` puts the box into download mode, flashes it, and starts it again —
-the order in `scripts/flash.sh` is not arbitrary, and getting it wrong costs
-opening the case.
+    just flash
 
-The box carries a serial console, and most of its commands exist to take a box
-apart rather than to run one — poking codec registers, arming the other
-firmware slot, reading a figure's memory. So a build meant to live on a shelf
-leaves them out:
+This puts the box into download mode, flashes it and restarts it. Use it rather
+than calling the tools directly: the order in `scripts/flash.sh` matters, and
+getting it wrong means opening the case to recover.
+
+For a box in daily use, build the release image:
 
     TEDDIEBOX_RELEASE=1 just flash
 
-That image answers `dl`, which reboots it for flashing, and nothing else. It is
-also about 19 KB smaller. Everything the box does for a child works the same;
-there is just no way to make it do anything else over the console.
+The release image drops the debug console commands. It answers only `dl`
+(reboot for flashing). Playback and controls are the
+same.
 
-### Giving it its identity
+### Flashing identity once
 
-The box identifies itself to teddyCloud with its own certificate and key. They
-are **not** read from the card. They live in the `cert` flash partition,
-written once per box with `just identity`, which reads them from the directory
-`TEDDIEBOX_IDENTITY_DIR` names — a private key does not belong on a medium that
-comes out of the box and goes into other machines. A box that has not been
-provisioned plays everything on its card and cannot fetch; it says so at boot.
+The box authenticates to teddyCloud with its own certificate and key. They are
+stored in the `cert` flash partition, not on the card.
 
-`CERT/` on the card only needs `TCCA.DER`. If the card also has `CLIENT.DER`
-and `PRIVATE.DER` there, the firmware ignores them: once `just identity` has
-been run and the box reports its identity from flash at boot, delete both
-files from the card, so the private key is not left on it.
+1. Set `TEDDIEBOX_IDENTITY_DIR` in `.envrc.local` to the directory holding
+   `CLIENT.DER` and `PRIVATE.DER`.
+2. Run `just identity`.
+3. Check that the box reports its identity from flash at boot.
 
-Flashing new firmware never touches the `cert` partition, so this is done once.
+This is needed once per box; flashing firmware does not touch the `cert`
+partition. Without it the box plays what is on the card but cannot fetch, and
+says so at boot.
 
-### Configuring it
+### Configuration
 
-Settings live in `CONFIG.TXT` at the root of the card. One `key = value` per
-line, `#` starts a comment, blank lines are ignored. Unknown keys are skipped,
-so a card written for a newer firmware still boots an older one — but a key the
-box *does* know, given a value it cannot use, is refused out loud rather than
-guessed at. `ears_skip = ture` is a typo about what the ears do, and the box
-saying so beats the box deciding for you.
+Settings are in `CONFIG.TXT` in the card's root:
 
-| key | | |
+- One `key = value` per line. `#` starts a comment. Blank lines are ignored.
+- Unknown keys are ignored, so newer cards work with older firmware.
+- A known key with an invalid value is reported as an error, not guessed at.
+
+| key | default | |
 |---|---|---|
-| `ssid` | required | your WiFi network |
-| `password` | | its passphrase. Everything after the `=` is the password, `#` included — so a passphrase with a hash in it needs no escaping. Leave it empty for an open network |
+| `ssid` | required | WiFi network |
+| `password` | empty | WiFi passphrase. Everything after `=` is used, including `#`. Empty for an open network |
 | `server` | required | `host:port` of your teddyCloud |
-| `ears_skip` | `yes` | whether holding an ear changes the chapter |
-| `update_url` | | full `https://` URL of an update manifest. Checked when the card is read, but no firmware fetches an update yet |
-| `setup_password` | | the box's own setup passphrase, 8 to 63 characters. See below |
+| `ears_skip` | `yes` | holding an ear skips a chapter |
+| `update_url` | none | `https://` URL of an update manifest. Parsed, but not used yet |
+| `setup_password` | `teddiebox` | passphrase of the setup network, 8 to 63 characters |
 
-**`server` is the line in this file carrying the weight.** The box checks the
-server's certificate against `TCCA.DER` on the card and will not connect
-without it — but it also identifies itself to whatever it reaches, sending its
-own certificate and the placed figure's token, so that a request can be
-relayed to the real teddyCloud. Point `server` somewhere you trust.
+**Trust `server`.** The box verifies the server's certificate against
+`TCCA.DER` on the card, and sends it its own certificate and the placed
+figure's token.
 
-The box also keeps the WiFi key it derives from `ssid` and `password`, in the
-`wifi` flash partition, so that joining the network takes a tenth of a second
-rather than two. Change either line and the box derives a new key by itself,
-after its first successful join with the new one. Whoever can read the box's
-flash can therefore join your network — but whoever holds the box holds the
-card, where the passphrase already sits in plain text. The partition arrives
-with `just flash`; a box whose partition table predates it simply joins the
-slower way.
+**The WiFi key is stored in flash.** The box derives a key from `ssid` and
+`password` and keeps it in the `wifi` partition, which cuts joining from about
+2s to 0.1s. It is re-derived after changing either value. Anyone who can
+read the flash can join your network, but the passphrase is on the card in
+plain text anyway.
 
-### Changing the settings without a card reader
+### Changing settings without a card reader
 
-The box can be told its settings over the air:
+1. Hold both ears while switching the box on, until the light turns on. The box
+   starts a WiFi network instead of playing.
+2. Join `teddiebox-setup` with passphrase `teddiebox`.
+3. Open <http://192.168.4.1/>. It shows `CONFIG.TXT` for editing.
+4. Press **Save and restart**. The file is checked first; errors are shown on
+   the page. The box then restarts.
 
-1. **Hold both ears** and switch the box on, keeping them held until the light
-   comes on. The box raises its own WiFi network instead of becoming a teddy
-   bear.
-2. **Join `teddiebox-setup`** from a phone or laptop. The passphrase is
-   `teddiebox`.
-3. **Open <http://192.168.4.1/>**. The page shows `CONFIG.TXT` exactly as it is
-   on the card — comments and all — in one editable box.
-4. **Edit it and press Save and restart.** The box checks the file before
-   writing it, so a mistake comes back as a message above the box rather than
-   as a card that has to be fixed on a laptop. The network then disappears and
-   the box restarts.
+Setup mode ends by itself after ten minutes, or when saving.
 
-The box gives up and restarts on its own after ten minutes, whether or not
-anybody joined: an access point left beaconing overnight flattens the battery.
+Security:
 
-**Two things worth knowing before you use it.** The page shows your home WiFi
-passphrase in clear, because that is the file being edited. And the passphrase
-for `teddiebox-setup` is the one printed above — it is in this public
-repository, so anyone in radio range who has read this page can also read
-what is on the box's.
+- The page shows your WiFi passphrase in plain text.
+- The default setup passphrase is public. Anyone in range who knows it and
+  records your device joining can decrypt the session, including your WiFi
+  passphrase. The page cannot use HTTPS: the box has no clock and the phone
+  has no reason to trust its certificate. Use setup mode only where that risk
+  is acceptable.
 
-That second one goes further than joining. WPA2 gives each client its own key,
-but that key is derived from the four-way handshake and the passphrase — so
-somebody in range who already knows the passphrase and records the moment your
-phone joins can read the whole session afterwards, without ever joining
-themselves. The page is plain HTTP, and it cannot be anything else: a box with
-no clock and a phone with no reason to trust it have nothing to build a
-certificate check on. Set the box up somewhere you would be happy saying both
-passphrases out loud.
+Set `setup_password` in `CONFIG.TXT` to use your own passphrase. A box with no
+card, an unreadable card or an unparseable `CONFIG.TXT` still uses the default.
 
-**You can give the box its own setup passphrase.** Put `setup_password =` and
-between 8 and 63 characters of your own in `CONFIG.TXT`, and the box asks for
-that instead of `teddiebox`. Worth understanding before you do: the published
-passphrase is what a box with no card, an unreadable card, or a `CONFIG.TXT`
-too broken to parse falls back to — so it always gets you in to *those*.
-
-If you forget one you have set, the way back is the serial console that setup
-mode runs alongside the page: send `setup pw off` to put the card back to the
-published passphrase, or `setup pw` and a new one to change it. Either rewrites
-that one line of `CONFIG.TXT`, leaves every other line exactly as you wrote it,
-and restarts the box. So a forgotten passphrase costs a USB serial cable rather
-than a card reader.
+To reset a forgotten setup passphrase, use the serial console in setup mode:
+`setup pw off` restores the default, `setup pw <new>` sets a new one. Both
+change only that line of `CONFIG.TXT` and restart the box.
 
 ### Updates over the air
 
-Not yet. The flash holds two firmware slots, and a new image in the other slot
-has to prove itself — the card mounts and the codec answers — before the box
-keeps it; one that does not is reverted at the next boot. What is missing is
-the fetch: nothing yet downloads a manifest or an image, so every update is a
-`just flash` over the serial cable.
+Not implemented yet. Every update is a `just flash`.
+
+What exists: the flash has two firmware slots. A new image is kept only after
+the card mounts and the codec responds; otherwise it is reverted at the next
+boot. Downloading a manifest and an image is not implemented.
 
 ## Development
 
-`just check` runs every gate the pipeline runs, in the same order, and is what
-to run before committing.
-
-The serial console on `/dev/ttyUSB0` runs at 115200, and the box prints its own
-command list at boot. `just console` opens an interactive session on it. Only
-one program may use the port at a time, so `just flash` refuses while a console
-is open.
-
-`HARDWARE.md` covers the board, the wiring and how to get into download mode.
+- `just check` runs all CI gates in CI's order. Run it before committing.
+- The serial console is running at 115200 baud. The box prints its
+  command list at boot.
+- `just console` opens an interactive session. Only one program can use the
+  port, so `just flash` refuses while a console is open.
+- `HARDWARE.md` covers the board, the wiring and download mode.
