@@ -69,8 +69,8 @@ pub struct Config {
     /// `None` means the built-in passphrase, which is published in
     /// `README.md`: the way back into a broken box cannot depend on a file
     /// that might be wrong. Setting this limits the ten-minute setup window to
-    /// people who know it. If you forget it, you need a card reader to fix
-    /// the config, which is what the portal is meant to avoid.
+    /// people who know it. A forgotten one is reset over the serial console
+    /// in setup mode (`setup pw off`), or removed from the card in a reader.
     pub setup_password: Option<String<MAX_PASSWORD>>,
 }
 
