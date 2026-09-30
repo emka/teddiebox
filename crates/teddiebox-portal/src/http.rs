@@ -155,17 +155,17 @@ mod tests {
 
     #[test]
     fn a_post_carries_its_length() {
-        let raw = b"POST /save HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\n\r\nconfig=ssid=";
+        let raw = b"POST /config HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\n\r\nconfig=ssid=";
         let r = parse(raw).unwrap();
         assert_eq!(r.method, Method::Post);
-        assert_eq!(r.path, "/save");
+        assert_eq!(r.path, "/config");
         assert_eq!(r.content_length, 12);
         assert_eq!(r.header_len, raw.len() - 12); // b"config=ssid=" is 12 bytes
     }
 
     #[test]
     fn a_header_name_is_matched_without_regard_to_case() {
-        let raw = b"POST /save HTTP/1.1\r\ncontent-length: 5\r\n\r\nabcde";
+        let raw = b"POST /config HTTP/1.1\r\ncontent-length: 5\r\n\r\nabcde";
         assert_eq!(parse(raw).unwrap().content_length, 5);
     }
 
@@ -185,7 +185,7 @@ mod tests {
     /// read more.
     #[test]
     fn a_body_still_arriving_parses_so_the_caller_can_wait_for_it() {
-        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 20\r\n\r\nconfig=";
+        let raw = b"POST /config HTTP/1.1\r\nContent-Length: 20\r\n\r\nconfig=";
         let r = parse(raw).unwrap();
         assert_eq!(r.content_length, 20);
         assert_eq!(raw.len() - r.header_len, 7);
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn a_body_larger_than_the_cap_is_refused_before_it_is_read() {
-        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 99999\r\n\r\n";
+        let raw = b"POST /config HTTP/1.1\r\nContent-Length: 99999\r\n\r\n";
         assert_eq!(parse(raw).unwrap_err(), RequestError::TooLarge);
     }
 
@@ -216,13 +216,13 @@ mod tests {
     #[test]
     fn a_body_of_exactly_the_cap_is_accepted() {
         assert_eq!(MAX_BODY, 3088);
-        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 3088\r\n\r\n";
+        let raw = b"POST /config HTTP/1.1\r\nContent-Length: 3088\r\n\r\n";
         assert_eq!(parse(raw).unwrap().content_length, 3088);
     }
 
     #[test]
     fn one_byte_over_the_cap_is_refused() {
-        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 3089\r\n\r\n";
+        let raw = b"POST /config HTTP/1.1\r\nContent-Length: 3089\r\n\r\n";
         assert_eq!(parse(raw).unwrap_err(), RequestError::TooLarge);
     }
 
@@ -232,13 +232,13 @@ mod tests {
     fn a_form_encoded_full_size_config_is_no_longer_refused() {
         // 1024 file bytes at 1.35, the ratio for a realistic config. Most of
         // it is line endings: a textarea sends CRLF, encoded as `%0D%0A`.
-        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 1382\r\n\r\n";
+        let raw = b"POST /config HTTP/1.1\r\nContent-Length: 1382\r\n\r\n";
         assert_eq!(parse(raw).unwrap().content_length, 1382);
     }
 
     #[test]
     fn a_content_length_that_is_not_a_number_is_malformed() {
-        let raw = b"POST /save HTTP/1.1\r\nContent-Length: yes\r\n\r\n";
+        let raw = b"POST /config HTTP/1.1\r\nContent-Length: yes\r\n\r\n";
         assert_eq!(parse(raw).unwrap_err(), RequestError::Malformed);
     }
 
@@ -299,13 +299,13 @@ Connection: close\r\n\r\n"
 
     #[test]
     fn headers_done_but_body_still_arriving_is_not_complete() {
-        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 20\r\n\r\nconfig=";
+        let raw = b"POST /config HTTP/1.1\r\nContent-Length: 20\r\n\r\nconfig=";
         assert_eq!(is_complete(raw), Ok(false));
     }
 
     #[test]
     fn headers_and_the_whole_body_are_complete() {
-        let raw = b"POST /save HTTP/1.1\r\nContent-Length: 12\r\n\r\nconfig=ssid=";
+        let raw = b"POST /config HTTP/1.1\r\nContent-Length: 12\r\n\r\nconfig=ssid=";
         assert_eq!(is_complete(raw), Ok(true));
     }
 

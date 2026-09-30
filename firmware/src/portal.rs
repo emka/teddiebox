@@ -308,7 +308,7 @@ async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut
 
     match (request.method, request.path) {
         (http::Method::Get, "/") => show(socket, card).await,
-        (http::Method::Post, "/save") => {
+        (http::Method::Post, "/config") => {
             let body = &buffer[request.header_len..request.header_len + request.content_length];
             save(socket, card, body).await
         }
@@ -496,7 +496,7 @@ async fn show(socket: &mut TcpSocket<'_>, card: Option<&Mounted>) {
     }
 }
 
-/// `POST /save` — decode, validate, write, reset.
+/// `POST /config` — decode, validate, write, reset.
 ///
 /// [`examine`] decides what the submission means (tested on the host); this
 /// handles the card and the socket.

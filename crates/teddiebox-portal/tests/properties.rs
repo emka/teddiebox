@@ -61,7 +61,7 @@ fn request_with_body() -> impl Strategy<Value = Vec<u8>> {
     (0..=64usize, prop::sample::select(vec![-1i64, 0, 1])).prop_map(|(announced, off)| {
         let arrived = (announced as i64 + off).max(0) as usize;
         let mut out =
-            format!("POST /save HTTP/1.1\r\nContent-Length: {announced}\r\n\r\n").into_bytes();
+            format!("POST /config HTTP/1.1\r\nContent-Length: {announced}\r\n\r\n").into_bytes();
         out.resize(out.len() + arrived, b'x');
         out
     })

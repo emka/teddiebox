@@ -30,7 +30,7 @@ pub enum Submission {
     Write(Vec<u8, MAX_CONFIG>),
 }
 
-/// Decodes a `POST /save` body and says what it means.
+/// Decodes a `POST /config` body and says what it means.
 pub fn examine(body: &[u8]) -> Submission {
     // One arm per variant: `TooLong` is about the *file*, not the request,
     // so it gets its own message pointing at the file.

@@ -41,7 +41,7 @@ margin-bottom:.75rem}\
 const ERROR_OPEN: &str = "<p class=\"error\">";
 const ERROR_CLOSE: &str = "</p>";
 
-const FORM_OPEN: &str = "<form method=\"post\" action=\"/save\">\
+const FORM_OPEN: &str = "<form method=\"post\" action=\"/config\">\
 <textarea name=\"config\" spellcheck=\"false\" autocapitalize=\"off\">";
 
 const FORM_CLOSE: &str = "</textarea><button type=\"submit\">Save and restart</button>\
@@ -174,6 +174,18 @@ mod tests {
         let open = text.find("<textarea").unwrap();
         let close = text.find("</textarea>").unwrap();
         assert!(text[open..close].contains("ssid = HomeNet"));
+    }
+
+    #[test]
+    fn the_config_form_posts_to_config() {
+        // Given
+        let config = b"";
+
+        // When
+        let text = text_of(config, None);
+
+        // Then
+        assert!(text.contains("<form method=\"post\" action=\"/config\">"));
     }
 
     #[test]
