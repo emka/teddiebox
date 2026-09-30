@@ -1044,6 +1044,19 @@ mod tests {
         assert_eq!(parsed, Some(Command::SlapThreshold { threshold: 0x2D }));
     }
 
+    /// How long a click may last, tuned at the bench like the threshold.
+    #[test]
+    fn the_slap_time_limit_command_carries_its_limit() {
+        // Given
+        let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"slapt 0a\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::SlapTimeLimit { limit: 10 }));
+    }
+
     #[test]
     fn a_slap_command_without_a_threshold_does_not_fire() {
         // Given
