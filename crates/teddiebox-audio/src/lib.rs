@@ -330,6 +330,24 @@ mod tests {
         assert_eq!(dec.chapter(), 2, "and it is back in that chapter");
     }
 
+    /// The audio packets from `chapter` to the end, read with the container
+    /// reader alone and not through `TafDecoder`, so a test can compare the
+    /// decoder against them. The Opus headers are left out by their magic.
+    fn audio_packets(taf: &'static [u8], chapter: usize) -> Vec<Vec<u8>> {
+        let mut page = [0u8; PAGE_SIZE];
+        let mut reader = TafReader::open(SlicePages::new(taf).unwrap(), &mut page).unwrap();
+        reader.seek_to_chapter(chapter).unwrap();
+        let mut packet = [0u8; MAX_PACKET];
+        let mut packets = Vec::new();
+        while let Some(len) = reader.next_packet(&mut packet).unwrap() {
+            let packet = &packet[..len];
+            if !(packet.starts_with(b"OpusHead") || packet.starts_with(b"OpusTags")) {
+                packets.push(packet.to_vec());
+            }
+        }
+        packets
+    }
+
     fn chapters_decoder(buffers: &mut TafBuffers) -> TafDecoder<'_, SlicePages<'static>, Recorder> {
         open(CHAPTERS, Recorder::default(), buffers)
     }
@@ -407,14 +425,9 @@ mod tests {
 
     #[test]
     fn seeking_to_a_chapter_decodes_its_first_packet_not_a_later_one() {
-        // Given: chapter 1's first packet, read without `TafDecoder`
+        // Given
+        let expected = audio_packets(CHAPTERS, 1);
         let mut buffers = TafBuffers::new();
-        let mut page = [0u8; PAGE_SIZE];
-        let mut direct = TafReader::open(SlicePages::new(CHAPTERS).unwrap(), &mut page).unwrap();
-        direct.seek_to_chapter(1).unwrap();
-        let mut expected = [0u8; MAX_PACKET];
-        let expected_len = direct.next_packet(&mut expected).unwrap().unwrap();
-
         let mut dec = open(CHAPTERS, Recorder::default(), &mut buffers);
 
         // When
@@ -424,8 +437,7 @@ mod tests {
 
         // Then
         assert_eq!(
-            dec.decoder.packets[0],
-            &expected[..expected_len],
+            dec.decoder.packets[0], expected[0],
             "expected chapter 1's first packet, got a different one \
              (the positional header skip re-triggered after a seek)"
         );
@@ -433,17 +445,9 @@ mod tests {
 
     #[test]
     fn a_decode_error_consumes_the_packet_so_the_next_call_resumes_after_it() {
-        // Given: the second real audio packet, read without `TafDecoder`
+        // Given
+        let expected = audio_packets(FIXTURE, 0);
         let mut buffers = TafBuffers::new();
-        let mut page = [0u8; PAGE_SIZE];
-        let mut direct = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
-        let mut scratch = [0u8; MAX_PACKET];
-        direct.next_packet(&mut scratch).unwrap(); // OpusHead
-        direct.next_packet(&mut scratch).unwrap(); // OpusTags
-        direct.next_packet(&mut scratch).unwrap(); // first audio packet
-        let mut expected = [0u8; MAX_PACKET];
-        let expected_len = direct.next_packet(&mut expected).unwrap().unwrap();
-
         let mut dec = open(
             FIXTURE,
             Recorder {
@@ -462,8 +466,7 @@ mod tests {
         assert_eq!(failed, Err(AudioError::Decode));
         assert!(resumed.is_some());
         assert_eq!(
-            dec.decoder.packets[1],
-            &expected[..expected_len],
+            dec.decoder.packets[1], expected[1],
             "a decode error should consume the failed packet, so the next \
              call must resume at the following packet, not repeat it"
         );
@@ -473,29 +476,9 @@ mod tests {
     fn seeking_to_chapter_zero_decodes_its_first_real_audio_packet_not_opus_head() {
         // Given: chapter 0 begins in the same block as OpusHead and OpusTags,
         // so the headers must be recognised by their magic bytes, not by
-        // position. Its first real audio packet, read without `TafDecoder`.
+        // position
+        let expected = audio_packets(FIXTURE, 0);
         let mut buffers = TafBuffers::new();
-        let mut page = [0u8; PAGE_SIZE];
-        let mut direct = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
-        direct.seek_to_chapter(0).unwrap();
-        let mut expected = [0u8; MAX_PACKET];
-        let expected_len;
-        loop {
-            match direct.next_packet(&mut expected).unwrap() {
-                None => panic!("unexpected end of stream"),
-                Some(len)
-                    if expected[..len].starts_with(b"OpusHead")
-                        || expected[..len].starts_with(b"OpusTags") =>
-                {
-                    continue;
-                }
-                Some(len) => {
-                    expected_len = len;
-                    break;
-                }
-            }
-        }
-
         let mut dec = open(FIXTURE, Recorder::default(), &mut buffers);
 
         // When
@@ -505,8 +488,7 @@ mod tests {
 
         // Then
         assert_eq!(
-            dec.decoder.packets[0],
-            &expected[..expected_len],
+            dec.decoder.packets[0], expected[0],
             "chapter 0 begins at the same container block as OpusHead and OpusTags; \
              seeking there must decode the first real audio packet, identified by \
              magic (OpusHead/OpusTags), not by positional skip logic"
