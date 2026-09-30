@@ -52,48 +52,81 @@ mod tests {
 
     #[test]
     fn a_page_renders_as_its_number_and_a_newline() {
+        // Given
         let mut out = [0u8; MAX_POSITION];
+
+        // When
         let len = render(7, &mut out);
+
+        // Then
         assert_eq!(&out[..len], b"7\n");
     }
 
     #[test]
     fn what_was_rendered_parses_back() {
+        // Given
         let mut out = [0u8; MAX_POSITION];
         let len = render(31_200, &mut out);
         let text = core::str::from_utf8(&out[..len]).unwrap();
-        assert_eq!(parse(text), Position::Exact { page: 31_200 });
+
+        // When
+        let position = parse(text);
+
+        // Then
+        assert_eq!(position, Position::Exact { page: 31_200 });
     }
 
     /// Page numbers can have more than five digits.
     #[test]
     fn a_page_late_in_a_long_story_survives_the_trip() {
+        // Given
         let mut out = [0u8; MAX_POSITION];
         let len = render(4_000_000, &mut out);
         let text = core::str::from_utf8(&out[..len]).unwrap();
-        assert_eq!(parse(text), Position::Exact { page: 4_000_000 });
+
+        // When
+        let position = parse(text);
+
+        // Then
+        assert_eq!(position, Position::Exact { page: 4_000_000 });
     }
 
     /// Writing zero clears a finished story (the storage code cannot delete
     /// files), so it must mean the same as no file.
     #[test]
     fn zero_is_the_start_rather_than_a_page() {
-        assert_eq!(parse("0\n"), Position::Start);
+        // Given
+        let cleared = "0\n";
+
+        // When
+        let position = parse(cleared);
+
+        // Then
+        assert_eq!(position, Position::Start);
     }
 
     /// An interrupted write or a hand-edited file must fall back to the start.
     #[test]
     fn anything_unreadable_is_the_start() {
-        assert_eq!(parse(""), Position::Start);
-        assert_eq!(parse("\n"), Position::Start);
-        assert_eq!(parse("twelve\n"), Position::Start);
-        assert_eq!(parse("4 5\n"), Position::Start);
-        assert_eq!(parse("99999999999\n"), Position::Start, "beyond a u32");
+        // Given: empty, blank, words, two numbers, and a number beyond a u32
+        let unreadable = ["", "\n", "twelve\n", "4 5\n", "99999999999\n"];
+
+        // When
+        let positions = unreadable.map(parse);
+
+        // Then
+        assert_eq!(positions, [Position::Start; 5]);
     }
 
     #[test]
     fn trailing_whitespace_is_tolerated() {
-        assert_eq!(parse("9\r\n"), Position::Exact { page: 9 });
-        assert_eq!(parse("9"), Position::Exact { page: 9 });
+        // Given
+        let texts = ["9\r\n", "9"];
+
+        // When
+        let positions = texts.map(parse);
+
+        // Then
+        assert_eq!(positions, [Position::Exact { page: 9 }; 2]);
     }
 }
