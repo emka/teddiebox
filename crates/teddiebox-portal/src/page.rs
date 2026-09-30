@@ -275,12 +275,24 @@ mod tests {
         String::from_utf8(page_of(config, message.as_slice(), ca)).unwrap()
     }
 
+    /// What the page puts between the textarea's tags.
+    fn textarea(page: &str) -> &str {
+        let at = page.find("<textarea").unwrap();
+        let open = at + page[at..].find('>').unwrap() + 1;
+        let close = page.find("</textarea>").unwrap();
+        &page[open..close]
+    }
+
     #[test]
     fn the_file_appears_inside_the_textarea() {
-        let text = text_of(b"ssid = HomeNet\n", None, "missing");
-        let open = text.find("<textarea").unwrap();
-        let close = text.find("</textarea>").unwrap();
-        assert!(text[open..close].contains("ssid = HomeNet"));
+        // Given
+        let config = b"ssid = HomeNet\n";
+
+        // When
+        let text = text_of(config, None, "missing");
+
+        // Then
+        assert!(textarea(&text).contains("ssid = HomeNet"));
     }
 
     #[test]
@@ -530,43 +542,75 @@ mod tests {
 
     #[test]
     fn markup_in_the_file_is_escaped() {
-        let text = text_of(b"ssid = <b>&\"x\"", None, "missing");
+        // Given
+        let config = b"ssid = <b>&\"x\"";
+
+        // When
+        let text = text_of(config, None, "missing");
+
+        // Then
         assert!(text.contains("&lt;b&gt;&amp;&quot;x&quot;"));
         assert!(!text.contains("<b>"));
     }
 
     #[test]
     fn a_missing_file_renders_an_empty_textarea() {
-        let text = text_of(b"", None, "missing");
-        assert!(text.contains("<textarea"));
-        let at = text.find("<textarea").unwrap();
-        let open = at + text[at..].find('>').unwrap();
-        assert!(text[open + 1..].starts_with("</textarea>"));
+        // Given
+        let config = b"";
+
+        // When
+        let text = text_of(config, None, "missing");
+
+        // Then
+        assert_eq!(textarea(&text), "");
     }
 
     #[test]
     fn an_error_is_shown_when_there_is_one() {
-        assert!(
-            text_of(b"", Some(Message::Error("ssid is missing")), "missing")
-                .contains("ssid is missing")
-        );
+        // Given
+        let message = Some(Message::Error("ssid is missing"));
+
+        // When
+        let text = text_of(b"", message, "missing");
+
+        // Then
+        assert!(text.contains("ssid is missing"));
     }
 
     #[test]
     fn no_error_text_appears_when_there_is_none() {
-        assert!(!text_of(b"ssid = x\n", None, "missing").contains("class=\"error\""));
+        // Given
+        let message = None;
+
+        // When
+        let text = text_of(b"ssid = x\n", message, "missing");
+
+        // Then
+        assert!(!text.contains("class=\"error\""));
     }
 
     #[test]
     fn markup_in_the_error_is_escaped_too() {
-        let text = text_of(b"", Some(Message::Error("<script>x</script>")), "missing");
+        // Given
+        let message = Some(Message::Error("<script>x</script>"));
+
+        // When
+        let text = text_of(b"", message, "missing");
+
+        // Then
         assert!(text.contains("&lt;script&gt;x&lt;/script&gt;"));
         assert!(!text.contains("<script"));
     }
 
     #[test]
     fn the_page_loads_nothing_from_the_network() {
-        let text = text_of(b"ssid = x\n", None, "missing").to_string();
+        // Given
+        let config = b"ssid = x\n";
+
+        // When
+        let text = text_of(config, None, "missing").to_string();
+
+        // Then
         for forbidden in ["http://", "https://", "<script", "<link", "<img"] {
             assert!(!text.contains(forbidden), "page reaches for {forbidden}");
         }
@@ -576,21 +620,29 @@ mod tests {
     /// the phone would wait for missing bytes or read too far.
     #[test]
     fn the_promised_length_is_the_length_that_arrives() {
-        for (config, message) in [
+        // Given: files and messages of every kind, with each CA status
+        let pages = [
             (&b""[..], None),
             (&b"ssid = x\n"[..], None),
             (&b"pass = a&b<c>d\"e\n"[..], Some(Message::Error("a & b"))),
             (&b"ssid = x\n"[..], Some(Message::Notice("a & b"))),
             (&[b'"'; 1024][..], Some(Message::Error("<<<"))),
-        ] {
-            assert_eq!(
-                length(config, message.as_slice(), "missing"),
-                page_of(config, message.as_slice(), "missing").len()
-            );
-            assert_eq!(
-                length(config, message.as_slice(), "787 bytes"),
-                page_of(config, message.as_slice(), "787 bytes").len()
-            );
+        ];
+
+        // When
+        let mut lengths = StdVec::new();
+        for (config, message) in pages {
+            for ca in ["missing", "787 bytes"] {
+                lengths.push((
+                    length(config, message.as_slice(), ca),
+                    page_of(config, message.as_slice(), ca).len(),
+                ));
+            }
+        }
+
+        // Then: promised and delivered agree for every page
+        for (i, (promised, delivered)) in lengths.into_iter().enumerate() {
+            assert_eq!(promised, delivered, "page {i}");
         }
     }
 
@@ -598,52 +650,68 @@ mod tests {
     /// save such a file, so the page must be able to show it.
     #[test]
     fn the_largest_file_of_the_worst_bytes_is_shown_in_full() {
+        // Given
         let worst = [b'"'; crate::MAX_CONFIG];
+
+        // When
         let text = text_of(&worst, None, "missing");
-        let open = text.find("<textarea").unwrap();
-        let open = open + text[open..].find('>').unwrap() + 1;
-        let close = text.find("</textarea>").unwrap();
-        assert_eq!(&text[open..close], "&quot;".repeat(crate::MAX_CONFIG));
+
+        // Then
+        assert_eq!(textarea(&text), "&quot;".repeat(crate::MAX_CONFIG));
     }
 
     /// An escape that does not fit is left for the next call, not cut in
     /// half. Six bytes of room fit one `&quot;`; five fit none.
     #[test]
     fn an_escape_is_never_split_across_a_chunk() {
-        let mut out = [0u8; 6];
-        assert_eq!(escape_chunk(b"\"\"", &mut out), (1, 6));
-        assert_eq!(&out[..6], b"&quot;");
+        // Given: room for exactly one escape, and room for one byte less
+        let (mut room, mut tight) = ([0u8; 6], [0u8; 5]);
 
-        let mut tight = [0u8; 5];
-        assert_eq!(escape_chunk(b"\"", &mut tight), (0, 0));
+        // When
+        let fitted = escape_chunk(b"\"\"", &mut room);
+        let refused = escape_chunk(b"\"", &mut tight);
+
+        // Then
+        assert_eq!(fitted, (1, 6));
+        assert_eq!(&room[..6], b"&quot;");
+        assert_eq!(refused, (0, 0));
     }
 
     #[test]
     fn a_plain_byte_fills_the_last_place_in_a_chunk() {
+        // Given
         let mut out = [0u8; 3];
-        assert_eq!(escape_chunk(b"abcd", &mut out), (3, 3));
+
+        // When
+        let written = escape_chunk(b"abcd", &mut out);
+
+        // Then
+        assert_eq!(written, (3, 3));
         assert_eq!(&out[..], b"abc");
     }
 
     #[test]
     fn what_escaping_will_cost_is_counted_before_it_is_done() {
-        assert_eq!(escaped_len(b"a&b"), 7);
-        assert_eq!(escaped_len(b"\"\""), 12);
-        assert_eq!(escaped_len(b"plain"), 5);
+        // Given
+        let files: [&[u8]; 3] = [b"a&b", b"\"\"", b"plain"];
+
+        // When
+        let lengths = files.map(escaped_len);
+
+        // Then
+        assert_eq!(lengths, [7, 12, 5]);
     }
 
     /// A password with `#` and `&` must survive the page and come back
     /// unchanged.
     #[test]
     fn a_password_with_hash_and_ampersand_survives_the_round_trip() {
+        // Given: the file as the page shows it
         let original = b"ssid = Home\npassword = a#b&c\nserver = box.lan:443\n";
         let text = text_of(original, None, "missing");
-        let at = text.find("<textarea").unwrap();
-        let open = at + text[at..].find('>').unwrap() + 1;
-        let close = text.find("</textarea>").unwrap();
-        let shown = &text[open..close];
+        let shown = textarea(&text);
 
-        // What a browser sends back for that textarea content.
+        // When: posted back as a browser would, then decoded and unescaped
         let mut posted = heapless::Vec::<u8, 512>::new();
         posted.extend_from_slice(b"config=").unwrap();
         for c in shown.bytes() {
@@ -658,7 +726,6 @@ mod tests {
                 }
             }
         }
-
         let decoded: heapless::Vec<u8, 512> = form::field(&posted, "config").unwrap();
         let unescaped = decoded
             .iter()
@@ -668,6 +735,8 @@ mod tests {
             .replace("&gt;", ">")
             .replace("&quot;", "\"")
             .replace("&amp;", "&");
+
+        // Then
         assert_eq!(unescaped.as_bytes(), original);
     }
 }
