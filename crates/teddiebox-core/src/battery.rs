@@ -392,9 +392,9 @@ mod tests {
     }
 
     /// The ADC has returned impossible readings (9453 mV from three NiMH
-    /// cells). One such reading must not change the level or turn the box
-    /// off. Hysteresis does not help here: it protects a *threshold*, this
-    /// protects against a bad *reading*.
+    /// cells), and one such reading must not change the level. Hysteresis
+    /// does not help here: it protects a *threshold*, this protects against a
+    /// bad *reading*.
     #[test]
     fn one_implausible_reading_does_not_move_the_level() {
         // Given
@@ -408,10 +408,20 @@ mod tests {
         // Then
         assert_eq!(reported, None, "one absurd reading changes nothing");
         assert_eq!(b.level(), settled);
-        assert!(
-            !b.must_shut_down(),
-            "and it must not arm the shutdown either"
-        );
+    }
+
+    /// Nor may one impossible reading turn the box off.
+    #[test]
+    fn one_implausible_reading_does_not_arm_the_shutdown() {
+        // Given
+        let mut b = model();
+        settle(&mut b, 3_800, false);
+
+        // When
+        b.update(10, false);
+
+        // Then
+        assert!(!b.must_shut_down());
     }
 
     /// A pack already at Critical would also place a bogus 2500 mV reading in
