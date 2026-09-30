@@ -87,13 +87,6 @@ impl Playback {
         }
     }
 
-    pub fn current_tag(&self) -> Option<TagUid> {
-        match self.state {
-            State::Checking(t) | State::Fetching(t) | State::Playing(t) => Some(t),
-            _ => None,
-        }
-    }
-
     /// Records how far playback has advanced, so lifting the figure can save it.
     pub fn note_position(&mut self, pos: Position) {
         self.position = pos;
