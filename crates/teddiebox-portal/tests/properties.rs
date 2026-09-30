@@ -164,7 +164,13 @@ proptest! {
 
     #[test]
     fn any_request_parses_or_is_refused_within_what_arrived(raw in request_like()) {
-        if let Ok(request) = http::parse(&raw) {
+        // Given: anything shaped roughly like a request
+
+        // When
+        let parsed = http::parse(&raw);
+
+        // Then: refused, or read within what arrived
+        if let Ok(request) = parsed {
             prop_assert!(request.header_len <= raw.len());
             prop_assert!(raw[..request.header_len].ends_with(b"\r\n\r\n"));
             prop_assert!(request.content_length <= MAX_BODY);
@@ -175,7 +181,12 @@ proptest! {
     fn a_request_is_complete_once_its_whole_body_has_arrived(
         raw in prop_oneof![request_like(), request_with_body()],
     ) {
+        // Given: a request, whole or not
+
+        // When
         let complete = http::is_complete(&raw);
+
+        // Then: complete exactly when the whole announced body is there
         match http::parse(&raw) {
             Ok(request) => {
                 let arrived = raw.len() - request.header_len;
@@ -191,8 +202,14 @@ proptest! {
         path in text(PATH_CHARS, 1..=40).prop_map(|p| format!("/{p}")),
         length in prop_oneof![Just(MAX_BODY + 1), MAX_BODY + 1..=2 * MAX_BODY],
     ) {
+        // Given
         let raw = format!("POST {path} HTTP/1.1\r\nContent-Length: {length}\r\n\r\n");
-        prop_assert_eq!(http::parse(raw.as_bytes()), Err(http::RequestError::TooLarge));
+
+        // When
+        let parsed = http::parse(raw.as_bytes());
+
+        // Then
+        prop_assert_eq!(parsed, Err(http::RequestError::TooLarge));
     }
 
     #[test]
@@ -201,9 +218,14 @@ proptest! {
         path in text(PATH_CHARS, 1..=40).prop_map(|p| format!("/{p}")),
         length in prop_oneof![Just(MAX_BODY), 0..=MAX_BODY],
     ) {
+        // Given
         let method = if post { "POST" } else { "GET" };
         let raw = format!("{method} {path} HTTP/1.1\r\nHost: 192.168.4.1\r\nContent-Length: {length}\r\n\r\n");
+
+        // When
         let request = http::parse(raw.as_bytes()).unwrap();
+
+        // Then
         prop_assert_eq!(request.method, if post { http::Method::Post } else { http::Method::Get });
         prop_assert_eq!(request.path, path.as_str());
         prop_assert_eq!(request.content_length, length);
@@ -212,7 +234,13 @@ proptest! {
 
     #[test]
     fn any_datagram_parses_or_is_ignored(raw in datagram_like()) {
-        let _ = dhcp::parse(&raw);
+        // Given: anything shaped roughly like a DHCP datagram
+
+        // When
+        let parsed = dhcp::parse(&raw);
+
+        // Then: it returned, read or ignored, rather than panicking
+        let _ = parsed;
     }
 
     #[test]
@@ -224,8 +252,13 @@ proptest! {
         before in prop::collection::vec(dhcp_option(), 0..=4),
         after in prop::collection::vec(dhcp_option(), 0..=4),
     ) {
+        // Given
         let raw = client_message(xid, flags, chaddr, discover, &before, &after);
+
+        // When
         let incoming = dhcp::parse(&raw).unwrap();
+
+        // Then
         prop_assert_eq!(incoming.kind, if discover { dhcp::Kind::Discover } else { dhcp::Kind::Request });
         prop_assert_eq!(incoming.xid, xid);
         prop_assert_eq!(incoming.chaddr, chaddr);
@@ -239,8 +272,13 @@ proptest! {
         chaddr in any::<[u8; 6]>(),
         discover in any::<bool>(),
     ) {
+        // Given
         let incoming = dhcp::parse(&client_message(xid, flags, chaddr, discover, &[], &[])).unwrap();
+
+        // When
         let reply = dhcp::reply(&incoming, if discover { dhcp::Reply::Offer } else { dhcp::Reply::Ack });
+
+        // Then
         prop_assert_eq!(reply[OP], BOOTREPLY);
         prop_assert_eq!(&reply[XID], &xid[..]);
         prop_assert_eq!(&reply[FLAGS], &flags[..]);
@@ -254,16 +292,27 @@ proptest! {
         upper in any::<bool>(),
         first in any::<bool>(),
     ) {
+        // Given: our field and a look-alike, in either order
         let mine = format!("config={}", form_encode(&value, upper));
         let theirs = format!("configuration={}", form_encode(&other, upper));
         let body = if first { format!("{mine}&{theirs}") } else { format!("{theirs}&{mine}") };
+
+        // When
         let decoded: heapless::Vec<u8, 64> = form::field(body.as_bytes(), "config").unwrap();
+
+        // Then
         prop_assert_eq!(&decoded[..], &value[..]);
     }
 
     #[test]
     fn any_form_body_decodes_or_is_refused(body in prop::collection::vec(any::<u8>(), 0..=128)) {
-        let _: Result<heapless::Vec<u8, 64>, _> = form::field(&body, "config");
+        // Given: any bytes as a form body
+
+        // When
+        let decoded: Result<heapless::Vec<u8, 64>, _> = form::field(&body, "config");
+
+        // Then: it returned, decoded or refused, rather than panicking
+        let _ = decoded;
     }
 
     #[test]
@@ -273,7 +322,13 @@ proptest! {
             text("abc= \n#_:/.1\r", 0..=MAX_CONFIG).prop_map(|t| format!("config={}", form_encode(t.as_bytes(), false)).into_bytes()),
         ],
     ) {
-        if let Submission::Write(bytes) = examine(&body) {
+        // Given: any body, or a form of config-like text
+
+        // When
+        let submission = examine(&body);
+
+        // Then: whatever is cleared for the card is a config the box parses
+        if let Submission::Write(bytes) = submission {
             let text = core::str::from_utf8(&bytes);
             prop_assert!(text.is_ok(), "wrote bytes that are not text");
             prop_assert!(teddiebox_config::Config::parse(text.unwrap()).is_ok(), "wrote a config that does not parse");
