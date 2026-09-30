@@ -208,9 +208,11 @@ mod tests {
 
     /// A second call at shutdown must not write the same position again.
     #[test]
-    fn taking_an_empty_slot_hands_back_nothing() {
+    fn a_second_take_hands_back_nothing() {
         // Given
         let mut places = PendingPlace::new();
+        places.remember(LEO, 284);
+        assert_eq!(places.take(), Some((LEO, 284)));
 
         // When
         let taken = places.take();
