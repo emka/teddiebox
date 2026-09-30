@@ -137,7 +137,13 @@ proptest! {
 
     #[test]
     fn any_manifest_text_parses_or_is_refused(text in manifest_like()) {
-        let _ = Manifest::parse_read(text.as_bytes(), MAX_MANIFEST);
+        // Given: any manifest-shaped text
+
+        // When
+        let parsed = Manifest::parse_read(text.as_bytes(), MAX_MANIFEST);
+
+        // Then: it returned, with a manifest or an error, rather than panicking
+        let _ = parsed;
     }
 
     #[test]
@@ -146,9 +152,15 @@ proptest! {
         at in any::<prop::sample::Index>(),
         junk in prop::sample::select(vec![0xFFu8, 0xC0, 0x80]),
     ) {
+        // Given: a written manifest with a byte that is not text inside it
         let mut raw = render(&fields, &[0, 1, 2, 3], false).into_bytes();
         raw.insert(at.index(raw.len() + 1), junk);
-        prop_assert_eq!(Manifest::parse_read(&raw, MAX_MANIFEST), Err(OtaError::NotText));
+
+        // When
+        let parsed = Manifest::parse_read(&raw, MAX_MANIFEST);
+
+        // Then
+        prop_assert_eq!(parsed, Err(OtaError::NotText));
     }
 
     #[test]
@@ -157,8 +169,13 @@ proptest! {
         order in Just(vec![0usize, 1, 2, 3]).prop_shuffle(),
         upper_hex in any::<bool>(),
     ) {
+        // Given: the fields written in any order and either case of hex
         let text = render(&fields, &order, upper_hex);
+
+        // When
         let parsed = Manifest::parse_read(text.as_bytes(), MAX_MANIFEST).unwrap();
+
+        // Then
         prop_assert_eq!(parsed.version.as_str(), fields.version.as_str());
         prop_assert_eq!(parsed.sha256, fields.sha256);
         prop_assert_eq!(parsed.length, fields.length);
@@ -170,7 +187,13 @@ proptest! {
         manifest in manifest_path(),
         image in text(ANY_URL_CHARS, 0..=40),
     ) {
-        if let Ok(path) = resolve_image(&manifest, &image) {
+        // Given: any manifest path, and any image name a server could send
+
+        // When
+        let resolved = resolve_image(&manifest, &image);
+
+        // Then: refused, or safe
+        if let Ok(path) = resolved {
             prop_assert!(path.starts_with('/'), "not absolute: {path:?}");
             prop_assert!(path.bytes().all(is_path_byte), "unsafe byte in {path:?}");
             prop_assert!(!path.split('/').any(|s| s == ".."), "climbs out: {path:?}");
@@ -184,8 +207,14 @@ proptest! {
         host in prop_oneof![text(HOST_CHARS, 1..=20), text(ANY_URL_CHARS, 0..=20)],
         path in prop_oneof![manifest_path(), text(ANY_URL_CHARS, 0..=40)],
     ) {
+        // Given: any scheme, host and path put together
         let url = format!("{scheme}{host}{path}");
-        if let Ok(parts) = split(&url) {
+
+        // When
+        let split_url = split(&url);
+
+        // Then: refused, or split with the host exactly as the URL named it
+        if let Ok(parts) = split_url {
             let named = url["https://".len()..].split('/').next().unwrap();
             let expected = if named.contains(':') { named.to_string() } else { format!("{named}:443") };
             prop_assert_eq!(parts.host.as_str(), expected.as_str());
@@ -197,7 +226,13 @@ proptest! {
 
     #[test]
     fn any_image_head_yields_a_version_or_is_refused(head in image_head()) {
-        if let Ok(version) = image_version(&head) {
+        // Given: any image head
+
+        // When
+        let read = image_version(&head);
+
+        // Then: refused, or a version that fits its field
+        if let Ok(version) = read {
             prop_assert!(version.len() <= VERSION_FIELD);
             prop_assert!(!version.contains('\0'));
         }
