@@ -448,6 +448,46 @@ fn a_request_too_large_for_the_fifo_is_refused_before_any_bus_traffic() {
     check(r);
 }
 
+/// An inventory reply is flags, DSFID and eight UID bytes. Anything shorter
+/// would have the UID read from bytes the tag never sent.
+#[test]
+fn a_short_inventory_reply_is_rejected_rather_than_read_past() {
+    // Given: flags, DSFID and three of the eight UID bytes
+    let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 4, &[0x00, 0x00, 0x08, 0x07, 0x06]);
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&answered(0)),
+        PinMock::new(&irq_exchange()),
+    );
+
+    // When
+    let uid = r.inventory();
+
+    // Then
+    assert_eq!(uid, Err(Error::BadResponse));
+    finish(r);
+}
+
+/// A random number reply is flags and two bytes. With one, the mask would be
+/// built from a byte the tag never sent, and the password refused.
+#[test]
+fn a_short_random_number_reply_is_rejected_rather_than_read_past() {
+    // Given: flags and one of the two random bytes
+    let spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 1, &[0x00, 0xCD]);
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&answered(0)),
+        PinMock::new(&irq_exchange()),
+    );
+
+    // When
+    let random = r.get_random_number();
+
+    // Then
+    assert_eq!(random, Err(Error::BadResponse));
+    finish(r);
+}
+
 #[test]
 fn an_empty_plate_reports_no_tag_without_reading_the_fifo() {
     // Given
