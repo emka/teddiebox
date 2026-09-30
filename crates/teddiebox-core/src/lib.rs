@@ -609,18 +609,18 @@ mod tests {
     fn a_tap_on_the_larger_ear_raises_the_volume() {
         // Given
         let mut c = core();
-        let before = c.volume();
+        assert_eq!(c.volume(), Volume(2));
 
         // When
         let actions = tap(&mut c, Ear::Larger, 0);
 
         // Then
-        assert!(c.volume() > before);
+        assert_eq!(c.volume(), Volume(3));
         assert!(contains(
             &actions,
             Action::SetVolume {
-                step: c.volume(),
-                db: db_for(Output::Speaker, c.volume())
+                step: Volume(3),
+                db: -29
             }
         ));
     }
@@ -645,18 +645,18 @@ mod tests {
         // Given
         let mut c = core();
         c.note_ears_skip(false);
-        let before = c.volume();
+        assert_eq!(c.volume(), Volume(2));
 
         // When
         let actions = c.handle(Event::EarDown(Ear::Larger, 0), &Index);
 
         // Then
-        assert!(c.volume() > before);
+        assert_eq!(c.volume(), Volume(3));
         assert!(contains(
             &actions,
             Action::SetVolume {
-                step: c.volume(),
-                db: db_for(Output::Speaker, c.volume())
+                step: Volume(3),
+                db: -29
             }
         ));
     }
@@ -767,19 +767,19 @@ mod tests {
     fn a_release_with_no_hold_before_it_is_a_tap_however_long_it_took() {
         // Given
         let mut c = core();
-        let before = c.volume();
+        assert_eq!(c.volume(), Volume(2));
         c.handle(Event::EarDown(Ear::Larger, 0), &Index);
 
         // When
         let actions = c.handle(Event::EarUp(Ear::Larger, 10_000), &Index);
 
         // Then
-        assert!(c.volume() > before);
+        assert_eq!(c.volume(), Volume(3));
         assert!(contains(
             &actions,
             Action::SetVolume {
-                step: c.volume(),
-                db: db_for(Output::Speaker, c.volume())
+                step: Volume(3),
+                db: -29
             }
         ));
         assert!(!contains(&actions, Action::NextTrack));
@@ -1322,7 +1322,7 @@ mod tests {
     fn plugging_in_asks_for_the_headphone_ladders_level() {
         // Given
         let mut c = core();
-        let step = c.volume();
+        assert_eq!(c.volume(), Volume(2));
 
         // When
         let actions = c.handle(Event::Headphones(true), &Index);
@@ -1331,8 +1331,8 @@ mod tests {
         assert!(contains(
             &actions,
             Action::SetVolume {
-                step,
-                db: db_for(Output::Headphones, step)
+                step: Volume(2),
+                db: -48
             }
         ));
     }
@@ -1342,13 +1342,12 @@ mod tests {
     /// headphones.
     #[test]
     fn each_output_remembers_its_own_step_across_a_plug_and_an_unplug() {
-        // Given: the headphones turned down one step below the speaker
+        // Given: the speaker on step 2, the headphones turned down to step 1
         let mut c = core();
-        let speaker_step = c.volume();
+        assert_eq!(c.volume(), Volume(2));
         c.handle(Event::Headphones(true), &Index);
         tap(&mut c, Ear::Smaller, 0);
-        let headphone_step = c.volume();
-        assert!(headphone_step < speaker_step);
+        assert_eq!(c.volume(), Volume(1));
 
         // When
         let back = c.handle(Event::Headphones(false), &Index);
@@ -1357,23 +1356,20 @@ mod tests {
         let headphones_again = c.volume();
 
         // Then
-        assert_eq!(speaker_again, speaker_step, "the speaker kept its own step");
+        assert_eq!(speaker_again, Volume(2), "the speaker kept its own step");
         assert!(contains(
             &back,
             Action::SetVolume {
-                step: speaker_step,
-                db: db_for(Output::Speaker, speaker_step)
+                step: Volume(2),
+                db: -36
             }
         ));
-        assert_eq!(
-            headphones_again, headphone_step,
-            "and so did the headphones"
-        );
+        assert_eq!(headphones_again, Volume(1), "and so did the headphones");
         assert!(contains(
             &again,
             Action::SetVolume {
-                step: headphone_step,
-                db: db_for(Output::Headphones, headphone_step)
+                step: Volume(1),
+                db: -55
             }
         ));
     }
@@ -1392,8 +1388,8 @@ mod tests {
         assert!(contains(
             &actions,
             Action::SetVolume {
-                step: c.volume(),
-                db: db_for(Output::Headphones, c.volume())
+                step: Volume(3),
+                db: -41
             }
         ));
     }
