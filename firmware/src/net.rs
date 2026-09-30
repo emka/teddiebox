@@ -47,20 +47,24 @@ pub const SETUP_SSID: &str = "teddiebox-setup";
 /// `CONFIG.TXT`.
 pub const SETUP_PASSWORD: &str = "teddiebox";
 
-/// Socket slots the stack is given.
+/// Socket slots a station (client) is given, the default for [`Radio`].
 ///
-/// As a station (client), `embassy-net` uses two sockets itself: one for DNS
-/// (with the `dns` feature) and one for DHCP (with `Config::dhcpv4`). That
-/// leaves one for the download's TCP connection, which is enough: the box
-/// talks to one server at a time.
-///
-/// The setup portal uses a static IP and needs two: a TCP listener for HTTP
-/// and a UDP socket for its DHCP *server*.
-///
-/// The two modes never run at once, so this is the larger of the two, not
-/// the sum. Measured: with 3 everything works; with 2, the station panics in
+/// `embassy-net` uses two sockets itself: one for DNS (with the `dns`
+/// feature) and one for DHCP (with `Config::dhcpv4`). That leaves one for the
+/// download's TCP connection, which is enough: the box talks to one server at
+/// a time. Measured: with 3 everything works; with 2, the station panics in
 /// smoltcp (`socket_set.rs:83`, full `SocketSet`) when TLS opens its socket.
-const SOCKETS: usize = 3;
+///
+/// The slots live in the `Radio`, which a normal boot keeps in `.bss`, so
+/// every slot here is taken from the stack region.
+pub const STATION_SOCKETS: usize = 3;
+
+/// Socket slots the setup portal is given.
+///
+/// The portal uses a static IP and opens a TCP listener for HTTP and a UDP
+/// socket for its DHCP *server*. Its `Radio` lives in the decode scratch, not
+/// in `.bss`, so slots here cost the stack region nothing.
+pub const PORTAL_SOCKETS: usize = 3;
 
 /// Why the radio could not be brought up.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +88,10 @@ impl From<WifiError> for Error {
 ///
 /// Kept for the whole time the firmware runs. It only holds the socket
 /// memory; power and connection belong to a [`Session`].
-pub struct Radio<'d> {
+///
+/// `SOCKETS` is how many socket slots the stack gets; see
+/// [`STATION_SOCKETS`].
+pub struct Radio<'d, const SOCKETS: usize = STATION_SOCKETS> {
     wifi: WIFI<'d>,
     resources: StackResources<SOCKETS>,
     /// The access point the last join reached, so the next one can go
@@ -148,7 +155,7 @@ pub struct Link<'d> {
     runner: Runner<'d, Interface>,
 }
 
-impl<'d> Radio<'d> {
+impl<'d, const SOCKETS: usize> Radio<'d, SOCKETS> {
     /// Claims the Wi-Fi peripheral without powering it.
     pub const fn new(wifi: WIFI<'d>) -> Self {
         Self {

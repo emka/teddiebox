@@ -132,7 +132,7 @@ pub async fn run(
 
     // Created here rather than passed in, so the radio's `StackResources`
     // (3,472 bytes) is part of this future and ends up in the scratch.
-    let mut radio = net::Radio::new(wifi);
+    let mut radio = net::Radio::<{ net::PORTAL_SOCKETS }>::new(wifi);
     let (session, mut link) = match radio.serve(seed, &setup_password) {
         Ok(pair) => pair,
         Err(trouble) => {
