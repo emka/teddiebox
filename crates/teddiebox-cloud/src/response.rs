@@ -303,6 +303,20 @@ Content-Length: banana\r\n\r\nbody";
         assert_eq!(head.content_length, Some(4));
     }
 
+    /// The first usable value wins, as for `ETag`: a later copy does not
+    /// change how much of the body is read.
+    #[test]
+    fn a_repeated_content_length_keeps_the_first_value() {
+        // Given
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 9\r\n\r\nbody";
+
+        // When
+        let (head, _) = parse_head(raw).unwrap();
+
+        // Then
+        assert_eq!(head.content_length, Some(4));
+    }
+
     #[test]
     fn a_response_without_a_status_line_is_malformed() {
         // Given
