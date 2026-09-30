@@ -355,6 +355,37 @@ mod tests {
         assert_eq!(parsed, Err(IdentityError::TooLong));
     }
 
+    /// The limit is the buffers' size, so a body that fills one exactly is
+    /// still held.
+    #[test]
+    fn bodies_that_fill_the_buffers_exactly_are_accepted() {
+        // Given
+        let mut image = [0u8; HEADER + 2 * MAX_BODY];
+        let len = render(&[0x30; MAX_BODY], &[0x02; MAX_BODY], &mut image).unwrap();
+
+        // When
+        let parsed = parse_header(&image, len);
+
+        // Then
+        assert_eq!(
+            parsed.map(|header| (header.certificate_len, header.key_len)),
+            Ok((MAX_BODY, MAX_BODY))
+        );
+    }
+
+    #[test]
+    fn a_key_longer_than_the_buffers_is_refused() {
+        // Given
+        let (mut image, len) = rendered();
+        image[8..10].copy_from_slice(&((MAX_BODY + 1) as u16).to_le_bytes());
+
+        // When
+        let parsed = parse_header(&image[..len], len);
+
+        // Then
+        assert_eq!(parsed, Err(IdentityError::TooLong));
+    }
+
     /// Stops a body read from running past the end of the partition.
     #[test]
     fn an_image_claiming_more_than_it_has_is_refused() {
