@@ -20,6 +20,15 @@ fn check(reader: Trf7962a<SpiMock<u8>, NoopDelay, PinMock>) {
     irq.done();
 }
 
+/// Checks that a reader with a clock used exactly the scripted bus traffic,
+/// waits and interrupt polls.
+fn finish(reader: Trf7962a<SpiMock<u8>, CheckedDelay, PinMock>) {
+    let (mut spi, mut delay, mut irq) = reader.release();
+    spi.done();
+    delay.done();
+    irq.done();
+}
+
 /// One SPI transaction carrying `bytes`.
 fn spi_write(bytes: Vec<u8>) -> Vec<Transaction<u8>> {
     vec![
@@ -37,13 +46,19 @@ fn spi_write(bytes: Vec<u8>) -> Vec<Transaction<u8>> {
 /// Literal bytes from the datasheet's procedure.
 #[test]
 fn the_interrupt_status_is_read_with_a_dummy_byte() {
-    let mut trf = reader(&[
+    // Given
+    let mut r = reader(&[
         Transaction::transaction_start(),
         Transaction::transfer(vec![0x6C, 0x00, 0x00], vec![0x00, 0x80, 0x00]),
         Transaction::transaction_end(),
     ]);
-    assert_eq!(trf.read_irq_status(), Ok(0x80));
-    check(trf);
+
+    // When
+    let status = r.read_irq_status();
+
+    // Then
+    assert_eq!(status, Ok(0x80));
+    check(r);
 }
 
 /// The interrupt status read: continuous-address bit set, and a dummy byte
@@ -171,23 +186,39 @@ const INVENTORY: [u8; 3] = [0x26, 0x01, 0x00];
 
 #[test]
 fn a_register_write_sends_the_bare_address() {
+    // Given
     let mut r = reader(&spi_write(vec![0x01, 0x02]));
+
+    // When
     r.write_register(regs::ISO_CONTROL, 0x02).unwrap();
+
+    // Then: the reader did exactly what was scripted
     check(r);
 }
 
 #[test]
 fn a_register_read_sets_the_read_bit() {
+    // Given
     // Address 0x01 with the read bit set, then a second byte for the value.
     let mut r = reader(&spi_read(0x41, 0x02));
-    assert_eq!(r.read_register(regs::ISO_CONTROL).unwrap(), 0x02);
+
+    // When
+    let result = r.read_register(regs::ISO_CONTROL).unwrap();
+
+    // Then
+    assert_eq!(result, 0x02);
     check(r);
 }
 
 #[test]
 fn a_direct_command_sets_the_command_bit() {
+    // Given
     let mut r = reader(&spi_write(vec![0x83]));
+
+    // When
     r.send_command(regs::cmd::SOFT_INIT).unwrap();
+
+    // Then: the reader did exactly what was scripted
     check(r);
 }
 
@@ -197,6 +228,7 @@ fn a_direct_command_sets_the_command_bit() {
 /// and be checked against the datasheet.
 #[test]
 fn initialisation_puts_exactly_this_sequence_on_the_bus() {
+    // Given
     let mut spi = Vec::new();
     spi.extend(spi_write(vec![0x83])); // command: soft init
     spi.extend(spi_write(vec![0x80])); // command: idle
@@ -220,38 +252,37 @@ fn initialisation_puts_exactly_this_sequence_on_the_bus() {
         CheckedDelay::new(&delay),
         PinMock::new(&[]),
     );
+
+    // When
     r.init_iso15693().unwrap();
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // Then: the reader did exactly what was scripted
+    finish(r);
 }
 
 #[test]
 fn inventory_waits_for_the_reader_before_reading_the_fifo() {
-    // Response: flags, DSFID, then the UID least-significant byte first.
-    let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
-    // Three bytes: the 12-bit length field splits as 0x00 / 0x30.
-    let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 9, &response);
-
-    // Two polls are low before the tag's answer arrives; the transmit's
+    // Given: the response is flags, DSFID, then the UID least-significant
+    // byte first; three request bytes split the 12-bit length field as 0x00 /
+    // 0x30. Two polls are low before the tag's answer arrives; the transmit's
     // interrupt is already there at the first poll.
+    let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+    let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 9, &response);
     let mut irq = irq_after(0);
     irq.extend(irq_after(2));
-
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
         CheckedDelay::new(&answered(2)),
         PinMock::new(&irq),
     );
 
+    // When
     let uid = r.inventory().unwrap().expect("a tag answered");
-    // Reported most-significant byte first, the order printed on a figure.
+
+    // Then: reported most-significant byte first, the order printed on a
+    // figure
     assert_eq!(uid, [1, 2, 3, 4, 5, 6, 7, 8]);
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 /// ISO 15693-3 §9.1: after a tag answers, the reader must wait t2 before the
@@ -262,6 +293,7 @@ fn inventory_waits_for_the_reader_before_reading_the_fifo() {
 /// after it got no answer 6 times out of 12.
 #[test]
 fn the_air_is_left_quiet_for_t2_after_a_tag_has_answered() {
+    // Given
     let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
     let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 9, &response);
 
@@ -279,11 +311,13 @@ fn the_air_is_left_quiet_for_t2_after_a_tag_has_answered() {
     );
 
     let mut out = [0u8; MAX_RESPONSE];
-    assert_eq!(r.transceive(&INVENTORY, &mut out), Ok(10));
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // When
+    let result = r.transceive(&INVENTORY, &mut out);
+
+    // Then
+    assert_eq!(result, Ok(10));
+    finish(r);
 }
 
 /// A tag that refused a password stops answering until it loses power
@@ -293,6 +327,7 @@ fn the_air_is_left_quiet_for_t2_after_a_tag_has_answered() {
 /// the field off, waits, and turns it on again.
 #[test]
 fn a_tag_is_reset_by_taking_its_field_away_and_giving_it_back() {
+    // Given
     let mut spi = Vec::new();
     // Field off: the same word with the transmitter bit cleared.
     spi.extend(spi_write(vec![0x00, 0x00]));
@@ -308,11 +343,12 @@ fn a_tag_is_reset_by_taking_its_field_away_and_giving_it_back() {
         CheckedDelay::new(&delay),
         PinMock::new(&[]),
     );
+
+    // When
     r.reset_tags().unwrap();
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // Then: the reader did exactly what was scripted
+    finish(r);
 }
 
 /// SET PASSWORD for privacy, the NXP vendor default 0x0F0F0F0F masked with a
@@ -324,6 +360,7 @@ const SET_PASSWORD_VENDOR: [u8; 8] = [0x02, 0xB3, 0x04, 0x04, 0x0F, 0x0F, 0x0F, 
 /// reset before trying the next password.
 #[test]
 fn a_refused_password_is_followed_by_a_field_reset_before_the_next_one() {
+    // Given
     let uid_response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
 
     let mut spi = Vec::new();
@@ -382,32 +419,38 @@ fn a_refused_password_is_followed_by_a_field_reset_before_the_next_one() {
         CheckedDelay::new(&delay),
         PinMock::new(&irq),
     );
+
+    // When
+    let result = r.inventory_unlocked(&[0x0000_0000, 0x0F0F_0F0F]);
+
+    // Then
     assert_eq!(
-        r.inventory_unlocked(&[0x0000_0000, 0x0F0F_0F0F]),
+        result,
         Ok(Some([1, 2, 3, 4, 5, 6, 7, 8])),
         "the second password must reach a tag that is listening"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 /// The FIFO holds twelve bytes and the whole request is loaded at once, so a
 /// longer request is refused.
 #[test]
 fn a_request_too_large_for_the_fifo_is_refused_before_any_bus_traffic() {
+    // Given
     let mut r = reader(&[]);
     let mut response = [0u8; 16];
-    assert_eq!(
-        r.transceive(&[0xAA; 13], &mut response),
-        Err(Error::RequestTooLong)
-    );
+
+    // When
+    let result = r.transceive(&[0xAA; 13], &mut response);
+
+    // Then
+    assert_eq!(result, Err(Error::RequestTooLong));
     check(r);
 }
 
 #[test]
 fn an_empty_plate_reports_no_tag_without_reading_the_fifo() {
+    // Given
     // Nothing answers, so there is no interrupt and the FIFO is not read.
     let spi = transmit_transactions(&INVENTORY, [0x00, 0x30]);
 
@@ -417,19 +460,20 @@ fn an_empty_plate_reports_no_tag_without_reading_the_fifo() {
         PinMock::new(&irq_never()),
     );
 
+    // When
+    let result = r.inventory().unwrap();
+
+    // Then
     assert_eq!(
-        r.inventory().unwrap(),
-        None,
+        result, None,
         "an unanswered exchange means no tag, or a tag still in privacy mode"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 #[test]
 fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
+    // Given
     // B4 is the overflow flag; the count is B3-B0. 0x1A has the overflow
     // flag set.
     let mut spi = transmit_transactions(&INVENTORY, [0x00, 0x30]);
@@ -443,35 +487,40 @@ fn an_overflowed_fifo_is_an_error_rather_than_a_byte_count() {
         CheckedDelay::new(&polls(0)),
         PinMock::new(&irq_exchange()),
     );
-    assert_eq!(r.inventory(), Err(Error::FifoOverflow));
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // When
+    let result = r.inventory();
+
+    // Then
+    assert_eq!(result, Err(Error::FifoOverflow));
+    finish(r);
 }
 
 /// B6 and B5 are the FIFO level flags, not part of the count. Counting them
 /// would turn a ten-byte reply into 105 bytes.
 #[test]
 fn the_fifo_level_flags_are_not_counted_as_received_bytes() {
+    // Given: 0x69 is level-high, level-low, and a count nibble of 9 meaning
+    // ten bytes
     let response = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
-    // 0x69: level-high, level-low, and a count nibble of 9 meaning ten bytes.
     let spi = transceive_transactions(&INVENTORY, [0x00, 0x30], 0x69, &response);
-
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
         CheckedDelay::new(&answered(0)),
         PinMock::new(&irq_exchange()),
     );
-    assert!(r.inventory().unwrap().is_some());
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // When
+    let uid = r.inventory().unwrap();
+
+    // Then
+    assert!(uid.is_some());
+    finish(r);
 }
 
 #[test]
 fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
+    // Given
     let random_response = [0x00u8, 0xCD, 0xAB]; // flags, then RN low, high
     let mut spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &random_response);
     // Eight bytes: the length field splits as 0x00 / 0x80.
@@ -495,15 +544,17 @@ fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
         CheckedDelay::new(&delay),
         PinMock::new(&irq),
     );
+
+    // When
     r.unlock_privacy(0).unwrap();
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // Then: the reader did exactly what was scripted
+    finish(r);
 }
 
 #[test]
 fn a_rejected_password_is_reported_rather_than_read_as_success() {
+    // Given
     // ISO 15693-3 §7.4: bit 0 of the response flags means the payload is an
     // error code. A SLIX refusing the password answers [0x01, 0x0F], which a
     // length check alone would accept.
@@ -527,50 +578,64 @@ fn a_rejected_password_is_reported_rather_than_read_as_success() {
         CheckedDelay::new(&delay),
         PinMock::new(&irq),
     );
+
+    // When
+    let result = r.unlock_privacy(0);
+
+    // Then
     assert_eq!(
-        r.unlock_privacy(0),
+        result,
         Err(Error::TagError(0x0F)),
         "a wrong password must not look like an unlocked tag"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 #[test]
 fn an_error_response_is_not_mistaken_for_a_random_number() {
+    // Given
     let spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 1, &[0x01, 0x03]);
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
         CheckedDelay::new(&answered(0)),
         PinMock::new(&irq_exchange()),
     );
-    assert_eq!(r.get_random_number(), Err(Error::TagError(0x03)));
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // When
+    let result = r.get_random_number();
+
+    // Then
+    assert_eq!(result, Err(Error::TagError(0x03)));
+    finish(r);
 }
 
 #[test]
 fn unlocking_fails_cleanly_when_no_tag_answers() {
+    // Given
     let spi = transmit_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30]);
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
         CheckedDelay::new(&polls(IRQ_POLL_ATTEMPTS as usize)),
         PinMock::new(&irq_never()),
     );
-    assert_eq!(r.unlock_privacy(0), Err(Error::Timeout));
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // When
+    let result = r.unlock_privacy(0);
+
+    // Then
+    assert_eq!(result, Err(Error::Timeout));
+    finish(r);
 }
 
 #[test]
 fn the_field_is_turned_on_last() {
-    let last = INIT_SEQUENCE.last().unwrap();
+    // Given
+    let sequence = INIT_SEQUENCE;
+
+    // When
+    let last = sequence.last().unwrap();
+
+    // Then
     assert_eq!(
         last.0,
         regs::CHIP_STATUS_CONTROL,
@@ -584,12 +649,18 @@ fn the_field_is_turned_on_last() {
 /// status register reports.
 #[test]
 fn the_interrupt_line_can_be_read_on_its_own() {
+    // Given
     let mut r = Trf7962a::new(
         SpiMock::new(&[]),
         NoopDelay,
         PinMock::new(&[PinTransaction::get(PinState::High)]),
     );
-    assert_eq!(r.irq_asserted(), Ok(true));
+
+    // When
+    let result = r.irq_asserted();
+
+    // Then
+    assert_eq!(result, Ok(true));
     check(r);
 }
 
@@ -605,6 +676,7 @@ fn the_interrupt_line_can_be_read_on_its_own() {
 /// request.
 #[test]
 fn a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it() {
+    // Given
     let mut r = Trf7962a::new(
         SpiMock::new(&spi_write(vec![
             0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00,
@@ -613,11 +685,13 @@ fn a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it() {
         PinMock::new(&irq_never()),
     );
     let mut response = [0u8; MAX_RESPONSE];
-    assert_eq!(r.transceive(&INVENTORY, &mut response), Ok(0));
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // When
+    let result = r.transceive(&INVENTORY, &mut response);
+
+    // Then
+    assert_eq!(result, Ok(0));
+    finish(r);
 }
 
 /// SLOS757G §6.12.5 and Figure 6-21: a transmit raises its own interrupt
@@ -633,6 +707,7 @@ fn a_transmit_is_one_burst_exactly_as_the_datasheet_shows_it() {
 /// 0x40 RX started, 0x5C FIFO status read.
 #[test]
 fn the_transmit_interrupt_is_not_mistaken_for_the_tags_reply() {
+    // Given
     let reply = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
     let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00]);
     spi.extend(spi_read_irq(0x80)); // TX finished; the tag has not answered yet
@@ -649,15 +724,17 @@ fn the_transmit_interrupt_is_not_mistaken_for_the_tags_reply() {
         CheckedDelay::new(&answered(0)),
         PinMock::new(&irq),
     );
+
+    // When
+    let result = r.inventory().unwrap();
+
+    // Then
     assert_eq!(
-        r.inventory().unwrap(),
+        result,
         Some([1, 2, 3, 4, 5, 6, 7, 8]),
         "the reply follows the transmit interrupt, not the transmit itself"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 /// A reader that transmits and hears nothing must say so, not read the FIFO.
@@ -666,6 +743,7 @@ fn the_transmit_interrupt_is_not_mistaken_for_the_tags_reply() {
 /// mean a tag answered.
 #[test]
 fn a_transmit_with_no_answer_reports_no_tag() {
+    // Given
     let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00]);
     spi.extend(spi_read_irq(0x80));
     spi.extend(spi_write(vec![0x8F]));
@@ -681,11 +759,13 @@ fn a_transmit_with_no_answer_reports_no_tag() {
         CheckedDelay::new(&delay),
         PinMock::new(&irq),
     );
-    assert_eq!(r.inventory().unwrap(), None);
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // When
+    let result = r.inventory().unwrap();
+
+    // Then
+    assert_eq!(result, None);
+    finish(r);
 }
 
 /// SLOS757G Figure 6-23: the FIFO is read as one continuous burst.
@@ -697,6 +777,7 @@ fn a_transmit_with_no_answer_reports_no_tag() {
 /// Read one byte per transaction, every byte comes back 0x00 (measured).
 #[test]
 fn the_fifo_is_read_as_one_continuous_burst() {
+    // Given
     let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x02, 0xB2, 0x04]);
     spi.extend(spi_read_irq(0x80));
     spi.extend(spi_write(vec![0x8F]));
@@ -713,15 +794,17 @@ fn the_fifo_is_read_as_one_continuous_burst() {
         CheckedDelay::new(&answered(0)),
         PinMock::new(&irq_exchange()),
     );
+
+    // When
+    let result = r.get_random_number();
+
+    // Then
     assert_eq!(
-        r.get_random_number(),
+        result,
         Ok(0xABCD),
         "a random number of zero on every run is a FIFO that was never read"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 /// A reception the reader could not decode says why.
@@ -732,6 +815,7 @@ fn the_fifo_is_read_as_one_continuous_burst() {
 /// reason is kept.
 #[test]
 fn a_reception_error_carries_the_reader_s_own_reason() {
+    // Given
     let mut spi = spi_write(vec![0x8F, 0x91, 0x3D, 0x00, 0x30, 0x26, 0x01, 0x00]);
     spi.extend(spi_read_irq(0x80));
     spi.extend(spi_write(vec![0x8F]));
@@ -744,15 +828,17 @@ fn a_reception_error_carries_the_reader_s_own_reason() {
         PinMock::new(&irq_exchange()),
     );
     let mut response = [0u8; MAX_RESPONSE];
+
+    // When
+    let result = r.transceive(&INVENTORY, &mut response);
+
+    // Then
     assert_eq!(
-        r.transceive(&INVENTORY, &mut response),
+        result,
         Err(Error::ReceiveError(0x02)),
         "the reason is the reader's own flags, not a verdict on the reply"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 /// A frame of five bytes or more interrupts part-way through its own
@@ -768,6 +854,7 @@ fn a_reception_error_carries_the_reader_s_own_reason() {
 /// would reset the FIFO mid-frame, and the tag would not answer.
 #[test]
 fn a_fifo_interrupt_during_a_transmit_is_not_the_end_of_it() {
+    // Given
     let reply = [0x00u8, 0xCD, 0xAB];
     // Eight bytes: the length field splits as 0x00 / 0x80.
     let mut spi = spi_write(vec![
@@ -789,15 +876,17 @@ fn a_fifo_interrupt_during_a_transmit_is_not_the_end_of_it() {
         PinMock::new(&irq),
     );
     let mut response = [0u8; MAX_RESPONSE];
+
+    // When
+    let result = r.transceive(&SET_PASSWORD_0, &mut response);
+
+    // Then
     assert_eq!(
-        r.transceive(&SET_PASSWORD_0, &mut response),
+        result,
         Ok(3),
         "the frame is preloaded, so a request for more data is only noise"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 /// READ SINGLE BLOCK for block 5, spelled out rather than built by the driver.
@@ -805,6 +894,7 @@ const READ_BLOCK_5: [u8; 3] = [0x02, 0x20, 0x05];
 
 #[test]
 fn a_block_read_returns_the_four_data_bytes_in_wire_order() {
+    // Given
     // flags, then four data bytes in an order that would catch a reversal.
     let response = [0x00u8, 0x11, 0x22, 0x33, 0x44];
     let spi = transceive_transactions(&READ_BLOCK_5, [0x00, 0x30], 4, &response);
@@ -814,19 +904,22 @@ fn a_block_read_returns_the_four_data_bytes_in_wire_order() {
         CheckedDelay::new(&answered(0)),
         PinMock::new(&irq_exchange()),
     );
+
+    // When
+    let result = r.read_block(5);
+
+    // Then
     assert_eq!(
-        r.read_block(5),
+        result,
         Ok([0x11, 0x22, 0x33, 0x44]),
         "block data has no byte-order convention and must come back as sent"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 #[test]
 fn a_tag_error_on_a_block_read_is_reported_rather_than_returned_as_data() {
+    // Given
     // ISO 15693-3 §7.4: bit 0 of the flags marks an error response, whose
     // payload is a one-byte error code rather than four bytes of data.
     let spi = transceive_transactions(&READ_BLOCK_5, [0x00, 0x30], 1, &[0x01, 0x0F]);
@@ -836,19 +929,22 @@ fn a_tag_error_on_a_block_read_is_reported_rather_than_returned_as_data() {
         CheckedDelay::new(&answered(0)),
         PinMock::new(&irq_exchange()),
     );
+
+    // When
+    let result = r.read_block(5);
+
+    // Then
     assert_eq!(
-        r.read_block(5),
+        result,
         Err(Error::TagError(0x0F)),
         "a refused read must not look like a successful one"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 #[test]
 fn a_short_block_response_is_rejected_rather_than_read_past() {
+    // Given
     // Two bytes: flags and one data byte instead of four. Reading past them
     // would return stale bytes as if they were tag memory.
     let response = [0x00u8, 0x11];
@@ -859,15 +955,18 @@ fn a_short_block_response_is_rejected_rather_than_read_past() {
         CheckedDelay::new(&answered(0)),
         PinMock::new(&irq_exchange()),
     );
-    assert_eq!(r.read_block(5), Err(Error::BadResponse));
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // When
+    let result = r.read_block(5);
+
+    // Then
+    assert_eq!(result, Err(Error::BadResponse));
+    finish(r);
 }
 
 #[test]
 fn an_absent_block_response_is_a_timeout_not_a_read() {
+    // Given
     let spi = transmit_transactions(&READ_BLOCK_5, [0x00, 0x30]);
 
     let mut r = Trf7962a::new(
@@ -875,15 +974,18 @@ fn an_absent_block_response_is_a_timeout_not_a_read() {
         CheckedDelay::new(&polls(IRQ_POLL_ATTEMPTS as usize)),
         PinMock::new(&irq_never()),
     );
-    assert_eq!(r.read_block(5), Err(Error::Timeout));
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+
+    // When
+    let result = r.read_block(5);
+
+    // Then
+    assert_eq!(result, Err(Error::Timeout));
+    finish(r);
 }
 
 #[test]
 fn reading_memory_issues_one_exchange_per_block_and_concatenates_in_order() {
+    // Given
     let mut spi = transceive_transactions(
         &[0x02, 0x20, 0x05],
         [0x00, 0x30],
@@ -908,23 +1010,30 @@ fn reading_memory_issues_one_exchange_per_block_and_concatenates_in_order() {
         PinMock::new(&irq),
     );
     let mut out = [0u8; 8];
+
+    // When
     r.read_memory(5, &mut out).unwrap();
+
+    // Then
     assert_eq!(
         out,
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
         "the second block's bytes must follow the first's, not precede them"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 #[test]
 fn reading_memory_with_a_length_not_a_multiple_of_four_is_refused_before_any_bus_traffic() {
+    // Given
     let mut r = reader(&[]);
     let mut out = [0u8; 5];
-    assert_eq!(r.read_memory(0, &mut out), Err(Error::BadLength));
+
+    // When
+    let result = r.read_memory(0, &mut out);
+
+    // Then
+    assert_eq!(result, Err(Error::BadLength));
     check(r);
 }
 
@@ -941,6 +1050,7 @@ fn reading_memory_with_a_length_not_a_multiple_of_four_is_refused_before_any_bus
 /// An inventory reply is exactly ten bytes, so this always happens.
 #[test]
 fn a_reply_longer_than_the_fifo_warning_is_collected_in_full() {
+    // Given
     let first = [0x00u8, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02];
     let last = [0x01u8];
 
@@ -964,15 +1074,17 @@ fn a_reply_longer_than_the_fifo_warning_is_collected_in_full() {
         CheckedDelay::new(&answered(0)),
         PinMock::new(&irq),
     );
+
+    // When
+    let result = r.inventory().unwrap();
+
+    // Then
     assert_eq!(
-        r.inventory().unwrap(),
+        result,
         Some([1, 2, 3, 4, 5, 6, 7, 8]),
         "the last byte of the UID arrives on its own interrupt"
     );
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    finish(r);
 }
 
 /// The plate's presence check. SL2S5002 §1.3: in privacy mode the label "will
@@ -982,6 +1094,7 @@ fn a_reply_longer_than_the_fifo_warning_is_collected_in_full() {
 /// SET PASSWORD follows.
 #[test]
 fn a_tag_is_noticed_without_being_unlocked() {
+    // Given
     let random_response = [0x00u8, 0xCD, 0xAB]; // flags, then RN low, high
     let spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &random_response);
     let mut r = Trf7962a::new(
@@ -990,18 +1103,19 @@ fn a_tag_is_noticed_without_being_unlocked() {
         PinMock::new(&irq_exchange()),
     );
 
-    assert_eq!(r.tag_present(), Ok(true));
+    // When
+    let result = r.tag_present();
 
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    // Then
+    assert_eq!(result, Ok(true));
+    finish(r);
 }
 
 /// An empty plate costs exactly one unanswered exchange. The box is in this
 /// state most of the time.
 #[test]
 fn an_empty_plate_costs_one_unanswered_exchange() {
+    // Given
     let spi = transmit_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30]);
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
@@ -1009,37 +1123,36 @@ fn an_empty_plate_costs_one_unanswered_exchange() {
         PinMock::new(&irq_never()),
     );
 
-    assert_eq!(r.tag_present(), Ok(false));
+    // When
+    let result = r.tag_present();
 
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    // Then
+    assert_eq!(result, Ok(false));
+    finish(r);
 }
 
 /// The driver remembers the slowest reply it has seen, to size
 /// `IRQ_POLL_ATTEMPTS` from real measurements.
 #[test]
 fn the_slowest_reply_is_remembered_for_the_bench_to_read() {
+    // Given: the transmit interrupt answers at once; the tag's reply takes
+    // two polls
     let random_response = [0x00u8, 0xCD, 0xAB];
     let spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &random_response);
-
-    // The transmit interrupt answers at once; the tag's reply takes two polls.
     let mut irq = irq_after(0);
     irq.extend(irq_after(2));
-
     let mut r = Trf7962a::new(
         SpiMock::new(&spi),
         CheckedDelay::new(&answered(2)),
         PinMock::new(&irq),
     );
-
     assert_eq!(r.slowest_reply_polls(), 0, "nothing has been answered yet");
-    assert_eq!(r.get_random_number(), Ok(0xABCD));
-    assert_eq!(r.slowest_reply_polls(), 2);
 
-    let (mut spi, mut delay, mut irq) = r.release();
-    spi.done();
-    delay.done();
-    irq.done();
+    // When
+    let random = r.get_random_number();
+
+    // Then
+    assert_eq!(random, Ok(0xABCD));
+    assert_eq!(r.slowest_reply_polls(), 2);
+    finish(r);
 }
