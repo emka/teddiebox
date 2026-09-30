@@ -14,10 +14,10 @@ use heapless::Vec;
 
 /// How many [`Piece`]s a page is ever made of.
 ///
-/// The head, three for the message paragraph, the config form's two halves
-/// and the config between them, and the certificate's description with the
-/// markup after it.
-const PIECES: usize = 9;
+/// The head, three for the message paragraph, three for the config form
+/// around the config, three for the certificate section around its
+/// description, and the restart form.
+const PIECES: usize = 11;
 
 /// A stretch of the page, in the order it goes on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,16 +53,19 @@ const ERROR_OPEN: &str = "<p class=\"error\">";
 const NOTICE_OPEN: &str = "<p class=\"notice\">";
 const MESSAGE_CLOSE: &str = "</p>";
 
-const FORM_OPEN: &str = "<form method=\"post\" action=\"/config\">\
+const CONFIG_OPEN: &str = "<form method=\"post\" action=\"/config\">\
 <textarea name=\"config\" spellcheck=\"false\" autocapitalize=\"off\">";
 
-const FORM_CLOSE: &str = "</textarea><button type=\"submit\">Write config.txt</button>\
-</form><h1>certificate</h1><p>cert/tcca.der: ";
+const CONFIG_CLOSE: &str = "</textarea><button type=\"submit\">Write config.txt</button>\
+</form>";
 
-const TAIL: &str = "</p><form method=\"post\" action=\"/ca\" enctype=\"multipart/form-data\">\
+const CA_OPEN: &str = "<h1>certificate</h1><p>cert/tcca.der: ";
+
+const CA_CLOSE: &str = "</p><form method=\"post\" action=\"/ca\" enctype=\"multipart/form-data\">\
 <input type=\"file\" name=\"ca\" accept=\".der\">\
-<button type=\"submit\">Write certificate</button></form>\
-<form method=\"post\" action=\"/restart\">\
+<button type=\"submit\">Write certificate</button></form>";
+
+const RESTART: &str = "<form method=\"post\" action=\"/restart\">\
 <button type=\"submit\">Restart</button></form></body></html>";
 
 /// What the page says about the card's `cert/tcca.der`.
@@ -102,11 +105,13 @@ pub fn pieces<'a>(
         let _ = out.push(Piece::Escaped(text.as_bytes()));
         let _ = out.push(Piece::Literal(MESSAGE_CLOSE));
     }
-    let _ = out.push(Piece::Literal(FORM_OPEN));
+    let _ = out.push(Piece::Literal(CONFIG_OPEN));
     let _ = out.push(Piece::Escaped(config));
-    let _ = out.push(Piece::Literal(FORM_CLOSE));
+    let _ = out.push(Piece::Literal(CONFIG_CLOSE));
+    let _ = out.push(Piece::Literal(CA_OPEN));
     let _ = out.push(Piece::Escaped(ca.as_bytes()));
-    let _ = out.push(Piece::Literal(TAIL));
+    let _ = out.push(Piece::Literal(CA_CLOSE));
+    let _ = out.push(Piece::Literal(RESTART));
     out
 }
 
