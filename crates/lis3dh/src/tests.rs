@@ -142,6 +142,21 @@ fn no_interrupt_active_is_not_a_click() {
     dev.release().done();
 }
 
+/// Only the interrupt flag makes a click; an axis bit without it is not one.
+#[test]
+fn an_axis_without_the_interrupt_flag_is_not_a_click() {
+    // Given
+    let expected = [Transaction::write_read(ADDR, vec![0x39], vec![0x01])];
+    let mut dev = Lis3dh::new(I2cMock::new(&expected), ADDR);
+
+    // When
+    let click = dev.take_click().unwrap();
+
+    // Then
+    assert_eq!(click, None);
+    dev.release().done();
+}
+
 /// An interrupt with no axis bit is not understood, so it is discarded
 /// rather than guessed.
 #[test]
