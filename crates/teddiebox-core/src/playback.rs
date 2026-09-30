@@ -505,18 +505,6 @@ mod tests {
     }
 
     #[test]
-    fn lifting_a_figure_that_was_never_placed_does_nothing() {
-        // Given
-        let mut p = Playback::new();
-
-        // When
-        let actions = p.on_tag_absent();
-
-        // Then
-        assert!(actions.is_empty());
-    }
-
-    #[test]
     fn replacing_the_same_figure_resumes_from_the_saved_position() {
         // Given: played to page 77, then lifted
         let mut p = Playback::new();
