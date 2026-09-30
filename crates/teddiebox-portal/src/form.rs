@@ -62,49 +62,97 @@ mod tests {
 
     #[test]
     fn plus_is_a_space() {
-        let got: heapless::Vec<u8, 64> = field(b"config=a+b", "config").unwrap();
+        // Given
+        let body = b"config=a+b";
+
+        // When
+        let got: heapless::Vec<u8, 64> = field(body, "config").unwrap();
+
+        // Then
         assert_eq!(&got[..], b"a b");
     }
 
     #[test]
     fn percent_escapes_decode() {
-        let got: heapless::Vec<u8, 64> = field(b"config=a%23b%26c", "config").unwrap();
+        // Given
+        let body = b"config=a%23b%26c";
+
+        // When
+        let got: heapless::Vec<u8, 64> = field(body, "config").unwrap();
+
+        // Then
         assert_eq!(&got[..], b"a#b&c");
     }
 
     #[test]
     fn lower_case_hex_decodes() {
-        let got: heapless::Vec<u8, 64> = field(b"config=%0d%0a", "config").unwrap();
+        // Given
+        let body = b"config=%0d%0a";
+
+        // When
+        let got: heapless::Vec<u8, 64> = field(body, "config").unwrap();
+
+        // Then
         assert_eq!(&got[..], b"\r\n");
     }
 
     #[test]
     fn a_later_field_is_found() {
-        let got: heapless::Vec<u8, 64> = field(b"other=1&config=x", "config").unwrap();
+        // Given
+        let body = b"other=1&config=x";
+
+        // When
+        let got: heapless::Vec<u8, 64> = field(body, "config").unwrap();
+
+        // Then
         assert_eq!(&got[..], b"x");
     }
 
     #[test]
     fn a_prefix_of_the_name_is_not_the_field() {
-        let got: Result<heapless::Vec<u8, 64>, _> = field(b"configuration=x", "config");
+        // Given
+        let body = b"configuration=x";
+
+        // When
+        let got: Result<heapless::Vec<u8, 64>, _> = field(body, "config");
+
+        // Then
         assert_eq!(got.unwrap_err(), FormError::NotFound);
     }
 
     #[test]
     fn an_empty_value_is_an_empty_field_not_a_missing_one() {
-        let got: heapless::Vec<u8, 64> = field(b"config=", "config").unwrap();
+        // Given
+        let body = b"config=";
+
+        // When
+        let got: heapless::Vec<u8, 64> = field(body, "config").unwrap();
+
+        // Then
         assert_eq!(&got[..], b"");
     }
 
     #[test]
     fn a_truncated_escape_is_refused() {
-        let got: Result<heapless::Vec<u8, 64>, _> = field(b"config=a%2", "config");
+        // Given
+        let body = b"config=a%2";
+
+        // When
+        let got: Result<heapless::Vec<u8, 64>, _> = field(body, "config");
+
+        // Then
         assert_eq!(got.unwrap_err(), FormError::BadEscape);
     }
 
     #[test]
     fn a_non_hex_escape_is_refused() {
-        let got: Result<heapless::Vec<u8, 64>, _> = field(b"config=a%zz", "config");
+        // Given
+        let body = b"config=a%zz";
+
+        // When
+        let got: Result<heapless::Vec<u8, 64>, _> = field(body, "config");
+
+        // Then
         assert_eq!(got.unwrap_err(), FormError::BadEscape);
     }
 
@@ -112,13 +160,25 @@ mod tests {
     /// decode capacity and the largest file the box writes.)
     #[test]
     fn a_value_of_exactly_the_capacity_is_kept() {
-        let got: heapless::Vec<u8, 4> = field(b"config=abcd", "config").unwrap();
+        // Given
+        let body = b"config=abcd";
+
+        // When
+        let got: heapless::Vec<u8, 4> = field(body, "config").unwrap();
+
+        // Then
         assert_eq!(&got[..], b"abcd");
     }
 
     #[test]
     fn a_value_past_capacity_is_refused() {
-        let got: Result<heapless::Vec<u8, 4>, _> = field(b"config=abcdefgh", "config");
+        // Given
+        let body = b"config=abcdefgh";
+
+        // When
+        let got: Result<heapless::Vec<u8, 4>, _> = field(body, "config");
+
+        // Then
         assert_eq!(got.unwrap_err(), FormError::TooLong);
     }
 }
