@@ -522,6 +522,19 @@ mod tests {
         assert!((-27.0..=-25.0).contains(&db), "{db:.1} dB");
     }
 
+    /// Measured −42 dB on the stock box's skip note.
+    #[test]
+    fn a_skip_note_carries_its_third_harmonic_42_db_down() {
+        // Given
+        let note = &render(Cue::SkipForward)[..4_445];
+
+        // When
+        let db = 20.0 * (amplitude(note, 3.0 * 587.33) / amplitude(note, 587.33)).log10();
+
+        // Then
+        assert!((-43.0..=-41.0).contains(&db), "{db:.1} dB");
+    }
+
     #[test]
     fn both_channels_carry_the_same_sample() {
         // Given
