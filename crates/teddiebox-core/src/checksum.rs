@@ -64,47 +64,82 @@ mod tests {
     /// order and both inversions.
     #[test]
     fn the_published_check_value_is_reproduced() {
-        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        // Given
+        let check_input = b"123456789";
+
+        // When
+        let crc = crc32(check_input);
+
+        // Then
+        assert_eq!(crc, 0xCBF4_3926);
     }
 
     /// A published value, not one computed here, so the test can disagree
     /// with the code.
     #[test]
     fn a_longer_known_string_matches_its_published_value() {
-        assert_eq!(
-            crc32(b"The quick brown fox jumps over the lazy dog"),
-            0x414F_A339
-        );
+        // Given
+        let text = b"The quick brown fox jumps over the lazy dog";
+
+        // When
+        let crc = crc32(text);
+
+        // Then
+        assert_eq!(crc, 0x414F_A339);
     }
 
     /// A real card can hold empty files; they must checksum to zero.
     #[test]
     fn the_empty_input_checksums_to_zero() {
-        assert_eq!(crc32(b""), 0);
+        // Given
+        let empty = b"";
+
+        // When
+        let crc = crc32(empty);
+
+        // Then
+        assert_eq!(crc, 0);
     }
 
     /// The result must not depend on where the block boundaries fall.
     #[test]
     fn feeding_in_pieces_matches_feeding_the_whole() {
+        // Given: the check input, split where a block boundary might fall
         let mut split = Crc32::new();
+
+        // When
         split.update(b"12345");
         split.update(b"6789");
+
+        // Then
         assert_eq!(split.finish(), 0xCBF4_3926);
     }
 
     /// Empty chunks must not change the result.
     #[test]
     fn empty_chunks_do_not_disturb_the_running_value() {
+        // Given
         let mut crc = Crc32::new();
+
+        // When
         crc.update(b"");
         crc.update(b"123456789");
         crc.update(b"");
+
+        // Then
         assert_eq!(crc.finish(), 0xCBF4_3926);
     }
 
     /// Byte order changes the result.
     #[test]
     fn transposed_input_checksums_differently() {
-        assert_ne!(crc32(b"123456789"), crc32(b"213456789"));
+        // Given
+        let (original, transposed) = (b"123456789", b"213456789");
+
+        // When
+        let crcs = (crc32(original), crc32(transposed));
+
+        // Then
+        assert_ne!(crcs.0, crcs.1);
     }
 }
