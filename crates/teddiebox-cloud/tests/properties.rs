@@ -116,7 +116,13 @@ proptest! {
 
     #[test]
     fn any_head_parses_or_is_refused_and_the_body_starts_after_it(raw in head_like()) {
-        if let Ok((_, body_at)) = parse_head(&raw) {
+        // Given: anything shaped roughly like a response head
+
+        // When
+        let parsed = parse_head(&raw);
+
+        // Then: refused, or a body that starts after a blank line
+        if let Ok((_, body_at)) = parsed {
             prop_assert!(body_at <= raw.len(), "body at {body_at} of {}", raw.len());
             prop_assert!(raw[..body_at].ends_with(b"\r\n\r\n"), "body does not follow a blank line");
         }
@@ -128,10 +134,16 @@ proptest! {
         at in any::<prop::sample::Index>(),
         junk in prop::sample::select(vec![0xFFu8, 0xC0, 0x80]),
     ) {
+        // Given: a well-formed head with a byte that is not text inside it
         let mut raw = render(&head).into_bytes();
         let head_len = raw.len() - 4;
         raw.insert(at.index(head_len), junk);
-        prop_assert_eq!(parse_head(&raw), Err(CloudError::MalformedResponse));
+
+        // When
+        let parsed = parse_head(&raw);
+
+        // Then
+        prop_assert_eq!(parsed, Err(CloudError::MalformedResponse));
     }
 
     #[test]
@@ -140,12 +152,16 @@ proptest! {
         preambles in 0..=3usize,
         body in prop::collection::vec(any::<u8>(), 0..=32),
     ) {
+        // Given: a written head behind some informational preambles
         let mut raw = "HTTP/1.1 100 Continue\r\n\r\n".repeat(preambles).into_bytes();
         raw.extend(render(&head).into_bytes());
         let body_starts = raw.len();
         raw.extend(&body);
 
+        // When
         let (parsed, body_at) = parse_head(&raw).unwrap();
+
+        // Then
         prop_assert_eq!(parsed.status, head.status);
         prop_assert_eq!(parsed.content_length, head.content_length);
         prop_assert_eq!(parsed.content_range, head.content_range);
