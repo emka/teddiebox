@@ -1105,7 +1105,7 @@ mod placed_tests {
     }
 
     #[test]
-    fn a_figure_arriving_is_announced_and_its_token_kept() {
+    fn a_figure_arriving_is_announced() {
         // Given
         let mut placed = Placed::empty();
 
@@ -1115,6 +1115,17 @@ mod placed_tests {
         // Then
         assert_eq!(event, Event::TagPresent(A));
         assert_eq!(placed.figure(), Some(A));
+    }
+
+    #[test]
+    fn a_figure_arriving_keeps_its_token() {
+        // Given
+        let mut placed = Placed::empty();
+
+        // When
+        placed.observe(figure(A, Some(TOKEN_A)));
+
+        // Then
         assert_eq!(placed.token(), Some(TOKEN_A));
     }
 
