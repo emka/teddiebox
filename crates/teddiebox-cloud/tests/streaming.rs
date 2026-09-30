@@ -93,40 +93,46 @@ fn request(from: Option<u32>) -> ContentRequest<'static> {
     }
 }
 
+/// Begins a download and reads its whole body through `buf`, as the firmware
+/// does, returning the body or the first error met.
+fn download(t: &mut Fake, request: &ContentRequest, buf: &mut [u8]) -> Result<Vec<u8>, CloudError> {
+    let Begun::Content {
+        body_length,
+        prefix,
+        ..
+    } = block_on(begin(t, request, buf))?
+    else {
+        panic!("expected content");
+    };
+    let mut collected = Vec::from(&buf[prefix.clone()]);
+    let mut body = Body::new(body_length, prefix.len() as u32);
+    while !body.is_complete() {
+        let n = block_on(body.read(t, buf))?;
+        collected.extend_from_slice(&buf[..n]);
+    }
+    Ok(collected)
+}
+
 #[test]
 fn a_body_larger_than_the_buffer_is_pumped_rather_than_refused() {
-    // 200 bytes of body through a 64-byte buffer, which could never hold it
-    // whole. The buffer must still fit the 40-byte head.
+    // Given: 200 bytes of body through a 64-byte buffer, which could never
+    // hold it whole. The buffer must still fit the 40-byte head.
     let body: Vec<u8> = (0..200u32).map(|n| n as u8).collect();
     let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n");
     raw.extend_from_slice(&body);
     let mut t = Fake::new(&raw);
     let mut buf = [0u8; 64];
 
-    let begun = block_on(begin(&mut t, &request(None), &mut buf)).unwrap();
-    let Begun::Content {
-        body_length,
-        offset,
-        prefix,
-        ..
-    } = begun
-    else {
-        panic!("expected content");
-    };
-    assert_eq!(body_length, 200);
-    assert_eq!(offset, 0);
+    // When
+    let collected = download(&mut t, &request(None), &mut buf);
 
-    let mut collected = Vec::from(&buf[prefix.clone()]);
-    let mut stream = Body::new(body_length, prefix.len() as u32);
-    while !stream.is_complete() {
-        let n = block_on(stream.read(&mut t, &mut buf)).unwrap();
-        collected.extend_from_slice(&buf[..n]);
-    }
-    assert_eq!(collected, body);
+    // Then
+    assert_eq!(collected, Ok(body));
 }
 
 #[test]
 fn a_partial_response_says_where_its_bytes_belong() {
+    // Given
     let mut raw = Vec::from(
         *b"HTTP/1.1 206 Partial Content\r\n\
 Content-Range: bytes 8-11/12\r\n\
@@ -136,13 +142,17 @@ Content-Length: 4\r\n\r\n",
     let mut t = Fake::new(&raw);
     let mut buf = [0u8; 256];
 
+    // When
+    let begun = block_on(begin(&mut t, &request(Some(8)), &mut buf)).unwrap();
+
+    // Then
     let Begun::Content {
         offset,
         total,
         body_length,
         prefix,
         ..
-    } = block_on(begin(&mut t, &request(Some(8)), &mut buf)).unwrap()
+    } = begun
     else {
         panic!("expected content");
     };
@@ -156,14 +166,17 @@ Content-Length: 4\r\n\r\n",
 /// at offset zero, not appended to the partial file.
 #[test]
 fn a_server_that_ignores_the_range_reports_an_offset_of_zero() {
+    // Given
     let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
     raw.extend_from_slice(b"HEAD");
     let mut t = Fake::new(&raw);
     let mut buf = [0u8; 256];
 
-    let Begun::Content { offset, total, .. } =
-        block_on(begin(&mut t, &request(Some(8)), &mut buf)).unwrap()
-    else {
+    // When
+    let begun = block_on(begin(&mut t, &request(Some(8)), &mut buf)).unwrap();
+
+    // Then
+    let Begun::Content { offset, total, .. } = begun else {
         panic!("expected content");
     };
     assert_eq!(offset, 0);
@@ -176,27 +189,17 @@ fn a_server_that_ignores_the_range_reports_an_offset_of_zero() {
 
 #[test]
 fn a_head_that_arrives_in_pieces_is_still_parsed() {
+    // Given
     let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
     raw.extend_from_slice(b"DATA");
     let mut t = Fake::new(&raw).in_bites_of(3);
     let mut buf = [0u8; 256];
 
-    let Begun::Content {
-        body_length,
-        prefix,
-        ..
-    } = block_on(begin(&mut t, &request(None), &mut buf)).unwrap()
-    else {
-        panic!("expected content");
-    };
-    assert_eq!(body_length, 4);
-    let mut collected = Vec::from(&buf[prefix.clone()]);
-    let mut stream = Body::new(body_length, prefix.len() as u32);
-    while !stream.is_complete() {
-        let n = block_on(stream.read(&mut t, &mut buf)).unwrap();
-        collected.extend_from_slice(&buf[..n]);
-    }
-    assert_eq!(collected, b"DATA");
+    // When
+    let collected = download(&mut t, &request(None), &mut buf);
+
+    // Then
+    assert_eq!(collected, Ok(b"DATA".to_vec()));
 }
 
 /// A keep-alive server can leave bytes in the buffer after the body's end,
@@ -204,105 +207,69 @@ fn a_head_that_arrives_in_pieces_is_still_parsed() {
 /// written to the file.
 #[test]
 fn trailing_bytes_after_the_body_are_not_handed_to_the_caller() {
+    // Given
     let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
     raw.extend_from_slice(b"DATATRAILING");
     let mut t = Fake::new(&raw);
     let mut buf = [0u8; 256];
 
-    let Begun::Content {
-        body_length,
-        prefix,
-        ..
-    } = block_on(begin(&mut t, &request(None), &mut buf)).unwrap()
-    else {
-        panic!("expected content");
-    };
+    // When
+    let collected = download(&mut t, &request(None), &mut buf);
 
-    let mut collected = Vec::from(&buf[prefix.clone()]);
-    let mut stream = Body::new(body_length, prefix.len() as u32);
-    while !stream.is_complete() {
-        let n = block_on(stream.read(&mut t, &mut buf)).unwrap();
-        collected.extend_from_slice(&buf[..n]);
-    }
-    assert_eq!(collected, b"DATA");
+    // Then
+    assert_eq!(collected, Ok(b"DATA".to_vec()));
 }
 
 /// A socket with no data yet returns Pending. The client must not treat it as
 /// the end of the stream.
 #[test]
 fn a_transport_that_pends_partway_does_not_end_the_download() {
+    // Given
     let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n");
     raw.extend_from_slice(b"ABCDEFGH");
     let mut t = Fake::new(&raw).in_bites_of(4).pending_after(20);
     let mut buf = [0u8; 64];
 
-    let Begun::Content {
-        body_length,
-        prefix,
-        ..
-    } = block_on(begin(&mut t, &request(None), &mut buf)).unwrap()
-    else {
-        panic!("expected content");
-    };
+    // When
+    let collected = download(&mut t, &request(None), &mut buf);
 
-    let mut collected = Vec::from(&buf[prefix.clone()]);
-    let mut body = Body::new(body_length, prefix.len() as u32);
-    while !body.is_complete() {
-        let n = block_on(body.read(&mut t, &mut buf)).unwrap();
-        collected.extend_from_slice(&buf[..n]);
-    }
-    assert_eq!(collected, b"ABCDEFGH");
+    // Then
+    assert_eq!(collected, Ok(b"ABCDEFGH".to_vec()));
 }
 
 /// A server that promises 100 bytes and sends 4 must not look like a complete
 /// file.
 #[test]
 fn a_peer_that_stops_early_is_an_error_rather_than_a_short_file() {
+    // Given
     let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
     raw.extend_from_slice(b"DATA");
     let mut t = Fake::new(&raw);
     let mut buf = [0u8; 64];
 
-    let Begun::Content {
-        body_length,
-        prefix,
-        ..
-    } = block_on(begin(&mut t, &request(None), &mut buf)).unwrap()
-    else {
-        panic!("expected content");
-    };
+    // When
+    let collected = download(&mut t, &request(None), &mut buf);
 
-    let mut body = Body::new(body_length, prefix.len() as u32);
-    let mut err = None;
-    while !body.is_complete() {
-        match block_on(body.read(&mut t, &mut buf)) {
-            Ok(_) => {}
-            Err(e) => {
-                err = Some(e);
-                break;
-            }
-        }
-    }
-    assert_eq!(err, Some(CloudError::BodyTruncated));
+    // Then
+    assert_eq!(collected, Err(CloudError::BodyTruncated));
 }
 
 #[test]
 fn an_unchanged_file_reports_unchanged_and_reads_no_body() {
+    // Given
     let mut t = Fake::new(b"HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\n\r\n");
     let etag = ETag::try_from("\"v1\"").unwrap();
     let mut buf = [0u8; 256];
     let request = ContentRequest {
-        uid: UID,
-        route: teddiebox_cloud::Route::V2,
-        auth: None,
         etag: Some(&etag),
-        server: "box.lan:8080",
-        from: None,
+        ..request(None)
     };
-    assert_eq!(
-        block_on(begin(&mut t, &request, &mut buf)).unwrap(),
-        Begun::Unchanged
-    );
+
+    // When
+    let begun = block_on(begin(&mut t, &request, &mut buf)).unwrap();
+
+    // Then
+    assert_eq!(begun, Begun::Unchanged);
     assert_eq!(
         t.read_at,
         t.response.len(),
@@ -312,28 +279,35 @@ fn an_unchanged_file_reports_unchanged_and_reads_no_body() {
 
 #[test]
 fn an_unknown_tag_reports_not_found() {
+    // Given
     let mut t = Fake::new(b"HTTP/1.1 404 Not Found\r\n\r\n");
     let mut buf = [0u8; 256];
-    assert_eq!(
-        block_on(begin(&mut t, &request(None), &mut buf)).unwrap(),
-        Begun::NotFound
-    );
+
+    // When
+    let begun = block_on(begin(&mut t, &request(None), &mut buf)).unwrap();
+
+    // Then
+    assert_eq!(begun, Begun::NotFound);
 }
 
 #[test]
 fn a_response_without_a_length_is_refused() {
+    // Given
     let mut t = Fake::new(b"HTTP/1.1 200 OK\r\n\r\nDATA");
     let mut buf = [0u8; 256];
-    assert_eq!(
-        block_on(begin(&mut t, &request(None), &mut buf)),
-        Err(CloudError::LengthRequired)
-    );
+
+    // When
+    let begun = block_on(begin(&mut t, &request(None), &mut buf));
+
+    // Then
+    assert_eq!(begun, Err(CloudError::LengthRequired));
 }
 
 /// A head longer than the buffer can never be parsed, so it must fail rather
 /// than loop forever.
 #[test]
 fn a_head_too_long_for_the_buffer_is_an_error_rather_than_a_spin() {
+    // Given
     let mut header = Vec::from(*b"HTTP/1.1 200 OK\r\n");
     for _ in 0..40 {
         header.extend_from_slice(b"X-Padding: 0123456789012345678901234567890123456789\r\n");
@@ -341,10 +315,12 @@ fn a_head_too_long_for_the_buffer_is_an_error_rather_than_a_spin() {
     header.extend_from_slice(b"\r\n");
     let mut t = Fake::new(&header);
     let mut buf = [0u8; 128];
-    assert_eq!(
-        block_on(begin(&mut t, &request(None), &mut buf)),
-        Err(CloudError::ResponseTooLong)
-    );
+
+    // When
+    let begun = block_on(begin(&mut t, &request(None), &mut buf));
+
+    // Then
+    assert_eq!(begun, Err(CloudError::ResponseTooLong));
 }
 
 /// The exact response teddyCloud sent to a one-byte probe, including the one
@@ -361,6 +337,7 @@ fn a_head_too_long_for_the_buffer_is_an_error_rather_than_a_spin() {
 /// ```
 #[test]
 fn a_probe_reports_the_whole_file_length_from_one_byte() {
+    // Given
     let response = b"HTTP/1.1 206 Partial Content\r\n\
 Connection: keep-alive\r\n\
 Keep-Alive: timeout=300, max=4294967294\r\n\
@@ -371,8 +348,10 @@ Content-Length: 1\r\n\r\nX";
     let mut transport = Fake::new(response);
     let mut buf = [0u8; 512];
 
+    // When
     let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
 
+    // Then
     assert_eq!(probed, Probed::Length(37_912_939));
     let sent = String::from_utf8(transport.written.clone()).unwrap();
     assert!(sent.contains("Range: bytes=1-1\r\n"), "sent: {sent}");
@@ -383,12 +362,14 @@ Content-Length: 1\r\n\r\nX";
 /// card.
 #[test]
 fn a_probe_for_an_unknown_figure_is_not_an_error() {
-    let response = b"HTTP/1.1 410 Gone\r\nContent-Length: 39\r\n\r\n";
-    let mut transport = Fake::new(response);
+    // Given
+    let mut transport = Fake::new(b"HTTP/1.1 410 Gone\r\nContent-Length: 39\r\n\r\n");
     let mut buf = [0u8; 512];
 
+    // When
     let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
 
+    // Then
     assert_eq!(probed, Probed::NoContent);
 }
 
@@ -397,12 +378,14 @@ fn a_probe_for_an_unknown_figure_is_not_an_error() {
 /// length is the file's length.
 #[test]
 fn a_probe_answered_with_the_whole_file_still_reports_its_length() {
-    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 60975\r\n\r\n";
-    let mut transport = Fake::new(response);
+    // Given
+    let mut transport = Fake::new(b"HTTP/1.1 200 OK\r\nContent-Length: 60975\r\n\r\n");
     let mut buf = [0u8; 512];
 
+    // When
     let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
 
+    // Then
     assert_eq!(probed, Probed::Length(60_975));
 }
 
@@ -411,12 +394,14 @@ fn a_probe_answered_with_the_whole_file_still_reports_its_length() {
 /// file stale.
 #[test]
 fn a_probe_that_learns_no_length_says_so() {
-    let response = b"HTTP/1.1 304 Not Modified\r\n\r\n";
-    let mut transport = Fake::new(response);
+    // Given
+    let mut transport = Fake::new(b"HTTP/1.1 304 Not Modified\r\n\r\n");
     let mut buf = [0u8; 512];
 
+    // When
     let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
 
+    // Then
     assert_eq!(probed, Probed::Unstated);
 }
 
@@ -424,12 +409,14 @@ fn a_probe_that_learns_no_length_says_so() {
 /// server could not be reached".
 #[test]
 fn a_figure_the_cloud_never_heard_of_is_not_a_network_fault() {
-    let response = b"HTTP/1.1 410 Gone\r\nContent-Length: 39\r\n\r\n";
-    let mut transport = Fake::new(response);
+    // Given
+    let mut transport = Fake::new(b"HTTP/1.1 410 Gone\r\nContent-Length: 39\r\n\r\n");
     let mut buf = [0u8; 512];
 
+    // When
     let begun = block_on(begin(&mut transport, &request(None), &mut buf)).unwrap();
 
+    // Then
     assert_eq!(begun, Begun::NotFound);
 }
 
@@ -438,21 +425,22 @@ fn a_figure_the_cloud_never_heard_of_is_not_a_network_fault() {
 /// content request, because both share the same code.
 #[test]
 fn begin_prepared_parses_a_path_response_the_same_way_begin_parses_a_content_response() {
+    // Given
     let raw = *b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nDATA";
-
     let mut path_bytes = [0u8; 512];
     let n = build_path_request(&mut path_bytes, "/teddiebox.bin", "box.lan:8080", None).unwrap();
     let mut path_transport = Fake::new(&raw);
     let mut path_buf = [0u8; 256];
+    let mut content_transport = Fake::new(&raw);
+    let mut content_buf = [0u8; 256];
+
+    // When
     let path_begun = block_on(begin_prepared(
         &mut path_transport,
         &path_bytes[..n],
         &mut path_buf,
     ))
     .unwrap();
-
-    let mut content_transport = Fake::new(&raw);
-    let mut content_buf = [0u8; 256];
     let content_begun = block_on(begin(
         &mut content_transport,
         &request(None),
@@ -460,6 +448,7 @@ fn begin_prepared_parses_a_path_response_the_same_way_begin_parses_a_content_res
     ))
     .unwrap();
 
+    // Then
     assert_eq!(path_begun, content_begun);
     let Begun::Content {
         body_length,
