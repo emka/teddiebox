@@ -97,7 +97,14 @@ mod tests {
     /// below it.
     #[test]
     fn the_loudest_step_is_quieter_than_the_level_that_was_too_loud() {
-        assert_eq!(db_for(Output::Speaker, Volume(MAX_VOLUME)), -15);
+        // Given
+        let loudest = Volume(MAX_VOLUME);
+
+        // When
+        let level = db_for(Output::Speaker, loudest);
+
+        // Then
+        assert_eq!(level, -15);
     }
 
     /// `VolumeModel::new` starts at half the limit, so this is the start-up
@@ -105,112 +112,198 @@ mod tests {
     /// listening tests.
     #[test]
     fn the_step_a_box_boots_at_is_the_level_the_bench_listened_to() {
-        assert_eq!(db_for(Output::Speaker, Volume(MAX_VOLUME / 2)), -36);
+        // Given
+        let start_up = Volume(MAX_VOLUME / 2);
+
+        // When
+        let level = db_for(Output::Speaker, start_up);
+
+        // Then
+        assert_eq!(level, -36);
     }
 
     /// Step 0 is silence. The codec's minimum is -63.5 dB and `set_volume_db`
     /// takes whole dB, so -63 is the quietest level.
     #[test]
     fn the_lowest_step_is_the_codecs_floor_rather_than_another_rung() {
-        assert_eq!(db_for(Output::Speaker, Volume(0)), -63);
+        // Given
+        let silence = Volume(0);
+
+        // When
+        let level = db_for(Output::Speaker, silence);
+
+        // Then
+        assert_eq!(level, -63);
     }
 
     /// Equal dB steps sound like equal loudness steps.
     #[test]
     fn the_audible_steps_are_evenly_spaced() {
-        assert_eq!(db_for(Output::Speaker, Volume(1)), -43);
-        assert_eq!(db_for(Output::Speaker, Volume(2)), -36);
-        assert_eq!(db_for(Output::Speaker, Volume(3)), -29);
-        assert_eq!(db_for(Output::Speaker, Volume(4)), -22);
-        assert_eq!(db_for(Output::Speaker, Volume(5)), -15);
+        // Given
+        let audible = [1, 2, 3, 4, 5].map(Volume);
+
+        // When
+        let levels = audible.map(|step| db_for(Output::Speaker, step));
+
+        // Then
+        assert_eq!(levels, [-43, -36, -29, -22, -15]);
     }
 
     /// `Volume` has a public field, so a caller can pass a step that does not
     /// exist. The loudest step is the only safe answer.
     #[test]
     fn a_step_above_the_maximum_is_answered_with_the_ceiling() {
-        assert_eq!(db_for(Output::Speaker, Volume(MAX_VOLUME + 1)), -15);
-        assert_eq!(db_for(Output::Speaker, Volume(255)), -15);
+        // Given
+        let too_loud = [Volume(MAX_VOLUME + 1), Volume(255)];
+
+        // When
+        let levels = too_loud.map(|step| db_for(Output::Speaker, step));
+
+        // Then
+        assert_eq!(levels, [-15, -15]);
     }
 
     /// Each headphone step is quieter than the speaker's. Written out as
     /// literals, so the test can disagree with the code.
     #[test]
     fn the_headphone_ladder_is_the_speakers_own_steps_made_quieter() {
-        assert_eq!(db_for(Output::Headphones, Volume(1)), -55);
-        assert_eq!(db_for(Output::Headphones, Volume(2)), -48);
-        assert_eq!(db_for(Output::Headphones, Volume(3)), -41);
-        assert_eq!(db_for(Output::Headphones, Volume(4)), -34);
-        assert_eq!(db_for(Output::Headphones, Volume(5)), -27);
+        // Given
+        let audible = [1, 2, 3, 4, 5].map(Volume);
+
+        // When
+        let levels = audible.map(|step| db_for(Output::Headphones, step));
+
+        // Then
+        assert_eq!(levels, [-55, -48, -41, -34, -27]);
     }
 
     /// Step 0 is silence on both outputs; the offset is not applied. The codec
     /// cannot go below -63.5 dB, so -75 dB is not possible.
     #[test]
     fn silence_is_the_codecs_floor_on_both_outputs() {
-        assert_eq!(db_for(Output::Headphones, Volume(0)), -63);
-        assert_eq!(db_for(Output::Speaker, Volume(0)), -63);
+        // Given
+        let silence = Volume(0);
+
+        // When
+        let levels = (
+            db_for(Output::Headphones, silence),
+            db_for(Output::Speaker, silence),
+        );
+
+        // Then
+        assert_eq!(levels, (-63, -63));
     }
 
     /// The two outputs' steps are a fixed distance apart. Step 0 is skipped
     /// because the offset is not applied to silence.
     #[test]
     fn the_two_ladders_stay_the_same_distance_apart() {
-        for step in 1..=MAX_VOLUME {
-            assert_eq!(
-                db_for(Output::Speaker, Volume(step)) - db_for(Output::Headphones, Volume(step)),
-                HEADPHONE_OFFSET_DB,
-                "step {step}"
-            );
-        }
+        // Given
+        let audible: [Volume; MAX_VOLUME as usize] = core::array::from_fn(|i| Volume(i as u8 + 1));
+
+        // When
+        let distances =
+            audible.map(|step| db_for(Output::Speaker, step) - db_for(Output::Headphones, step));
+
+        // Then
+        assert_eq!(distances, [HEADPHONE_OFFSET_DB; MAX_VOLUME as usize]);
     }
 
     /// The same for headphones, where a too-loud level matters most.
     #[test]
     fn a_step_above_the_maximum_is_answered_with_the_ceiling_on_both_outputs() {
-        assert_eq!(db_for(Output::Headphones, Volume(MAX_VOLUME + 1)), -27);
-        assert_eq!(db_for(Output::Headphones, Volume(255)), -27);
-        assert_eq!(db_for(Output::Speaker, Volume(255)), -15);
+        // Given
+        let too_loud = [Volume(MAX_VOLUME + 1), Volume(255)];
+
+        // When
+        let levels = too_loud.map(|step| {
+            (
+                db_for(Output::Headphones, step),
+                db_for(Output::Speaker, step),
+            )
+        });
+
+        // Then
+        assert_eq!(levels, [(-27, -15), (-27, -15)]);
     }
 
     #[test]
     fn starts_at_half_the_limit() {
-        assert_eq!(VolumeModel::new(4).current(), Volume(2));
+        // Given
+        let limit = 4;
+
+        // When
+        let model = VolumeModel::new(limit);
+
+        // Then
+        assert_eq!(model.current(), Volume(2));
     }
 
     /// The firmware powers the codec up at this step's level, computed at
     /// compile time, so it must match the reducer's start-up step.
     #[test]
     fn a_box_with_no_parental_limit_starts_on_the_middle_step() {
-        assert_eq!(VolumeModel::new(MAX_VOLUME).current(), Volume(2));
+        // Given
+        let no_limit = MAX_VOLUME;
+
+        // When
+        let model = VolumeModel::new(no_limit);
+
+        // Then
+        assert_eq!(model.current(), Volume(2));
     }
 
     #[test]
     fn stepping_up_increases_by_one() {
+        // Given
         let mut v = VolumeModel::new(4);
-        assert_eq!(v.up(), Some(Volume(3)));
+
+        // When
+        let stepped = v.up();
+
+        // Then
+        assert_eq!(stepped, Some(Volume(3)));
         assert_eq!(v.current(), Volume(3));
     }
 
     #[test]
     fn stepping_up_stops_at_the_parental_limit() {
+        // Given
         let mut v = VolumeModel::new(2);
         v.up();
         assert_eq!(v.current(), Volume(2));
-        assert_eq!(v.up(), None, "at the ceiling, nothing changes");
+
+        // When
+        let stepped = v.up();
+
+        // Then
+        assert_eq!(stepped, None, "at the ceiling, nothing changes");
         assert_eq!(v.current(), Volume(2));
     }
 
     #[test]
     fn stepping_down_stops_at_silence() {
+        // Given
         let mut v = VolumeModel::new(2);
         v.down();
         assert_eq!(v.current(), Volume(0));
-        assert_eq!(v.down(), None);
+
+        // When
+        let stepped = v.down();
+
+        // Then
+        assert_eq!(stepped, None);
     }
 
     #[test]
     fn a_limit_above_the_maximum_is_clamped() {
-        assert_eq!(VolumeModel::new(250).limit(), MAX_VOLUME);
+        // Given
+        let too_high = 250;
+
+        // When
+        let model = VolumeModel::new(too_high);
+
+        // Then
+        assert_eq!(model.limit(), MAX_VOLUME);
     }
 }
