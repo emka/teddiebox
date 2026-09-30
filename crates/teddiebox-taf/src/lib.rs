@@ -4,6 +4,8 @@ mod header;
 mod page;
 mod reader;
 mod source;
+#[cfg(test)]
+mod test_pages;
 mod varint;
 
 pub use header::TonieHeader;

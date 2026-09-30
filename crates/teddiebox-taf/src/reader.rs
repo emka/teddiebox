@@ -259,6 +259,7 @@ impl<'p, S: PageSource> TafReader<'p, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_pages::{header_page, ogg_page, ogg_page_with_serial};
     use crate::SlicePages;
 
     const FIXTURE: &[u8] = include_bytes!("../tests/data/sine.taf");
@@ -422,48 +423,6 @@ mod tests {
         // Then
         assert_eq!(read, Ok(Some(19)));
         assert_eq!(&exact[..8], b"OpusHead");
-    }
-
-    /// Builds a minimal TAF header page with the given protobuf field bytes.
-    /// A copy of the private helper in `header.rs`.
-    fn header_page(fields: &[u8]) -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        page[0..4].copy_from_slice(&(fields.len() as u32).to_be_bytes());
-        page[4..4 + fields.len()].copy_from_slice(fields);
-        page
-    }
-
-    /// Builds a minimal valid Ogg page with the given packets. A copy of the
-    /// private helper in `page.rs`.
-    fn ogg_page(packets: &[&[u8]]) -> [u8; PAGE_SIZE] {
-        ogg_page_with_serial(0, packets)
-    }
-
-    /// Like `ogg_page`, but with a stream serial.
-    fn ogg_page_with_serial(serial: u32, packets: &[&[u8]]) -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        page[0..4].copy_from_slice(b"OggS");
-        page[14..18].copy_from_slice(&serial.to_le_bytes());
-
-        let mut off = 27usize;
-        for p in packets {
-            let mut remaining = p.len();
-            while remaining >= 255 {
-                page[off] = 255;
-                off += 1;
-                remaining -= 255;
-            }
-            page[off] = remaining as u8;
-            off += 1;
-        }
-        let segment_count = off - 27;
-        page[26] = segment_count as u8;
-
-        for p in packets {
-            page[off..off + p.len()].copy_from_slice(p);
-            off += p.len();
-        }
-        page
     }
 
     #[test]

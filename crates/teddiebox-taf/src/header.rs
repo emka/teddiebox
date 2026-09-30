@@ -132,15 +132,7 @@ fn apply_field(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Builds a header page the way a real encoder does, so the test exercises
-    /// the same path as production input.
-    fn header_page(fields: &[u8]) -> [u8; PAGE_SIZE] {
-        let mut page = [0xFFu8; PAGE_SIZE];
-        page[0..4].copy_from_slice(&(fields.len() as u32).to_be_bytes());
-        page[4..4 + fields.len()].copy_from_slice(fields);
-        page
-    }
+    use crate::test_pages::header_page;
 
     #[test]
     fn parses_audio_id_and_data_length() {

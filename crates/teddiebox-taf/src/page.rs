@@ -131,32 +131,7 @@ impl PacketCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Assembles a minimal valid Ogg page carrying the given packets.
-    fn ogg_page(packets: &[&[u8]]) -> [u8; PAGE_SIZE] {
-        let mut page = [0u8; PAGE_SIZE];
-        page[0..4].copy_from_slice(CAPTURE_PATTERN);
-
-        let mut lacing = heapless::Vec::<u8, 255>::new();
-        for p in packets {
-            let mut remaining = p.len();
-            while remaining >= 255 {
-                lacing.push(255).unwrap();
-                remaining -= 255;
-            }
-            lacing.push(remaining as u8).unwrap();
-        }
-
-        page[26] = lacing.len() as u8;
-        page[27..27 + lacing.len()].copy_from_slice(&lacing);
-
-        let mut off = 27 + lacing.len();
-        for p in packets {
-            page[off..off + p.len()].copy_from_slice(p);
-            off += p.len();
-        }
-        page
-    }
+    use crate::test_pages::ogg_page;
 
     /// Every packet the cursor yields from `offset`, or the error it stops on.
     fn collect(page: &[u8; PAGE_SIZE], offset: usize) -> Result<heapless::Vec<&[u8], 8>, TafError> {
