@@ -336,19 +336,24 @@ mod tests {
         assert_eq!(format, Err(WavError::Malformed));
     }
 
-    /// Mono or 44.1 kHz would play at the wrong speed. The file is still
-    /// valid, so parsing succeeds and only the codec check fails.
+    /// Mono, 44.1 kHz or 8-bit samples would play at the wrong speed or as
+    /// noise. The file is still valid, so parsing succeeds and only the codec
+    /// check fails.
     #[test]
     fn a_file_the_codec_was_not_configured_for_parses_but_does_not_match() {
         // Given
-        let mut file = REAL_HEADER;
-        file[22] = 1; // mono
+        let mut mono = REAL_HEADER;
+        mono[22] = 1;
+        let mut cd_rate = REAL_HEADER;
+        cd_rate[24..28].copy_from_slice(&44_100u32.to_le_bytes());
+        let mut eight_bit = REAL_HEADER;
+        eight_bit[34] = 8;
 
         // When
-        let format = WavFormat::parse(&file).expect("still a valid WAV");
+        let matches = [mono, cd_rate, eight_bit]
+            .map(|file| WavFormat::parse(&file).map(|format| format.matches_codec()));
 
         // Then
-        assert_eq!(format.channels, 1);
-        assert!(!format.matches_codec());
+        assert_eq!(matches, [Ok(false); 3]);
     }
 }
