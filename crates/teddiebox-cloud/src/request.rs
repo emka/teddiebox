@@ -117,7 +117,11 @@ pub fn build_content_request(
 /// request. `None` asks for the whole file. There is no etag, because nothing
 /// needs it yet.
 ///
-/// Header order and `Connection: close` match `build_content_request`.
+/// Unlike `build_content_request`, no `Connection: close`: teddyCloud's
+/// `/content/` handler (CycloneHTTP) writes `Content-Length` only on a
+/// persistent connection, and without it the response ends at the close,
+/// which `begin_prepared` refuses as `LengthRequired`. The caller closes the
+/// session once the body is read.
 pub fn build_path_request(
     buf: &mut [u8],
     path: &str,
@@ -133,7 +137,7 @@ pub fn build_path_request(
         write!(writer, "Range: bytes={from}-\r\n").map_err(|_| CloudError::RequestTooLong)?;
     }
 
-    write!(writer, "Connection: close\r\n\r\n").map_err(|_| CloudError::RequestTooLong)?;
+    write!(writer, "\r\n").map_err(|_| CloudError::RequestTooLong)?;
 
     Ok(writer.used)
 }
@@ -556,7 +560,8 @@ mod tests {
         let text = core::str::from_utf8(&out[..n]).unwrap();
         assert!(!text.contains("Authorization"), "wrote: {text}");
     }
-    /// Like a content request, a path request closes the connection.
+    /// No `Connection: close`: teddyCloud's `/content/` handler then omits
+    /// `Content-Length`, which `begin_prepared` requires.
     #[test]
     fn a_path_request_asks_for_the_file_and_names_the_host() {
         let mut buf = [0u8; 256];
@@ -565,7 +570,6 @@ mod tests {
             core::str::from_utf8(&buf[..n]).unwrap(),
             "GET /teddiebox.txt HTTP/1.1\r\n\
              Host: teddycloud.local\r\n\
-             Connection: close\r\n\
              \r\n"
         );
     }
@@ -580,7 +584,6 @@ mod tests {
             "GET /teddiebox.bin HTTP/1.1\r\n\
              Host: teddycloud.local\r\n\
              Range: bytes=65536-\r\n\
-             Connection: close\r\n\
              \r\n"
         );
     }
