@@ -88,10 +88,6 @@ impl Debounced {
             Edge::Released
         })
     }
-
-    pub const fn is_pressed(&self) -> bool {
-        self.settled
-    }
 }
 
 #[cfg(test)]
