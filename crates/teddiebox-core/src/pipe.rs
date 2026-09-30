@@ -202,7 +202,8 @@ mod tests {
             count += pipe.read(&mut drained[count..count + 3]);
         }
 
-        // Then
+        // Then: every round's read was served, and in order
+        assert_eq!(count, 150);
         let in_order = drained[..count]
             .iter()
             .enumerate()
