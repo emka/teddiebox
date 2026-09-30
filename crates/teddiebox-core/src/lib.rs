@@ -1344,11 +1344,10 @@ mod tests {
         ));
     }
 
-    /// Each output keeps its own volume. Turning the headphones down must not
-    /// make the speaker quiet, and a loud speaker must not carry over to the
-    /// headphones.
+    /// Each output keeps its own volume, so turning the headphones down must
+    /// not make the speaker quiet.
     #[test]
-    fn each_output_remembers_its_own_step_across_a_plug_and_an_unplug() {
+    fn unplugging_brings_back_the_speakers_own_step() {
         // Given: the speaker on step 2, the headphones turned down to step 1
         let mut c = core();
         assert_eq!(c.volume(), Volume(2));
@@ -1357,23 +1356,37 @@ mod tests {
         assert_eq!(c.volume(), Volume(1));
 
         // When
-        let back = c.handle(Event::Headphones(false), &Index);
-        let speaker_again = c.volume();
-        let again = c.handle(Event::Headphones(true), &Index);
-        let headphones_again = c.volume();
+        let actions = c.handle(Event::Headphones(false), &Index);
 
         // Then
-        assert_eq!(speaker_again, Volume(2), "the speaker kept its own step");
+        assert_eq!(c.volume(), Volume(2));
         assert!(contains(
-            &back,
+            &actions,
             Action::SetVolume {
                 step: Volume(2),
                 db: -36
             }
         ));
-        assert_eq!(headphones_again, Volume(1), "and so did the headphones");
+    }
+
+    /// Each output keeps its own volume, so a loud speaker must not carry
+    /// over to the headphones.
+    #[test]
+    fn plugging_in_again_brings_back_the_headphones_own_step() {
+        // Given: the headphones turned down to step 1, then unplugged
+        let mut c = core();
+        c.handle(Event::Headphones(true), &Index);
+        tap(&mut c, Ear::Smaller, 0);
+        assert_eq!(c.volume(), Volume(1));
+        c.handle(Event::Headphones(false), &Index);
+
+        // When
+        let actions = c.handle(Event::Headphones(true), &Index);
+
+        // Then
+        assert_eq!(c.volume(), Volume(1));
         assert!(contains(
-            &again,
+            &actions,
             Action::SetVolume {
                 step: Volume(1),
                 db: -55
