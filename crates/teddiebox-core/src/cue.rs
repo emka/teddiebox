@@ -376,58 +376,106 @@ mod tests {
     /// Lengths measured from recordings of a stock box, in frames at 48 kHz.
     #[test]
     fn each_cue_lasts_as_long_as_the_recording() {
-        assert_eq!(Cue::SkipForward.frames(), 11_462);
-        assert_eq!(Cue::SkipBack.frames(), 11_462);
-        assert_eq!(Cue::VolumeUp.frames(), 960);
-        assert_eq!(Cue::VolumeDown.frames(), 960);
-        assert_eq!(Cue::VolumeLimit.frames(), 3_360);
+        // Given
+        let cues = ALL;
+
+        // When
+        let lengths = cues.map(|cue| (cue, cue.frames()));
+
+        // Then
+        assert_eq!(
+            lengths,
+            [
+                (Cue::SkipForward, 11_462),
+                (Cue::SkipBack, 11_462),
+                (Cue::VolumeUp, 960),
+                (Cue::VolumeDown, 960),
+                (Cue::VolumeLimit, 3_360),
+            ]
+        );
     }
 
     #[test]
     fn skip_forward_rises_from_d5_to_g5() {
-        let s = render(Cue::SkipForward);
+        // Given
+        let cue = Cue::SkipForward;
+
+        // When
+        let s = render(cue);
+
+        // Then
         assert_pitch(&s[..4_445], 587.33);
         assert_pitch(&s[4_445 + 2_947..], 783.99);
     }
 
     #[test]
     fn skip_back_falls_from_d5_to_a4() {
-        let s = render(Cue::SkipBack);
+        // Given
+        let cue = Cue::SkipBack;
+
+        // When
+        let s = render(cue);
+
+        // Then
         assert_pitch(&s[..4_445], 587.33);
         assert_pitch(&s[4_445 + 2_947..], 440.0);
     }
 
     #[test]
     fn the_volume_beeps_have_their_measured_pitches() {
-        assert_pitch(&render(Cue::VolumeUp), 800.0);
-        assert_pitch(&render(Cue::VolumeDown), 504.0);
-        let limit = render(Cue::VolumeLimit);
+        // Given
+        let (up, down, limit) = (Cue::VolumeUp, Cue::VolumeDown, Cue::VolumeLimit);
+
+        // When
+        let (up, down, limit) = (render(up), render(down), render(limit));
+
+        // Then
+        assert_pitch(&up, 800.0);
+        assert_pitch(&down, 504.0);
         assert_pitch(&limit[..960], 1_000.0);
         assert_pitch(&limit[960 + 1_440..], 1_000.0);
     }
 
     #[test]
     fn the_gaps_between_notes_are_silent() {
-        let skip = render(Cue::SkipForward);
+        // Given
+        let (skip, limit) = (Cue::SkipForward, Cue::VolumeLimit);
+
+        // When
+        let (skip, limit) = (render(skip), render(limit));
+
+        // Then
         assert!(skip[4_445..4_445 + 2_947].iter().all(|&s| s == 0));
-        let limit = render(Cue::VolumeLimit);
         assert!(limit[960..960 + 1_440].iter().all(|&s| s == 0));
     }
 
     /// A jump from or to silence is a click.
     #[test]
     fn every_cue_starts_and_ends_at_zero() {
-        for cue in ALL {
+        // Given
+        let cues = ALL;
+
+        // When
+        let ends = cues.map(|cue| {
             let s = render(cue);
-            assert_eq!(s[0], 0, "{cue:?} starts");
-            assert_eq!(s[s.len() - 1], 0, "{cue:?} ends");
-        }
+            (cue, s[0], s[s.len() - 1])
+        });
+
+        // Then
+        assert_eq!(ends, cues.map(|cue| (cue, 0, 0)));
     }
 
     #[test]
     fn no_cue_is_louder_than_the_peak() {
-        for cue in ALL {
-            assert!(peak(&render(cue)) <= 16_384, "{cue:?}");
+        // Given
+        let cues = ALL;
+
+        // When
+        let peaks = cues.map(|cue| (cue, peak(&render(cue))));
+
+        // Then
+        for (cue, peak) in peaks {
+            assert!(peak <= 16_384, "{cue:?} peaks at {peak}");
         }
     }
 
@@ -435,16 +483,28 @@ mod tests {
     /// of the 16,384 peak.
     #[test]
     fn the_beeps_reach_the_peak() {
-        assert!(peak(&render(Cue::VolumeUp)) >= 15_564);
+        // Given
+        let beep = Cue::VolumeUp;
+
+        // When
+        let loudest = peak(&render(beep));
+
+        // Then
+        assert!(loudest >= 15_564, "peaks at {loudest}");
     }
 
     /// A skip note starts at full level and has fallen to about two thirds
     /// by its end: 0.5 + 0.5·e^(−t/75 ms) at t ≈ 88 ms.
     #[test]
     fn a_skip_note_fades_as_it_plays() {
+        // Given
         let note = &render(Cue::SkipForward)[..4_445];
+
+        // When: the peaks just inside its rising and falling edges
         let start = f64::from(peak(&note[48..480]));
         let end = f64::from(peak(&note[4_445 - 528..4_445 - 48]));
+
+        // Then
         let ratio = end / start;
         assert!((0.62..=0.71).contains(&ratio), "ratio {ratio:.3}");
     }
@@ -452,28 +512,38 @@ mod tests {
     /// Measured −26 dB on the stock box's skip note.
     #[test]
     fn a_skip_note_carries_its_second_harmonic_26_db_down() {
+        // Given
         let note = &render(Cue::SkipForward)[..4_445];
+
+        // When
         let db = 20.0 * (amplitude(note, 2.0 * 587.33) / amplitude(note, 587.33)).log10();
+
+        // Then
         assert!((-27.0..=-25.0).contains(&db), "{db:.1} dB");
     }
 
     #[test]
     fn both_channels_carry_the_same_sample() {
+        // Given
         let mut out = vec![0i16; 960 * 2];
+
+        // When
         Cue::VolumeUp.samples().fill(&mut out);
-        for frame in out.chunks_exact(2) {
-            assert_eq!(frame[0], frame[1]);
-        }
+
+        // Then
+        assert!(out.chunks_exact(2).all(|frame| frame[0] == frame[1]));
     }
 
     /// The DMA takes what fits, so the firmware fills in whatever pieces it
     /// has room for.
     #[test]
     fn filling_in_pieces_gives_the_same_samples() {
+        // Given
         let cue = Cue::SkipBack;
         let mut whole = vec![0i16; cue.frames() as usize * 2];
         cue.samples().fill(&mut whole);
 
+        // When
         let mut pieces = Vec::new();
         let mut samples = cue.samples();
         for size in [2usize, 14, 1_000, 6].iter().cycle() {
@@ -484,45 +554,66 @@ mod tests {
                 break;
             }
         }
+
+        // Then
         assert_eq!(&pieces[..whole.len()], &whole[..]);
     }
 
     #[test]
     fn fill_reports_the_end_only_once_the_last_frame_is_out() {
+        // Given
         let mut samples = Cue::VolumeUp.samples();
-        let mut out = vec![0i16; 959 * 2];
-        assert!(!samples.fill(&mut out));
-        let mut last = [0i16; 2];
-        assert!(samples.fill(&mut last));
+
+        // When
+        let after_all_but_one = samples.fill(&mut vec![0i16; 959 * 2]);
+        let after_the_last = samples.fill(&mut [0i16; 2]);
+
+        // Then
+        assert_eq!((after_all_but_one, after_the_last), (false, true));
     }
 
     #[test]
     fn a_finished_cue_fills_with_silence() {
+        // Given
         let mut samples = Cue::VolumeUp.samples();
-        let mut out = vec![0i16; 960 * 2];
-        samples.fill(&mut out);
+        samples.fill(&mut vec![0i16; 960 * 2]);
+
+        // When
         let mut after = [7i16; 8];
-        assert!(samples.fill(&mut after));
+        let finished = samples.fill(&mut after);
+
+        // Then
+        assert!(finished);
         assert_eq!(after, [0; 8]);
     }
 
     #[test]
     fn a_fresh_cursor_starts_the_cue_again() {
-        let mut first = vec![0i16; 100 * 2];
+        // Given: a cursor that has played part of the cue
         let mut half_used = Cue::VolumeDown.samples();
         half_used.fill(&mut vec![0i16; 400 * 2]);
+
+        // When
+        let mut first = vec![0i16; 100 * 2];
         Cue::VolumeDown.samples().fill(&mut first);
-        let mut again = vec![0i16; 100 * 2];
-        Cue::VolumeDown.samples().fill(&mut again);
-        assert_eq!(first, again);
+
+        // Then
+        let mut from_the_start = vec![0i16; 100 * 2];
+        Cue::VolumeDown.samples().fill(&mut from_the_start);
+        assert_eq!(first, from_the_start);
     }
 
     #[test]
     fn mixing_onto_silence_is_filling() {
+        // Given
         let mut filled = vec![0i16; 3_360 * 2];
         Cue::VolumeLimit.samples().fill(&mut filled);
+
+        // When
         let mut mixed = vec![0i16; 3_360 * 2];
         Cue::VolumeLimit.samples().mix_into(&mut mixed);
+
+        // Then
         assert_eq!(filled, mixed);
     }
 
@@ -530,16 +621,26 @@ mod tests {
     /// crack instead of a clipped beep.
     #[test]
     fn mixing_clips_instead_of_wrapping() {
+        // Given
         let mut loud = vec![30_000i16; 960 * 2];
+
+        // When
         Cue::VolumeUp.samples().mix_into(&mut loud);
+
+        // Then
         assert!(loud.iter().all(|&s| s > 0), "a sample wrapped negative");
         assert!(loud.contains(&i16::MAX));
     }
 
     #[test]
     fn mixing_clips_at_the_negative_rail_too() {
+        // Given
         let mut loud = vec![-30_000i16; 960 * 2];
+
+        // When
         Cue::VolumeUp.samples().mix_into(&mut loud);
+
+        // Then
         assert!(loud.iter().all(|&s| s < 0), "a sample wrapped positive");
         assert!(loud.contains(&i16::MIN));
     }
@@ -547,8 +648,14 @@ mod tests {
     /// Mixing past the end of the cue leaves the story untouched.
     #[test]
     fn mixing_stops_at_the_end_of_the_cue() {
+        // Given
         let mut story = vec![123i16; 1_000 * 2];
-        assert!(Cue::VolumeUp.samples().mix_into(&mut story));
+
+        // When
+        let finished = Cue::VolumeUp.samples().mix_into(&mut story);
+
+        // Then
+        assert!(finished);
         assert!(story[960 * 2..].iter().all(|&s| s == 123));
     }
 
@@ -556,15 +663,26 @@ mod tests {
     /// disagree with the table; 0 means no cue.
     #[test]
     fn each_cue_has_its_own_code() {
-        assert_eq!(Cue::SkipForward.code(), 1);
-        assert_eq!(Cue::SkipBack.code(), 2);
-        assert_eq!(Cue::VolumeUp.code(), 3);
-        assert_eq!(Cue::VolumeDown.code(), 4);
-        assert_eq!(Cue::VolumeLimit.code(), 5);
-        for cue in ALL {
-            assert_eq!(Cue::from_code(cue.code()), Some(cue));
-        }
-        assert_eq!(Cue::from_code(0), None);
-        assert_eq!(Cue::from_code(6), None);
+        // Given
+        let cues = ALL;
+
+        // When
+        let codes = cues.map(|cue| (cue, cue.code()));
+        let round_tripped = cues.map(|cue| Cue::from_code(cue.code()));
+        let strays = [0, 6].map(Cue::from_code);
+
+        // Then
+        assert_eq!(
+            codes,
+            [
+                (Cue::SkipForward, 1),
+                (Cue::SkipBack, 2),
+                (Cue::VolumeUp, 3),
+                (Cue::VolumeDown, 4),
+                (Cue::VolumeLimit, 5),
+            ]
+        );
+        assert_eq!(round_tripped, cues.map(Some));
+        assert_eq!(strays, [None, None]);
     }
 }
