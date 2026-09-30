@@ -488,6 +488,29 @@ fn a_short_random_number_reply_is_rejected_rather_than_read_past() {
     finish(r);
 }
 
+/// The limit is the FIFO's size, so a request that fills it exactly is still
+/// sent.
+#[test]
+fn a_request_that_fills_the_fifo_exactly_is_sent() {
+    // Given: twelve bytes split the length field as 0x00 / 0xC0
+    let request = [0xAA; 12];
+    let mut burst = vec![0x8F, 0x91, 0x3D, 0x00, 0xC0];
+    burst.extend_from_slice(&request);
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi_write(burst)),
+        CheckedDelay::new(&polls(IRQ_POLL_ATTEMPTS as usize)),
+        PinMock::new(&irq_never()),
+    );
+    let mut response = [0u8; MAX_RESPONSE];
+
+    // When
+    let received = r.transceive(&request, &mut response);
+
+    // Then: sent, and unanswered
+    assert_eq!(received, Ok(0));
+    finish(r);
+}
+
 #[test]
 fn an_empty_plate_reports_no_tag_without_reading_the_fifo() {
     // Given
