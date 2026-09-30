@@ -61,10 +61,12 @@ pub const STATION_SOCKETS: usize = 3;
 
 /// Socket slots the setup portal is given.
 ///
-/// The portal uses a static IP and opens a TCP listener for HTTP and a UDP
-/// socket for its DHCP *server*. Its `Radio` lives in the decode scratch, not
-/// in `.bss`, so slots here cost the stack region nothing.
-pub const PORTAL_SOCKETS: usize = 3;
+/// `embassy-net` spends one on DNS even with the portal's static IP; the
+/// portal adds two TCP listeners for HTTP and a UDP socket for its DHCP
+/// *server*. Measured: with 3, entering setup panics in smoltcp
+/// (`socket_set.rs:83`, full `SocketSet`). Its `Radio` lives in the decode
+/// scratch, not in `.bss`, so slots here cost the stack region nothing.
+pub const PORTAL_SOCKETS: usize = 4;
 
 /// Why the radio could not be brought up.
 #[derive(Debug, Clone, PartialEq, Eq)]

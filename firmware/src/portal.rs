@@ -12,6 +12,7 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use embassy_futures::join::join;
 use embassy_futures::select::{select, select4, Either};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
@@ -163,7 +164,13 @@ pub async fn run(
     let stack = session.stack();
     let serving = select4(
         link.run(),
-        serve_http(stack, card.as_ref()),
+        // Two listeners, so a browser's next request (such as a reload right
+        // after an answer) finds one listening while the other is still
+        // closing. With one, it is refused.
+        join(
+            serve_http(stack, card.as_ref()),
+            serve_http(stack, card.as_ref()),
+        ),
         serve_dhcp(stack),
         serve_console(console, card.as_ref()),
     );
@@ -258,9 +265,9 @@ async fn stay_put() -> ! {
 /// Never returns. [`run`] ends the portal after its time window, and Restart
 /// resets the box from inside the handler.
 async fn serve_http(stack: Stack<'_>, card: Option<&Mounted>) {
-    // The portal's buffers: 1536 + 1536 + 4112 here, `CHUNK` in `send_page`,
-    // and 1024 + 1024 + 590 in `serve_dhcp`. None of it is on the stack; see
-    // [`REQUEST`].
+    // Each listener's buffers: 1536 + 1536 + 4112 here and `CHUNK` in
+    // `send_page`; `serve_dhcp` adds 1024 + 1024 + 590. None of it is on the
+    // stack; see [`REQUEST`].
     let mut rx = [0u8; 1536];
     let mut tx = [0u8; 1536];
     let mut buffer = [0u8; REQUEST];
