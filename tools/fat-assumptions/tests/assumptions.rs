@@ -3,7 +3,9 @@
 //!
 //! If one of these fails, the download design needs rethinking.
 
-use embedded_sdmmc::{Error, Mode, TimeSource, Timestamp, VolumeIdx, VolumeManager};
+use embedded_sdmmc::{
+    Error, Mode, RawDirectory, RawFile, TimeSource, Timestamp, VolumeIdx, VolumeManager,
+};
 use fat_assumptions::RamDisk;
 
 struct NoClock;
@@ -91,42 +93,86 @@ fn mounted(disk: RamDisk) -> Volumes {
     VolumeManager::new_with_limits(disk, NoClock, 5000)
 }
 
-/// The download uses one file handle for writing and reading: bytes written
-/// at the end of a file can be read back from earlier in the file, on the
-/// same handle, without closing it.
-#[test]
-fn one_handle_can_write_at_the_end_and_read_from_behind_it() {
-    let volumes = mounted(blank_fat_image_in_memory(8));
+/// Mounts `disk` and opens its root directory, as the firmware does.
+fn root_of(disk: RamDisk) -> (Volumes, RawDirectory) {
+    let volumes = mounted(disk);
     let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
     let root = volumes.open_root_dir(volume).unwrap();
-    let file = volumes
-        .open_file_in_dir(root, "STORY.TAF", Mode::ReadWriteCreate)
-        .unwrap();
+    (volumes, root)
+}
 
-    // Write four 4096-byte pages, each filled with its own index.
-    for page in 0u8..4 {
-        volumes.file_seek_from_end(file, 0).unwrap();
-        volumes.write(file, &[page; 4096]).unwrap();
-    }
-    volumes.flush_file(file).unwrap();
-
-    // Read page 1 back from behind the write head.
-    volumes.file_seek_from_start(file, 4096).unwrap();
-    let mut buf = [0u8; 4096];
+/// Reads from `file` until `buf` is full, failing if the file ends first.
+fn read_exactly(volumes: &Volumes, file: RawFile, buf: &mut [u8]) {
     let mut filled = 0;
     while filled < buf.len() {
         let n = volumes.read(file, &mut buf[filled..]).unwrap();
         assert_ne!(n, 0, "the file ended early");
         filled += n;
     }
-    assert!(buf.iter().all(|&b| b == 1), "page 1 read back wrong");
+}
 
-    // And the write head is still where more bytes can be appended.
+/// What one read of up to 128 bytes returns, with the file closed after.
+fn read_and_close(volumes: &Volumes, file: RawFile) -> Vec<u8> {
+    let mut raw = [0u8; 128];
+    let read = volumes.read(file, &mut raw).unwrap();
+    volumes.close_file(file).unwrap();
+    raw[..read].to_vec()
+}
+
+/// Writes into `disk` the way a laptop would, through `fatfs`, which can
+/// create the long names and directories `embedded-sdmmc` cannot.
+fn written_by_a_host(
+    disk: RamDisk,
+    write: impl FnOnce(&fatfs::Dir<std::io::Cursor<&mut [u8]>>),
+) -> RamDisk {
+    let mut image = disk.into_bytes();
+    let partition_at = PARTITION_START_BLOCK as usize * 512;
+    {
+        let cursor = std::io::Cursor::new(&mut image[partition_at..]);
+        let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new())
+            .expect("could not mount the image as a host");
+        write(&fs.root_dir());
+    }
+    RamDisk::new(image)
+}
+
+/// Creates `name` in `dir` holding `contents`, through `fatfs`.
+fn host_file(dir: &fatfs::Dir<std::io::Cursor<&mut [u8]>>, name: &str, contents: &[u8]) {
+    use std::io::Write;
+
+    let mut file = dir.create_file(name).expect("could not create");
+    file.write_all(contents).expect("could not write");
+    file.flush().expect("could not flush");
+}
+
+/// The download uses one file handle for writing and reading: bytes written
+/// at the end of a file can be read back from earlier in the file, on the
+/// same handle, without closing it.
+#[test]
+fn one_handle_can_write_at_the_end_and_read_from_behind_it() {
+    // Given: four 4096-byte pages, each filled with its own index
+    let (volumes, root) = root_of(blank_fat_image_in_memory(8));
+    let file = volumes
+        .open_file_in_dir(root, "STORY.TAF", Mode::ReadWriteCreate)
+        .unwrap();
+    for page in 0u8..4 {
+        volumes.file_seek_from_end(file, 0).unwrap();
+        volumes.write(file, &[page; 4096]).unwrap();
+    }
+    volumes.flush_file(file).unwrap();
+
+    // When: page 1 is read back from behind the write head, then one more
+    // page is appended
+    volumes.file_seek_from_start(file, 4096).unwrap();
+    let mut page_1 = [0u8; 4096];
+    read_exactly(&volumes, file, &mut page_1);
     volumes.file_seek_from_end(file, 0).unwrap();
     volumes.write(file, &[4u8; 4096]).unwrap();
     volumes.flush_file(file).unwrap();
-    assert_eq!(volumes.file_length(file).unwrap(), 5 * 4096);
 
+    // Then
+    assert!(page_1.iter().all(|&b| b == 1), "page 1 read back wrong");
+    assert_eq!(volumes.file_length(file).unwrap(), 5 * 4096);
     volumes.close_file(file).unwrap();
 }
 
@@ -135,49 +181,35 @@ fn one_handle_can_write_at_the_end_and_read_from_behind_it() {
 /// of appending.
 #[test]
 fn a_write_after_a_backward_seek_overwrites_unless_you_seek_to_the_end() {
-    let volumes = mounted(blank_fat_image_in_memory(8));
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
+    // Given: two pages, and the first read back, leaving the offset at 4096
+    let (volumes, root) = root_of(blank_fat_image_in_memory(8));
     let file = volumes
         .open_file_in_dir(root, "STORY.TAF", Mode::ReadWriteCreate)
         .unwrap();
-
     volumes.write(file, &[1u8; 4096]).unwrap();
     volumes.write(file, &[2u8; 4096]).unwrap();
     volumes.flush_file(file).unwrap();
     assert_eq!(volumes.file_length(file).unwrap(), 8192);
-
-    // Read the first page, leaving the offset at 4096.
     volumes.file_seek_from_start(file, 0).unwrap();
-    let mut buf = [0u8; 4096];
-    let mut filled = 0;
-    while filled < buf.len() {
-        filled += volumes.read(file, &mut buf[filled..]).unwrap();
-    }
+    read_exactly(&volumes, file, &mut [0u8; 4096]);
 
-    // Writing now lands at 4096, not at the end.
+    // When
     volumes.write(file, &[9u8; 4096]).unwrap();
     volumes.flush_file(file).unwrap();
+
+    // Then: the file did not grow, and page 1 now holds the new bytes
     assert_eq!(
         volumes.file_length(file).unwrap(),
         8192,
         "the file did not grow: the write overwrote page 1"
     );
-
-    // Page 1 itself was overwritten.
     volumes.file_seek_from_start(file, 4096).unwrap();
-    let mut clobbered = [0u8; 4096];
-    let mut filled = 0;
-    while filled < clobbered.len() {
-        let n = volumes.read(file, &mut clobbered[filled..]).unwrap();
-        assert_ne!(n, 0, "the file ended early");
-        filled += n;
-    }
+    let mut page_1 = [0u8; 4096];
+    read_exactly(&volumes, file, &mut page_1);
     assert!(
-        clobbered.iter().all(|&b| b == 9),
+        page_1.iter().all(|&b| b == 9),
         "page 1 still held its old bytes, so nothing was overwritten"
     );
-
     volumes.close_file(file).unwrap();
 }
 
@@ -185,23 +217,23 @@ fn a_write_after_a_backward_seek_overwrites_unless_you_seek_to_the_end() {
 /// possible, whatever `MAX_FILES` is.
 #[test]
 fn the_same_file_cannot_be_opened_twice() {
-    let volumes = mounted(blank_fat_image_in_memory(8));
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
+    // Given
+    let (volumes, root) = root_of(blank_fat_image_in_memory(8));
     let first = volumes
         .open_file_in_dir(root, "STORY.TAF", Mode::ReadWriteCreate)
         .unwrap();
 
+    // When
     let refusal = volumes
         .open_file_in_dir(root, "STORY.TAF", Mode::ReadOnly)
         .expect_err("two handles on one file would make the ping-pong unnecessary");
-    // Check the exact error: `is_err()` would also pass if the handle limit
-    // (which this project sets) caused the refusal.
+
+    // Then: the exact error, since `is_err()` would also pass if the handle
+    // limit (which this project sets) caused the refusal
     assert!(
         matches!(refusal, Error::FileAlreadyOpen),
         "the refusal must be about this file, not about how many handles fit: {refusal:?}"
     );
-
     volumes.close_file(first).unwrap();
 }
 
@@ -214,39 +246,33 @@ fn the_same_file_cannot_be_opened_twice() {
 /// closing the file, like a power loss.
 #[test]
 fn a_files_recorded_length_only_becomes_true_at_a_flush() {
+    // Given: one page flushed, a second not, then the power lost
     let card = {
-        let volumes = mounted(blank_fat_image_in_memory(8));
-        let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-        let root = volumes.open_root_dir(volume).unwrap();
+        let (volumes, root) = root_of(blank_fat_image_in_memory(8));
         let file = volumes
             .open_file_in_dir(root, "STORY.TAF", Mode::ReadWriteCreate)
             .unwrap();
-
         volumes.write(file, &[1u8; 4096]).unwrap();
         volumes.flush_file(file).unwrap();
-
-        // A second page, not flushed.
         volumes.write(file, &[2u8; 4096]).unwrap();
         assert_eq!(
             volumes.file_length(file).unwrap(),
             8192,
             "the live handle counts every byte handed to it, flushed or not"
         );
-
-        // Power is lost here: `free` releases the card without closing the
-        // file, so the unflushed length never reaches the directory.
         volumes.free().0
     };
 
-    let volumes = mounted(card);
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
+    // When
+    let (volumes, root) = root_of(card);
     let reopened = volumes
         .open_file_in_dir(root, "STORY.TAF", Mode::ReadOnly)
         .unwrap();
+    let length = volumes.file_length(reopened).unwrap();
+
+    // Then
     assert_eq!(
-        volumes.file_length(reopened).unwrap(),
-        4096,
+        length, 4096,
         "the on-disk record counts only what was flushed, and a resume reads it"
     );
     volumes.close_file(reopened).unwrap();
@@ -257,27 +283,24 @@ fn a_files_recorded_length_only_becomes_true_at_a_flush() {
 /// under the crate's file name, read the bytes back, and parse them.
 #[test]
 fn the_config_file_can_be_opened_by_the_name_the_crate_publishes() {
+    // Given
     const TEXT: &str = "ssid = HomeNet\npassword = hunter2\nserver = box.lan:80\n";
-
-    let volumes = mounted(blank_fat_image_in_memory(8));
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
-
+    let (volumes, root) = root_of(blank_fat_image_in_memory(8));
     let written = volumes
         .open_file_in_dir(root, teddiebox_config::FILENAME, Mode::ReadWriteCreate)
         .expect("the published name is not one this filesystem can open");
     volumes.write(written, TEXT.as_bytes()).unwrap();
     volumes.close_file(written).unwrap();
 
+    // When
     let file = volumes
         .open_file_in_dir(root, teddiebox_config::FILENAME, Mode::ReadOnly)
         .unwrap();
-    let mut raw = [0u8; 128];
-    let read = volumes.read(file, &mut raw).unwrap();
-    volumes.close_file(file).unwrap();
-
-    let config = teddiebox_config::Config::parse(core::str::from_utf8(&raw[..read]).unwrap())
+    let raw = read_and_close(&volumes, file);
+    let config = teddiebox_config::Config::parse(core::str::from_utf8(&raw).unwrap())
         .expect("the bytes that came off the filesystem did not parse");
+
+    // Then
     assert_eq!(config.ssid.as_str(), "HomeNet");
     assert_eq!(config.server.as_str(), "box.lan:80");
 }
@@ -291,22 +314,26 @@ fn the_config_file_can_be_opened_by_the_name_the_crate_publishes() {
 /// none of that.
 #[test]
 fn a_long_config_filename_opens_only_through_the_long_name_call() {
+    // Given: written by a laptop, since `open_long_name_file_in_dir` cannot
+    // create files
     const LONG: &str = "teddiebox.conf";
     const TEXT: &str = "ssid = HomeNet\nserver = box.lan:80\n";
+    let disk = written_by_a_host(blank_fat_image_in_memory(8), |root| {
+        host_file(root, LONG, TEXT.as_bytes());
+    });
+    let (volumes, root) = root_of(disk);
 
-    let disk = blank_fat_image_in_memory(8);
-    // Written by the laptop, not the box: `open_long_name_file_in_dir` cannot
-    // create files.
-    let disk = with_long_name_file(disk, LONG, TEXT.as_bytes());
-
-    let volumes = mounted(disk);
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
-
+    // When
     let refusal = volumes
         .open_file_in_dir(root, LONG, Mode::ReadOnly)
         .expect_err("a short-name open of a long name must fail");
-    // Check the exact error: `is_err()` would also pass for a missing file.
+    let file = volumes
+        .open_long_name_file_in_dir(root, LONG, Mode::ReadOnly)
+        .expect("a long name does open through the long-name call");
+    let raw = read_and_close(&volumes, file);
+
+    // Then: the exact error, since `is_err()` would also pass for a missing
+    // file
     assert!(
         matches!(
             refusal,
@@ -314,34 +341,7 @@ fn a_long_config_filename_opens_only_through_the_long_name_call() {
         ),
         "the refusal must be about the ninth character of the stem: {refusal:?}"
     );
-
-    // The long-name call does open it.
-    let file = volumes
-        .open_long_name_file_in_dir(root, LONG, Mode::ReadOnly)
-        .expect("a long name does open through the long-name call");
-    let mut raw = [0u8; 128];
-    let read = volumes.read(file, &mut raw).unwrap();
-    volumes.close_file(file).unwrap();
-    assert_eq!(core::str::from_utf8(&raw[..read]).unwrap(), TEXT);
-}
-
-/// Puts a file with a long name into an image, the way a laptop would.
-///
-/// `embedded-sdmmc` cannot create one, so this uses `fatfs`.
-fn with_long_name_file(disk: RamDisk, name: &str, contents: &[u8]) -> RamDisk {
-    use std::io::Write;
-
-    let mut image = disk.into_bytes();
-    let partition_at = PARTITION_START_BLOCK as usize * 512;
-    {
-        let cursor = std::io::Cursor::new(&mut image[partition_at..]);
-        let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new())
-            .expect("could not mount the image to write the long name");
-        let mut file = fs.root_dir().create_file(name).expect("could not create");
-        file.write_all(contents).expect("could not write");
-        file.flush().expect("could not flush");
-    }
-    RamDisk::new(image)
+    assert_eq!(core::str::from_utf8(&raw).unwrap(), TEXT);
 }
 
 /// Whether a lower-case name written by a host is reachable by the box.
@@ -352,36 +352,36 @@ fn with_long_name_file(disk: RamDisk, name: &str, contents: &[u8]) -> RamDisk {
 /// writes the file and `embedded-sdmmc` reads it, so this checks both agree.
 #[test]
 fn a_lower_case_name_is_the_same_file_as_its_upper_case_short_name() {
+    // Given: written by the host, in lower case, as on the real card
     const TEXT: &str = "ssid = HomeNet\nserver = box.lan:80\n";
+    let disk = written_by_a_host(blank_fat_image_in_memory(8), |root| {
+        host_file(root, "config.txt", TEXT.as_bytes());
+    });
+    let (volumes, root) = root_of(disk);
 
-    let disk = blank_fat_image_in_memory(8);
-    // Written by the host, in lower case, as on the real card.
-    let disk = with_long_name_file(disk, "config.txt", TEXT.as_bytes());
-
-    let volumes = mounted(disk);
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
-
+    // When
     let file = volumes
         .open_file_in_dir(root, "CONFIG.TXT", Mode::ReadOnly)
         .expect("a lower-case 8.3 name must be reachable by its short name");
-    let mut raw = [0u8; 128];
-    let read = volumes.read(file, &mut raw).unwrap();
-    volumes.close_file(file).unwrap();
+    let raw = read_and_close(&volumes, file);
 
-    assert_eq!(core::str::from_utf8(&raw[..read]).unwrap(), TEXT);
+    // Then
+    assert_eq!(core::str::from_utf8(&raw).unwrap(), TEXT);
 }
 
 /// `CardIndex` checks `CONTENT/` first and treats any error as "not on the
 /// stock card", so a missing directory must fail cleanly.
 #[test]
 fn a_content_path_that_does_not_exist_fails_rather_than_panicking() {
-    let volumes = mounted(blank_fat_image_in_memory(8));
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
+    // Given
+    let (volumes, root) = root_of(blank_fat_image_in_memory(8));
 
+    // When
+    let opened = volumes.open_dir(root, "CONTENT");
+
+    // Then
     assert!(
-        volumes.open_dir(root, "CONTENT").is_err(),
+        opened.is_err(),
         "a directory that was never created must not open"
     );
 }
@@ -391,84 +391,65 @@ fn a_content_path_that_does_not_exist_fails_rather_than_panicking() {
 /// file would be downloaded again forever).
 #[test]
 fn a_cached_story_and_its_sidecar_live_only_under_the_cache_tree() {
+    // Given
     const BODY: &[u8] = &[0x00, 0x00, 0x0f, 0xfc];
     const SIDECAR: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF, 0x0A];
-
-    let mut image = blank_fat_image_in_memory(8).into_bytes();
-    {
-        let cursor = std::io::Cursor::new(&mut image[PARTITION_START_BLOCK as usize * 512..]);
-        let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new()).unwrap();
-        let dir = fs
-            .root_dir()
+    let disk = written_by_a_host(blank_fat_image_in_memory(8), |root| {
+        let dir = root
             .create_dir("CACHE")
             .unwrap()
             .create_dir("1C2D3E4F")
             .unwrap();
-        use std::io::Write;
-        let mut body = dir.create_file("500304E0").unwrap();
-        body.write_all(BODY).unwrap();
-        body.flush().unwrap();
-        let mut met = dir.create_file("500304E0.MET").unwrap();
-        met.write_all(SIDECAR).unwrap();
-        met.flush().unwrap();
-    }
+        host_file(&dir, "500304E0", BODY);
+        host_file(&dir, "500304E0.MET", SIDECAR);
+    });
+    let (volumes, root) = root_of(disk);
 
-    let volumes = mounted(RamDisk::new(image));
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
-
-    assert!(
-        volumes.open_dir(root, "CONTENT").is_err(),
-        "a cached story must not be reachable through the stock tree"
-    );
-
+    // When
+    let stock_tree = volumes.open_dir(root, "CONTENT");
     let cache = volumes.open_dir(root, "CACHE").unwrap();
     let dir = volumes.open_dir(cache, "1C2D3E4F").unwrap();
-
     let body = volumes
         .open_file_in_dir(dir, "500304E0", Mode::ReadOnly)
         .expect("the cached story must open");
-    assert_eq!(volumes.file_length(body).unwrap(), BODY.len() as u32);
+    let body_length = volumes.file_length(body).unwrap();
     volumes.close_file(body).unwrap();
-
     let met = volumes
         .open_file_in_dir(dir, "500304E0.MET", Mode::ReadOnly)
         .expect("the sidecar must open beside it");
-    let mut raw = [0u8; 8];
-    let read = volumes.read(met, &mut raw).unwrap();
-    volumes.close_file(met).unwrap();
-    assert_eq!(&raw[..read], SIDECAR);
+    let sidecar = read_and_close(&volumes, met);
+
+    // Then
+    assert!(
+        stock_tree.is_err(),
+        "a cached story must not be reachable through the stock tree"
+    );
+    assert_eq!(body_length, BODY.len() as u32);
+    assert_eq!(sidecar, SIDECAR);
 }
 
 /// The same for a directory, since the certificates are in one.
 #[test]
 fn a_lower_case_directory_is_reachable_by_its_short_name() {
-    let mut image = blank_fat_image_in_memory(8).into_bytes();
-    {
-        let cursor = std::io::Cursor::new(&mut image[PARTITION_START_BLOCK as usize * 512..]);
-        let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new()).unwrap();
-        let dir = fs.root_dir().create_dir("cert").unwrap();
-        use std::io::Write;
-        let mut file = dir.create_file("client.der").unwrap();
-        file.write_all(&[0x30, 0x82, 0x01, 0x02]).unwrap();
-        file.flush().unwrap();
-    }
+    // Given
+    let disk = written_by_a_host(blank_fat_image_in_memory(8), |root| {
+        let dir = root.create_dir("cert").unwrap();
+        host_file(&dir, "client.der", &[0x30, 0x82, 0x01, 0x02]);
+    });
+    let (volumes, root) = root_of(disk);
 
-    let volumes = mounted(RamDisk::new(image));
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
-
+    // When
     let dir = volumes
         .open_dir(root, "CERT")
         .expect("a lower-case directory must be reachable by its short name");
     let file = volumes
         .open_file_in_dir(dir, "CLIENT.DER", Mode::ReadOnly)
         .expect("and so must a lower-case file inside it");
-    let mut raw = [0u8; 8];
-    let read = volumes.read(file, &mut raw).unwrap();
-    volumes.close_file(file).unwrap();
+    let raw = read_and_close(&volumes, file);
     let _ = volumes.close_dir(dir);
-    assert_eq!(&raw[..read], &[0x30, 0x82, 0x01, 0x02]);
+
+    // Then
+    assert_eq!(raw, [0x30, 0x82, 0x01, 0x02]);
 }
 
 /// Rewriting a file shorter than it was leaves no tail.
@@ -478,10 +459,8 @@ fn a_lower_case_directory_is_reachable_by_its_short_name() {
 /// pieces of the old one and might still parse.
 #[test]
 fn truncating_a_rewrite_leaves_no_tail() {
-    let volumes = mounted(blank_fat_image_in_memory(8));
-    let volume = volumes.open_raw_volume(VolumeIdx(0)).unwrap();
-    let root = volumes.open_root_dir(volume).unwrap();
-
+    // Given: a long config already on the card
+    let (volumes, root) = root_of(blank_fat_image_in_memory(8));
     let long = b"ssid = averylongnetworkname\nserver = box.lan:443\n";
     let file = volumes
         .open_file_in_dir(root, "CONFIG.TXT", Mode::ReadWriteCreateOrTruncate)
@@ -490,25 +469,25 @@ fn truncating_a_rewrite_leaves_no_tail() {
     volumes.flush_file(file).unwrap();
     volumes.close_file(file).unwrap();
 
+    // When
     let short = b"ssid = x\n";
     let file = volumes
         .open_file_in_dir(root, "CONFIG.TXT", Mode::ReadWriteCreateOrTruncate)
         .unwrap();
     volumes.write(file, short).unwrap();
     volumes.flush_file(file).unwrap();
-    assert_eq!(
-        volumes.file_length(file).unwrap(),
-        short.len() as u32,
-        "the directory entry still claims the old length"
-    );
+    let length = volumes.file_length(file).unwrap();
     volumes.close_file(file).unwrap();
-
     let file = volumes
         .open_file_in_dir(root, "CONFIG.TXT", Mode::ReadOnly)
         .unwrap();
-    let mut buffer = [0u8; 128];
-    let read = volumes.read(file, &mut buffer).unwrap();
-    volumes.close_file(file).unwrap();
+    let raw = read_and_close(&volumes, file);
 
-    assert_eq!(&buffer[..read], short, "the previous config left a tail");
+    // Then
+    assert_eq!(
+        length,
+        short.len() as u32,
+        "the directory entry still claims the old length"
+    );
+    assert_eq!(raw, short, "the previous config left a tail");
 }
