@@ -369,6 +369,17 @@ mod tests {
         (s * s + c * c).sqrt()
     }
 
+    /// A skip's first note, the gap and its second note: 92.6 ms, 61.4 ms and
+    /// 84.8 ms at 48 kHz, as recorded from a stock box.
+    fn skip_parts(s: &[i16]) -> (&[i16], &[i16], &[i16]) {
+        (&s[..4_445], &s[4_445..4_445 + 2_947], &s[4_445 + 2_947..])
+    }
+
+    /// The limit cue's two 20 ms beeps and the 30 ms between them.
+    fn limit_parts(s: &[i16]) -> (&[i16], &[i16], &[i16]) {
+        (&s[..960], &s[960..960 + 1_440], &s[960 + 1_440..])
+    }
+
     fn peak(samples: &[i16]) -> i16 {
         samples.iter().map(|s| s.saturating_abs()).max().unwrap()
     }
@@ -404,8 +415,9 @@ mod tests {
         let s = render(cue);
 
         // Then
-        assert_pitch(&s[..4_445], 587.33);
-        assert_pitch(&s[4_445 + 2_947..], 783.99);
+        let (first, _, second) = skip_parts(&s);
+        assert_pitch(first, 587.33);
+        assert_pitch(second, 783.99);
     }
 
     #[test]
@@ -417,8 +429,9 @@ mod tests {
         let s = render(cue);
 
         // Then
-        assert_pitch(&s[..4_445], 587.33);
-        assert_pitch(&s[4_445 + 2_947..], 440.0);
+        let (first, _, second) = skip_parts(&s);
+        assert_pitch(first, 587.33);
+        assert_pitch(second, 440.0);
     }
 
     #[test]
@@ -432,8 +445,9 @@ mod tests {
         // Then
         assert_pitch(&up, 800.0);
         assert_pitch(&down, 504.0);
-        assert_pitch(&limit[..960], 1_000.0);
-        assert_pitch(&limit[960 + 1_440..], 1_000.0);
+        let (first, _, second) = limit_parts(&limit);
+        assert_pitch(first, 1_000.0);
+        assert_pitch(second, 1_000.0);
     }
 
     #[test]
@@ -445,8 +459,10 @@ mod tests {
         let (skip, limit) = (render(skip), render(limit));
 
         // Then
-        assert!(skip[4_445..4_445 + 2_947].iter().all(|&s| s == 0));
-        assert!(limit[960..960 + 1_440].iter().all(|&s| s == 0));
+        let (_, skip_gap, _) = skip_parts(&skip);
+        let (_, limit_gap, _) = limit_parts(&limit);
+        assert!(skip_gap.iter().all(|&s| s == 0));
+        assert!(limit_gap.iter().all(|&s| s == 0));
     }
 
     /// A jump from or to silence is a click.
@@ -498,11 +514,12 @@ mod tests {
     #[test]
     fn a_skip_note_fades_as_it_plays() {
         // Given
-        let note = &render(Cue::SkipForward)[..4_445];
+        let skip = render(Cue::SkipForward);
+        let (note, _, _) = skip_parts(&skip);
 
         // When: the peaks just inside its rising and falling edges
         let start = f64::from(peak(&note[48..480]));
-        let end = f64::from(peak(&note[4_445 - 528..4_445 - 48]));
+        let end = f64::from(peak(&note[note.len() - 528..note.len() - 48]));
 
         // Then
         let ratio = end / start;
@@ -513,7 +530,8 @@ mod tests {
     #[test]
     fn a_skip_note_carries_its_second_harmonic_26_db_down() {
         // Given
-        let note = &render(Cue::SkipForward)[..4_445];
+        let skip = render(Cue::SkipForward);
+        let (note, _, _) = skip_parts(&skip);
 
         // When
         let db = 20.0 * (amplitude(note, 2.0 * 587.33) / amplitude(note, 587.33)).log10();
@@ -526,7 +544,8 @@ mod tests {
     #[test]
     fn a_skip_note_carries_its_third_harmonic_42_db_down() {
         // Given
-        let note = &render(Cue::SkipForward)[..4_445];
+        let skip = render(Cue::SkipForward);
+        let (note, _, _) = skip_parts(&skip);
 
         // When
         let db = 20.0 * (amplitude(note, 3.0 * 587.33) / amplitude(note, 587.33)).log10();
