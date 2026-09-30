@@ -432,6 +432,7 @@ mod tests {
 
     #[test]
     fn reset_writes_page_zero_then_the_reset_register() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write(DEFAULT_ADDRESS, vec![page0::SOFTWARE_RESET, 0x01]),
@@ -439,12 +440,16 @@ mod tests {
         let i2c = I2cMock::new(&expected);
         let mut dac = Tlv320Dac3100::new(i2c, DEFAULT_ADDRESS);
 
+        // When
         dac.reset().unwrap();
+
+        // Then: the bus saw exactly the expected transactions
         dac.release().done();
     }
 
     #[test]
     fn the_page_register_is_not_rewritten_when_it_is_already_selected() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write(DEFAULT_ADDRESS, vec![page0::SOFTWARE_RESET, 0x01]),
@@ -454,8 +459,11 @@ mod tests {
         let i2c = I2cMock::new(&expected);
         let mut dac = Tlv320Dac3100::new(i2c, DEFAULT_ADDRESS);
 
+        // When
         dac.reset().unwrap();
         dac.set_muted(false).unwrap();
+
+        // Then: the bus saw exactly the expected transactions
         dac.release().done();
     }
 
@@ -466,6 +474,7 @@ mod tests {
     /// changing these literals too.
     #[test]
     fn init_puts_exactly_this_sequence_on_the_bus() {
+        // Given
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let expected = [
             w(vec![0x00, 0x00]), // select page 0
@@ -496,13 +505,17 @@ mod tests {
             w(vec![0x21, 0xBE]), // pop removal: power down amps before the DAC
             w(vec![0x1F, 0xC4]), // headphone drivers: HPL and HPR powered up
             w(vec![0x20, 0x06]), // speaker amp configured but NOT powered
-                                 // Nothing else: no DAC, no amplifier, no unmute. A box that is
-                                 // not playing anything drives nothing.
         ];
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         let mut delay = CheckedDelay::new(&[DelayTransaction::delay_ms(DRIVER_RAMP_MS)]);
+
+        // When
         dac.init(&mut delay).unwrap();
+
+        // Then: the bus saw exactly these transactions and nothing else: no
+        // DAC, no amplifier, no unmute. A box that is not playing anything
+        // drives nothing.
         dac.release().done();
         delay.done();
     }
@@ -516,10 +529,16 @@ mod tests {
     /// its reset value.
     #[test]
     fn the_headset_debounce_is_clocked_from_the_internal_oscillator() {
-        let &(_, _, value) = INIT_ANALOG
+        // Given
+        let sequence = INIT_ANALOG;
+
+        // When
+        let &(_, _, value) = sequence
             .iter()
             .find(|&&(p, r, _)| p == 3 && r == page3::TIMER_CLOCK)
             .expect("the debounce has no clock until page 3 register 16 is written");
+
+        // Then
         assert_eq!(
             value & 0x80,
             0x00,
@@ -533,10 +552,16 @@ mod tests {
     /// 16 ms the output would switch back and forth. `011` is 128 ms.
     #[test]
     fn detection_debounces_for_longer_than_a_slow_hand() {
-        let &(_, _, value) = INIT_ANALOG
+        // Given
+        let sequence = INIT_ANALOG;
+
+        // When
+        let &(_, _, value) = sequence
             .iter()
             .find(|&&(p, r, _)| p == 0 && r == page0::HEADSET_DETECT)
             .expect("the sequence must enable headset detection");
+
+        // Then
         assert_eq!(value & 0x80, 0x80, "D7 clear leaves detection off");
         assert_eq!(value & 0x1C, 0x0C, "D4-D2 = 011 is the 128 ms debounce");
         assert_eq!(value, 0x8C);
@@ -548,19 +573,26 @@ mod tests {
     /// muted, so they are only powered when there is something to play.
     #[test]
     fn the_start_up_leaves_the_output_stages_unpowered() {
-        let &(_, _, amp) = INIT_ANALOG
+        // Given
+        let sequence = INIT_ANALOG;
+
+        // When
+        let &(_, _, amp) = sequence
             .iter()
             .find(|&&(p, r, _)| p == 1 && r == page1::SPK_AMP)
             .expect("the sequence must configure the speaker amplifier");
+        let powers_the_dac = sequence
+            .iter()
+            .any(|&(p, r, _)| p == 0 && r == page0::DAC_DATA_PATH);
+
+        // Then
         assert_eq!(
             amp & 0x80,
             0x00,
             "D7 set powers the class-D amp, which clicks"
         );
         assert!(
-            !INIT_ANALOG
-                .iter()
-                .any(|&(p, r, _)| p == 0 && r == page0::DAC_DATA_PATH),
+            !powers_the_dac,
             "the DAC must not be powered by the start-up sequence"
         );
     }
@@ -573,6 +605,7 @@ mod tests {
     /// speaker clicks.
     #[test]
     fn starting_the_output_mutes_first_then_powers_the_dac_and_the_amplifier() {
+        // Given
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let expected = [
             w(vec![0x00, 0x01]), // page 1
@@ -588,7 +621,12 @@ mod tests {
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         let mut delay = CheckedDelay::new(&[]);
-        assert_eq!(dac.start_output(&mut delay, true), Ok(()));
+
+        // When
+        let result = dac.start_output(&mut delay, true);
+
+        // Then
+        assert_eq!(result, Ok(()));
         dac.release().done();
         delay.done();
     }
@@ -600,6 +638,7 @@ mod tests {
     /// The speaker is still muted first, whatever an earlier unplug left.
     #[test]
     fn starting_the_output_for_headphones_leaves_the_speaker_unpowered() {
+        // Given
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let expected = [
             w(vec![0x00, 0x01]), // page 1
@@ -607,12 +646,16 @@ mod tests {
             w(vec![0x00, 0x00]), // page 0
             w(vec![0x3F, 0xD4]), // DAC on, both channels
             w(vec![0x40, 0x00]), // digital unmute
-                                 // Nothing more: no amplifier, no unmute.
         ];
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         let mut delay = CheckedDelay::new(&[]);
-        assert_eq!(dac.start_output(&mut delay, false), Ok(()));
+
+        // When
+        let result = dac.start_output(&mut delay, false);
+
+        // Then: nothing more on the bus, no amplifier and no unmute
+        assert_eq!(result, Ok(()));
         dac.release().done();
         delay.done();
     }
@@ -625,6 +668,7 @@ mod tests {
     /// silent.
     #[test]
     fn resuming_the_speaker_powers_the_amplifier_before_it_unmutes() {
+        // Given
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let expected = [
             w(vec![0x00, 0x01]), // page 1
@@ -635,7 +679,12 @@ mod tests {
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         let mut delay = CheckedDelay::new(&[]);
-        assert_eq!(dac.resume_speaker(&mut delay), Ok(()));
+
+        // When
+        let result = dac.resume_speaker(&mut delay);
+
+        // Then
+        assert_eq!(result, Ok(()));
         dac.release().done();
         delay.done();
     }
@@ -643,6 +692,7 @@ mod tests {
     /// Stopping mutes first, so nothing after it is heard.
     #[test]
     fn stopping_the_output_mutes_before_it_unpowers_anything() {
+        // Given
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let expected = [
             w(vec![0x00, 0x01]), // page 1
@@ -654,16 +704,27 @@ mod tests {
         ];
 
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
-        assert_eq!(dac.stop_output(), Ok(()));
+
+        // When
+        let result = dac.stop_output();
+
+        // Then
+        assert_eq!(result, Ok(()));
         dac.release().done();
     }
 
     #[test]
     fn the_speaker_comes_up_muted() {
-        let &(_, _, value) = INIT_ANALOG
+        // Given
+        let sequence = INIT_ANALOG;
+
+        // When
+        let &(_, _, value) = sequence
             .iter()
             .find(|&&(p, r, _)| p == 1 && r == page1::SPK_DRIVER_GAIN)
             .expect("the sequence must set the speaker driver");
+
+        // Then
         assert_eq!(
             value & 0x04,
             0x00,
@@ -676,6 +737,7 @@ mod tests {
     /// driver waits for it instead of guessing a delay.
     #[test]
     fn unmuting_the_speaker_waits_for_its_gains_to_be_applied() {
+        // Given
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let r =
             |reg: u8, value: u8| Transaction::write_read(DEFAULT_ADDRESS, vec![reg], vec![value]);
@@ -689,7 +751,11 @@ mod tests {
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         let mut delay = CheckedDelay::new(&[DelayTransaction::delay_ms(GAIN_POLL_MS)]);
 
-        assert_eq!(dac.unmute_speaker(&mut delay), Ok(()));
+        // When
+        let result = dac.unmute_speaker(&mut delay);
+
+        // Then
+        assert_eq!(result, Ok(()));
         dac.release().done();
         delay.done();
     }
@@ -699,20 +765,33 @@ mod tests {
     /// `cset` can override it from the console.
     #[test]
     fn the_bias_the_detector_senses_against_is_part_of_the_sequence() {
+        // Given
+        let sequence = INIT_ANALOG;
+
+        // When
+        let writes_micbias = sequence
+            .iter()
+            .any(|&(p, r, _)| p == 1 && r == page1::MICBIAS);
+
+        // Then
         assert!(
-            INIT_ANALOG
-                .iter()
-                .any(|&(p, r, _)| p == 1 && r == page1::MICBIAS),
+            writes_micbias,
             "an override for a register the sequence never writes does nothing"
         );
     }
 
     #[test]
     fn the_pop_removal_register_orders_the_power_down_after_the_amplifiers() {
-        let &(_, _, value) = INIT_ANALOG
+        // Given
+        let sequence = INIT_ANALOG;
+
+        // When
+        let &(_, _, value) = sequence
             .iter()
             .find(|&&(p, r, _)| p == 1 && r == page1::HP_POP_REMOVAL)
             .expect("the de-pop settings must be written rather than inherited");
+
+        // Then
         assert_eq!(
             value & 0x80,
             0x80,
@@ -724,6 +803,7 @@ mod tests {
     /// still on would pop, so the driver waits for the flags to clear.
     #[test]
     fn powering_down_waits_for_the_output_stages_to_report_off() {
+        // Given
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let r =
             |reg: u8, value: u8| Transaction::write_read(DEFAULT_ADDRESS, vec![reg], vec![value]);
@@ -738,7 +818,11 @@ mod tests {
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
         let mut delay = CheckedDelay::new(&[DelayTransaction::delay_ms(POWER_DOWN_POLL_MS)]);
 
-        assert_eq!(dac.power_down(&mut delay), Ok(()));
+        // When
+        let result = dac.power_down(&mut delay);
+
+        // Then
+        assert_eq!(result, Ok(()));
         dac.release().done();
         delay.done();
     }
@@ -746,6 +830,7 @@ mod tests {
     /// A codec that never reports itself off must not stall a reboot forever.
     #[test]
     fn powering_down_gives_up_rather_than_waiting_for_ever() {
+        // Given
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let mut expected = vec![
             w(vec![0x00, 0x01]),
@@ -766,13 +851,18 @@ mod tests {
             POWER_DOWN_POLLS as usize
         ]);
 
-        assert_eq!(dac.power_down(&mut delay), Err(Error::StillPowered));
+        // When
+        let result = dac.power_down(&mut delay);
+
+        // Then
+        assert_eq!(result, Err(Error::StillPowered));
         dac.release().done();
         delay.done();
     }
 
     #[test]
     fn the_dac_is_powered_only_after_the_drivers_have_finished_ramping() {
+        // Given
         let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
         let mut dac = Tlv320Dac3100::new(
             I2cMock::new(&[
@@ -785,6 +875,7 @@ mod tests {
         );
         let mut delay = CheckedDelay::new(&[DelayTransaction::delay_ms(DRIVER_RAMP_MS)]);
 
+        // When
         dac.apply(
             &mut delay,
             &[(1, page1::SPK_AMP, 0x86)],
@@ -792,12 +883,14 @@ mod tests {
         )
         .unwrap();
 
+        // Then: the bus saw exactly the expected transactions
         dac.release().done();
         delay.done();
     }
 
     #[test]
     fn every_output_driver_is_powered_only_after_its_routing_and_gain() {
+        // Given
         let at = |page: u8, reg: u8| {
             INIT_ANALOG
                 .iter()
@@ -805,8 +898,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("sequence must write page {page} register {reg:#04x}"))
         };
 
+        // When
         let routing = at(1, page1::OUTPUT_MIXER_ROUTING);
-        for (name, gain, driver) in [
+        let drivers = [
             (
                 "headphone",
                 at(1, page1::HPL_DRIVER_GAIN),
@@ -817,7 +911,10 @@ mod tests {
                 at(1, page1::SPK_DRIVER_GAIN),
                 at(1, page1::SPK_AMP),
             ),
-        ] {
+        ];
+
+        // Then
+        for (name, gain, driver) in drivers {
             assert!(
                 routing < driver,
                 "the {name} driver is powered before the DAC is routed to it"
@@ -831,40 +928,51 @@ mod tests {
 
     #[test]
     fn the_sequence_unmutes_only_after_the_output_stages_are_powered() {
-        // The amplifier is in the analog table and the unmute in the table
-        // applied after the ramp, so the order is guaranteed.
+        // Given: the amplifier is in the analog table and the unmute in the
+        // table applied after the ramp, so the order is guaranteed
+        let (analog, after_the_ramp) = (INIT_ANALOG, INIT_DAC);
+
+        // When
+        let amp_in_analog = analog
+            .iter()
+            .any(|&(p, r, _)| p == 1 && r == page1::SPK_AMP);
+        let unmute_after_ramp = after_the_ramp
+            .iter()
+            .any(|&(_, r, _)| r == page0::DAC_MUTE_CTRL);
+        let unmute_in_analog = analog.iter().any(|&(_, r, _)| r == page0::DAC_MUTE_CTRL);
+
+        // Then
+        assert!(amp_in_analog, "the speaker amp belongs to the analog block");
         assert!(
-            INIT_ANALOG
-                .iter()
-                .any(|&(p, r, _)| p == 1 && r == page1::SPK_AMP),
-            "the speaker amp belongs to the analog block"
-        );
-        assert!(
-            INIT_DAC.iter().any(|&(_, r, _)| r == page0::DAC_MUTE_CTRL),
+            unmute_after_ramp,
             "unmuting must wait until after the drivers have ramped"
         );
         assert!(
-            !INIT_ANALOG
-                .iter()
-                .any(|&(_, r, _)| r == page0::DAC_MUTE_CTRL),
+            !unmute_in_analog,
             "unmuting before the amp is powered produces an audible pop"
         );
     }
 
     #[test]
     fn zero_decibels_writes_the_zero_code_to_both_channels() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_LEFT_VOLUME, 0x00]),
             Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_RIGHT_VOLUME, 0x00]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+
+        // When
         dac.set_volume_db(0).unwrap();
+
+        // Then: the bus saw exactly the expected transactions
         dac.release().done();
     }
 
     #[test]
     fn negative_decibels_are_encoded_as_twos_complement_half_steps() {
+        // Given
         // The register is 0.5 dB per step, two's complement. -6 dB is -12 steps.
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
@@ -872,42 +980,61 @@ mod tests {
             Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_RIGHT_VOLUME, 0xF4]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+
+        // When
         dac.set_volume_db(-6).unwrap();
+
+        // Then: the bus saw exactly the expected transactions
         dac.release().done();
     }
 
     #[test]
     fn volume_is_clamped_to_the_registers_range() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_LEFT_VOLUME, 0x81]),
             Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_RIGHT_VOLUME, 0x81]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
-        // -100 dB is below the -63.5 dB floor, so it must clamp to 0x81.
+
+        // When: -100 dB is below the -63.5 dB floor, so it must clamp to 0x81
         dac.set_volume_db(-100).unwrap();
+
+        // Then: the bus saw exactly the expected transactions
         dac.release().done();
     }
 
     #[test]
     fn muting_sets_both_mute_bits() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write(DEFAULT_ADDRESS, vec![page0::DAC_MUTE_CTRL, 0x0C]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+
+        // When
         dac.set_muted(true).unwrap();
+
+        // Then: the bus saw exactly the expected transactions
         dac.release().done();
     }
 
     #[test]
     fn an_inserted_jack_reads_as_connected() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x10]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
-        assert!(dac.headphones_connected().unwrap());
+
+        // When
+        let connected = dac.headphones_connected().unwrap();
+
+        // Then
+        assert!(connected);
         dac.release().done();
     }
 
@@ -917,41 +1044,57 @@ mod tests {
     /// for debugging.
     #[test]
     fn the_live_status_register_is_reported_byte_for_byte() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![0x00, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x10]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
-        assert_eq!(dac.headset_status_raw(), Ok(0x10));
+
+        // When
+        let result = dac.headset_status_raw();
+
+        // Then
+        assert_eq!(result, Ok(0x10));
         dac.release().done();
     }
 
     #[test]
     fn a_pulled_plug_reads_as_absent() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x00]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
-        assert!(!dac.headphones_connected().unwrap());
+
+        // When
+        let connected = dac.headphones_connected().unwrap();
+
+        // Then
+        assert!(!connected);
         dac.release().done();
     }
 
     #[test]
     fn invalidating_the_page_makes_the_next_access_select_it_again() {
+        // Given: page 0 selected and cached, then the codec reset behind the
+        // driver's back, so it is back on page 0 and the cache is wrong
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x00]),
-            // The RESET line was driven or the power gate cycled, so the
-            // codec is back on page 0 and the cache is wrong.
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x2E], vec![0x10]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
-
         dac.headphones_connected().unwrap();
+
+        // When
         dac.invalidate_page();
-        assert!(dac.headphones_connected().unwrap());
+        let connected = dac.headphones_connected().unwrap();
+
+        // Then
+        assert!(connected);
         dac.release().done();
     }
 
@@ -959,26 +1102,37 @@ mod tests {
     /// from detection that was never turned on.
     #[test]
     fn the_raw_headset_register_is_reported_byte_for_byte() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![0x00, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x43], vec![0x8C]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
-        assert_eq!(dac.headset_detect_raw(), Ok(0x8C));
+
+        // When
+        let result = dac.headset_detect_raw();
+
+        // Then
+        assert_eq!(result, Ok(0x8C));
         dac.release().done();
     }
 
     /// Checked against a literal register value, not a mask expression.
     #[test]
     fn the_power_flags_decode_each_stage_separately() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x25], vec![0b1001_1000]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
 
+        // When
+        let flags = dac.power_flags().unwrap();
+
+        // Then
         assert_eq!(
-            dac.power_flags().unwrap(),
+            flags,
             PowerFlags {
                 left_dac: true,
                 right_dac: true,
@@ -992,12 +1146,17 @@ mod tests {
 
     #[test]
     fn nothing_powered_reads_as_nothing_powered() {
+        // Given
         let expected = [
             Transaction::write(DEFAULT_ADDRESS, vec![REG_PAGE_SELECT, 0x00]),
             Transaction::write_read(DEFAULT_ADDRESS, vec![0x25], vec![0x00]),
         ];
         let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+
+        // When
         let flags = dac.power_flags().unwrap();
+
+        // Then
         assert!(!flags.left_dac && !flags.left_class_d);
         dac.release().done();
     }
@@ -1084,18 +1243,26 @@ impl Overrides {
 
 #[cfg(test)]
 mod override_tests {
+    extern crate std;
+    use std::vec::Vec;
+
     use super::*;
 
     const TABLE: &[(u8, u8, u8)] = &[(0, 0x3F, 0xD4), (1, 0x2A, 0x06), (0, 0x40, 0x0C)];
 
     #[test]
     fn an_override_replaces_the_value_for_its_register_only() {
+        // Given
         let mut overrides = Overrides::new();
         assert!(overrides.set(1, 0x2A, 0x86));
 
+        // When
         let mut out = [(0, 0, 0); 8];
+        let applied = overrides.apply(TABLE, &mut out);
+
+        // Then
         assert_eq!(
-            overrides.apply(TABLE, &mut out),
+            applied,
             &[(0, 0x3F, 0xD4), (1, 0x2A, 0x86), (0, 0x40, 0x0C)]
         );
     }
@@ -1103,21 +1270,31 @@ mod override_tests {
     /// The same register on a different page is a different register.
     #[test]
     fn an_override_on_another_page_leaves_the_table_alone() {
+        // Given
         let mut overrides = Overrides::new();
         assert!(overrides.set(0, 0x2A, 0x86));
 
+        // When
         let mut out = [(0, 0, 0); 8];
-        assert_eq!(overrides.apply(TABLE, &mut out), TABLE);
+        let applied = overrides.apply(TABLE, &mut out);
+
+        // Then
+        assert_eq!(applied, TABLE);
     }
 
     /// Stepping one value up and down must not consume the table.
     #[test]
     fn overriding_the_same_register_twice_takes_one_slot() {
+        // Given
         let mut overrides = Overrides::new();
-        for value in 0..(OVERRIDE_SLOTS as u8 + 4) {
-            assert!(overrides.set(1, 0x2A, value), "slot {value} refused");
-        }
 
+        // When: one register stepped through more values than there are slots
+        let taken: Vec<bool> = (0..OVERRIDE_SLOTS as u8 + 4)
+            .map(|value| overrides.set(1, 0x2A, value))
+            .collect();
+
+        // Then: every value was taken, and the last one applies
+        assert!(taken.iter().all(|&set| set), "{taken:?}");
         let mut out = [(0, 0, 0); 8];
         assert_eq!(
             overrides.apply(TABLE, &mut out)[1].2,
@@ -1127,19 +1304,29 @@ mod override_tests {
 
     #[test]
     fn a_seventh_register_is_refused_rather_than_dropped_quietly() {
+        // Given: every slot taken
         let mut overrides = Overrides::new();
         for register in 0..OVERRIDE_SLOTS as u8 {
             assert!(overrides.set(0, register, 1));
         }
-        assert!(!overrides.set(0, OVERRIDE_SLOTS as u8, 1));
+
+        // When
+        let taken = overrides.set(0, OVERRIDE_SLOTS as u8, 1);
+
+        // Then
+        assert!(!taken);
     }
 
     #[test]
     fn clearing_puts_the_table_back() {
+        // Given
         let mut overrides = Overrides::new();
         overrides.set(1, 0x2A, 0x86);
+
+        // When
         overrides.clear();
 
+        // Then
         let mut out = [(0, 0, 0); 8];
         assert_eq!(overrides.apply(TABLE, &mut out), TABLE);
     }
@@ -1148,10 +1335,15 @@ mod override_tests {
     /// the same overrides are applied to both sequences.
     #[test]
     fn an_override_for_an_absent_register_does_nothing() {
+        // Given
         let mut overrides = Overrides::new();
         overrides.set(9, 0x11, 0x22);
 
+        // When
         let mut out = [(0, 0, 0); 8];
-        assert_eq!(overrides.apply(TABLE, &mut out), TABLE);
+        let applied = overrides.apply(TABLE, &mut out);
+
+        // Then
+        assert_eq!(applied, TABLE);
     }
 }
