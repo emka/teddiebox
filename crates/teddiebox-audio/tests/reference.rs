@@ -17,10 +17,6 @@ use teddiebox_taf::SlicePages;
 const FIXTURE: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/sine.taf");
 const CHAPTERS: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
 
-fn decode_all() -> Vec<i16> {
-    decode_from(FIXTURE, None)
-}
-
 /// Decodes `taf` to the end, optionally seeking to a chapter first.
 fn decode_from(taf: &[u8], chapter: Option<usize>) -> Vec<i16> {
     let mut state = OpusState::new();
@@ -62,9 +58,14 @@ fn crossings_over_one_second(pcm: &[i16], channel: usize, skip_seconds: usize) -
 
 #[test]
 fn decodes_approximately_five_seconds_of_stereo_audio() {
-    let pcm = decode_all();
-    let frames = pcm.len() / CHANNELS;
-    let seconds = frames as f64 / SAMPLE_RATE as f64;
+    // Given
+    let taf = FIXTURE;
+
+    // When
+    let pcm = decode_from(taf, None);
+
+    // Then
+    let seconds = (pcm.len() / CHANNELS) as f64 / SAMPLE_RATE as f64;
     assert!(
         (4.9..=5.2).contains(&seconds),
         "expected ~5 s, got {seconds:.2} s"
@@ -73,8 +74,13 @@ fn decodes_approximately_five_seconds_of_stereo_audio() {
 
 #[test]
 fn the_decoded_signal_is_a_440_hz_tone() {
-    // Skip the encoder's warm-up before measuring.
-    let crossings = crossings_over_one_second(&decode_all(), 0, 1);
+    // Given
+    let taf = FIXTURE;
+
+    // When: skipping the encoder's warm-up before measuring
+    let crossings = crossings_over_one_second(&decode_from(taf, None), 0, 1);
+
+    // Then
     assert!(
         (860..=900).contains(&crossings),
         "expected ~880 zero crossings for 440 Hz, got {crossings}"
@@ -85,11 +91,14 @@ fn the_decoded_signal_is_a_440_hz_tone() {
 /// mono downmix, or an interleaving mistake.
 #[test]
 fn the_left_and_right_channels_carry_their_own_tones() {
-    let pcm = decode_all();
+    // Given
+    let pcm = decode_from(FIXTURE, None);
 
+    // When
     let left = crossings_over_one_second(&pcm, 0, 1);
     let right = crossings_over_one_second(&pcm, 1, 1);
 
+    // Then
     assert!(
         (860..=900).contains(&left),
         "expected ~880 zero crossings for 440 Hz on the left, got {left}"
@@ -103,21 +112,22 @@ fn the_left_and_right_channels_carry_their_own_tones() {
 /// Seeks with the real decoder and checks that audio comes out.
 #[test]
 fn seeking_to_a_chapter_yields_audible_audio_from_that_chapter_onward() {
+    // Given
     let whole = decode_from(CHAPTERS, None);
+
+    // When
     let from_second = decode_from(CHAPTERS, Some(1));
 
+    // Then: audible, the right tone, and about a third shorter. Chapter 1 of 3
+    // starts about a third in; only checking that it is *shorter* would also
+    // pass if the seek went to the end.
     let peak = from_second.iter().map(|s| s.unsigned_abs()).max().unwrap();
     assert!(peak > 1000, "audio after the seek is silent, peak {peak}");
-
     let crossings = crossings_over_one_second(&from_second, 0, 0);
     assert!(
         (860..=900).contains(&crossings),
         "expected ~880 zero crossings for 440 Hz after the seek, got {crossings}"
     );
-
-    // Chapter 1 of 3 starts about a third in, so seeking there must drop
-    // about a third of the audio. Only checking that it is *shorter* would
-    // also pass if the seek went to the end.
     let dropped = whole.len() as f64 - from_second.len() as f64;
     let fraction = dropped / whole.len() as f64;
     assert!(
@@ -129,7 +139,13 @@ fn seeking_to_a_chapter_yields_audible_audio_from_that_chapter_onward() {
 
 #[test]
 fn the_decoded_signal_is_not_silence() {
-    let pcm = decode_all();
+    // Given
+    let taf = FIXTURE;
+
+    // When
+    let pcm = decode_from(taf, None);
+
+    // Then
     let peak = pcm.iter().map(|s| s.unsigned_abs()).max().unwrap();
     assert!(peak > 1000, "decoded audio is silent, peak {peak}");
 }
