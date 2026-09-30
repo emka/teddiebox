@@ -14,10 +14,13 @@ use heapless::Vec;
 
 /// How many [`Piece`]s a page is ever made of.
 ///
-/// The head, three for the message paragraph, three for the config form
+/// The head, three for each message paragraph, three for the config form
 /// around the config, three for the certificate section around its
 /// description, and the restart form.
-const PIECES: usize = 11;
+const PIECES: usize = 1 + 3 * MESSAGES + 3 + 3 + 1;
+
+/// How many messages a page shows: one about the request, one about the card.
+pub const MESSAGES: usize = 2;
 
 /// A stretch of the page, in the order it goes on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,20 +108,21 @@ pub enum CaOnCard {
 
 /// The page, in the order it goes out.
 ///
-/// The card's bytes go in the textarea, with the message (if any) above it.
-/// `ca` describes the card's certificate, as [`ca_status`] words it.
-/// Nothing is copied: the pieces borrow, and the caller writes them.
+/// The card's bytes go in the textarea, with the first [`MESSAGES`] of
+/// `messages` above it, in order. `ca` describes the card's certificate, as
+/// [`ca_status`] words it. Nothing is copied: the pieces borrow, and the
+/// caller writes them.
 pub fn pieces<'a>(
     config: &'a [u8],
-    message: Option<Message<'a>>,
+    messages: &[Message<'a>],
     ca: &'a str,
 ) -> Vec<Piece<'a>, PIECES> {
     let mut out = Vec::new();
     // The vector has room for all `PIECES`, so no push can fail. `let _ =`
     // rather than `unwrap`, to avoid a panic path in the firmware.
     let _ = out.push(Piece::Literal(HEAD));
-    if let Some(message) = message {
-        let (open, text) = match message {
+    for message in messages.iter().take(MESSAGES) {
+        let (open, text) = match *message {
             Message::Error(text) => (ERROR_OPEN, text),
             Message::Notice(text) => (NOTICE_OPEN, text),
         };
@@ -139,8 +143,8 @@ pub fn pieces<'a>(
 /// How many bytes [`pieces`] will produce once escaped.
 ///
 /// Needed before anything is written, for the `Content-Length` header.
-pub fn length(config: &[u8], message: Option<Message<'_>>, ca: &str) -> usize {
-    pieces(config, message, ca)
+pub fn length(config: &[u8], messages: &[Message<'_>], ca: &str) -> usize {
+    pieces(config, messages, ca)
         .iter()
         .map(|piece| match piece {
             Piece::Literal(text) => text.len(),
@@ -213,9 +217,9 @@ mod tests {
     ///
     /// The chunk is only eight bytes, just over the longest escape, so every
     /// test crosses chunk boundaries.
-    fn page_of(config: &[u8], message: Option<Message<'_>>, ca: &str) -> StdVec<u8> {
+    fn page_of(config: &[u8], messages: &[Message<'_>], ca: &str) -> StdVec<u8> {
         let mut out = StdVec::new();
-        for piece in pieces(config, message, ca) {
+        for piece in pieces(config, messages, ca) {
             match piece {
                 Piece::Literal(text) => out.extend_from_slice(text.as_bytes()),
                 Piece::Escaped(bytes) => {
@@ -234,7 +238,7 @@ mod tests {
     }
 
     fn text_of(config: &[u8], message: Option<Message<'_>>, ca: &str) -> String {
-        String::from_utf8(page_of(config, message, ca)).unwrap()
+        String::from_utf8(page_of(config, message.as_slice(), ca)).unwrap()
     }
 
     #[test]
@@ -398,6 +402,39 @@ mod tests {
     }
 
     #[test]
+    fn two_messages_are_both_shown_in_order() {
+        // Given
+        let messages = [
+            Message::Error("that is not a certificate"),
+            Message::Error("the box could not read its card"),
+        ];
+
+        // When
+        let text = String::from_utf8(page_of(b"", &messages, "missing")).unwrap();
+
+        // Then
+        let first = text.find("that is not a certificate").unwrap();
+        let second = text.find("the box could not read its card").unwrap();
+        assert!(first < second);
+    }
+
+    #[test]
+    fn messages_beyond_the_page_s_room_do_not_cut_the_page_short() {
+        // Given
+        let messages = [
+            Message::Error("one"),
+            Message::Error("two"),
+            Message::Error("three"),
+        ];
+
+        // When
+        let text = String::from_utf8(page_of(b"", &messages, "missing")).unwrap();
+
+        // Then
+        assert!(text.ends_with("</body></html>"));
+    }
+
+    #[test]
     fn markup_in_the_file_is_escaped() {
         let text = text_of(b"ssid = <b>&\"x\"", None, "missing");
         assert!(text.contains("&lt;b&gt;&amp;&quot;x&quot;"));
@@ -453,12 +490,12 @@ mod tests {
             (&[b'"'; 1024][..], Some(Message::Error("<<<"))),
         ] {
             assert_eq!(
-                length(config, message, "missing"),
-                page_of(config, message, "missing").len()
+                length(config, message.as_slice(), "missing"),
+                page_of(config, message.as_slice(), "missing").len()
             );
             assert_eq!(
-                length(config, message, "787 bytes"),
-                page_of(config, message, "787 bytes").len()
+                length(config, message.as_slice(), "787 bytes"),
+                page_of(config, message.as_slice(), "787 bytes").len()
             );
         }
     }

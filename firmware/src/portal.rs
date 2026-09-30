@@ -490,24 +490,25 @@ const NO_CARD: &str = "the box could not read its card — check it is pushed in
 /// and `message` above it. `GET /` shows it with no message.
 ///
 /// Every answer that is not about a submitted config goes through here, so
-/// the textarea never looks as if the card's file were gone.
+/// the textarea never looks as if the card's file were gone. A card that
+/// cannot be read is said below `message`, not instead of it.
 async fn show(
     socket: &mut TcpSocket<'_>,
     card: Option<&Mounted>,
     status: http::Status,
     message: Option<Message<'_>>,
 ) {
-    let Some(mounted) = card else {
-        return send_page(socket, card, status, b"", Some(Message::Error(NO_CARD))).await;
-    };
-
     let mut config = [0u8; MAX_CONFIG];
-    match mounted.read_config_bytes(&mut config) {
+    let (filled, trouble) = match card.map(|card| card.read_config_bytes(&mut config)) {
         // `Ok(0)` is a card with no config yet, as on a new box: show an empty
         // textarea, not an error.
-        Ok(filled) => send_page(socket, card, status, &config[..filled], message).await,
-        Err(why) => send_page(socket, card, status, b"", Some(Message::Error(why))).await,
-    }
+        Some(Ok(filled)) => (filled, None),
+        Some(Err(why)) => (0, Some(Message::Error(why))),
+        None => (0, Some(Message::Error(NO_CARD))),
+    };
+    let messages: heapless::Vec<Message<'_>, { page::MESSAGES }> =
+        message.into_iter().chain(trouble).collect();
+    send_page(socket, card, status, &config[..filled], &messages).await
 }
 
 /// `POST /config` — decode, validate, write, and show the page again.
@@ -603,7 +604,7 @@ async fn respond_page(
     config: &[u8],
     message: Option<Message<'_>>,
 ) {
-    send_page(socket, card, http::Status::Ok, config, message).await
+    send_page(socket, card, http::Status::Ok, config, message.as_slice()).await
 }
 
 /// The page again, but as a refusal, with nothing in the textarea.
@@ -616,7 +617,7 @@ async fn respond_error(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, messa
         card,
         http::Status::BadRequest,
         b"",
-        Some(Message::Error(message)),
+        &[Message::Error(message)],
     )
     .await
 }
@@ -673,14 +674,14 @@ async fn send_page(
     card: Option<&Mounted>,
     status: http::Status,
     config: &[u8],
-    message: Option<Message<'_>>,
+    messages: &[Message<'_>],
 ) {
     let ca = ca_status(card);
-    let head = http::head(status, page::length(config, message, &ca));
+    let head = http::head(status, page::length(config, messages, &ca));
     if write_all(socket, &head).await.is_err() {
         return;
     }
-    for piece in page::pieces(config, message, &ca) {
+    for piece in page::pieces(config, messages, &ca) {
         let sent = match piece {
             page::Piece::Literal(text) => write_all(socket, text.as_bytes()).await,
             page::Piece::Escaped(bytes) => write_escaped(socket, bytes).await,
