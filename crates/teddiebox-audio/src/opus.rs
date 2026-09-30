@@ -159,6 +159,28 @@ mod tests {
         assert_eq!(n, 5760);
     }
 
+    /// libopus writes as much as it is told there is room for, so the room
+    /// it is told must be the buffer's: anything larger writes past its end.
+    #[test]
+    fn a_buffer_too_small_for_the_frame_is_a_decode_error_rather_than_an_overrun() {
+        // Given: a 60 ms packet, and room for half of it
+        let mut page = [0u8; PAGE_SIZE];
+        let mut reader = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
+        let mut scratch = [0u8; MAX_PACKET];
+        reader.next_packet(&mut scratch).unwrap(); // OpusHead
+        reader.next_packet(&mut scratch).unwrap(); // OpusTags
+        let len = reader.next_packet(&mut scratch).unwrap().unwrap();
+        let mut state = OpusState::new();
+        let mut decoder = LibOpus::new(&mut state).unwrap();
+        let mut pcm = [0i16; 2880];
+
+        // When
+        let decoded = decoder.decode(&scratch[..len], &mut pcm);
+
+        // Then
+        assert_eq!(decoded, Err(AudioError::Decode));
+    }
+
     #[test]
     fn a_corrupt_packet_is_a_decode_error_rather_than_a_panic() {
         // Given: a TOC byte claiming a configuration the payload cannot support
