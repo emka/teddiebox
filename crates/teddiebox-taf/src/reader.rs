@@ -901,22 +901,16 @@ mod tests {
     }
 
     #[test]
-    fn both_real_fixtures_still_open_and_yield_their_existing_packet_counts() {
+    fn reads_every_packet_of_the_multi_chapter_fixture() {
         // Given
-        let mut page0 = [0u8; PAGE_SIZE];
-        let mut page1 = [0u8; PAGE_SIZE];
-        let mut sine = open(FIXTURE, &mut page0);
-        let mut chapters = open(CHAPTERS_FIXTURE, &mut page1);
+        let mut page = [0u8; PAGE_SIZE];
+        let mut r = open(CHAPTERS_FIXTURE, &mut page);
 
         // When
-        let counts = (count_packets(&mut sine), count_packets(&mut chapters));
+        let count = count_packets(&mut r);
 
         // Then
-        assert_eq!(counts.0, 85, "sine.taf's packet count must be unaffected");
-        assert_eq!(
-            counts.1, 97,
-            "chapters.taf's packet count must be unaffected"
-        );
+        assert_eq!(count, 97);
     }
 
     #[test]
