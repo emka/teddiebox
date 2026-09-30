@@ -124,43 +124,53 @@ mod tests {
 
     #[test]
     fn the_reservation_covers_what_libopus_asks_for() {
+        // Given
+        let channels = CHANNELS as c_int;
+
+        // When
         // SAFETY: takes no pointers; 2 is a channel count libopus accepts.
-        let needed = unsafe { sys::opus_decoder_get_size(CHANNELS as c_int) };
+        let needed = unsafe { sys::opus_decoder_get_size(channels) };
+
+        // Then
         assert!(
             needed > 0 && (needed as usize) <= OPUS_STATE_BYTES,
             "libopus wants {needed} bytes of decoder state, reserved {OPUS_STATE_BYTES}"
         );
     }
 
+    /// Uses real libopus, to check the per-channel to interleaved conversion.
     #[test]
     fn decodes_the_first_real_audio_packet_to_a_full_stereo_frame() {
+        // Given: the fixture's first audio packet
         let mut page = [0u8; PAGE_SIZE];
         let mut reader = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
         let mut scratch = [0u8; MAX_PACKET];
         reader.next_packet(&mut scratch).unwrap(); // OpusHead
         reader.next_packet(&mut scratch).unwrap(); // OpusTags
         let len = reader.next_packet(&mut scratch).unwrap().unwrap();
-
         let mut state = OpusState::new();
         let mut decoder = LibOpus::new(&mut state).unwrap();
         let mut pcm = [0i16; crate::MAX_FRAME_SAMPLES];
+
+        // When
         let n = decoder.decode(&scratch[..len], &mut pcm).unwrap();
 
-        // 60 ms of stereo audio at 48 kHz: 2880 samples/channel x 2 channels.
-        // Uses real libopus, to check the per-channel to interleaved
-        // conversion.
+        // Then: 60 ms of stereo audio at 48 kHz, 2880 samples per channel
         assert_eq!(n, 5760);
     }
 
     #[test]
     fn a_corrupt_packet_is_a_decode_error_rather_than_a_panic() {
+        // Given: a TOC byte claiming a configuration the payload cannot support
         let mut state = OpusState::new();
         let mut decoder = LibOpus::new(&mut state).unwrap();
         let mut pcm = [0i16; crate::MAX_FRAME_SAMPLES];
+        let corrupt = [0xff, 0xff, 0xff];
 
-        // A TOC byte claiming a configuration the payload cannot support.
-        let err = decoder.decode(&[0xff, 0xff, 0xff], &mut pcm).unwrap_err();
+        // When
+        let decoded = decoder.decode(&corrupt, &mut pcm);
 
-        assert_eq!(err, AudioError::Decode);
+        // Then
+        assert_eq!(decoded, Err(AudioError::Decode));
     }
 }
