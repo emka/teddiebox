@@ -66,61 +66,87 @@ mod tests {
 
     #[test]
     fn reads_the_requested_page() {
+        // Given: three pages, the second marked
         let mut data = [0u8; PAGE_SIZE * 3];
         data[PAGE_SIZE] = 0xAB;
         let mut src = SlicePages::new(&data).unwrap();
-
         let mut buf = [0u8; PAGE_SIZE];
+
+        // When
         src.read_page(1, &mut buf).unwrap();
+
+        // Then
         assert_eq!(buf[0], 0xAB);
         assert_eq!(src.page_count(), 3);
     }
 
     #[test]
     fn rejects_reads_past_the_end() {
+        // Given
         let data = [0u8; PAGE_SIZE];
         let mut src = SlicePages::new(&data).unwrap();
         let mut buf = [0u8; PAGE_SIZE];
-        assert_eq!(src.read_page(1, &mut buf), Err(TafError::PageOutOfRange));
+
+        // When
+        let read = src.read_page(1, &mut buf);
+
+        // Then
+        assert_eq!(read, Err(TafError::PageOutOfRange));
     }
 
     #[test]
     fn rejects_a_partial_page_file() {
-        assert!(matches!(
-            SlicePages::new(&[0u8; 100]),
-            Err(TafError::TruncatedFile)
-        ));
+        // Given
+        let data = [0u8; 100];
+
+        // When
+        let src = SlicePages::new(&data);
+
+        // Then
+        assert!(matches!(src, Err(TafError::TruncatedFile)));
     }
 
     #[test]
     fn accepts_a_file_whose_final_page_is_short() {
-        // Real Toniebox files end with a short page. `toniefile` pads to a
-        // full page, so the test fixtures do not show this.
+        // Given: real Toniebox files end with a short page; `toniefile` pads
+        // to a full page, so the test fixtures do not show this
         let data = [0u8; PAGE_SIZE + 100];
+
+        // When
         let src = SlicePages::new(&data).unwrap();
+
+        // Then
         assert_eq!(src.page_count(), 2, "the short final page still counts");
     }
 
     #[test]
     fn reads_a_short_final_page_zero_filled() {
-        // Callers always get a full page. Zero-filling is safe because an
-        // Ogg page states its own length.
+        // Given: callers always get a full page; zero-filling is safe because
+        // an Ogg page states its own length
         let mut data = [0u8; PAGE_SIZE + 3];
         data[PAGE_SIZE..].copy_from_slice(&[0xAB, 0xCD, 0xEF]);
         let mut src = SlicePages::new(&data).unwrap();
-
         let mut buf = [0xFFu8; PAGE_SIZE];
+
+        // When
         src.read_page(1, &mut buf).unwrap();
 
+        // Then
         assert_eq!(&buf[..3], &[0xAB, 0xCD, 0xEF]);
         assert!(buf[3..].iter().all(|&b| b == 0), "tail must be zero-filled");
     }
 
     #[test]
     fn still_rejects_a_read_beyond_the_last_page() {
+        // Given
         let data = [0u8; PAGE_SIZE + 100];
         let mut src = SlicePages::new(&data).unwrap();
         let mut buf = [0u8; PAGE_SIZE];
-        assert_eq!(src.read_page(2, &mut buf), Err(TafError::PageOutOfRange));
+
+        // When
+        let read = src.read_page(2, &mut buf);
+
+        // Then
+        assert_eq!(read, Err(TafError::PageOutOfRange));
     }
 }
