@@ -157,8 +157,14 @@ proptest! {
 
     #[test]
     fn any_header_page_parses_or_is_refused(page in header_page()) {
+        // Given: any header page the strategy builds
         let page: &[u8; PAGE_SIZE] = page.as_slice().try_into().unwrap();
-        let _ = TonieHeader::parse(page);
+
+        // When
+        let parsed = TonieHeader::parse(page);
+
+        // Then: it returned, with a header or an error, rather than panicking
+        let _ = parsed;
     }
 
     #[test]
@@ -166,7 +172,13 @@ proptest! {
         file in damaged_fixture(),
         chapter in 0..=MAX_CHAPTERS + 1,
     ) {
-        exercise(&file, chapter).map_err(TestCaseError::fail)?;
+        // Given: the fixture with up to eight bytes overwritten, and a chapter
+
+        // When
+        let read = exercise(&file, chapter);
+
+        // Then
+        read.map_err(TestCaseError::fail)?;
     }
 
     #[test]
@@ -174,6 +186,12 @@ proptest! {
         file in real_header_then_noise(),
         chapter in 0..=MAX_CHAPTERS + 1,
     ) {
-        exercise(&file, chapter).map_err(TestCaseError::fail)?;
+        // Given: the fixture's header over random pages, and a chapter
+
+        // When
+        let read = exercise(&file, chapter);
+
+        // Then
+        read.map_err(TestCaseError::fail)?;
     }
 }
