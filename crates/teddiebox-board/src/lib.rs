@@ -260,13 +260,24 @@ pub const fn side_for_click(axis: Axis, negative: bool) -> Option<Side> {
 mod tests {
     use super::*;
 
+    /// Gates with the peripherals rail on, so the LED can be lit.
+    fn powered() -> Gates {
+        let mut gates = Gates::at_reset();
+        gates.power(Rail::Peripherals, true);
+        gates
+    }
+
     /// The LED has no orange channel; orange is red and green together.
     /// Lighting only red would look like a fault.
     #[test]
     fn orange_lights_the_red_and_green_channels_together() {
-        let mut gates = Gates::at_reset();
-        gates.power(Rail::Peripherals, true);
+        // Given
+        let gates = powered();
+
+        // When
         let levels = gates.led(Colour::Orange).expect("the rail is up");
+
+        // Then
         for level in levels {
             let lit = level.high == LED_ACTIVE_HIGH;
             match level.gpio {
@@ -282,9 +293,15 @@ mod tests {
     /// peripherals dead, which looks like a wiring fault.
     #[test]
     fn the_peripherals_rail_is_enabled_by_driving_gpio45_high() {
+        // Given
         let mut gates = Gates::at_reset();
+
+        // When
+        let level = gates.power(Rail::Peripherals, true);
+
+        // Then
         assert_eq!(
-            gates.power(Rail::Peripherals, true),
+            level,
             PinLevel {
                 gpio: 45,
                 high: true
@@ -294,9 +311,15 @@ mod tests {
 
     #[test]
     fn the_storage_rail_is_enabled_by_driving_gpio47_low() {
+        // Given
         let mut gates = Gates::at_reset();
+
+        // When
+        let level = gates.power(Rail::Storage, true);
+
+        // Then
         assert_eq!(
-            gates.power(Rail::Storage, true),
+            level,
             PinLevel {
                 gpio: 47,
                 high: false
@@ -306,7 +329,12 @@ mod tests {
 
     #[test]
     fn nothing_is_powered_at_reset() {
+        // Given: the board just out of reset
+
+        // When
         let gates = Gates::at_reset();
+
+        // Then
         assert!(!gates.is_on(Rail::Peripherals));
         assert!(!gates.is_on(Rail::Storage));
     }
@@ -316,12 +344,15 @@ mod tests {
     /// storage rail would also fail.
     #[test]
     fn releasing_for_reset_drives_gpio45_low_and_gpio47_high() {
+        // Given
         let mut gates = Gates::at_reset();
         gates.power(Rail::Peripherals, true);
         gates.power(Rail::Storage, true);
 
+        // When
         let released = gates.release_for_reset();
 
+        // Then
         assert_eq!(
             released,
             [
@@ -343,38 +374,49 @@ mod tests {
     /// relies on the recorded state.
     #[test]
     fn powering_a_rail_records_that_it_is_on() {
+        // Given
         let mut gates = Gates::at_reset();
+        let rails = |gates: &Gates| (gates.is_on(Rail::Peripherals), gates.is_on(Rail::Storage));
 
+        // When
         gates.power(Rail::Peripherals, true);
-        assert!(gates.is_on(Rail::Peripherals));
-        assert!(!gates.is_on(Rail::Storage), "rails are independent");
-
+        let peripherals_on = rails(&gates);
         gates.power(Rail::Storage, true);
-        assert!(gates.is_on(Rail::Storage));
-
+        let both_on = rails(&gates);
         gates.power(Rail::Peripherals, false);
-        assert!(!gates.is_on(Rail::Peripherals));
-        assert!(
-            gates.is_on(Rail::Storage),
-            "switching one must not switch the other"
-        );
+        let peripherals_off = rails(&gates);
+
+        // Then: switching one never switches the other
+        assert_eq!(peripherals_on, (true, false));
+        assert_eq!(both_on, (true, true));
+        assert_eq!(peripherals_off, (false, true));
     }
 
     /// The LED is powered by the peripherals rail, so setting a colour before
     /// that rail is on is an error, not a silent no-op.
     #[test]
     fn a_colour_cannot_be_set_before_the_rail_that_feeds_it() {
+        // Given
         let gates = Gates::at_reset();
-        assert_eq!(gates.led(Colour::Red), Err(NotPowered));
+
+        // When
+        let levels = gates.led(Colour::Red);
+
+        // Then
+        assert_eq!(levels, Err(NotPowered));
     }
 
     #[test]
     fn red_lights_only_the_red_channel() {
-        let mut gates = Gates::at_reset();
-        gates.power(Rail::Peripherals, true);
+        // Given
+        let gates = powered();
 
+        // When
+        let levels = gates.led(Colour::Red);
+
+        // Then
         assert_eq!(
-            gates.led(Colour::Red),
+            levels,
             Ok([
                 PinLevel {
                     gpio: 19,
@@ -394,10 +436,13 @@ mod tests {
 
     #[test]
     fn off_darkens_every_channel() {
-        let mut gates = Gates::at_reset();
-        gates.power(Rail::Peripherals, true);
+        // Given
+        let gates = powered();
 
+        // When
         let levels = gates.led(Colour::Off).unwrap();
+
+        // Then
         assert!(levels.iter().all(|p| !p.high));
     }
 
@@ -405,11 +450,15 @@ mod tests {
     /// swapped.
     #[test]
     fn green_lights_only_the_green_channel() {
-        let mut gates = Gates::at_reset();
-        gates.power(Rail::Peripherals, true);
+        // Given
+        let gates = powered();
 
+        // When
+        let levels = gates.led(Colour::Green);
+
+        // Then
         assert_eq!(
-            gates.led(Colour::Green),
+            levels,
             Ok([
                 PinLevel {
                     gpio: 19,
@@ -430,11 +479,15 @@ mod tests {
     /// See `green_lights_only_the_green_channel`.
     #[test]
     fn blue_lights_only_the_blue_channel() {
-        let mut gates = Gates::at_reset();
-        gates.power(Rail::Peripherals, true);
+        // Given
+        let gates = powered();
 
+        // When
+        let levels = gates.led(Colour::Blue);
+
+        // Then
         assert_eq!(
-            gates.led(Colour::Blue),
+            levels,
             Ok([
                 PinLevel {
                     gpio: 19,
@@ -455,8 +508,14 @@ mod tests {
     /// Literal values, so the test can disagree with the code.
     #[test]
     fn at_reset_every_rail_is_off_and_every_led_is_dark() {
+        // Given: the board just out of reset
+
+        // When
+        let levels = at_reset_levels();
+
+        // Then
         assert_eq!(
-            at_reset_levels(),
+            levels,
             [
                 PinLevel {
                     gpio: 45,
@@ -484,36 +543,57 @@ mod tests {
 
     #[test]
     fn releasing_the_codec_drives_its_reset_line_to_the_running_level() {
+        // Given
+        let (released, held) = (false, true);
+
+        // When
+        let levels = [released, held].map(dac_reset);
+
+        // Then
         assert_eq!(
-            dac_reset(false),
-            PinLevel {
-                gpio: 26,
-                high: true
-            }
-        );
-        assert_eq!(
-            dac_reset(true),
-            PinLevel {
-                gpio: 26,
-                high: false
-            }
+            levels,
+            [
+                PinLevel {
+                    gpio: 26,
+                    high: true
+                },
+                PinLevel {
+                    gpio: 26,
+                    high: false
+                },
+            ]
         );
     }
 
     /// Measured: a slap on the left gives `Y+`, on the right `Y-`.
     #[test]
     fn a_slap_on_y_picks_a_side_by_its_sign() {
-        assert_eq!(side_for_click(Axis::Y, false), Some(Side::Left));
-        assert_eq!(side_for_click(Axis::Y, true), Some(Side::Right));
+        // Given
+        let (positive, negative) = (false, true);
+
+        // When
+        let sides = [positive, negative].map(|sign| side_for_click(Axis::Y, sign));
+
+        // Then
+        assert_eq!(sides, [Some(Side::Left), Some(Side::Right)]);
     }
 
     /// X is vertical when the box stands upright, so an X click is the box
     /// being put down. Z has the same sign on both sides. Neither is a slap.
     #[test]
     fn a_click_on_another_axis_is_not_a_slap() {
-        assert_eq!(side_for_click(Axis::X, false), None);
-        assert_eq!(side_for_click(Axis::X, true), None);
-        assert_eq!(side_for_click(Axis::Z, false), None);
-        assert_eq!(side_for_click(Axis::Z, true), None);
+        // Given
+        let clicks = [
+            (Axis::X, false),
+            (Axis::X, true),
+            (Axis::Z, false),
+            (Axis::Z, true),
+        ];
+
+        // When
+        let sides = clicks.map(|(axis, negative)| side_for_click(axis, negative));
+
+        // Then
+        assert_eq!(sides, [None; 4]);
     }
 }
