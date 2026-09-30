@@ -52,21 +52,49 @@ mod tests {
 
     #[test]
     fn a_403_means_no_content() {
-        assert!(CloudError::UnexpectedStatus(403).means_no_content());
+        // Given
+        let error = CloudError::UnexpectedStatus(403);
+
+        // When
+        let no_content = error.means_no_content();
+
+        // Then
+        assert!(no_content);
     }
 
     #[test]
     fn a_404_means_no_content() {
-        assert!(CloudError::UnexpectedStatus(404).means_no_content());
+        // Given
+        let error = CloudError::UnexpectedStatus(404);
+
+        // When
+        let no_content = error.means_no_content();
+
+        // Then
+        assert!(no_content);
     }
 
     #[test]
     fn a_500_does_not_mean_no_content() {
-        assert!(!CloudError::UnexpectedStatus(500).means_no_content());
+        // Given
+        let error = CloudError::UnexpectedStatus(500);
+
+        // When
+        let no_content = error.means_no_content();
+
+        // Then
+        assert!(!no_content);
     }
 
     #[test]
     fn a_transport_failure_does_not_mean_no_content() {
-        assert!(!CloudError::Transport.means_no_content());
+        // Given
+        let error = CloudError::Transport;
+
+        // When
+        let no_content = error.means_no_content();
+
+        // Then
+        assert!(!no_content);
     }
 }
