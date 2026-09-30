@@ -336,6 +336,26 @@ mod tests {
         assert_eq!(format, Err(WavError::Malformed));
     }
 
+    /// The fields read from a format chunk take sixteen bytes. A shorter chunk
+    /// would have them read from whatever follows it.
+    #[test]
+    fn a_format_chunk_too_short_for_its_fields_is_rejected() {
+        // Given: a format chunk that ends before the sample size, followed
+        // directly by the data chunk
+        let mut file = [0u8; 42];
+        file[..12].copy_from_slice(&REAL_HEADER[..12]);
+        file[12..16].copy_from_slice(b"fmt ");
+        file[16..20].copy_from_slice(&14u32.to_le_bytes());
+        file[20..34].copy_from_slice(&REAL_HEADER[20..34]);
+        file[34..].copy_from_slice(&REAL_HEADER[36..]);
+
+        // When
+        let format = WavFormat::parse(&file);
+
+        // Then
+        assert_eq!(format, Err(WavError::Malformed));
+    }
+
     /// Mono, 44.1 kHz or 8-bit samples would play at the wrong speed or as
     /// noise. The file is still valid, so parsing succeeds and only the codec
     /// check fails.
