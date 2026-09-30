@@ -206,106 +206,126 @@ mod tests {
             cutoff_mv: 3_000,
             load_offset_mv: 150,
             hysteresis_mv: 60,
-            readings_to_agree: 4,
+            readings_to_agree: READINGS_TO_AGREE,
         })
+    }
+
+    /// The agreement count of both the test model and the shipped one.
+    const READINGS_TO_AGREE: u8 = 4;
+
+    /// Feeds one reading as often as the model needs to agree on it, and
+    /// returns what the last of them reported.
+    fn settle(b: &mut BatteryModel, mv: u16, under_load: bool) -> Option<BatteryLevel> {
+        let mut last = None;
+        for _ in 0..READINGS_TO_AGREE {
+            last = b.update(mv, under_load);
+        }
+        last
     }
 
     #[test]
     fn a_full_pack_reads_full() {
+        // Given
         let mut b = model();
-        // A level only changes once `readings_to_agree` readings in a row
-        // agree on it.
-        for _ in 0..3 {
-            assert_eq!(b.update(4_000, false), None, "not yet agreed");
-        }
-        assert_eq!(b.update(4_000, false), Some(BatteryLevel::Full));
+
+        // When: a level only changes once enough readings in a row agree
+        let reported = [4_000; 4].map(|mv| b.update(mv, false));
+
+        // Then
+        assert_eq!(reported, [None, None, None, Some(BatteryLevel::Full)]);
     }
 
     #[test]
     fn an_unchanged_level_reports_nothing() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(4_000, false);
-        }
+        settle(&mut b, 4_000, false);
         assert_eq!(b.level(), BatteryLevel::Full);
-        assert_eq!(b.update(3_950, false), None);
+
+        // When
+        let reported = b.update(3_950, false);
+
+        // Then
+        assert_eq!(reported, None);
     }
 
     #[test]
     fn the_level_falls_through_the_buckets() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(4_000, false);
-        }
-        for _ in 0..3 {
-            b.update(3_600, false);
-        }
-        assert_eq!(b.update(3_600, false), Some(BatteryLevel::Ok));
-        for _ in 0..3 {
-            b.update(3_300, false);
-        }
-        assert_eq!(b.update(3_300, false), Some(BatteryLevel::Low));
-        for _ in 0..3 {
-            b.update(3_100, false);
-        }
-        assert_eq!(b.update(3_100, false), Some(BatteryLevel::Critical));
+        settle(&mut b, 4_000, false);
+
+        // When
+        let reported = [3_600, 3_300, 3_100].map(|mv| settle(&mut b, mv, false));
+
+        // Then
+        assert_eq!(
+            reported,
+            [
+                Some(BatteryLevel::Ok),
+                Some(BatteryLevel::Low),
+                Some(BatteryLevel::Critical),
+            ]
+        );
     }
 
     #[test]
     fn hysteresis_stops_the_level_flickering_at_a_boundary() {
+        // Given: Full, then just under the Ok threshold, so Low
         let mut b = model();
-        for _ in 0..4 {
-            b.update(4_000, false);
-        }
-        for _ in 0..3 {
-            b.update(3_490, false); // just under the Ok threshold, so drops to Low
-        }
-        assert_eq!(b.update(3_490, false), Some(BatteryLevel::Low));
-        assert_eq!(b.level(), BatteryLevel::Low);
-        // Back above the threshold, but not by the hysteresis margin.
-        assert_eq!(b.update(3_510, false), None);
-        assert_eq!(b.level(), BatteryLevel::Low);
-        // Clearly above it.
-        for _ in 0..3 {
-            b.update(3_990, false);
-        }
-        assert_eq!(b.update(3_990, false), Some(BatteryLevel::Full));
+        settle(&mut b, 4_000, false);
+        assert_eq!(settle(&mut b, 3_490, false), Some(BatteryLevel::Low));
+
+        // When: back above the threshold, but not by the hysteresis margin;
+        // then clearly above it
+        let just_above = b.update(3_510, false);
+        let level_just_above = b.level();
+        let clearly_above = settle(&mut b, 3_990, false);
+
+        // Then
+        assert_eq!(just_above, None);
+        assert_eq!(level_just_above, BatteryLevel::Low);
+        assert_eq!(clearly_above, Some(BatteryLevel::Full));
     }
 
     #[test]
     fn a_reading_under_load_is_compensated_upward() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(3_300, false);
-        }
+        settle(&mut b, 3_300, false);
         assert_eq!(b.level(), BatteryLevel::Low);
-        // 3_450 sagging under load is really about 3_600 at rest, which clears
-        // the Ok threshold; uncompensated it would have stayed Low.
-        for _ in 0..3 {
-            b.update(3_450, true);
-        }
-        assert_eq!(b.update(3_450, true), Some(BatteryLevel::Ok));
+
+        // When: 3_450 sagging under load is really about 3_600 at rest, which
+        // clears the Ok threshold; uncompensated it would have stayed Low
+        let reported = settle(&mut b, 3_450, true);
+
+        // Then
+        assert_eq!(reported, Some(BatteryLevel::Ok));
     }
 
     #[test]
     fn falling_below_the_cutoff_latches_shutdown() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(2_900, false);
-        }
+
+        // When
+        settle(&mut b, 2_900, false);
+
+        // Then
         assert!(b.must_shut_down());
     }
 
     #[test]
     fn shutdown_does_not_clear_when_the_voltage_recovers() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(2_900, false);
-        }
+        settle(&mut b, 2_900, false);
         assert!(b.must_shut_down());
-        for _ in 0..4 {
-            b.update(3_800, false);
-        }
+
+        // When
+        settle(&mut b, 3_800, false);
+
+        // Then
         assert!(
             b.must_shut_down(),
             "a pack that rebounds once unloaded is still empty"
@@ -314,11 +334,13 @@ mod tests {
 
     #[test]
     fn the_cutoff_is_judged_on_the_compensated_reading() {
+        // Given
         let mut b = model();
-        // 2_950 under load compensates to 3_100, which is above the cutoff.
-        for _ in 0..4 {
-            b.update(2_950, true);
-        }
+
+        // When: 2_950 under load compensates to 3_100, above the cutoff
+        settle(&mut b, 2_950, true);
+
+        // Then
         assert!(!b.must_shut_down());
     }
 
@@ -327,10 +349,13 @@ mod tests {
     /// the pack still has usable charge above it.
     #[test]
     fn settling_at_critical_does_not_by_itself_arm_the_shutdown() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(3_100, false);
-        }
+
+        // When
+        settle(&mut b, 3_100, false);
+
+        // Then
         assert_eq!(b.level(), BatteryLevel::Critical);
         assert!(
             !b.must_shut_down(),
@@ -342,14 +367,15 @@ mod tests {
     /// trigger even though the level no longer changes.
     #[test]
     fn falling_past_the_cutoff_arms_the_shutdown_even_once_critical_is_settled() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(3_100, false);
-        }
+        settle(&mut b, 3_100, false);
         assert!(!b.must_shut_down());
-        for _ in 0..4 {
-            b.update(2_950, false);
-        }
+
+        // When
+        settle(&mut b, 2_950, false);
+
+        // Then
         assert!(b.must_shut_down());
     }
 
@@ -359,16 +385,16 @@ mod tests {
     /// protects against a bad *reading*.
     #[test]
     fn one_implausible_reading_does_not_move_the_level() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(3_800, false);
-        }
+        settle(&mut b, 3_800, false);
         let settled = b.level();
-        assert_eq!(
-            b.update(10, false),
-            None,
-            "one absurd reading changes nothing"
-        );
+
+        // When
+        let reported = b.update(10, false);
+
+        // Then
+        assert_eq!(reported, None, "one absurd reading changes nothing");
         assert_eq!(b.level(), settled);
         assert!(
             !b.must_shut_down(),
@@ -378,11 +404,14 @@ mod tests {
 
     #[test]
     fn four_agreeing_readings_move_the_level() {
+        // Given
         let mut b = model();
-        for _ in 0..3 {
-            assert_eq!(b.update(2_900, false), None, "not yet agreed");
-        }
-        assert_eq!(b.update(2_900, false), Some(BatteryLevel::Critical));
+
+        // When
+        let reported = [2_900; 4].map(|mv| b.update(mv, false));
+
+        // Then
+        assert_eq!(reported, [None, None, None, Some(BatteryLevel::Critical)]);
         assert!(b.must_shut_down());
     }
 
@@ -390,15 +419,16 @@ mod tests {
     /// Critical. That single reading must not trigger the shutdown.
     #[test]
     fn one_implausible_reading_from_a_settled_critical_pack_does_not_arm_the_shutdown() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(3_100, false);
-        }
+        settle(&mut b, 3_100, false);
         assert_eq!(b.level(), BatteryLevel::Critical, "settled in the bucket");
         assert!(!b.must_shut_down(), "and above the cutoff");
 
+        // When
         b.update(2_500, false);
 
+        // Then
         assert!(
             !b.must_shut_down(),
             "one sample below the cutoff is not a pack below the cutoff"
@@ -409,14 +439,17 @@ mod tests {
     /// adds up to a shutdown.
     #[test]
     fn a_reading_above_the_cutoff_restarts_the_cutoff_count() {
+        // Given
         let mut b = model();
-        for _ in 0..4 {
-            b.update(3_100, false);
-        }
+        settle(&mut b, 3_100, false);
+
+        // When
         for _ in 0..8 {
             b.update(2_500, false);
             b.update(3_100, false);
         }
+
+        // Then
         assert!(!b.must_shut_down());
     }
 
@@ -424,16 +457,17 @@ mod tests {
     /// side of a threshold never accumulates into a decision.
     #[test]
     fn a_disagreeing_reading_restarts_the_count() {
+        // Given: one reading short of agreeing
         let mut b = model();
         for _ in 0..3 {
             b.update(2_900, false);
         }
-        assert_eq!(
-            b.update(3_800, false),
-            None,
-            "a healthy reading interrupts it"
-        );
-        assert_eq!(b.update(2_900, false), None, "and the count starts again");
+
+        // When: a healthy reading interrupts it, then the count starts again
+        let reported = [3_800, 2_900].map(|mv| b.update(mv, false));
+
+        // Then
+        assert_eq!(reported, [None, None]);
     }
 
     /// The shipped calibration, against the pack it was measured on.
@@ -448,14 +482,17 @@ mod tests {
             BatteryModel::new(BatteryConfig::default())
         }
 
+        /// The box rebooted at 3_410 mV eleven times during a measured run. The cutoff must fire
+        /// before that.
         #[test]
         fn the_shutdown_latches_above_the_voltage_the_box_browns_out_at() {
-            // The box rebooted at 3_410 mV eleven times during a measured
-            // run. The cutoff must fire before that.
+            // Given
             let mut b = measured();
-            for _ in 0..4 {
-                b.update(3_410, false);
-            }
+
+            // When
+            settle(&mut b, 3_410, false);
+
+            // Then
             assert!(
                 b.must_shut_down(),
                 "the pack browns out here; the cutoff has to be above it"
@@ -464,62 +501,79 @@ mod tests {
 
         #[test]
         fn a_pack_at_the_brownout_floor_is_not_still_called_ok() {
+            // Given
             let mut b = measured();
-            for _ in 0..4 {
-                b.update(3_410, false);
-            }
+
+            // When
+            settle(&mut b, 3_410, false);
+
+            // Then
             assert_eq!(b.level(), BatteryLevel::Critical);
         }
 
+        /// Playing lowers the reading by about 9 mV (measured), so a reading during a story is
+        /// close to the true value. An offset large enough to hide the brownout voltage would stop
+        /// the cutoff from ever firing.
         #[test]
         fn the_load_offset_does_not_lift_a_dying_pack_over_the_cutoff() {
-            // Playing lowers the reading by about 9 mV (measured), so a
-            // reading during a story is close to the true value. An offset
-            // large enough to hide the brownout voltage would stop the cutoff
-            // from ever firing.
+            // Given
             let mut b = measured();
-            for _ in 0..4 {
-                b.update(3_410, true);
-            }
+
+            // When
+            settle(&mut b, 3_410, true);
+
+            // Then
             assert!(
                 b.must_shut_down(),
                 "a pack at the floor is at the floor, story or no story"
             );
         }
 
+        /// A measured run fell from 3_570 to 3_407 mV in the 40 minutes after this voltage, so this
+        /// must already read Low.
         #[test]
         fn the_level_drops_before_the_curve_does() {
-            // A measured run fell from 3_570 to 3_407 mV in the 40 minutes
-            // after this voltage, so this must already read Low.
+            // Given
             let mut b = measured();
-            for _ in 0..4 {
-                b.update(3_550, false);
-            }
+
+            // When
+            settle(&mut b, 3_550, false);
+
+            // Then
             assert_eq!(b.level(), BatteryLevel::Low);
         }
 
+        /// 3_943 mV: the first reading of a measured discharge, once the surface charge had gone.
         #[test]
         fn a_pack_just_off_the_charger_reads_full() {
-            // 3_943 mV: the first reading of a measured discharge, once the
-            // surface charge had gone.
+            // Given
             let mut b = measured();
-            for _ in 0..4 {
-                b.update(3_943, false);
-            }
+
+            // When
+            settle(&mut b, 3_943, false);
+
+            // Then
             assert_eq!(b.level(), BatteryLevel::Full);
         }
 
+        /// The pack spends most of its life here; calling any of it Low would make the warning
+        /// meaningless.
         #[test]
         fn the_eight_hour_plateau_reads_ok_throughout() {
-            // The pack spends most of its life here; calling any of it Low
-            // would make the warning meaningless.
+            // Given
             let mut b = measured();
-            for mv in [3_900, 3_800, 3_750, 3_700, 3_680] {
-                for _ in 0..4 {
-                    b.update(mv, false);
-                }
+            let plateau = [3_900, 3_800, 3_750, 3_700, 3_680];
+
+            // When
+            let levels = plateau.map(|mv| {
+                settle(&mut b, mv, false);
+                (mv, b.level())
+            });
+
+            // Then
+            for (mv, level) in levels {
                 assert!(
-                    b.level() >= BatteryLevel::Ok,
+                    level >= BatteryLevel::Ok,
                     "{mv} mV is mid-plateau, not a warning"
                 );
             }
