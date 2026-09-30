@@ -178,6 +178,22 @@ mod tests {
         assert_eq!(&flash.bytes[3001..3004], &[0xFF, 0xFF, 0xFF]);
     }
 
+    /// An image that ends on a stage boundary has nothing left to write, so
+    /// finishing adds no write of its own.
+    #[test]
+    fn finishing_on_a_stage_boundary_writes_nothing_more() {
+        // Given: exactly one stage's worth pushed, and so already written
+        let mut flash = Memory::new(8192);
+        let mut writer = ImageWriter::<512>::new(8192);
+        writer.push(&mut flash, &[0u8; 512]).unwrap();
+
+        // When
+        writer.finish(&mut flash).unwrap();
+
+        // Then
+        assert_eq!(flash.writes, [(0, 512, 0)]);
+    }
+
     #[test]
     fn finish_reports_the_image_length_without_the_padding() {
         // Given
