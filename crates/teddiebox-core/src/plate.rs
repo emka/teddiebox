@@ -299,6 +299,21 @@ mod tests {
         );
     }
 
+    /// Only the stray reading is noise. A newcomer that goes on answering after
+    /// it is a real swap, however it began.
+    #[test]
+    fn a_newcomer_seen_twice_after_a_stray_reading_is_a_swap() {
+        // Given
+        const C: TagUid = TagUid([7, 7, 7, 7, 7, 7, 7, 7]);
+        let mut p = holding(A);
+
+        // When
+        let events = [Some(B), Some(C), Some(C)].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None, None, Some(TagEvent::Left)]);
+    }
+
     /// A figure lifted while a stray reading is pending still departs on the
     /// misses, so noise cannot keep a story alive after its figure is gone.
     #[test]
