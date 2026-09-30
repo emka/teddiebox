@@ -231,6 +231,20 @@ mod tests {
 
         // Then
         assert_eq!(percents, [25, 100]);
+    }
+
+    #[test]
+    fn the_low_water_mark_is_reported_as_a_percentage_too() {
+        // Given
+        let mut cushion = Cushion::new(CAPACITY);
+        cushion.start();
+
+        // When
+        for level in [CAPACITY / 4, CAPACITY] {
+            cushion.observe(level);
+        }
+
+        // Then
         assert_eq!(cushion.low_water_percent(), 25);
     }
 
