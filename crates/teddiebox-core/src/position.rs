@@ -62,6 +62,20 @@ mod tests {
         assert_eq!(&out[..len], b"7\n");
     }
 
+    /// The longest rendering must fit, or the box panics writing it.
+    #[test]
+    fn the_largest_page_fills_the_rendering_exactly() {
+        // Given
+        let mut out = [0u8; MAX_POSITION];
+
+        // When
+        let len = render(u32::MAX, &mut out);
+
+        // Then
+        assert_eq!(&out[..len], b"4294967295\n");
+        assert_eq!(len, MAX_POSITION);
+    }
+
     #[test]
     fn what_was_rendered_parses_back() {
         // Given
