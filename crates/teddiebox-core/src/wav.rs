@@ -172,7 +172,7 @@ mod tests {
 
     /// The generated test file is five minutes long.
     #[test]
-    fn the_step_8_test_file_is_five_minutes_the_codec_can_play() {
+    fn the_generated_test_file_is_five_minutes_the_codec_can_play() {
         // Given
         let header = GENERATED_HEADER;
 
