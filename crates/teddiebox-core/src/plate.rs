@@ -496,6 +496,23 @@ mod tests {
         assert_eq!(p.poll_again_in_ms(), 500);
     }
 
+    /// The readings that proved a swap are used up on the departure, so the
+    /// newcomer starts as if just placed on an empty plate. Nothing of it has
+    /// been read yet that a quick second reading could confirm.
+    #[test]
+    fn after_a_swap_the_newcomer_is_looked_at_like_an_empty_plate() {
+        // Given: A replaced by B
+        let mut p = holding(A);
+        p.feed(Some(B));
+        assert_eq!(p.feed(Some(B)), Some(TagEvent::Left));
+
+        // When
+        let wait = p.poll_again_in_ms();
+
+        // Then
+        assert_eq!(wait, 200);
+    }
+
     /// Lifting a figure pauses its story, so this is how long a child waits
     /// for the box to react to a lift: one ordinary poll to notice the
     /// silence, then three quick ones to agree it.
