@@ -163,22 +163,22 @@ mod tests {
         ];
 
         // When
-        let files = sounds.map(Sound::file);
+        let files = sounds.map(|sound| (sound, sound.file()));
 
         // Then
         assert_eq!(
             files,
             [
-                0x0000_0000, // the first file of a language
-                0x0000_0001,
-                0x0000_0003, // "caution, battery is low"
-                0x0000_0009, // "turning off now"; the wiki says 0x03
-                0x0000_000B,
-                0x0000_000F,
-                0x0000_0010,
-                0x0000_0011, // 0x11 to 0x13 are neighbours, easy to mix up
-                0x0000_0012,
-                0x0000_0013,
+                (Sound::Startup, 0x0000_0000), // the first file of a language
+                (Sound::Confirmation, 0x0000_0001),
+                (Sound::BatteryLow, 0x0000_0003), // "caution, battery is low"
+                (Sound::BatteryCritical, 0x0000_0009), // the wiki says 0x03
+                (Sound::ConfigError, 0x0000_000B),
+                (Sound::NetworkError, 0x0000_000F),
+                (Sound::Ready, 0x0000_0010),
+                (Sound::NoInternet, 0x0000_0011), // 0x11 to 0x13 are easy to mix up
+                (Sound::NoStory, 0x0000_0012),
+                (Sound::WrongPassword, 0x0000_0013),
             ]
         );
     }
@@ -227,12 +227,17 @@ mod tests {
         ];
 
         // When
-        let directories = languages.map(Language::content_directory);
+        let directories = languages.map(|language| (language, language.content_directory()));
 
         // Then
         assert_eq!(
             directories,
-            [0x0000_0001, 0x0000_0000, 0x0000_0002, 0x0000_0003]
+            [
+                (Language::German, 0x0000_0001),
+                (Language::EnglishGb, 0x0000_0000),
+                (Language::EnglishUs, 0x0000_0002),
+                (Language::French, 0x0000_0003),
+            ]
         );
     }
 
@@ -242,16 +247,16 @@ mod tests {
         let names = ["de", "en-gb", "en-us", "fr"];
 
         // When
-        let languages = names.map(Language::from_name);
+        let languages = names.map(|name| (name, Language::from_name(name)));
 
         // Then
         assert_eq!(
             languages,
             [
-                Some(Language::German),
-                Some(Language::EnglishGb),
-                Some(Language::EnglishUs),
-                Some(Language::French),
+                ("de", Some(Language::German)),
+                ("en-gb", Some(Language::EnglishGb)),
+                ("en-us", Some(Language::EnglishUs)),
+                ("fr", Some(Language::French)),
             ]
         );
     }
@@ -282,18 +287,18 @@ mod tests {
         ];
 
         // When
-        let sounds = prompts.map(Sound::for_prompt);
+        let sounds = prompts.map(|prompt| (prompt, Sound::for_prompt(prompt)));
 
         // Then
         assert_eq!(
             sounds,
             [
-                Sound::Startup,
-                Sound::NoInternet,
-                Sound::BatteryLow,
-                Sound::BatteryCritical,
-                Sound::NoStory,
-                Sound::WrongPassword,
+                (Prompt::Startup, Sound::Startup),
+                (Prompt::NoNetwork, Sound::NoInternet),
+                (Prompt::BatteryLow, Sound::BatteryLow),
+                (Prompt::BatteryCritical, Sound::BatteryCritical),
+                (Prompt::NoContent, Sound::NoStory),
+                (Prompt::WrongPassword, Sound::WrongPassword),
             ]
         );
     }
