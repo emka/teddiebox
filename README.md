@@ -176,8 +176,8 @@ change only that line of `config.txt` and restart the box.
 ### Updates over the air
 
 With `update_url` set, the box checks for an update once per boot, after the
-jingle, when the plate is empty. A boot that starts with a figure on the plate
-does not check.
+jingle, when the plate is empty and the pack is not low. A boot that starts
+with a figure on the plate, or on a low pack, does not check.
 
 If the manifest's version differs from the running one, the box downloads the
 image into its spare firmware slot (the LED shows fetching, about 30 s) and
@@ -186,7 +186,8 @@ codec responds; otherwise the box goes back to the old one at the next boot.
 
 The download stops, and the box keeps its current firmware, if:
 
-- anything starts playing (a story or a system sound, such as the one the charger triggers), or a figure needs the network;
+- anything starts playing, such as a story or the low-battery warning, or a
+  figure needs the network;
 - the length, SHA-256 or version inside the image does not match the manifest.
 
 To publish an update:
