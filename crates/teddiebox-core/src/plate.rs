@@ -1228,60 +1228,47 @@ mod settle_fetch_outcome_tests {
 
     const A: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
 
+    /// The outcome reaches the reducer as the event for the figure it was
+    /// fetched for.
     #[test]
-    fn a_completed_download_for_the_figure_on_the_plate_makes_content_ready() {
+    fn each_outcome_for_the_figure_on_the_plate_becomes_its_event() {
         // Given
-        let answering = Answering::TheFigure(A);
+        let outcomes = [
+            Outcome::Completed,
+            Outcome::Unreachable,
+            Outcome::NoContent,
+            Outcome::Refused,
+        ];
 
         // When
-        let settled = settle_fetch_outcome(answering, Outcome::Completed);
-
-        // Then
-        assert_eq!(settled, Settlement::ForTheFigure(Event::ContentReady(A)));
-    }
-
-    #[test]
-    fn an_unreachable_server_for_the_figure_on_the_plate_reports_why() {
-        // Given
-        let answering = Answering::TheFigure(A);
-
-        // When
-        let settled = settle_fetch_outcome(answering, Outcome::Unreachable);
-
-        // Then
-        assert_eq!(
-            settled,
-            Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::Unreachable))
-        );
-    }
-
-    #[test]
-    fn no_content_for_the_figure_on_the_plate_reports_why() {
-        // Given
-        let answering = Answering::TheFigure(A);
-
-        // When
-        let settled = settle_fetch_outcome(answering, Outcome::NoContent);
+        let settled = outcomes.map(|outcome| {
+            (
+                outcome,
+                settle_fetch_outcome(Answering::TheFigure(A), outcome),
+            )
+        });
 
         // Then
         assert_eq!(
             settled,
-            Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::NoContent))
-        );
-    }
-
-    #[test]
-    fn a_refused_join_for_the_figure_on_the_plate_reports_why() {
-        // Given
-        let answering = Answering::TheFigure(A);
-
-        // When
-        let settled = settle_fetch_outcome(answering, Outcome::Refused);
-
-        // Then
-        assert_eq!(
-            settled,
-            Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::Refused))
+            [
+                (
+                    Outcome::Completed,
+                    Settlement::ForTheFigure(Event::ContentReady(A))
+                ),
+                (
+                    Outcome::Unreachable,
+                    Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::Unreachable))
+                ),
+                (
+                    Outcome::NoContent,
+                    Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::NoContent))
+                ),
+                (
+                    Outcome::Refused,
+                    Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::Refused))
+                ),
+            ]
         );
     }
 
