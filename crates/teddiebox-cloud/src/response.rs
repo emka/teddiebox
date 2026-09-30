@@ -317,6 +317,22 @@ Content-Length: banana\r\n\r\nbody";
         assert_eq!(head.content_length, Some(4));
     }
 
+    /// The same for `Content-Range`, which says where in the file the bytes
+    /// belong.
+    #[test]
+    fn a_repeated_content_range_keeps_the_first_value() {
+        // Given
+        let raw = b"HTTP/1.1 206 Partial Content\r\n\
+Content-Range: bytes 8-11/12\r\n\
+Content-Range: bytes 0-3/12\r\n\r\nTAIL";
+
+        // When
+        let (head, _) = parse_head(raw).unwrap();
+
+        // Then
+        assert_eq!(head.content_range.map(|range| range.first), Some(8));
+    }
+
     #[test]
     fn a_response_without_a_status_line_is_malformed() {
         // Given
