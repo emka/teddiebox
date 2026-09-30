@@ -461,6 +461,25 @@ mod tests {
         assert_eq!(parsed, Err(IdentityError::Truncated));
     }
 
+    /// The laptop tool refuses an image the box would refuse, one body at
+    /// fault at a time.
+    #[test]
+    fn rendering_refuses_a_body_the_box_would_refuse() {
+        // Given
+        let too_long = [0u8; MAX_BODY + 1];
+        let faults: [(&[u8], &[u8]); 2] = [(&[], KEY), (CERTIFICATE, &too_long)];
+
+        // When
+        let rendered =
+            faults.map(|(certificate, key)| render(certificate, key, &mut [0u8; 4 * MAX_BODY]));
+
+        // Then
+        assert_eq!(
+            rendered,
+            [Err(IdentityError::Empty), Err(IdentityError::TooLong)]
+        );
+    }
+
     #[test]
     fn rendering_refuses_a_buffer_it_would_overrun() {
         // Given
