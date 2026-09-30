@@ -70,35 +70,53 @@ mod tests {
 
     #[test]
     fn the_same_version_is_up_to_date() {
+        // Given
         let m = manifest("2026-09-15-a1b2c3d", 1_103_728);
-        assert_eq!(decide(&m, "2026-09-15-a1b2c3d", SLOT), Decision::UpToDate);
+
+        // When
+        let decision = decide(&m, "2026-09-15-a1b2c3d", SLOT);
+
+        // Then
+        assert_eq!(decision, Decision::UpToDate);
     }
 
     #[test]
     fn a_different_version_updates() {
+        // Given
         let m = manifest("2026-09-16-9f8e7d6", 1_103_728);
-        assert_eq!(
-            decide(&m, "2026-09-15-a1b2c3d", SLOT),
-            Decision::Update { length: 1_103_728 }
-        );
+
+        // When
+        let decision = decide(&m, "2026-09-15-a1b2c3d", SLOT);
+
+        // Then
+        assert_eq!(decision, Decision::Update { length: 1_103_728 });
     }
 
     /// Any different version is installed, so a bad build can be undone by
     /// publishing the previous one.
     #[test]
     fn an_older_version_still_updates() {
+        // Given
         let m = manifest("2026-09-14-0000000", 1_103_728);
-        assert_eq!(
-            decide(&m, "2026-09-15-a1b2c3d", SLOT),
-            Decision::Update { length: 1_103_728 }
-        );
+
+        // When
+        let decision = decide(&m, "2026-09-15-a1b2c3d", SLOT);
+
+        // Then
+        assert_eq!(decision, Decision::Update { length: 1_103_728 });
     }
 
     #[test]
     fn an_image_larger_than_the_slot_is_refused() {
+        // Given
         let m = manifest("v2", SLOT + 1);
+
+        // When
+        let decision = decide(&m, "v1", SLOT);
+
+        // Then
         assert_eq!(
-            decide(&m, "v1", SLOT),
+            decision,
             Decision::Refuse(Refusal::WillNotFit {
                 length: SLOT + 1,
                 slot: SLOT
@@ -108,35 +126,53 @@ mod tests {
 
     #[test]
     fn an_image_exactly_the_size_of_the_slot_fits() {
+        // Given
         let m = manifest("v2", SLOT);
-        assert_eq!(decide(&m, "v1", SLOT), Decision::Update { length: SLOT });
+
+        // When
+        let decision = decide(&m, "v1", SLOT);
+
+        // Then
+        assert_eq!(decision, Decision::Update { length: SLOT });
     }
 
     #[test]
     fn a_zero_length_image_is_refused() {
+        // Given
         let m = manifest("v2", 0);
-        assert_eq!(
-            decide(&m, "v1", SLOT),
-            Decision::Refuse(Refusal::ZeroLength)
-        );
+
+        // When
+        let decision = decide(&m, "v1", SLOT);
+
+        // Then
+        assert_eq!(decision, Decision::Refuse(Refusal::ZeroLength));
     }
 
     /// The version check comes before the length check: if the version
     /// matches, nothing happens, whatever `length` says.
     #[test]
     fn a_same_version_manifest_is_up_to_date_even_with_a_zero_length() {
+        // Given
         let m = manifest("v1", 0);
-        assert_eq!(decide(&m, "v1", SLOT), Decision::UpToDate);
+
+        // When
+        let decision = decide(&m, "v1", SLOT);
+
+        // Then
+        assert_eq!(decision, Decision::UpToDate);
     }
 
     /// An empty own version means the build did not set it. The box must not
     /// treat every manifest as an update and reflash forever.
     #[test]
     fn an_empty_version_of_ours_refuses_rather_than_updating() {
+        // Given
         let m = manifest("v2", 1024);
-        assert_eq!(
-            decide(&m, "", SLOT),
-            Decision::Refuse(Refusal::EmptyVersion)
-        );
+
+        // When
+        let decision = decide(&m, "", SLOT);
+
+        // Then
+        assert_eq!(decision, Decision::Refuse(Refusal::EmptyVersion));
     }
 }
