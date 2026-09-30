@@ -714,22 +714,6 @@ mod tests {
         assert!(contains(&actions, Action::PlayCue(Cue::VolumeLimit)));
     }
 
-    /// The skip happens while the ear is still held. Waiting for the release
-    /// makes the box feel unresponsive.
-    #[test]
-    fn a_hold_skips_while_the_ear_is_still_down() {
-        // Given
-        let mut c = core();
-
-        // When
-        let forward = hold(&mut c, Ear::Larger, 0);
-        let back = hold(&mut c, Ear::Smaller, 2_000);
-
-        // Then
-        assert!(contains(&forward, Action::NextTrack));
-        assert!(contains(&back, Action::PrevTrack));
-    }
-
     /// The press was used for the skip, so the release must not also change
     /// the volume.
     #[test]
@@ -886,7 +870,9 @@ mod tests {
     }
 
     /// The larger ear is on the box's right, and right goes forward, like a
-    /// slap on that side. See `teddiebox_board::side_for_click`.
+    /// slap on that side. See `teddiebox_board::side_for_click`. The skip
+    /// happens while the ear is still held: waiting for the release makes the
+    /// box feel unresponsive.
     #[test]
     fn a_long_press_on_the_right_ear_skips_forward() {
         // Given
