@@ -213,6 +213,23 @@ mod tests {
         );
     }
 
+    /// The firmware reads only the header from flash, then the bodies where
+    /// it says they are.
+    #[test]
+    fn the_header_alone_is_enough_to_find_the_bodies() {
+        // Given
+        let (image, len) = rendered();
+
+        // When
+        let parsed = parse_header(&image[..HEADER], len);
+
+        // Then
+        assert_eq!(
+            parsed.map(|header| (header.certificate_len, header.key_len)),
+            Ok((CERTIFICATE.len(), KEY.len()))
+        );
+    }
+
     /// An interrupted write can leave a valid header over bodies that never
     /// arrived; the checksum catches it.
     #[test]
