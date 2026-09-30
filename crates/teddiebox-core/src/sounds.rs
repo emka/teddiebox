@@ -106,7 +106,7 @@ pub enum Sound {
     /// The box reached the server and there is no story for this figure.
     ///
     /// Identified by listening. It sits between `NoInternet` and
-    /// `WrongPassword`, so it has its own test.
+    /// `WrongPassword`, so the three are easy to mix up.
     NoStory,
 }
 
@@ -144,18 +144,43 @@ mod tests {
     use super::*;
     use crate::Prompt;
 
-    /// Written as literals, so the test can disagree with the table. These
-    /// were identified by listening.
+    /// Written as literals, so the test can disagree with the table. Every
+    /// file was identified by listening; the Toniebox wiki is wrong in places.
     #[test]
-    fn the_failure_sounds_name_the_files_the_bench_identified() {
+    fn each_sound_names_the_file_the_bench_identified() {
         // Given
-        let sounds = [Sound::ConfigError, Sound::NoInternet, Sound::WrongPassword];
+        let sounds = [
+            Sound::Startup,
+            Sound::Confirmation,
+            Sound::BatteryLow,
+            Sound::BatteryCritical,
+            Sound::ConfigError,
+            Sound::NetworkError,
+            Sound::Ready,
+            Sound::NoInternet,
+            Sound::NoStory,
+            Sound::WrongPassword,
+        ];
 
         // When
         let files = sounds.map(Sound::file);
 
         // Then
-        assert_eq!(files, [0x0000_000B, 0x0000_0011, 0x0000_0013]);
+        assert_eq!(
+            files,
+            [
+                0x0000_0000, // the first file of a language
+                0x0000_0001,
+                0x0000_0003, // "caution, battery is low"
+                0x0000_0009, // "turning off now"; the wiki says 0x03
+                0x0000_000B,
+                0x0000_000F,
+                0x0000_0010,
+                0x0000_0011, // 0x11 to 0x13 are neighbours, easy to mix up
+                0x0000_0012,
+                0x0000_0013,
+            ]
+        );
     }
 
     /// Two sounds sharing a file would make the box say the wrong thing,
@@ -245,32 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn the_startup_sound_is_the_first_file_of_a_language() {
-        // Given
-        let sounds = [Sound::Startup];
-
-        // When
-        let files = sounds.map(Sound::file);
-
-        // Then
-        assert_eq!(files, [0x0000_0000]);
-    }
-
-    /// "Caution, battery is low" and "battery is critical, turning off now"
-    /// are different files.
-    #[test]
-    fn the_two_battery_sounds_are_not_the_same_file() {
-        // Given
-        let sounds = [Sound::BatteryLow, Sound::BatteryCritical];
-
-        // When
-        let files = sounds.map(Sound::file);
-
-        // Then
-        assert_eq!(files, [0x0000_0003, 0x0000_0009]);
-    }
-
-    #[test]
     fn each_prompt_maps_to_its_file() {
         // Given
         let prompts = [
@@ -297,49 +296,5 @@ mod tests {
                 Sound::WrongPassword,
             ]
         );
-    }
-
-    /// Three neighbouring files: `no internet` at 0x11, `no story` at 0x12,
-    /// `wrong password` at 0x13, identified by listening. A mix-up here would
-    /// be easy to miss.
-    #[test]
-    fn a_refused_passphrase_and_an_absent_network_are_different_files() {
-        // Given
-        let sounds = [Sound::WrongPassword, Sound::NoInternet];
-
-        // When
-        let files = sounds.map(Sound::file);
-
-        // Then
-        assert_eq!(files, [0x0000_0013, 0x0000_0011]);
-        assert_ne!(files[0], files[1]);
-    }
-
-    /// The sound for a figure with no story, identified by listening.
-    #[test]
-    fn the_figure_with_no_story_has_its_own_file() {
-        // Given
-        let sounds = [Sound::NoStory];
-
-        // When
-        let files = sounds.map(Sound::file);
-
-        // Then
-        assert_eq!(files, [0x0000_0012]);
-    }
-
-    /// Identified by listening; the wiki is wrong about this one. 0x09 is
-    /// "battery is critical, turning off now", not 0x03.
-    #[test]
-    fn the_critical_announcement_has_its_own_file() {
-        // Given
-        let sounds = [Sound::BatteryCritical, Sound::BatteryLow];
-
-        // When
-        let files = sounds.map(Sound::file);
-
-        // Then
-        assert_eq!(files[0], 0x0000_0009);
-        assert_ne!(files[0], files[1]);
     }
 }
