@@ -49,16 +49,37 @@ mod tests {
 
     #[test]
     fn a_freshly_selected_slot_confirms_its_first_boot() {
-        assert_eq!(boot_action(SlotState::New), BootAction::ConfirmFirstBoot);
+        // Given
+        let state = SlotState::New;
+
+        // When
+        let action = boot_action(state);
+
+        // Then
+        assert_eq!(action, BootAction::ConfirmFirstBoot);
     }
 
     #[test]
     fn a_slot_still_pending_from_a_previous_boot_reverts() {
-        assert_eq!(boot_action(SlotState::PendingVerify), BootAction::Revert);
+        // Given
+        let state = SlotState::PendingVerify;
+
+        // When
+        let action = boot_action(state);
+
+        // Then
+        assert_eq!(action, BootAction::Revert);
     }
 
     #[test]
     fn a_confirmed_slot_does_nothing() {
-        assert_eq!(boot_action(SlotState::Confirmed), BootAction::Proceed);
+        // Given
+        let state = SlotState::Confirmed;
+
+        // When
+        let action = boot_action(state);
+
+        // Then
+        assert_eq!(action, BootAction::Proceed);
     }
 }
