@@ -170,51 +170,74 @@ mod tests {
 
     #[test]
     fn reports_no_page_where_the_capture_pattern_is_absent() {
+        // Given
         let page = [0u8; PAGE_SIZE];
-        assert!(PacketCursor::at_page(&page, 0).unwrap().is_none());
+
+        // When
+        let found = PacketCursor::at_page(&page, 0);
+
+        // Then
+        assert!(found.unwrap().is_none());
     }
 
     #[test]
     fn rejects_a_page_whose_segment_table_overruns_the_block() {
-        // A page header at the very end of the block: its segment table
-        // cannot fit, so this is corruption, not a missing page.
+        // Given: a page header at the very end of the block, whose segment
+        // table cannot fit, so this is corruption, not a missing page
         let mut page = [0u8; PAGE_SIZE];
         let offset = PAGE_SIZE - MIN_HEADER_LEN;
         page[offset..offset + 4].copy_from_slice(CAPTURE_PATTERN);
         page[offset + 26] = 1;
-        assert_eq!(
-            PacketCursor::at_page(&page, offset),
-            Err(TafError::NotAnOggPage)
-        );
+
+        // When
+        let found = PacketCursor::at_page(&page, offset);
+
+        // Then
+        assert_eq!(found, Err(TafError::NotAnOggPage));
     }
 
     #[test]
     fn yields_a_single_packet() {
+        // Given
         let page = ogg_page(&[&[1, 2, 3, 4]]);
-        assert_eq!(collect(&page, 0).unwrap().as_slice(), &[&[1, 2, 3, 4][..]]);
+
+        // When
+        let packets = collect(&page, 0).unwrap();
+
+        // Then
+        assert_eq!(packets.as_slice(), &[&[1, 2, 3, 4][..]]);
     }
 
     #[test]
     fn yields_multiple_packets_in_order() {
+        // Given
         let page = ogg_page(&[&[0xAA; 3], &[0xBB; 7]]);
+
+        // When
         let packets = collect(&page, 0).unwrap();
-        assert_eq!(packets.len(), 2);
-        assert_eq!(packets[0], &[0xAA; 3]);
-        assert_eq!(packets[1], &[0xBB; 7]);
+
+        // Then
+        assert_eq!(packets.as_slice(), &[&[0xAA; 3][..], &[0xBB; 7][..]]);
     }
 
     #[test]
     fn yields_a_packet_of_exactly_255_bytes() {
-        // Lacing [255, 0]: a length that is an exact multiple of 255 is
-        // terminated by an explicit zero segment, not folded into the 255.
+        // Given: lacing [255, 0], since a length that is an exact multiple of
+        // 255 is terminated by an explicit zero segment, not folded into the
+        // 255
         let page = ogg_page(&[&[0xCC; 255]]);
-        assert_eq!(collect(&page, 0).unwrap().as_slice(), &[&[0xCC; 255][..]]);
+
+        // When
+        let packets = collect(&page, 0).unwrap();
+
+        // Then
+        assert_eq!(packets.as_slice(), &[&[0xCC; 255][..]]);
     }
 
     #[test]
     fn finds_a_page_packed_in_behind_another() {
-        // As `toniefile` writes it: OpusHead's page is much smaller than a
-        // block, and the next page starts right after it.
+        // Given: as `toniefile` writes it, OpusHead's page is much smaller
+        // than a block, and the next page starts right after it
         let mut page = ogg_page(&[b"first"]);
         let second = 27 + 1 + 5;
         page[second..second + 4].copy_from_slice(CAPTURE_PATTERN);
@@ -222,63 +245,71 @@ mod tests {
         page[second + 27] = 6;
         page[second + 28..second + 34].copy_from_slice(b"second");
 
-        assert_eq!(collect(&page, 0).unwrap().as_slice(), &[&b"first"[..]]);
-        assert_eq!(
-            collect(&page, second).unwrap().as_slice(),
-            &[&b"second"[..]]
-        );
+        // When
+        let (from_first, from_second) =
+            (collect(&page, 0).unwrap(), collect(&page, second).unwrap());
+
+        // Then
+        assert_eq!(from_first.as_slice(), &[&b"first"[..]]);
+        assert_eq!(from_second.as_slice(), &[&b"second"[..]]);
     }
 
     #[test]
     fn drops_a_packet_whose_lacing_runs_out_without_a_terminator() {
-        // A single lacing entry of 255 with no value below 255 after it: the
-        // packet continues on the next page, so it is dropped rather than
-        // returned incomplete.
+        // Given: a single lacing entry of 255 with no value below 255 after
+        // it, so the packet continues on the next page
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(CAPTURE_PATTERN);
         page[26] = 1;
         page[27] = 255;
-
         let mut cursor = PacketCursor::at_page(&page, 0).unwrap().unwrap();
-        assert_eq!(cursor.next(&page), Ok(None));
-        // Once the lacing table is used up, later calls keep returning None.
-        assert_eq!(cursor.next(&page), Ok(None));
+
+        // When
+        let packets = [cursor.next(&page), cursor.next(&page)];
+
+        // Then: dropped rather than returned incomplete, and nothing after
+        // the lacing table is used up
+        assert_eq!(packets, [Ok(None), Ok(None)]);
     }
 
     #[test]
     fn steps_over_a_dropped_fragments_bytes_rather_than_stopping_on_them() {
-        // The dropped packet's 255 bytes still take up space. A page packed
-        // in after it starts after them.
+        // Given: a dropped packet's 255 bytes still take up space
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(CAPTURE_PATTERN);
         page[26] = 1;
         page[27] = 255;
-
         let mut cursor = PacketCursor::at_page(&page, 0).unwrap().unwrap();
-        assert_eq!(cursor.next(&page), Ok(None));
+
+        // When
+        let packet = cursor.next(&page);
+
+        // Then: a page packed in after it starts after them
+        assert_eq!(packet, Ok(None));
         assert_eq!(cursor.payload_start(), 28 + 255);
     }
 
     #[test]
     fn stops_yielding_after_an_oversized_packet_even_with_lacing_entries_remaining() {
-        // 20 segments: the first 17 (sixteen 255s and a 1) declare a
+        // Given: 20 segments, the first 17 (sixteen 255s and a 1) declaring a
         // 4081-byte packet at payload offset 47, which overruns the 4096-byte
-        // page. The three lacing entries after it must not be read from a
-        // stale offset.
+        // page, then three more lacing entries
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(CAPTURE_PATTERN);
         page[26] = 20;
         for i in 0..16 {
             page[27 + i] = 255;
         }
-        page[27 + 16] = 1; // terminator: total declared length 16*255+1 = 4081
-        page[27 + 17] = 10; // remaining lacing entries after the oversized packet
+        page[27 + 16] = 1;
+        page[27 + 17] = 10;
         page[27 + 18] = 0;
         page[27 + 19] = 0;
-
         let mut cursor = PacketCursor::at_page(&page, 0).unwrap().unwrap();
-        assert_eq!(cursor.next(&page), Err(TafError::NotAnOggPage));
-        // Must not continue from a stale offset with the remaining entries.
-        assert_eq!(cursor.next(&page), Ok(None));
+
+        // When
+        let packets = [cursor.next(&page), cursor.next(&page)];
+
+        // Then: the entries after it are not read from a stale offset
+        assert_eq!(packets, [Err(TafError::NotAnOggPage), Ok(None)]);
     }
 }
