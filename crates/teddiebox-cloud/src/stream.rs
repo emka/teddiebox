@@ -203,10 +203,6 @@ impl Body {
         self.remaining == 0
     }
 
-    pub fn remaining(&self) -> u32 {
-        self.remaining
-    }
-
     /// Reads the next bite of the body into `buf`.
     ///
     /// Never reads past the end of the body, so a server that keeps the
