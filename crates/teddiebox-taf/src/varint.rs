@@ -30,38 +30,66 @@ mod tests {
 
     #[test]
     fn reads_single_byte_values() {
+        // Given
         let mut pos = 0;
-        assert_eq!(read_varint(&[0x01], &mut pos), Some(1));
+
+        // When
+        let parsed = read_varint(&[0x01], &mut pos);
+
+        // Then
+        assert_eq!(parsed, Some(1));
         assert_eq!(pos, 1);
     }
 
     #[test]
     fn reads_multi_byte_values() {
-        // 300 == 0xAC 0x02
+        // Given: 300 == 0xAC 0x02
         let mut pos = 0;
-        assert_eq!(read_varint(&[0xAC, 0x02], &mut pos), Some(300));
+
+        // When
+        let parsed = read_varint(&[0xAC, 0x02], &mut pos);
+
+        // Then
+        assert_eq!(parsed, Some(300));
         assert_eq!(pos, 2);
     }
 
     #[test]
     fn rejects_truncated_input() {
+        // Given
         let mut pos = 0;
-        assert_eq!(read_varint(&[0x80], &mut pos), None);
+
+        // When
+        let parsed = read_varint(&[0x80], &mut pos);
+
+        // Then
+        assert_eq!(parsed, None);
     }
 
     #[test]
     fn rejects_overlong_encoding() {
+        // Given
         let mut pos = 0;
-        assert_eq!(read_varint(&[0x80; 12], &mut pos), None);
+
+        // When
+        let parsed = read_varint(&[0x80; 12], &mut pos);
+
+        // Then
+        assert_eq!(parsed, None);
     }
 
     #[test]
     fn rejects_a_final_byte_whose_payload_bits_overrun_64_bits() {
-        // Nine continuation bytes with zero payload put the tenth (last)
+        // Given: nine continuation bytes with zero payload put the tenth (last)
         // byte at shift 63. Its payload of 2 would need bit 64, so the value
         // does not fit in a u64.
         let bytes = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02];
         let mut pos = 0;
-        assert_eq!(read_varint(&bytes, &mut pos), None);
+
+        // When
+        let parsed = read_varint(&bytes, &mut pos);
+
+        // Then
+        assert_eq!(parsed, None);
     }
 }
