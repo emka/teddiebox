@@ -120,7 +120,7 @@ mod tests {
         let mv = battery_mv(beyond);
 
         // Then
-        assert_eq!(mv, battery_mv(ADC_MAX));
+        assert_eq!(mv, 5_028);
     }
 
     /// The calibration point: the ADC read 3111 while a multimeter read 3.82 V
