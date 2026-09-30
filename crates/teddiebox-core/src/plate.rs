@@ -274,10 +274,10 @@ mod tests {
         let mut p = holding(A);
 
         // When: one reading is not a swap, and the figure never left
-        let events = [Some(B), Some(A)].map(|seen| p.feed(seen));
+        let events = [Some(B), Some(A), Some(A)].map(|seen| p.feed(seen));
 
         // Then
-        assert_eq!(events, [None, None]);
+        assert_eq!(events, [None, None, None]);
     }
 
     /// Two different wrong readings in a row are two pieces of noise, not the
