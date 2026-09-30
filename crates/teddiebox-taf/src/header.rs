@@ -144,108 +144,142 @@ mod tests {
 
     #[test]
     fn parses_audio_id_and_data_length() {
-        // field 2 (data_length) varint = 8192; field 3 (audio_id) varint = 0x1234
+        // Given: field 2 (data_length) varint = 8192; field 3 (audio_id) varint = 0x1234
         let fields = [0x10, 0x80, 0x40, 0x18, 0xB4, 0x24];
+
+        // When
         let h = TonieHeader::parse(&header_page(&fields)).unwrap();
+
+        // Then
         assert_eq!(h.data_length, 8192);
         assert_eq!(h.audio_id, 0x1234);
     }
 
     #[test]
     fn parses_packed_chapter_pages() {
-        // field 4, wire type 2, payload length 4, values 1, 50, 120, 1
+        // Given: field 4, wire type 2, payload length 4, values 1, 50, 120, 1
         let fields = [0x22, 0x04, 0x01, 0x32, 0x78, 0x01];
+
+        // When
         let h = TonieHeader::parse(&header_page(&fields)).unwrap();
+
+        // Then
         assert_eq!(h.chapter_pages.as_slice(), &[1, 50, 120, 1]);
     }
 
     #[test]
     fn parses_unpacked_chapter_pages() {
-        // field 4, wire type 0, repeated
+        // Given: field 4, wire type 0, repeated
         let fields = [0x20, 0x01, 0x20, 0x32];
+
+        // When
         let h = TonieHeader::parse(&header_page(&fields)).unwrap();
+
+        // Then
         assert_eq!(h.chapter_pages.as_slice(), &[1, 50]);
     }
 
     #[test]
     fn skips_unknown_fields() {
-        // field 1 (hash), wire type 2, 3 bytes, then field 3 (audio_id)
+        // Given: field 1 (hash), wire type 2, 3 bytes, then field 3 (audio_id)
         let fields = [0x0A, 0x03, 0xAA, 0xBB, 0xCC, 0x18, 0x07];
+
+        // When
         let h = TonieHeader::parse(&header_page(&fields)).unwrap();
+
+        // Then
         assert_eq!(h.audio_id, 7);
     }
 
     #[test]
     fn rejects_length_prefix_larger_than_the_page() {
+        // Given
         let mut page = [0xFFu8; PAGE_SIZE];
         page[0..4].copy_from_slice(&(PAGE_SIZE as u32).to_be_bytes());
-        assert_eq!(TonieHeader::parse(&page), Err(TafError::MalformedHeader));
+
+        // When
+        let parsed = TonieHeader::parse(&page);
+
+        // Then
+        assert_eq!(parsed, Err(TafError::MalformedHeader));
     }
 
     #[test]
     fn rejects_truncated_fixed32_field() {
-        // field 9, wire type 5 (fixed32): declares a 4-byte payload but only
+        // Given: field 9, wire type 5 (fixed32): declares a 4-byte payload but only
         // 2 bytes remain in the body.
         let fields = [0x4D, 0x00, 0x00];
-        assert_eq!(
-            TonieHeader::parse(&header_page(&fields)),
-            Err(TafError::MalformedHeader)
-        );
+
+        // When
+        let parsed = TonieHeader::parse(&header_page(&fields));
+
+        // Then
+        assert_eq!(parsed, Err(TafError::MalformedHeader));
     }
 
     #[test]
     fn rejects_truncated_fixed64_field() {
-        // field 9, wire type 1 (fixed64): declares an 8-byte payload but only
+        // Given: field 9, wire type 1 (fixed64): declares an 8-byte payload but only
         // 2 bytes remain in the body.
         let fields = [0x49, 0x00, 0x00];
-        assert_eq!(
-            TonieHeader::parse(&header_page(&fields)),
-            Err(TafError::MalformedHeader)
-        );
+
+        // When
+        let parsed = TonieHeader::parse(&header_page(&fields));
+
+        // Then
+        assert_eq!(parsed, Err(TafError::MalformedHeader));
     }
 
     #[test]
     fn rejects_a_data_length_that_overflows_u32() {
-        // field 2 (data_length), varint 4295024640 (> u32::MAX). `as u32`
+        // Given: field 2 (data_length), varint 4295024640 (> u32::MAX). `as u32`
         // would silently wrap this to 57344, and `data_length` decides how
         // much of the file is read as audio.
         let fields = [0x10, 0x80, 0xC0, 0x83, 0x80, 0x10];
-        assert_eq!(
-            TonieHeader::parse(&header_page(&fields)),
-            Err(TafError::MalformedHeader)
-        );
+
+        // When
+        let parsed = TonieHeader::parse(&header_page(&fields));
+
+        // Then
+        assert_eq!(parsed, Err(TafError::MalformedHeader));
     }
 
     #[test]
     fn rejects_an_audio_id_that_overflows_u32() {
-        // field 3 (audio_id), varint 4294967338 (u32::MAX + 43).
+        // Given: field 3 (audio_id), varint 4294967338 (u32::MAX + 43).
         let fields = [0x18, 0xAA, 0x80, 0x80, 0x80, 0x10];
-        assert_eq!(
-            TonieHeader::parse(&header_page(&fields)),
-            Err(TafError::MalformedHeader)
-        );
+
+        // When
+        let parsed = TonieHeader::parse(&header_page(&fields));
+
+        // Then
+        assert_eq!(parsed, Err(TafError::MalformedHeader));
     }
 
     #[test]
     fn rejects_a_chapter_page_that_overflows_u32() {
-        // field 4 (chapter_pages), unpacked, varint 4294967297 (u32::MAX + 2).
+        // Given: field 4 (chapter_pages), unpacked, varint 4294967297 (u32::MAX + 2).
         let fields = [0x20, 0x81, 0x80, 0x80, 0x80, 0x10];
-        assert_eq!(
-            TonieHeader::parse(&header_page(&fields)),
-            Err(TafError::MalformedHeader)
-        );
+
+        // When
+        let parsed = TonieHeader::parse(&header_page(&fields));
+
+        // Then
+        assert_eq!(parsed, Err(TafError::MalformedHeader));
     }
 
     #[test]
     fn rejects_packed_field_whose_final_varint_overruns_its_declared_length() {
-        // field 4, wire type 2, declared length 2, payload [0x80, 0x80]: both
+        // Given: field 4, wire type 2, declared length 2, payload [0x80, 0x80]: both
         // bytes carry a continuation bit, so the varint is unterminated
         // within the declared length and only resolves by reading the extra
         // trailing byte that follows the field.
         let fields = [0x22, 0x02, 0x80, 0x80, 0x00];
-        assert_eq!(
-            TonieHeader::parse(&header_page(&fields)),
-            Err(TafError::MalformedHeader)
-        );
+
+        // When
+        let parsed = TonieHeader::parse(&header_page(&fields));
+
+        // Then
+        assert_eq!(parsed, Err(TafError::MalformedHeader));
     }
 }
