@@ -22,11 +22,12 @@ use teddiebox_console::{Command, CommandWatch};
 use teddiebox_core::{heapless, LedState};
 use teddiebox_portal::page::Message;
 use teddiebox_portal::submission::{examine, Submission};
-use teddiebox_portal::{dhcp, http, page, MAX_BODY, MAX_CONFIG};
+use teddiebox_portal::{dhcp, http, multipart, page, MAX_BODY, MAX_CONFIG};
 
 use crate::net;
 use crate::stack;
 use crate::storage::Mounted;
+use crate::tls;
 
 /// How long the box will sit with its radio up before restarting itself.
 ///
@@ -279,7 +280,7 @@ async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut
     let filled = match receive(socket, buffer).await {
         Received::Request(filled) => filled,
         Received::Refused(status, why) => {
-            return send_page(socket, status, b"", Some(Message::Error(why))).await
+            return send_page(socket, card, status, b"", Some(Message::Error(why))).await
         }
         Received::Gone => return,
     };
@@ -291,6 +292,7 @@ async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut
         esp_println::println!("teddiebox: portal unparseable request, {filled} bytes of {REQUEST}");
         return send_page(
             socket,
+            card,
             http::Status::BadRequest,
             b"",
             Some(Message::Error("that request did not make sense to the box")),
@@ -310,10 +312,14 @@ async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut
     );
 
     match (request.method, request.path) {
-        (http::Method::Get, "/") => show(socket, card).await,
+        (http::Method::Get, "/") => show(socket, card, None).await,
         (http::Method::Post, "/config") => {
             let body = &buffer[request.header_len..request.header_len + request.content_length];
             write_config(socket, card, body).await
+        }
+        (http::Method::Post, "/ca") => {
+            let body = &buffer[request.header_len..request.header_len + request.content_length];
+            write_ca(socket, card, request.content_type, body).await
         }
         (http::Method::Post, "/restart") => restart(socket).await,
         // Everything else gets an empty 404. A phone probing `/generate_204`
@@ -342,7 +348,7 @@ async fn receive(socket: &mut TcpSocket<'_>, buffer: &mut [u8]) -> Received {
             Err(http::RequestError::TooLarge) => {
                 return Received::Refused(
                     http::Status::TooLarge,
-                    "that was far more than a config file — the box stopped reading it",
+                    "that was more than the box will read — it stopped reading",
                 )
             }
             Err(http::RequestError::Malformed) => {
@@ -485,18 +491,19 @@ async fn serve_console(
 const NO_CARD: &str = "the box could not read its card — check it is pushed in, \
                        then reload this page";
 
-/// `GET /` — the card's file, in the box, as it is.
-async fn show(socket: &mut TcpSocket<'_>, card: Option<&Mounted>) {
-    let Some(card) = card else {
-        return respond_page(socket, b"", Some(Message::Error(NO_CARD))).await;
+/// The page with the card's file in the textarea, as it is, and `message`
+/// above it. `GET /` shows it with no message.
+async fn show(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, message: Option<Message<'_>>) {
+    let Some(mounted) = card else {
+        return respond_page(socket, card, b"", Some(Message::Error(NO_CARD))).await;
     };
 
     let mut config = [0u8; MAX_CONFIG];
-    match card.read_config_bytes(&mut config) {
+    match mounted.read_config_bytes(&mut config) {
         // `Ok(0)` is a card with no config yet, as on a new box: show an empty
         // textarea, not an error.
-        Ok(filled) => respond_page(socket, &config[..filled], None).await,
-        Err(why) => respond_page(socket, b"", Some(Message::Error(why))).await,
+        Ok(filled) => respond_page(socket, card, &config[..filled], message).await,
+        Err(why) => respond_page(socket, card, b"", Some(Message::Error(why))).await,
     }
 }
 
@@ -506,26 +513,62 @@ async fn show(socket: &mut TcpSocket<'_>, card: Option<&Mounted>) {
 /// handles the card and the socket.
 async fn write_config(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, body: &[u8]) {
     let submitted = match examine(body) {
-        Submission::Refuse(why) => return respond_error(socket, why).await,
+        Submission::Refuse(why) => return respond_error(socket, card, why).await,
         Submission::HandBack(bytes, why) => {
-            return respond_page(socket, &bytes, Some(Message::Error(why))).await
+            return respond_page(socket, card, &bytes, Some(Message::Error(why))).await
         }
         Submission::Write(bytes) => bytes,
     };
 
     // Checked after decoding, so a config typed without a card is still
     // checked and shown back, not lost.
-    let Some(card) = card else {
-        return respond_page(socket, &submitted, Some(Message::Error(NO_CARD))).await;
+    let Some(mounted) = card else {
+        return respond_page(socket, card, &submitted, Some(Message::Error(NO_CARD))).await;
     };
 
-    match card.write_config(&submitted) {
+    match mounted.write_config(&submitted) {
         Ok(()) => {
             esp_println::println!("teddiebox: portal wrote {} bytes", submitted.len());
             let written = Some(Message::Notice("config.txt written"));
-            respond_page(socket, &submitted, written).await
+            respond_page(socket, card, &submitted, written).await
         }
-        Err(why) => respond_page(socket, &submitted, Some(Message::Error(why))).await,
+        Err(why) => respond_page(socket, card, &submitted, Some(Message::Error(why))).await,
+    }
+}
+
+/// `POST /ca` — take the uploaded file, check it is a certificate, write it
+/// as `CERT/TCCA.DER`, and show the page again.
+///
+/// Read at the next boot by `read_anchor`; nothing changes until then.
+async fn write_ca(
+    socket: &mut TcpSocket<'_>,
+    card: Option<&Mounted>,
+    content_type: Option<&str>,
+    body: &[u8],
+) {
+    let der = match multipart::file(content_type, body) {
+        Ok(der) => der,
+        Err(trouble) => {
+            let why = Message::Error(multipart::describe(trouble));
+            return show(socket, card, Some(why)).await;
+        }
+    };
+    if !tls::is_certificate(der) {
+        let why = Message::Error("that is not a certificate — pick tcca.der, as DER");
+        return show(socket, card, Some(why)).await;
+    }
+    let Some(mounted) = card else {
+        return show(socket, card, Some(Message::Error(NO_CARD))).await;
+    };
+    match mounted.write_certificate("TCCA.DER", der) {
+        Ok(()) => {
+            esp_println::println!(
+                "teddiebox: portal wrote the certificate, {} bytes",
+                der.len()
+            );
+            show(socket, card, Some(Message::Notice("certificate written"))).await
+        }
+        Err(why) => show(socket, card, Some(Message::Error(why))).await,
     }
 }
 
@@ -539,17 +582,23 @@ async fn restart(socket: &mut TcpSocket<'_>) {
 }
 
 /// The page, with whatever should be in the textarea and whatever went wrong.
-async fn respond_page(socket: &mut TcpSocket<'_>, config: &[u8], message: Option<Message<'_>>) {
-    send_page(socket, http::Status::Ok, config, message).await
+async fn respond_page(
+    socket: &mut TcpSocket<'_>,
+    card: Option<&Mounted>,
+    config: &[u8],
+    message: Option<Message<'_>>,
+) {
+    send_page(socket, card, http::Status::Ok, config, message).await
 }
 
 /// The page again, but as a refusal, with nothing in the textarea.
 ///
 /// For a form that did not decode or is not text. Browsers do not send
 /// either, so nothing typed is lost.
-async fn respond_error(socket: &mut TcpSocket<'_>, message: &str) {
+async fn respond_error(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, message: &str) {
     send_page(
         socket,
+        card,
         http::Status::BadRequest,
         b"",
         Some(Message::Error(message)),
@@ -575,6 +624,13 @@ body{font:16px system-ui;margin:0;padding:1rem;background:#f6f5f3;color:#1a1a1a}
 <p>The box is restarting. This network will disappear on its own.</p>\
 </body></html>";
 
+/// What the page says about the card's `CERT/TCCA.DER`.
+fn ca_status(card: Option<&Mounted>) -> heapless::String<16> {
+    let mut certificate = [0u8; tls::CERT_BYTES];
+    let len = card.and_then(|card| card.read_certificate("TCCA.DER", &mut certificate).ok());
+    page::ca_status(len)
+}
+
 /// How much of an escaped run is held at a time.
 ///
 /// Must be at least as long as the longest escape (`&quot;`, six bytes), or
@@ -587,17 +643,21 @@ const CHUNK: usize = 64;
 /// The page is never held in memory: [`page::length`] gives the size for the
 /// header, and the pieces follow. A full `CONFIG.TXT` (1024 bytes, up to
 /// 6144 escaped) would otherwise need a 7.6 KB buffer.
+///
+/// The certificate's line is read from `card` here, so every page shows it.
 async fn send_page(
     socket: &mut TcpSocket<'_>,
+    card: Option<&Mounted>,
     status: http::Status,
     config: &[u8],
     message: Option<Message<'_>>,
 ) {
-    let head = http::head(status, page::length(config, message));
+    let ca = ca_status(card);
+    let head = http::head(status, page::length(config, message, &ca));
     if write_all(socket, &head).await.is_err() {
         return;
     }
-    for piece in page::pieces(config, message) {
+    for piece in page::pieces(config, message, &ca) {
         let sent = match piece {
             page::Piece::Literal(text) => write_all(socket, text.as_bytes()).await,
             page::Piece::Escaped(bytes) => write_escaped(socket, bytes).await,

@@ -171,6 +171,15 @@ pub fn set_anchor(certificate: &[u8]) -> bool {
     }
 }
 
+/// Whether `der` is one X.509 certificate in DER form that mbedtls accepts.
+///
+/// Says nothing about whether it is the right one: the box's own
+/// `client.der` passes too, and is only caught when the next boot's first
+/// request fails verification.
+pub fn is_certificate(der: &[u8]) -> bool {
+    der.len() <= CERT_BYTES && Certificate::new_no_copy(der).is_ok()
+}
+
 fn anchor() -> Option<Certificate<'static>> {
     let held = critical_section::with(|cs| *ANCHOR.borrow_ref(cs))?;
     Certificate::new_no_copy(&held.certificate[..held.len]).ok()

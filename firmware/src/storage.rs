@@ -879,7 +879,7 @@ impl Mounted {
         wrote
     }
 
-    /// Opens a subdirectory, creating it if this is the first download.
+    /// Opens a subdirectory, creating it if it is not there yet.
     ///
     /// Tries to open first, and creates only if that fails.
     fn open_or_make_dir(
@@ -892,10 +892,10 @@ impl Mounted {
         }
         self.volumes
             .make_dir_in_dir(parent, name)
-            .map_err(|_| "could not create the cache directory")?;
+            .map_err(|_| "could not create a directory on the card")?;
         self.volumes
             .open_dir(parent, name)
-            .map_err(|_| "the cache directory would not open after being created")
+            .map_err(|_| "the directory would not open after being created")
     }
 
     /// Appends to a cache file, **seeking to the end first**.
@@ -943,6 +943,29 @@ impl Mounted {
                 Err(_) => break Err("the certificate would not read"),
             }
         };
+        self.close_file(file);
+        outcome
+    }
+
+    /// Writes a certificate into the card's `CERT` directory, creating the
+    /// directory if needed and replacing any file of that name.
+    pub fn write_certificate(&self, name: &str, bytes: &[u8]) -> Result<(), &'static str> {
+        let dir = self.open_or_make_dir(self.root, CERT_DIR)?;
+        let file = self
+            .volumes
+            .open_file_in_dir(dir, name, Mode::ReadWriteCreateOrTruncate);
+        let _ = self.volumes.close_dir(dir);
+        let file = file.map_err(|_| "the certificate would not open for writing")?;
+
+        let outcome = self
+            .volumes
+            .write(file, bytes)
+            .map_err(|_| "the certificate would not write")
+            .and_then(|()| {
+                self.volumes
+                    .flush_file(file)
+                    .map_err(|_| "the certificate would not flush")
+            });
         self.close_file(file);
         outcome
     }

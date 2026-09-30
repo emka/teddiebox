@@ -87,7 +87,9 @@ The light is steady and dim.
 - A [teddyCloud](https://github.com/toniebox-reverse-engineering/teddycloud)
   server on your network.
 - The box's certificate files `client.der` and `private.der` on the host.
-- The teddyCloud CA on the SD card at `cert/tcca.der`.
+- The teddyCloud CA at `cert/tcca.der` on the SD card. Copy it there, or
+  upload it in setup mode (below). teddyCloud serves it at
+  `https://<host>:8443/api/getFile/ca.der`.
 
 ### Flashing
 
@@ -156,11 +158,17 @@ plain text anyway.
    the page and nothing is written.
 5. Press **Restart** to leave setup mode with the new settings.
 
+To put teddyCloud's CA on the card, choose `ca.der` under **certificate** and
+press **Write certificate**. The page then shows its size. It is used from the
+next restart.
+
 Setup mode also ends by itself after ten minutes.
 
 Security:
 
 - The page shows your WiFi passphrase in plain text.
+- Anyone on the setup network can replace the CA the box trusts, as they can
+  replace `server`.
 - The default setup passphrase is public. Anyone in range who knows it and
   records your device joining can decrypt the session, including your WiFi
   passphrase. The page cannot use HTTPS: the box has no clock and the phone

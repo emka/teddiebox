@@ -14,9 +14,10 @@ use heapless::Vec;
 
 /// How many [`Piece`]s a page is ever made of.
 ///
-/// The head, three for the message paragraph, the form's two halves, and the
-/// config between them.
-const PIECES: usize = 7;
+/// The head, three for the message paragraph, the config form's two halves
+/// and the config between them, and the certificate's description with the
+/// markup after it.
+const PIECES: usize = 9;
 
 /// A stretch of the page, in the order it goes on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +34,8 @@ const HEAD: &str = "<!doctype html><html><head><meta charset=\"utf-8\">\
 body{font:16px system-ui;margin:0;padding:1rem;background:#f6f5f3;color:#1a1a1a}\
 textarea{width:100%;height:60vh;font:14px ui-monospace,monospace;\
 padding:.5rem;box-sizing:border-box}\
-button{font:16px system-ui;padding:.6rem 1.2rem;margin-top:.75rem}\
+button{font:16px system-ui;padding:.6rem 1.2rem;margin:.75rem .5rem 0 0}\
+input{margin-top:.75rem}\
 .error{background:#fde8e6;border-left:4px solid #c0392b;padding:.6rem;\
 margin-bottom:.75rem}\
 .notice{background:#e6f4ea;border-left:4px solid #2e7d32;padding:.6rem;\
@@ -55,14 +57,38 @@ const FORM_OPEN: &str = "<form method=\"post\" action=\"/config\">\
 <textarea name=\"config\" spellcheck=\"false\" autocapitalize=\"off\">";
 
 const FORM_CLOSE: &str = "</textarea><button type=\"submit\">Write config.txt</button>\
-</form><form method=\"post\" action=\"/restart\">\
+</form><h1>certificate</h1><p>cert/tcca.der: ";
+
+const TAIL: &str = "</p><form method=\"post\" action=\"/ca\" enctype=\"multipart/form-data\">\
+<input type=\"file\" name=\"ca\" accept=\".der\">\
+<button type=\"submit\">Write certificate</button></form>\
+<form method=\"post\" action=\"/restart\">\
 <button type=\"submit\">Restart</button></form></body></html>";
+
+/// What the page says about the card's `cert/tcca.der`.
+pub fn ca_status(len: Option<usize>) -> heapless::String<16> {
+    use core::fmt::Write;
+
+    let mut out = heapless::String::new();
+    // Sixteen bytes hold ten digits and " bytes"; a certificate the box
+    // accepts has at most four.
+    let _ = match len {
+        Some(n) => write!(out, "{n} bytes"),
+        None => write!(out, "missing"),
+    };
+    out
+}
 
 /// The page, in the order it goes out.
 ///
 /// The card's bytes go in the textarea, with the message (if any) above it.
+/// `ca` describes the card's certificate, as [`ca_status`] words it.
 /// Nothing is copied: the pieces borrow, and the caller writes them.
-pub fn pieces<'a>(config: &'a [u8], message: Option<Message<'a>>) -> Vec<Piece<'a>, PIECES> {
+pub fn pieces<'a>(
+    config: &'a [u8],
+    message: Option<Message<'a>>,
+    ca: &'a str,
+) -> Vec<Piece<'a>, PIECES> {
     let mut out = Vec::new();
     // The vector has room for all `PIECES`, so no push can fail. `let _ =`
     // rather than `unwrap`, to avoid a panic path in the firmware.
@@ -79,14 +105,16 @@ pub fn pieces<'a>(config: &'a [u8], message: Option<Message<'a>>) -> Vec<Piece<'
     let _ = out.push(Piece::Literal(FORM_OPEN));
     let _ = out.push(Piece::Escaped(config));
     let _ = out.push(Piece::Literal(FORM_CLOSE));
+    let _ = out.push(Piece::Escaped(ca.as_bytes()));
+    let _ = out.push(Piece::Literal(TAIL));
     out
 }
 
 /// How many bytes [`pieces`] will produce once escaped.
 ///
 /// Needed before anything is written, for the `Content-Length` header.
-pub fn length(config: &[u8], message: Option<Message<'_>>) -> usize {
-    pieces(config, message)
+pub fn length(config: &[u8], message: Option<Message<'_>>, ca: &str) -> usize {
+    pieces(config, message, ca)
         .iter()
         .map(|piece| match piece {
             Piece::Literal(text) => text.len(),
@@ -159,9 +187,9 @@ mod tests {
     ///
     /// The chunk is only eight bytes, just over the longest escape, so every
     /// test crosses chunk boundaries.
-    fn page_of(config: &[u8], message: Option<Message<'_>>) -> StdVec<u8> {
+    fn page_of(config: &[u8], message: Option<Message<'_>>, ca: &str) -> StdVec<u8> {
         let mut out = StdVec::new();
-        for piece in pieces(config, message) {
+        for piece in pieces(config, message, ca) {
             match piece {
                 Piece::Literal(text) => out.extend_from_slice(text.as_bytes()),
                 Piece::Escaped(bytes) => {
@@ -179,13 +207,13 @@ mod tests {
         out
     }
 
-    fn text_of(config: &[u8], message: Option<Message<'_>>) -> String {
-        String::from_utf8(page_of(config, message)).unwrap()
+    fn text_of(config: &[u8], message: Option<Message<'_>>, ca: &str) -> String {
+        String::from_utf8(page_of(config, message, ca)).unwrap()
     }
 
     #[test]
     fn the_file_appears_inside_the_textarea() {
-        let text = text_of(b"ssid = HomeNet\n", None);
+        let text = text_of(b"ssid = HomeNet\n", None, "missing");
         let open = text.find("<textarea").unwrap();
         let close = text.find("</textarea>").unwrap();
         assert!(text[open..close].contains("ssid = HomeNet"));
@@ -197,7 +225,7 @@ mod tests {
         let config = b"";
 
         // When
-        let text = text_of(config, None);
+        let text = text_of(config, None, "missing");
 
         // Then
         assert!(text.contains("<form method=\"post\" action=\"/config\">"));
@@ -209,7 +237,7 @@ mod tests {
         let message = Message::Notice("config.txt written");
 
         // When
-        let text = text_of(b"", Some(message));
+        let text = text_of(b"", Some(message), "missing");
 
         // Then
         assert!(text.contains("<p class=\"notice\">config.txt written</p>"));
@@ -222,7 +250,7 @@ mod tests {
         let config = b"";
 
         // When
-        let text = text_of(config, None);
+        let text = text_of(config, None, "missing");
 
         // Then
         assert!(text.contains(">Write config.txt</button>"));
@@ -235,7 +263,7 @@ mod tests {
         let config = b"";
 
         // When
-        let text = text_of(config, None);
+        let text = text_of(config, None, "missing");
 
         // Then
         assert!(text.contains(
@@ -244,15 +272,79 @@ mod tests {
     }
 
     #[test]
+    fn the_certificate_form_is_a_file_upload_to_ca() {
+        // Given
+        let config = b"";
+
+        // When
+        let text = text_of(config, None, "missing");
+
+        // Then
+        assert!(text.contains(
+            "<form method=\"post\" action=\"/ca\" enctype=\"multipart/form-data\">\
+<input type=\"file\" name=\"ca\" accept=\".der\">\
+<button type=\"submit\">Write certificate</button></form>"
+        ));
+    }
+
+    #[test]
+    fn the_cards_certificate_is_described() {
+        // Given
+        let ca = "787 bytes";
+
+        // When
+        let text = text_of(b"", None, ca);
+
+        // Then
+        assert!(text.contains("cert/tcca.der: 787 bytes"));
+    }
+
+    #[test]
+    fn the_certificate_description_is_escaped() {
+        // Given
+        let ca = "<b>";
+
+        // When
+        let text = text_of(b"", None, ca);
+
+        // Then
+        assert!(text.contains("cert/tcca.der: &lt;b&gt;"));
+    }
+
+    #[test]
+    fn a_certificate_on_the_card_is_described_by_its_size() {
+        // Given
+        let len = Some(787);
+
+        // When
+        let status = ca_status(len);
+
+        // Then
+        assert_eq!(status.as_str(), "787 bytes");
+    }
+
+    #[test]
+    fn no_certificate_on_the_card_is_described_as_missing() {
+        // Given
+        let len = None;
+
+        // When
+        let status = ca_status(len);
+
+        // Then
+        assert_eq!(status.as_str(), "missing");
+    }
+
+    #[test]
     fn markup_in_the_file_is_escaped() {
-        let text = text_of(b"ssid = <b>&\"x\"", None);
+        let text = text_of(b"ssid = <b>&\"x\"", None, "missing");
         assert!(text.contains("&lt;b&gt;&amp;&quot;x&quot;"));
         assert!(!text.contains("<b>"));
     }
 
     #[test]
     fn a_missing_file_renders_an_empty_textarea() {
-        let text = text_of(b"", None);
+        let text = text_of(b"", None, "missing");
         assert!(text.contains("<textarea"));
         let at = text.find("<textarea").unwrap();
         let open = at + text[at..].find('>').unwrap();
@@ -261,24 +353,27 @@ mod tests {
 
     #[test]
     fn an_error_is_shown_when_there_is_one() {
-        assert!(text_of(b"", Some(Message::Error("ssid is missing"))).contains("ssid is missing"));
+        assert!(
+            text_of(b"", Some(Message::Error("ssid is missing")), "missing")
+                .contains("ssid is missing")
+        );
     }
 
     #[test]
     fn no_error_text_appears_when_there_is_none() {
-        assert!(!text_of(b"ssid = x\n", None).contains("class=\"error\""));
+        assert!(!text_of(b"ssid = x\n", None, "missing").contains("class=\"error\""));
     }
 
     #[test]
     fn markup_in_the_error_is_escaped_too() {
-        let text = text_of(b"", Some(Message::Error("<script>x</script>")));
+        let text = text_of(b"", Some(Message::Error("<script>x</script>")), "missing");
         assert!(text.contains("&lt;script&gt;x&lt;/script&gt;"));
         assert!(!text.contains("<script"));
     }
 
     #[test]
     fn the_page_loads_nothing_from_the_network() {
-        let text = text_of(b"ssid = x\n", None).to_string();
+        let text = text_of(b"ssid = x\n", None, "missing").to_string();
         for forbidden in ["http://", "https://", "<script", "<link", "<img"] {
             assert!(!text.contains(forbidden), "page reaches for {forbidden}");
         }
@@ -295,7 +390,14 @@ mod tests {
             (&b"ssid = x\n"[..], Some(Message::Notice("a & b"))),
             (&[b'"'; 1024][..], Some(Message::Error("<<<"))),
         ] {
-            assert_eq!(length(config, message), page_of(config, message).len());
+            assert_eq!(
+                length(config, message, "missing"),
+                page_of(config, message, "missing").len()
+            );
+            assert_eq!(
+                length(config, message, "787 bytes"),
+                page_of(config, message, "787 bytes").len()
+            );
         }
     }
 
@@ -304,7 +406,7 @@ mod tests {
     #[test]
     fn the_largest_file_of_the_worst_bytes_is_shown_in_full() {
         let worst = [b'"'; crate::MAX_CONFIG];
-        let text = text_of(&worst, None);
+        let text = text_of(&worst, None, "missing");
         let open = text.find("<textarea").unwrap();
         let open = open + text[open..].find('>').unwrap() + 1;
         let close = text.find("</textarea>").unwrap();
@@ -342,7 +444,7 @@ mod tests {
     #[test]
     fn a_password_with_hash_and_ampersand_survives_the_round_trip() {
         let original = b"ssid = Home\npassword = a#b&c\nserver = box.lan:443\n";
-        let text = text_of(original, None);
+        let text = text_of(original, None, "missing");
         let at = text.find("<textarea").unwrap();
         let open = at + text[at..].find('>').unwrap() + 1;
         let close = text.find("</textarea>").unwrap();
