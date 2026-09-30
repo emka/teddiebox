@@ -196,6 +196,23 @@ mod tests {
         assert_eq!(found, Err(TafError::NotAnOggPage));
     }
 
+    /// The limit is the block's end, so a segment table that reaches it
+    /// exactly still fits.
+    #[test]
+    fn accepts_a_page_whose_segment_table_ends_at_the_block_end() {
+        // Given: one lacing entry in the block's last byte
+        let mut page = [0u8; PAGE_SIZE];
+        let offset = PAGE_SIZE - MIN_HEADER_LEN - 1;
+        page[offset..offset + 4].copy_from_slice(CAPTURE_PATTERN);
+        page[offset + 26] = 1;
+
+        // When
+        let found = PacketCursor::at_page(&page, offset);
+
+        // Then
+        assert!(matches!(found, Ok(Some(_))), "{found:?}");
+    }
+
     #[test]
     fn yields_a_single_packet() {
         // Given
