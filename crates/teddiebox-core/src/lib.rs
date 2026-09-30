@@ -988,9 +988,9 @@ mod tests {
     #[test]
     fn a_finished_story_lets_the_idle_timeout_fire_with_the_figure_still_on() {
         // Given
-        let mut c = Core::new(CoreConfig::default());
+        let mut c = core();
         c.handle(Event::Tick(0), &Index);
-        c.handle(Event::TagPresent(TagUid([1, 2, 3, 4, 5, 6, 7, 8])), &Index);
+        c.handle(Event::TagPresent(TAG), &Index);
         c.handle(Event::PlaybackEnded, &Index);
 
         // When
