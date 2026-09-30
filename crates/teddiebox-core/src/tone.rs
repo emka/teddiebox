@@ -80,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tone_is_the_rate_divided_by_the_cycle() {
+    fn the_tone_is_one_kilohertz() {
         // Given: a cycle of SINE's length, repeated at SAMPLE_RATE_HZ
 
         // When
