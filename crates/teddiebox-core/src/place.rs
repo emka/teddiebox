@@ -85,45 +85,79 @@ mod tests {
 
     #[test]
     fn a_fresh_slot_holds_nothing() {
-        assert_eq!(PendingPlace::new().held(LEO), None);
+        // Given
+        let places = PendingPlace::new();
+
+        // When
+        let held = places.held(LEO);
+
+        // Then
+        assert_eq!(held, None);
     }
 
     #[test]
     fn a_remembered_place_is_held_for_that_figure() {
+        // Given
         let mut places = PendingPlace::new();
+
+        // When
         places.remember(LEO, 233);
+
+        // Then
         assert_eq!(places.held(LEO), Some(233));
     }
 
     #[test]
     fn a_place_is_not_held_for_a_different_figure() {
+        // Given
         let mut places = PendingPlace::new();
+
+        // When
         places.remember(LEO, 233);
+
+        // Then
         assert_eq!(places.held(WALDE), None);
     }
 
     /// Lifting a figure and putting it back must not cause a card write.
     #[test]
     fn the_same_figure_again_moves_the_page_on_and_displaces_nothing() {
+        // Given
         let mut places = PendingPlace::new();
         places.remember(LEO, 233);
-        assert_eq!(places.remember(LEO, 247), None);
+
+        // When
+        let displaced = places.remember(LEO, 247);
+
+        // Then
+        assert_eq!(displaced, None);
         assert_eq!(places.held(LEO), Some(247));
     }
 
     /// The caller writes the replaced position to the card.
     #[test]
     fn a_different_figure_displaces_the_one_held_and_hands_it_back() {
+        // Given
         let mut places = PendingPlace::new();
         places.remember(LEO, 284);
-        assert_eq!(places.remember(WALDE, 12), Some((LEO, 284)));
+
+        // When
+        let displaced = places.remember(WALDE, 12);
+
+        // Then
+        assert_eq!(displaced, Some((LEO, 284)));
     }
 
     #[test]
     fn a_displaced_figure_is_no_longer_held() {
+        // Given
         let mut places = PendingPlace::new();
         places.remember(LEO, 284);
+
+        // When
         places.remember(WALDE, 12);
+
+        // Then
         assert_eq!(places.held(LEO), None);
         assert_eq!(places.held(WALDE), Some(12));
     }
@@ -132,9 +166,14 @@ mod tests {
     /// too, because it is checked before the card.
     #[test]
     fn a_story_that_ended_is_forgotten() {
+        // Given
         let mut places = PendingPlace::new();
         places.remember(LEO, 284);
+
+        // When
         places.forget(LEO.ruid());
+
+        // Then
         assert_eq!(places.held(LEO), None);
     }
 
@@ -142,23 +181,41 @@ mod tests {
     /// clear a figure's position.
     #[test]
     fn a_different_story_ending_leaves_the_slot_alone() {
+        // Given
         let mut places = PendingPlace::new();
         places.remember(LEO, 284);
+
+        // When
         places.forget(WALDE.ruid());
+
+        // Then
         assert_eq!(places.held(LEO), Some(284));
     }
 
     #[test]
     fn taking_the_place_hands_it_back_and_empties_the_slot() {
+        // Given
         let mut places = PendingPlace::new();
         places.remember(LEO, 284);
-        assert_eq!(places.take(), Some((LEO, 284)));
+
+        // When
+        let taken = places.take();
+
+        // Then
+        assert_eq!(taken, Some((LEO, 284)));
         assert_eq!(places.held(LEO), None);
     }
 
     /// A second call at shutdown must not write the same position again.
     #[test]
     fn taking_an_empty_slot_hands_back_nothing() {
-        assert_eq!(PendingPlace::new().take(), None);
+        // Given
+        let mut places = PendingPlace::new();
+
+        // When
+        let taken = places.take();
+
+        // Then
+        assert_eq!(taken, None);
     }
 }
