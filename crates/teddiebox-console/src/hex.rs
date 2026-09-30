@@ -39,41 +39,76 @@ mod tests {
 
     #[test]
     fn eight_digits_become_the_number_they_spell() {
-        assert_eq!(u32_from_hex(b"deadbeef"), Some(0xDEAD_BEEF));
-        assert_eq!(u32_from_hex(b"0000ffff"), Some(0x0000_FFFF));
+        // Given
+        let texts: [&[u8]; 2] = [b"deadbeef", b"0000ffff"];
+
+        // When
+        let values = texts.map(u32_from_hex);
+
+        // Then
+        assert_eq!(values, [Some(0xDEAD_BEEF), Some(0x0000_FFFF)]);
     }
 
     /// Leading zeros count as digits.
     #[test]
     fn leading_zeros_are_digits_like_any_other() {
-        assert_eq!(u32_from_hex(b"00000001"), Some(1));
-        assert_eq!(u32_from_hex(b"00000000"), Some(0));
+        // Given
+        let texts: [&[u8]; 2] = [b"00000001", b"00000000"];
+
+        // When
+        let values = texts.map(u32_from_hex);
+
+        // Then
+        assert_eq!(values, [Some(1), Some(0)]);
     }
 
     #[test]
     fn either_case_of_letter_is_accepted() {
-        assert_eq!(u32_from_hex(b"ABCDEF01"), u32_from_hex(b"abcdef01"));
+        // Given
+        let (upper, lower) = (b"ABCDEF01", b"abcdef01");
+
+        // When
+        let values = (u32_from_hex(upper), u32_from_hex(lower));
+
+        // Then
+        assert_eq!(values.0, values.1);
     }
 
     /// Seven digits is a typo, not a shorter password.
     #[test]
     fn anything_but_exactly_eight_digits_is_refused() {
-        assert_eq!(u32_from_hex(b"deadbee"), None);
-        assert_eq!(u32_from_hex(b"deadbeef0"), None);
-        assert_eq!(u32_from_hex(b""), None);
+        // Given
+        let texts: [&[u8]; 3] = [b"deadbee", b"deadbeef0", b""];
+
+        // When
+        let values = texts.map(u32_from_hex);
+
+        // Then
+        assert_eq!(values, [None; 3]);
     }
 
     #[test]
     fn a_non_digit_is_refused_rather_than_skipped() {
-        assert_eq!(u32_from_hex(b"deadbeeg"), None);
-        assert_eq!(u32_from_hex(b"dead beef"), None);
-        assert_eq!(u32_from_hex(b"0xdeadbe"), None);
+        // Given
+        let texts: [&[u8]; 3] = [b"deadbeeg", b"dead beef", b"0xdeadbe"];
+
+        // When
+        let values = texts.map(u32_from_hex);
+
+        // Then
+        assert_eq!(values, [None; 3]);
     }
 
     /// A wrong compiled-in value fails the build instead of the box.
     #[test]
     fn it_can_be_computed_at_compile_time() {
-        const VALUE: Option<u32> = u32_from_hex(b"12345678");
+        // Given
+        const TEXT: &[u8] = b"12345678";
+
+        // When
+        const VALUE: Option<u32> = u32_from_hex(TEXT);
+
+        // Then
         assert_eq!(VALUE, Some(0x1234_5678));
     }
 }
