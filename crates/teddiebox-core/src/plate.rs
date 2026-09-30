@@ -770,6 +770,20 @@ mod plate_poll_tests {
         assert_eq!(calls(&reader), (0, 0, 0));
     }
 
+    /// The firmware sleeps until this time, so it sets how often the reader
+    /// transmits.
+    #[test]
+    fn the_next_poll_is_due_one_interval_after_the_last() {
+        // Given
+        let mut poll = PlatePoll::new(2, 4);
+
+        // When
+        poll.poll(&mut empty_plate(), true, PASSWORD, 1_000);
+
+        // Then
+        assert_eq!(poll.next_poll_ms(), 1_200);
+    }
+
     #[test]
     fn neither_present_nor_believed_polls_nothing_further() {
         // Given
