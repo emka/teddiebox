@@ -493,6 +493,9 @@ mod tests {
 
     const TAG: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
 
+    /// The idle timeout of `CoreConfig::default()`.
+    const IDLE_MS: Millis = 5 * 60 * 1_000;
+
     struct Index;
     impl ContentIndex for Index {
         fn is_available(&self, _tag: TagUid) -> bool {
@@ -544,16 +547,54 @@ mod tests {
         actions.contains(&wanted)
     }
 
+    /// A press and release of `ear` at `at`, too short to be a hold. Returns
+    /// what the release asked for.
+    fn tap(c: &mut Core, ear: Ear, at: Millis) -> Actions {
+        c.handle(Event::EarDown(ear, at), &Index);
+        c.handle(Event::EarUp(ear, at + 100), &Index)
+    }
+
+    /// A press of `ear` at `at` that the firmware reports as a hold. Returns
+    /// what the hold asked for.
+    fn hold(c: &mut Core, ear: Ear, at: Millis) -> Actions {
+        c.handle(Event::EarDown(ear, at), &Index);
+        c.handle(Event::EarHeld(ear, at + 600), &Index)
+    }
+
+    fn battery_reading(pack_mv: u16) -> Event {
+        Event::Battery {
+            pack_mv,
+            under_load: false,
+        }
+    }
+
+    /// Feeds the same battery reading `times` times and counts the low-battery
+    /// warnings they asked for.
+    fn low_warnings(c: &mut Core, pack_mv: u16, times: usize) -> usize {
+        (0..times)
+            .map(|_| c.handle(battery_reading(pack_mv), &Index))
+            .map(|actions| {
+                actions
+                    .iter()
+                    .filter(|&&a| a == Action::PlayPrompt(Prompt::BatteryLow))
+                    .count()
+            })
+            .sum()
+    }
+
     /// Lifting a figure saves the position the story had reached, not the one
     /// it started at.
     #[test]
     fn a_lifted_figure_saves_where_the_story_had_reached() {
+        // Given
         let mut c = core();
         c.handle(Event::TagPresent(TAG), &Index);
-
         c.note_position(Position::Exact { page: 412 });
+
+        // When
         let actions = c.handle(Event::TagAbsent, &Index);
 
+        // Then
         assert!(contains(
             &actions,
             Action::SavePosition {
@@ -566,10 +607,14 @@ mod tests {
     /// The larger ear turns the volume up, as on a stock box.
     #[test]
     fn a_tap_on_the_larger_ear_raises_the_volume() {
+        // Given
         let mut c = core();
         let before = c.volume();
-        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
+
+        // When
+        let actions = tap(&mut c, Ear::Larger, 0);
+
+        // Then
         assert!(c.volume() > before);
         assert!(contains(
             &actions,
@@ -582,10 +627,14 @@ mod tests {
 
     #[test]
     fn a_tap_on_the_smaller_ear_lowers_the_volume() {
+        // Given
         let mut c = core();
         let before = c.volume();
-        c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
-        c.handle(Event::EarUp(Ear::Smaller, 100), &Index);
+
+        // When
+        tap(&mut c, Ear::Smaller, 0);
+
+        // Then
         assert!(c.volume() < before);
     }
 
@@ -593,10 +642,15 @@ mod tests {
     /// wait for the release.
     #[test]
     fn with_skipping_off_a_press_changes_the_volume_at_once() {
+        // Given
         let mut c = core();
         c.note_ears_skip(false);
         let before = c.volume();
+
+        // When
         let actions = c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+
+        // Then
         assert!(c.volume() > before);
         assert!(contains(
             &actions,
@@ -609,11 +663,16 @@ mod tests {
 
     #[test]
     fn with_skipping_off_the_release_does_nothing_more() {
+        // Given
         let mut c = core();
         c.note_ears_skip(false);
         c.handle(Event::EarDown(Ear::Larger, 0), &Index);
         let stepped = c.volume();
+
+        // When
         let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
+
+        // Then
         assert!(actions.is_empty(), "{actions:?}");
         assert_eq!(c.volume(), stepped, "one press, one step");
     }
@@ -622,9 +681,14 @@ mod tests {
     /// the release. Otherwise every skip would also change the volume.
     #[test]
     fn with_skipping_on_a_press_still_waits_for_the_release() {
+        // Given
         let mut c = core();
         let before = c.volume();
+
+        // When
         let actions = c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+
+        // Then
         assert_eq!(c.volume(), before);
         assert!(
             !actions
@@ -636,13 +700,17 @@ mod tests {
 
     #[test]
     fn with_skipping_off_a_press_at_the_ceiling_plays_the_limit_cue() {
+        // Given
         let mut c = core();
         c.note_ears_skip(false);
         for i in 0..10 {
-            c.handle(Event::EarDown(Ear::Larger, i * 200), &Index);
-            c.handle(Event::EarUp(Ear::Larger, i * 200 + 100), &Index);
+            tap(&mut c, Ear::Larger, i * 200);
         }
+
+        // When
         let actions = c.handle(Event::EarDown(Ear::Larger, 5_000), &Index);
+
+        // Then
         assert!(contains(&actions, Action::PlayCue(Cue::VolumeLimit)));
     }
 
@@ -650,13 +718,15 @@ mod tests {
     /// makes the box feel unresponsive.
     #[test]
     fn a_hold_skips_while_the_ear_is_still_down() {
+        // Given
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        let forward = c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
-        assert!(contains(&forward, Action::NextTrack));
 
-        c.handle(Event::EarDown(Ear::Smaller, 2_000), &Index);
-        let back = c.handle(Event::EarHeld(Ear::Smaller, 2_600), &Index);
+        // When
+        let forward = hold(&mut c, Ear::Larger, 0);
+        let back = hold(&mut c, Ear::Smaller, 2_000);
+
+        // Then
+        assert!(contains(&forward, Action::NextTrack));
         assert!(contains(&back, Action::PrevTrack));
     }
 
@@ -664,11 +734,15 @@ mod tests {
     /// the volume.
     #[test]
     fn the_release_after_a_hold_does_nothing() {
+        // Given
         let mut c = core();
         let before = c.volume();
-        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
+        hold(&mut c, Ear::Larger, 0);
+
+        // When
         let actions = c.handle(Event::EarUp(Ear::Larger, 2_000), &Index);
+
+        // Then
         assert!(actions.is_empty(), "{actions:?}");
         assert_eq!(c.volume(), before);
     }
@@ -676,10 +750,14 @@ mod tests {
     /// One hold skips one chapter, however long the ear is held.
     #[test]
     fn holding_on_after_the_skip_does_not_skip_again() {
+        // Given
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
+        hold(&mut c, Ear::Larger, 0);
+
+        // When
         let again = c.handle(Event::EarHeld(Ear::Larger, 1_200), &Index);
+
+        // Then
         assert!(!contains(&again, Action::NextTrack), "{again:?}");
     }
 
@@ -687,10 +765,15 @@ mod tests {
     /// `EarHeld` before it is a tap, however long it took.
     #[test]
     fn a_release_with_no_hold_before_it_is_a_tap_however_long_it_took() {
+        // Given
         let mut c = core();
         let before = c.volume();
         c.handle(Event::EarDown(Ear::Larger, 0), &Index);
+
+        // When
         let actions = c.handle(Event::EarUp(Ear::Larger, 10_000), &Index);
+
+        // Then
         assert!(c.volume() > before);
         assert!(contains(
             &actions,
@@ -704,17 +787,25 @@ mod tests {
 
     #[test]
     fn a_hold_without_a_press_is_ignored() {
+        // Given
         let mut c = core();
-        assert!(c
-            .handle(Event::EarHeld(Ear::Larger, 600), &Index)
-            .is_empty());
+
+        // When
+        let actions = c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
+
+        // Then
+        assert!(actions.is_empty());
     }
 
     #[test]
     fn a_tap_on_the_larger_ear_beeps_up() {
+        // Given
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
+
+        // When
+        let actions = tap(&mut c, Ear::Larger, 0);
+
+        // Then
         assert!(
             contains(&actions, Action::PlayCue(Cue::VolumeUp)),
             "{actions:?}"
@@ -723,9 +814,13 @@ mod tests {
 
     #[test]
     fn a_tap_on_the_smaller_ear_beeps_down() {
+        // Given
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Smaller, 100), &Index);
+
+        // When
+        let actions = tap(&mut c, Ear::Smaller, 0);
+
+        // Then
         assert!(
             contains(&actions, Action::PlayCue(Cue::VolumeDown)),
             "{actions:?}"
@@ -736,13 +831,16 @@ mod tests {
     /// no separate sound for the bottom was observed on a stock box.
     #[test]
     fn a_tap_at_the_volume_floor_plays_the_limit_cue() {
+        // Given
         let mut c = core();
         for i in 0..10 {
-            c.handle(Event::EarDown(Ear::Smaller, i * 200), &Index);
-            c.handle(Event::EarUp(Ear::Smaller, i * 200 + 100), &Index);
+            tap(&mut c, Ear::Smaller, i * 200);
         }
-        c.handle(Event::EarDown(Ear::Smaller, 5_000), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Smaller, 5_100), &Index);
+
+        // When
+        let actions = tap(&mut c, Ear::Smaller, 5_000);
+
+        // Then
         assert!(
             contains(&actions, Action::PlayCue(Cue::VolumeLimit)),
             "{actions:?}"
@@ -759,9 +857,13 @@ mod tests {
     /// the skip happened. The reducer asks for no volume cue.
     #[test]
     fn a_hold_asks_for_no_volume_cue() {
+        // Given
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        let actions = c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
+
+        // When
+        let actions = hold(&mut c, Ear::Larger, 0);
+
+        // Then
         assert!(
             !actions.iter().any(|a| matches!(a, Action::PlayCue(_))),
             "{actions:?}"
@@ -770,13 +872,16 @@ mod tests {
 
     #[test]
     fn a_tap_at_the_volume_ceiling_plays_the_limit_cue_instead_of_changing_volume() {
+        // Given
         let mut c = core();
         for i in 0..10 {
-            c.handle(Event::EarDown(Ear::Larger, i * 200), &Index);
-            c.handle(Event::EarUp(Ear::Larger, i * 200 + 100), &Index);
+            tap(&mut c, Ear::Larger, i * 200);
         }
-        c.handle(Event::EarDown(Ear::Larger, 5_000), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Larger, 5_100), &Index);
+
+        // When
+        let actions = tap(&mut c, Ear::Larger, 5_000);
+
+        // Then
         assert!(contains(&actions, Action::PlayCue(Cue::VolumeLimit)));
     }
 
@@ -784,9 +889,13 @@ mod tests {
     /// slap on that side. See `teddiebox_board::side_for_click`.
     #[test]
     fn a_long_press_on_the_right_ear_skips_forward() {
+        // Given
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        let actions = c.handle(Event::EarHeld(Ear::Larger, 600), &Index);
+
+        // When
+        let actions = hold(&mut c, Ear::Larger, 0);
+
+        // Then
         assert!(contains(&actions, Action::NextTrack));
         assert!(
             !actions
@@ -798,22 +907,37 @@ mod tests {
 
     #[test]
     fn a_long_press_on_the_left_ear_skips_backward() {
+        // Given
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
-        let actions = c.handle(Event::EarHeld(Ear::Smaller, 600), &Index);
+
+        // When
+        let actions = hold(&mut c, Ear::Smaller, 0);
+
+        // Then
         assert!(contains(&actions, Action::PrevTrack));
     }
 
     #[test]
     fn a_release_without_a_press_is_ignored() {
+        // Given
         let mut c = core();
-        assert!(c.handle(Event::EarUp(Ear::Larger, 100), &Index).is_empty());
+
+        // When
+        let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
+
+        // Then
+        assert!(actions.is_empty());
     }
 
     #[test]
     fn placing_a_figure_starts_playback_and_updates_the_indicator() {
+        // Given
         let mut c = core();
+
+        // When
         let actions = c.handle(Event::TagPresent(TAG), &Index);
+
+        // Then
         assert!(contains(
             &actions,
             Action::Play {
@@ -826,19 +950,28 @@ mod tests {
 
     #[test]
     fn the_box_powers_off_after_a_long_idle() {
+        // Given
         let mut c = core();
-        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+
+        // When
+        let actions = c.handle(Event::Tick(IDLE_MS + 1), &Index);
+
+        // Then
         assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
     /// The idle timeout asks to park once, not on every tick after it expires.
     #[test]
     fn the_idle_park_is_asked_for_once_not_on_every_tick() {
+        // Given
         let mut c = core();
-        let first = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        let first = c.handle(Event::Tick(IDLE_MS + 1), &Index);
         assert!(contains(&first, Action::PowerOff(PowerOffReason::Idle)));
 
-        let again = c.handle(Event::Tick(5 * 60 * 1_000 + 2_000), &Index);
+        // When
+        let again = c.handle(Event::Tick(IDLE_MS + 2_000), &Index);
+
+        // Then
         assert!(
             !contains(&again, Action::PowerOff(PowerOffReason::Idle)),
             "a box already told to park must not be told again on the next tick"
@@ -847,9 +980,14 @@ mod tests {
 
     #[test]
     fn the_box_does_not_power_off_while_playing() {
+        // Given
         let mut c = core();
         c.handle(Event::TagPresent(TAG), &Index);
-        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+
+        // When
+        let actions = c.handle(Event::Tick(IDLE_MS + 1), &Index);
+
+        // Then
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
@@ -857,12 +995,16 @@ mod tests {
     /// ends, the idle timeout must still fire.
     #[test]
     fn a_finished_story_lets_the_idle_timeout_fire_with_the_figure_still_on() {
+        // Given
         let mut c = Core::new(CoreConfig::default());
         c.handle(Event::Tick(0), &Index);
         c.handle(Event::TagPresent(TagUid([1, 2, 3, 4, 5, 6, 7, 8])), &Index);
         c.handle(Event::PlaybackEnded, &Index);
 
-        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        // When
+        let actions = c.handle(Event::Tick(IDLE_MS + 1), &Index);
+
+        // Then
         assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
@@ -871,22 +1013,24 @@ mod tests {
     /// the figure was placed.
     #[test]
     fn the_idle_countdown_starts_when_the_story_ends_not_when_it_began() {
+        // Given: a long story, with the clock kept fresh throughout
         let mut c = core();
         c.handle(Event::Tick(0), &Index);
         c.handle(Event::TagPresent(TAG), &Index);
-        // A long story, with the clock kept fresh throughout.
         c.handle(Event::Tick(30 * 60 * 1_000), &Index);
         c.handle(Event::PlaybackEnded, &Index);
 
-        let actions = c.handle(Event::Tick(30 * 60 * 1_000 + 1_000), &Index);
+        // When
+        let a_second_later = c.handle(Event::Tick(30 * 60 * 1_000 + 1_000), &Index);
+        let a_timeout_later = c.handle(Event::Tick(30 * 60 * 1_000 + IDLE_MS + 1), &Index);
+
+        // Then
         assert!(
-            !contains(&actions, Action::PowerOff(PowerOffReason::Idle)),
+            !contains(&a_second_later, Action::PowerOff(PowerOffReason::Idle)),
             "one second after the end is not idle"
         );
-
-        let actions = c.handle(Event::Tick(30 * 60 * 1_000 + 5 * 60 * 1_000 + 1), &Index);
         assert!(
-            contains(&actions, Action::PowerOff(PowerOffReason::Idle)),
+            contains(&a_timeout_later, Action::PowerOff(PowerOffReason::Idle)),
             "five minutes after the end is"
         );
     }
@@ -897,12 +1041,16 @@ mod tests {
     /// while the card is being written.
     #[test]
     fn a_download_in_progress_holds_the_box_awake() {
+        // Given
         let mut c = core();
         c.handle(Event::Tick(0), &Unknown);
-        let actions = c.handle(Event::TagPresent(TAG), &Unknown);
-        assert!(contains(&actions, Action::RequestContent(TAG)));
+        let placed = c.handle(Event::TagPresent(TAG), &Unknown);
+        assert!(contains(&placed, Action::RequestContent(TAG)));
 
+        // When
         let actions = c.handle(Event::Tick(15 * 60 * 1_000), &Unknown);
+
+        // Then
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
@@ -911,33 +1059,42 @@ mod tests {
     /// so the box stays awake.
     #[test]
     fn something_only_the_firmware_can_see_holds_the_box_awake() {
+        // Given
         let mut c = core();
         c.handle(Event::Tick(0), &Index);
         c.note_in_use(true);
 
-        let actions = c.handle(Event::Tick(60 * 60 * 1_000), &Index);
-        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
-
+        // When
+        let during = c.handle(Event::Tick(60 * 60 * 1_000), &Index);
         c.note_in_use(false);
-        let actions = c.handle(Event::Tick(60 * 60 * 1_000 + 1_000), &Index);
+        let a_second_after = c.handle(Event::Tick(60 * 60 * 1_000 + 1_000), &Index);
+        let a_timeout_after = c.handle(Event::Tick(65 * 60 * 1_000 + 1), &Index);
+
+        // Then
+        assert!(!contains(&during, Action::PowerOff(PowerOffReason::Idle)));
         assert!(
-            !contains(&actions, Action::PowerOff(PowerOffReason::Idle)),
+            !contains(&a_second_after, Action::PowerOff(PowerOffReason::Idle)),
             "the countdown starts when it ended"
         );
-
-        let actions = c.handle(Event::Tick(65 * 60 * 1_000 + 1), &Index);
-        assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+        assert!(contains(
+            &a_timeout_after,
+            Action::PowerOff(PowerOffReason::Idle)
+        ));
     }
 
     /// The charger cannot wake the box, so a box parked while charging
     /// overnight could not be woken by it.
     #[test]
     fn a_charging_box_does_not_park_itself() {
+        // Given
         let mut c = core();
         c.handle(Event::Tick(0), &Index);
         c.handle(Event::Charger(true), &Index);
 
-        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        // When
+        let actions = c.handle(Event::Tick(IDLE_MS + 1), &Index);
+
+        // Then
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
@@ -945,25 +1102,38 @@ mod tests {
     /// countdown, because charging kept the box in use until then.
     #[test]
     fn unplugging_the_charger_starts_the_countdown() {
+        // Given: an hour on the charger, then unplugged
         let mut c = core();
         c.handle(Event::Tick(0), &Index);
         c.handle(Event::Charger(true), &Index);
         c.handle(Event::Tick(60 * 60 * 1_000), &Index);
         c.handle(Event::Charger(false), &Index);
 
-        let actions = c.handle(Event::Tick(60 * 60 * 1_000 + 1_000), &Index);
-        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+        // When
+        let a_second_later = c.handle(Event::Tick(60 * 60 * 1_000 + 1_000), &Index);
+        let a_timeout_later = c.handle(Event::Tick(65 * 60 * 1_000 + 1), &Index);
 
-        let actions = c.handle(Event::Tick(65 * 60 * 1_000 + 1), &Index);
-        assert!(contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+        // Then
+        assert!(!contains(
+            &a_second_later,
+            Action::PowerOff(PowerOffReason::Idle)
+        ));
+        assert!(contains(
+            &a_timeout_later,
+            Action::PowerOff(PowerOffReason::Idle)
+        ));
     }
 
     #[test]
     fn activity_defers_the_power_off() {
+        // Given
         let mut c = core();
-        c.handle(Event::EarDown(Ear::Larger, 4 * 60 * 1_000), &Index);
-        c.handle(Event::EarUp(Ear::Larger, 4 * 60 * 1_000 + 100), &Index);
-        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        tap(&mut c, Ear::Larger, 4 * 60 * 1_000);
+
+        // When
+        let actions = c.handle(Event::Tick(IDLE_MS + 1), &Index);
+
+        // Then
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
@@ -971,36 +1141,25 @@ mod tests {
     /// not again on later readings.
     #[test]
     fn a_pack_reaching_critical_announces_it_and_stops_once() {
+        // Given
         let mut c = core();
-        let mut seen = 0;
-        for _ in 0..4 {
-            let actions = c.handle(
-                Event::Battery {
-                    pack_mv: 2_900,
-                    under_load: false,
-                },
-                &Index,
-            );
-            if contains(&actions, Action::PowerOff(PowerOffReason::PackEmpty)) {
-                seen += 1;
-                assert!(
-                    contains(&actions, Action::PlayPrompt(Prompt::BatteryCritical)),
-                    "it should say so in the same breath"
-                );
-            }
-        }
-        assert_eq!(seen, 1, "announced and acted on once, not per reading");
 
-        let actions = c.handle(
-            Event::Battery {
-                pack_mv: 2_900,
-                under_load: false,
-            },
-            &Index,
+        // When: enough readings to agree, and one more
+        let batches = [(); 5].map(|_| c.handle(battery_reading(2_900), &Index));
+
+        // Then
+        let stops: Vec<&Actions, 5> = batches
+            .iter()
+            .filter(|actions| contains(actions, Action::PowerOff(PowerOffReason::PackEmpty)))
+            .collect();
+        assert_eq!(
+            stops.len(),
+            1,
+            "announced and acted on once, not per reading"
         );
         assert!(
-            !contains(&actions, Action::PowerOff(PowerOffReason::PackEmpty)),
-            "and not again after"
+            contains(stops[0], Action::PlayPrompt(Prompt::BatteryCritical)),
+            "it should say so in the same breath"
         );
     }
 
@@ -1008,50 +1167,40 @@ mod tests {
     /// rather than Critical.
     #[test]
     fn a_pack_falling_to_low_warns_once() {
+        // Given
         let mut c = core();
-        let mut seen = 0;
-        for _ in 0..8 {
-            let actions = c.handle(
-                Event::Battery {
-                    pack_mv: 3_250,
-                    under_load: false,
-                },
-                &Index,
-            );
-            if contains(&actions, Action::PlayPrompt(Prompt::BatteryLow)) {
-                seen += 1;
-            }
-        }
-        assert_eq!(seen, 1);
+
+        // When
+        let warnings = low_warnings(&mut c, 3_250, 8);
+
+        // Then
+        assert_eq!(warnings, 1);
     }
 
     /// The Critical bucket starts at `low_mv` (3200) and the hard cutoff is at
     /// 3000. Between them the box warns but does not shut down.
     #[test]
     fn the_critical_bucket_above_the_cutoff_warns_without_stopping() {
+        // Given
         let mut c = core();
-        let mut actions_seen = Actions::new();
+
+        // When
+        let mut seen: Vec<Action, 48> = Vec::new();
         for _ in 0..6 {
-            for a in c.handle(
-                Event::Battery {
-                    pack_mv: 3_100,
-                    under_load: false,
-                },
-                &Index,
-            ) {
-                let _ = actions_seen.push(a);
-            }
+            seen.extend(c.handle(battery_reading(3_100), &Index));
         }
+
+        // Then
         assert!(
-            contains(&actions_seen, Action::PlayPrompt(Prompt::BatteryLow)),
+            seen.contains(&Action::PlayPrompt(Prompt::BatteryLow)),
             "3100 mV is low enough to warn about"
         );
         assert!(
-            !contains(&actions_seen, Action::PowerOff(PowerOffReason::PackEmpty)),
+            !seen.contains(&Action::PowerOff(PowerOffReason::PackEmpty)),
             "but 3100 mV is above the 3000 mV cutoff, so nothing stops"
         );
         assert!(
-            !contains(&actions_seen, Action::PlayPrompt(Prompt::BatteryCritical)),
+            !seen.contains(&Action::PlayPrompt(Prompt::BatteryCritical)),
             "and announcing a shutdown that is not happening would be a lie"
         );
     }
@@ -1060,112 +1209,75 @@ mod tests {
     /// again.
     #[test]
     fn a_pack_that_falls_further_is_warned_about_again() {
+        // Given
         let mut c = core();
-        let mut warnings = 0;
-        for _ in 0..4 {
-            for a in c.handle(
-                Event::Battery {
-                    pack_mv: 3_250,
-                    under_load: false,
-                },
-                &Index,
-            ) {
-                if a == Action::PlayPrompt(Prompt::BatteryLow) {
-                    warnings += 1;
-                }
-            }
-        }
-        assert_eq!(warnings, 1, "settling into Low warns once");
+        assert_eq!(
+            low_warnings(&mut c, 3_250, 4),
+            1,
+            "settling into Low warns once"
+        );
 
-        for _ in 0..4 {
-            for a in c.handle(
-                Event::Battery {
-                    pack_mv: 3_100,
-                    under_load: false,
-                },
-                &Index,
-            ) {
-                if a == Action::PlayPrompt(Prompt::BatteryLow) {
-                    warnings += 1;
-                }
-            }
-        }
-        assert_eq!(warnings, 2, "falling on into Critical warns again");
+        // When
+        let warnings = low_warnings(&mut c, 3_100, 4);
+
+        // Then
+        assert_eq!(warnings, 1, "falling on into Critical warns again");
     }
 
     /// A recovering pack makes no sound, but a later drop warns again.
     #[test]
     fn recovering_is_silent_but_arms_the_warning_again() {
+        // Given
         let mut c = core();
-        let mut warnings = 0;
-        for _ in 0..4 {
-            for a in c.handle(
-                Event::Battery {
-                    pack_mv: 3_250,
-                    under_load: false,
-                },
-                &Index,
-            ) {
-                if a == Action::PlayPrompt(Prompt::BatteryLow) {
-                    warnings += 1;
-                }
-            }
-        }
-        assert_eq!(warnings, 1);
+        assert_eq!(low_warnings(&mut c, 3_250, 4), 1);
 
-        // 3_700 is above the Ok threshold plus hysteresis, so the level rises
-        // again, silently.
-        for _ in 0..4 {
-            for a in c.handle(
-                Event::Battery {
-                    pack_mv: 3_700,
-                    under_load: false,
-                },
-                &Index,
-            ) {
-                assert_ne!(
-                    a,
-                    Action::PlayPrompt(Prompt::BatteryLow),
-                    "recovering must not warn"
-                );
-            }
-        }
+        // When: 3_700 is above the Ok threshold plus hysteresis, so the level
+        // rises again; then it falls back
+        let recovering = low_warnings(&mut c, 3_700, 4);
+        let falling_again = low_warnings(&mut c, 3_250, 4);
 
-        for _ in 0..4 {
-            for a in c.handle(
-                Event::Battery {
-                    pack_mv: 3_250,
-                    under_load: false,
-                },
-                &Index,
-            ) {
-                if a == Action::PlayPrompt(Prompt::BatteryLow) {
-                    warnings += 1;
-                }
-            }
-        }
-        assert_eq!(warnings, 2, "falling low again after recovery warns again");
+        // Then
+        assert_eq!(recovering, 0, "recovering must not warn");
+        assert_eq!(
+            falling_again, 1,
+            "falling low again after recovery warns again"
+        );
     }
 
     #[test]
     fn the_indicator_is_not_reset_when_nothing_changed() {
+        // Given
         let mut c = core();
         c.handle(Event::TagPresent(TAG), &Index);
+
+        // When
         let actions = c.handle(Event::Tick(1_000), &Index);
+
+        // Then
         assert!(!actions.iter().any(|a| matches!(a, Action::SetLed(_))));
     }
 
     #[test]
     fn a_slap_on_the_right_goes_to_the_next_chapter() {
+        // Given
         let mut c = core();
+
+        // When
         let actions = c.handle(Event::Slap(Side::Right), &Index);
+
+        // Then
         assert!(contains(&actions, Action::NextTrack));
     }
 
     #[test]
     fn a_slap_on_the_left_goes_back_a_chapter() {
+        // Given
         let mut c = core();
+
+        // When
         let actions = c.handle(Event::Slap(Side::Left), &Index);
+
+        // Then
         assert!(contains(&actions, Action::PrevTrack));
     }
 
@@ -1173,8 +1285,13 @@ mod tests {
     /// box has to.
     #[test]
     fn a_jack_going_in_moves_the_sound_to_the_headphones() {
+        // Given
         let mut c = core();
+
+        // When
         let actions = c.handle(Event::Headphones(true), &Index);
+
+        // Then
         assert!(contains(&actions, Action::SetOutput(Output::Headphones)));
         assert_eq!(c.output(), Output::Headphones);
     }
@@ -1182,9 +1299,14 @@ mod tests {
     /// Like a stock box: pulling the plug does not pause, stop or seek.
     #[test]
     fn a_jack_coming_out_brings_the_speaker_back_without_touching_playback() {
+        // Given
         let mut c = core();
         c.handle(Event::Headphones(true), &Index);
+
+        // When
         let actions = c.handle(Event::Headphones(false), &Index);
+
+        // Then
         assert!(contains(&actions, Action::SetOutput(Output::Speaker)));
         assert!(
             !actions
@@ -1198,9 +1320,14 @@ mod tests {
     /// the speaker's level.
     #[test]
     fn plugging_in_asks_for_the_headphone_ladders_level() {
+        // Given
         let mut c = core();
         let step = c.volume();
+
+        // When
         let actions = c.handle(Event::Headphones(true), &Index);
+
+        // Then
         assert!(contains(
             &actions,
             Action::SetVolume {
@@ -1215,17 +1342,22 @@ mod tests {
     /// headphones.
     #[test]
     fn each_output_remembers_its_own_step_across_a_plug_and_an_unplug() {
+        // Given: the headphones turned down one step below the speaker
         let mut c = core();
         let speaker_step = c.volume();
-
         c.handle(Event::Headphones(true), &Index);
-        c.handle(Event::EarDown(Ear::Smaller, 0), &Index);
-        c.handle(Event::EarUp(Ear::Smaller, 100), &Index);
+        tap(&mut c, Ear::Smaller, 0);
         let headphone_step = c.volume();
         assert!(headphone_step < speaker_step);
 
+        // When
         let back = c.handle(Event::Headphones(false), &Index);
-        assert_eq!(c.volume(), speaker_step, "the speaker kept its own step");
+        let speaker_again = c.volume();
+        let again = c.handle(Event::Headphones(true), &Index);
+        let headphones_again = c.volume();
+
+        // Then
+        assert_eq!(speaker_again, speaker_step, "the speaker kept its own step");
         assert!(contains(
             &back,
             Action::SetVolume {
@@ -1233,9 +1365,10 @@ mod tests {
                 db: db_for(Output::Speaker, speaker_step)
             }
         ));
-
-        let again = c.handle(Event::Headphones(true), &Index);
-        assert_eq!(c.volume(), headphone_step, "and so did the headphones");
+        assert_eq!(
+            headphones_again, headphone_step,
+            "and so did the headphones"
+        );
         assert!(contains(
             &again,
             Action::SetVolume {
@@ -1248,10 +1381,14 @@ mod tests {
     /// With headphones in, the ears change the headphone volume.
     #[test]
     fn an_ear_steps_the_ladder_of_whatever_is_plugged_in() {
+        // Given
         let mut c = core();
         c.handle(Event::Headphones(true), &Index);
-        c.handle(Event::EarDown(Ear::Larger, 0), &Index);
-        let actions = c.handle(Event::EarUp(Ear::Larger, 100), &Index);
+
+        // When
+        let actions = tap(&mut c, Ear::Larger, 0);
+
+        // Then
         assert!(contains(
             &actions,
             Action::SetVolume {
@@ -1264,10 +1401,15 @@ mod tests {
     /// Plugging in headphones counts as activity.
     #[test]
     fn plugging_headphones_in_restarts_the_idle_countdown() {
+        // Given
         let mut c = core();
         c.handle(Event::Tick(4 * 60 * 1_000), &Index);
+
+        // When: plugged in, then a timeout after boot
         c.handle(Event::Headphones(true), &Index);
-        let actions = c.handle(Event::Tick(5 * 60 * 1_000 + 1), &Index);
+        let actions = c.handle(Event::Tick(IDLE_MS + 1), &Index);
+
+        // Then
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 }
