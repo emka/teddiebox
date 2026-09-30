@@ -77,6 +77,17 @@ mod tests {
 
         // Then
         assert_eq!(buf[0], 0xAB);
+    }
+
+    #[test]
+    fn counts_every_whole_page() {
+        // Given
+        let data = [0u8; PAGE_SIZE * 3];
+
+        // When
+        let src = SlicePages::new(&data).unwrap();
+
+        // Then
         assert_eq!(src.page_count(), 3);
     }
 
