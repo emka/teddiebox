@@ -1,11 +1,12 @@
-//! Eight hex digits to a `u32`.
+//! Eight hex digits to a `u32`, as a privacy password or a content ID is
+//! written.
 //!
 //! A `const fn`, so the same code serves both the console (parsing what was
 //! typed) and the build (compiling a password from the environment into the
 //! image).
 
-/// Digits a password must have. Exactly eight, because a privacy password is
-/// a `u32` and a shorter value is a typo.
+/// Digits a password or a content ID has. Exactly eight, because each is a
+/// `u32` and a shorter value is a typo.
 pub const DIGITS: usize = 8;
 
 /// Parses exactly [`DIGITS`] hex digits. `None` for anything else at all.

@@ -388,24 +388,6 @@ impl CommandWatch {
     }
 }
 
-/// Reads exactly eight hex digits, as the Toniebox writes a content ID.
-fn hex_u32(digits: &[u8]) -> Option<u32> {
-    if digits.len() != 8 {
-        return None;
-    }
-    let mut value = 0u32;
-    for &byte in digits {
-        let nibble = match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => return None,
-        };
-        value = (value << 4) | u32::from(nibble);
-    }
-    Some(value)
-}
-
 /// Reads `otaboot <0|1>`, the slot to arm the next boot on.
 ///
 /// Only `0` or `1`. This command can leave the box unbootable, so anything
@@ -448,18 +430,18 @@ fn parse_play_content(line: &[u8]) -> Option<Command> {
     // Sixteen digits is a downloaded file's identifier, as for `get`.
     // Checked before splitting on `/`.
     if rest.len() == 16 {
-        let directory = hex_u32(&rest[..8])?;
-        let file = hex_u32(&rest[8..])?;
+        let directory = crate::hex::u32_from_hex(&rest[..8])?;
+        let file = crate::hex::u32_from_hex(&rest[8..])?;
         return Some(Command::PlayCache { directory, file });
     }
     let mut halves = rest.split(|&b| b == b'/');
-    let first = hex_u32(halves.next()?)?;
+    let first = crate::hex::u32_from_hex(halves.next()?)?;
     // One part names a system sound in the box's language; two parts name a
     // path.
     let Some(second) = halves.next() else {
         return Some(Command::PlaySound { file: first });
     };
-    let file = hex_u32(second)?;
+    let file = crate::hex::u32_from_hex(second)?;
     if halves.next().is_some() {
         return None;
     }
@@ -491,8 +473,8 @@ fn parse_crc(line: &[u8]) -> Option<Command> {
     if rest.len() != 16 {
         return None;
     }
-    let directory = hex_u32(&rest[..8])?;
-    let file = hex_u32(&rest[8..])?;
+    let directory = crate::hex::u32_from_hex(&rest[..8])?;
+    let file = crate::hex::u32_from_hex(&rest[8..])?;
     Some(Command::Crc { directory, file })
 }
 
