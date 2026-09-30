@@ -39,15 +39,6 @@ impl<const N: usize> Pipe<N> {
         }
     }
 
-    /// How many bytes are waiting.
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     /// How many more bytes would fit.
     pub const fn free(&self) -> usize {
         N - self.len
@@ -98,7 +89,7 @@ mod tests {
         // Then
         assert_eq!(given, 4);
         assert_eq!(&out, b"abcd");
-        assert!(pipe.is_empty());
+        assert_eq!(pipe.read(&mut out), 0, "and nothing is left behind");
     }
 
     /// A short write tells the producer the pipe is full.
