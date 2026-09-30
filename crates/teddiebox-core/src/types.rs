@@ -185,14 +185,26 @@ mod tests {
 
     #[test]
     fn a_position_with_nothing_saved_is_the_start() {
-        assert_eq!(Position::default(), Position::Start);
+        // Given: nothing is saved
+
+        // When
+        let position = Position::default();
+
+        // Then
+        assert_eq!(position, Position::Start);
     }
 
     /// A real Tonie: the reader returns its UID as `E0040350503F2E1D`, and
     /// its story is stored at `CONTENT/1D2E3F50/500304E0`.
     #[test]
     fn a_real_tonie_uid_reverses_to_the_identifier_its_story_is_filed_under() {
+        // Given
         let tag = TagUid([0xE0, 0x04, 0x03, 0x50, 0x50, 0x3F, 0x2E, 0x1D]);
-        assert_eq!(tag.ruid(), 0x1D2E_3F50_5003_04E0);
+
+        // When
+        let ruid = tag.ruid();
+
+        // Then
+        assert_eq!(ruid, 0x1D2E_3F50_5003_04E0);
     }
 }
