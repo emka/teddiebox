@@ -38,7 +38,7 @@ const HEAD: usize = 0x50;
 ///
 /// Returns only when nothing was installed: up to date, no server, a
 /// malformed manifest, or a download that failed, did not verify, or was
-/// stopped because a story started or a figure needs the network. Each case
+/// stopped because a sound started or a figure needs the network. Each case
 /// prints why.
 pub async fn check(client: &tls::Client, stack: &Stack<'_>, update_url: &str) {
     let url = match teddiebox_ota::split(update_url) {
@@ -133,9 +133,10 @@ async fn fetch_manifest(
 /// Streams the image into `slot`, hashing it on the way, and says whether it
 /// is the image the manifest promised.
 ///
-/// Stops early, and returns `false`, when a story starts or another network
-/// request is queued: erasing flash blocks interrupts, which would make a
-/// story stutter, and a figure waiting on the network must not wait for this.
+/// Stops early, and returns `false`, when anything starts playing or another
+/// network request is queued: erasing flash blocks interrupts, which would
+/// make the sound stutter, and a figure waiting on the network must not wait
+/// for this.
 async fn install(
     client: &tls::Client,
     stack: &Stack<'_>,
@@ -185,7 +186,9 @@ async fn install(
     match fetched {
         Ok(_) => {}
         Err(tls::Error::Abandoned) => {
-            esp_println::println!("teddiebox: update stopped — the box is needed for a story");
+            esp_println::println!(
+                "teddiebox: update stopped — a sound started or a figure needs the network"
+            );
             return false;
         }
         Err(trouble) => {

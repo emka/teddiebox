@@ -186,7 +186,7 @@ codec responds; otherwise the box goes back to the old one at the next boot.
 
 The download stops, and the box keeps its current firmware, if:
 
-- a story starts, or a figure needs the network;
+- anything starts playing (a story or a system sound, such as the one the charger triggers), or a figure needs the network;
 - the length, SHA-256 or version inside the image does not match the manifest.
 
 To publish an update:
