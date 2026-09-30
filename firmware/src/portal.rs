@@ -533,8 +533,8 @@ async fn write_config(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, body: 
     match mounted.write_config(&submitted) {
         Ok(()) => {
             esp_println::println!("teddiebox: portal wrote {} bytes", submitted.len());
-            let written = Some(Message::Notice("config.txt written"));
-            respond_page(socket, card, &submitted, written).await
+            let written = page::notice(page::Written::Config, ca_on_card(card));
+            respond_page(socket, card, &submitted, Some(Message::Notice(&written))).await
         }
         Err(why) => respond_page(socket, card, &submitted, Some(Message::Error(why))).await,
     }
@@ -576,11 +576,12 @@ async fn write_ca(
                 "teddiebox: portal wrote the certificate, {} bytes",
                 der.len()
             );
+            let written = page::notice(page::Written::Ca, ca_on_card(card));
             show(
                 socket,
                 card,
                 http::Status::Ok,
-                Some(Message::Notice("certificate written")),
+                Some(Message::Notice(&written)),
             )
             .await
         }
@@ -640,19 +641,18 @@ body{font:16px system-ui;margin:0;padding:1rem;background:#f6f5f3;color:#1a1a1a}
 <p>The box is restarting. This network will disappear on its own.</p>\
 </body></html>";
 
-/// What the page says about the card's `CERT/TCCA.DER`.
-fn ca_status(card: Option<&Mounted>) -> heapless::String<{ page::CA_STATUS }> {
+/// What the card holds at `CERT/TCCA.DER`.
+fn ca_on_card(card: Option<&Mounted>) -> page::CaOnCard {
     use page::CaOnCard;
 
     let mut certificate = [0u8; tls::CERT_BYTES];
-    let found = match card.map(|card| card.read_certificate("TCCA.DER", &mut certificate)) {
+    match card.map(|card| card.read_certificate("TCCA.DER", &mut certificate)) {
         None | Some(Err(CertificateError::Missing)) => CaOnCard::Missing,
         Some(Err(CertificateError::TooLarge)) => CaOnCard::TooLarge,
         Some(Err(CertificateError::Unreadable)) => CaOnCard::Unreadable,
         Some(Ok(n)) if tls::is_certificate(&certificate[..n]) => CaOnCard::Certificate(n),
         Some(Ok(n)) => CaOnCard::NotACertificate(n),
-    };
-    page::ca_status(found)
+    }
 }
 
 /// How much of an escaped run is held at a time.
@@ -676,7 +676,7 @@ async fn send_page(
     config: &[u8],
     messages: &[Message<'_>],
 ) {
-    let ca = ca_status(card);
+    let ca = page::ca_status(ca_on_card(card));
     let head = http::head(status, page::length(config, messages, &ca));
     if write_all(socket, &head).await.is_err() {
         return;

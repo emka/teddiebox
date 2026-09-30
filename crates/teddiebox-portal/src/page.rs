@@ -90,6 +90,31 @@ pub fn ca_status(card: CaOnCard) -> heapless::String<CA_STATUS> {
 /// [`crate::MAX_BODY`] and ", not a certificate".
 pub const CA_STATUS: usize = 40;
 
+/// What a request just wrote to the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Written {
+    Config,
+    Ca,
+}
+
+/// How the notice after a certificate write begins; a [`ca_status`] follows.
+const CA_WRITTEN: &str = "certificate written, ";
+
+/// Room for the longest [`notice`].
+pub const NOTICE: usize = CA_WRITTEN.len() + CA_STATUS;
+
+/// What the page says after `done`, given what the card now holds.
+pub fn notice(done: Written, card: CaOnCard) -> heapless::String<NOTICE> {
+    use core::fmt::Write;
+
+    let mut out = heapless::String::new();
+    let _ = match done {
+        Written::Config => write!(out, "config.txt written"),
+        Written::Ca => write!(out, "{CA_WRITTEN}{}", ca_status(card)),
+    };
+    out
+}
+
 /// What the card holds at `cert/tcca.der`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaOnCard {
@@ -432,6 +457,30 @@ mod tests {
 
         // Then
         assert!(text.ends_with("</body></html>"));
+    }
+
+    #[test]
+    fn after_a_config_write_the_page_says_so() {
+        // Given
+        let done = Written::Config;
+
+        // When
+        let text = notice(done, CaOnCard::Certificate(787));
+
+        // Then
+        assert_eq!(text, "config.txt written");
+    }
+
+    #[test]
+    fn after_a_certificate_write_the_page_says_how_large_it_is() {
+        // Given
+        let done = Written::Ca;
+
+        // When
+        let text = notice(done, CaOnCard::Certificate(787));
+
+        // Then
+        assert_eq!(text, "certificate written, 787 bytes");
     }
 
     #[test]
