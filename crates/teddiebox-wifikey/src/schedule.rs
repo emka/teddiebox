@@ -126,79 +126,113 @@ mod tests {
 
     #[test]
     fn nothing_is_derived_before_a_passphrase_join() {
+        // Given
         let mut s = Schedule::new();
-        assert_eq!(until_done(&mut s, b"IEEE", b"password"), None);
+
+        // When
+        let derived = until_done(&mut s, b"IEEE", b"password");
+
+        // Then
+        assert_eq!(derived, None);
     }
 
     #[test]
     fn proved_credentials_derive_their_key() {
+        // Given
         let mut s = Schedule::new();
         s.proved(b"IEEE", b"password");
+
+        // When
         let (_, psk) = until_done(&mut s, b"IEEE", b"password").expect("derives");
+
+        // Then
         assert_eq!(psk.as_bytes(), &IEEE);
     }
 
     #[test]
     fn credentials_changed_since_the_join_are_not_derived() {
+        // Given
         let mut s = Schedule::new();
         s.proved(b"IEEE", b"password");
-        assert_eq!(until_done(&mut s, b"IEEE", b"guessed"), None);
+
+        // When
+        let derived = until_done(&mut s, b"IEEE", b"guessed");
+
+        // Then
+        assert_eq!(derived, None);
     }
 
     #[test]
     fn a_stored_key_for_these_credentials_is_not_derived_again() {
+        // Given
         let mut s = Schedule::new();
         s.proved(b"IEEE", b"password");
-        for _ in 0..100 {
-            assert_eq!(
-                s.pass(Some((b"IEEE", b"password")), true, false, SLICE),
-                Pass::Idle
-            );
-        }
+
+        // When
+        let passes = [(); 100].map(|_| s.pass(Some((b"IEEE", b"password")), true, false, SLICE));
+
+        // Then
+        assert!(passes.iter().all(|pass| *pass == Pass::Idle));
     }
 
     #[test]
     fn playing_pauses_the_derivation_without_losing_it() {
+        // Given: two slices done
         let mut s = Schedule::new();
         s.proved(b"IEEE", b"password");
         idle(&mut s, b"IEEE", b"password");
         idle(&mut s, b"IEEE", b"password");
-        for _ in 0..10 {
-            assert_eq!(
-                s.pass(Some((b"IEEE", b"password")), false, true, SLICE),
-                Pass::Idle
-            );
-        }
-        // 4095 rounds at 1000 a pass: five passes in all, two already done.
-        assert_eq!(
-            until_done(&mut s, b"IEEE", b"password").map(|(n, _)| n),
-            Some(3)
-        );
+
+        // When: ten passes while a story plays, then passes until the key
+        let paused = [(); 10].map(|_| s.pass(Some((b"IEEE", b"password")), false, true, SLICE));
+        let resumed = until_done(&mut s, b"IEEE", b"password").map(|(n, _)| n);
+
+        // Then: 4095 rounds at 1000 a pass is five passes in all, two already
+        // done before the pause
+        assert!(paused.iter().all(|pass| *pass == Pass::Idle));
+        assert_eq!(resumed, Some(3));
     }
 
     #[test]
     fn newly_proved_credentials_start_over_with_their_own_key() {
+        // Given: one slice done for the first credentials, then others proved
         let mut s = Schedule::new();
         s.proved(b"IEEE", b"password");
         idle(&mut s, b"IEEE", b"password");
         s.proved(b"ThisIsASSID", b"ThisIsAPassword");
+
+        // When
         let (n, psk) = until_done(&mut s, b"ThisIsASSID", b"ThisIsAPassword").expect("derives");
+
+        // Then: all five passes, from the start
         assert_eq!(n, 5);
         assert_eq!(psk.as_bytes(), &IEEE_SECOND);
     }
 
     #[test]
     fn a_derived_key_is_handed_out_once() {
+        // Given
         let mut s = Schedule::new();
         s.proved(b"IEEE", b"password");
         until_done(&mut s, b"IEEE", b"password").expect("derives");
-        assert_eq!(until_done(&mut s, b"IEEE", b"password"), None);
+
+        // When
+        let again = until_done(&mut s, b"IEEE", b"password");
+
+        // Then
+        assert_eq!(again, None);
     }
 
     #[test]
     fn no_credentials_derive_nothing() {
+        // Given
         let mut s = Schedule::new();
         s.proved(b"IEEE", b"password");
-        assert_eq!(s.pass(None, false, false, SLICE), Pass::Idle);
+
+        // When
+        let pass = s.pass(None, false, false, SLICE);
+
+        // Then
+        assert_eq!(pass, Pass::Idle);
     }
 }
