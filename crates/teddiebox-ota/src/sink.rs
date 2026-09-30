@@ -138,56 +138,103 @@ mod tests {
 
     #[test]
     fn a_write_at_the_start_erases_the_first_sector_once() {
+        // Given
         let mut s = Sectors::new(0x1D0000);
-        assert_eq!(s.erase_before(0, 100), Some(0..SECTOR));
-        // A second write in the same sector must not erase it again.
-        assert_eq!(s.erase_before(100, 100), None);
+
+        // When: a write at the start, then a second in the same sector
+        let erased = [s.erase_before(0, 100), s.erase_before(100, 100)];
+
+        // Then
+        assert_eq!(erased, [Some(0..SECTOR), None]);
     }
 
     #[test]
     fn crossing_a_sector_boundary_erases_only_the_new_sector() {
+        // Given: the first sector already erased
         let mut s = Sectors::new(0x1D0000);
         s.erase_before(0, SECTOR).unwrap();
-        assert_eq!(s.erase_before(SECTOR, 10), Some(SECTOR..SECTOR * 2));
+
+        // When
+        let erased = s.erase_before(SECTOR, 10);
+
+        // Then
+        assert_eq!(erased, Some(SECTOR..SECTOR * 2));
     }
 
     #[test]
     fn a_write_spanning_three_sectors_erases_all_three() {
+        // Given
         let mut s = Sectors::new(0x1D0000);
-        assert_eq!(s.erase_before(0, SECTOR * 2 + 1), Some(0..SECTOR * 3));
+
+        // When
+        let erased = s.erase_before(0, SECTOR * 2 + 1);
+
+        // Then
+        assert_eq!(erased, Some(0..SECTOR * 3));
     }
 
     #[test]
     fn a_resumed_write_erases_from_where_it_resumes() {
+        // Given
         let mut s = Sectors::new(0x1D0000);
-        assert_eq!(s.erase_before(SECTOR * 4, 10), Some(SECTOR * 4..SECTOR * 5));
+
+        // When
+        let erased = s.erase_before(SECTOR * 4, 10);
+
+        // Then
+        assert_eq!(erased, Some(SECTOR * 4..SECTOR * 5));
     }
 
     #[test]
     fn a_length_already_on_a_sector_boundary_is_not_padded() {
-        assert_eq!(pad_to_sector(SECTOR * 3), SECTOR * 3);
+        // Given
+        let length = SECTOR * 3;
+
+        // When
+        let padded = pad_to_sector(length);
+
+        // Then
+        assert_eq!(padded, SECTOR * 3);
     }
 
     #[test]
     fn a_short_final_chunk_is_padded_up_to_a_whole_sector() {
-        assert_eq!(pad_to_sector(SECTOR * 3 + 1), SECTOR * 4);
-        assert_eq!(pad_to_sector(1), SECTOR);
+        // Given
+        let lengths = [SECTOR * 3 + 1, 1];
+
+        // When
+        let padded = lengths.map(pad_to_sector);
+
+        // Then
+        assert_eq!(padded, [SECTOR * 4, SECTOR]);
     }
 
     #[test]
     fn a_zero_length_pads_to_nothing() {
-        assert_eq!(pad_to_sector(0), 0);
+        // Given
+        let length = 0;
+
+        // When
+        let padded = pad_to_sector(length);
+
+        // Then
+        assert_eq!(padded, 0);
     }
 
     /// Checks alignment only. A bug that always erased sector 0 is caught by
     /// `a_resumed_write_lands_where_the_watermark_says_not_at_zero`.
     #[test]
     fn erased_ranges_start_and_end_on_a_sector_boundary() {
+        // Given
         let mut s = Sectors::new(0x1D0000);
         let mut f = Fake::default();
+
+        // When: three writes of awkward sizes
         s.feed(&mut f, 0, &[0u8; 100]).unwrap();
         s.feed(&mut f, 100, &[0u8; 5000]).unwrap();
         s.feed(&mut f, 5100, &[0u8; 50]).unwrap();
+
+        // Then
         assert!(!f.erased.is_empty());
         for range in &f.erased {
             assert_eq!(range.start % SECTOR, 0);
@@ -197,19 +244,29 @@ mod tests {
 
     #[test]
     fn a_sector_is_erased_once_and_before_the_write_that_touches_it() {
+        // Given
         let mut s = Sectors::new(0x1D0000);
         let mut f = Fake::default();
+
+        // When: two writes in the same sector
         s.feed(&mut f, 0, &[0u8; 100]).unwrap();
         s.feed(&mut f, 100, &[0u8; 100]).unwrap();
+
+        // Then
         assert_eq!(f.erased.len(), 1);
         assert_eq!(f.events, ["erase", "write", "write"]);
     }
 
     #[test]
     fn a_resumed_write_lands_where_the_watermark_says_not_at_zero() {
+        // Given
         let mut s = Sectors::new(0x1D0000);
         let mut f = Fake::default();
+
+        // When
         s.feed(&mut f, SECTOR * 4, &[0u8; 10]).unwrap();
+
+        // Then
         assert_eq!(f.written, [(SECTOR * 4, 10)]);
         assert_eq!(f.erased.len(), 1);
         assert_eq!(f.erased[0], SECTOR * 4..SECTOR * 5);
@@ -217,17 +274,27 @@ mod tests {
 
     #[test]
     fn a_short_final_chunk_is_written_not_dropped() {
+        // Given
         let mut s = Sectors::new(0x1D0000);
         let mut f = Fake::default();
+
+        // When
         s.feed(&mut f, 0, &[0u8; 100]).unwrap();
+
+        // Then
         assert_eq!(f.written, [(0, 100)]);
     }
 
     #[test]
     fn a_write_ending_exactly_at_the_slot_end_is_accepted() {
+        // Given
         let mut s = Sectors::new(8192);
         let mut f = Fake::default();
+
+        // When
         s.feed(&mut f, 8172, &[7u8; 20]).unwrap();
+
+        // Then
         assert_eq!(f.written, [(8172, 20)]);
         assert_eq!(f.erased.len(), 1);
         assert_eq!(f.erased[0], 4096..8192);
@@ -235,24 +302,34 @@ mod tests {
 
     #[test]
     fn a_write_ending_one_byte_past_the_slot_end_is_refused() {
+        // Given
         let mut s = Sectors::new(8192);
         let mut f = Fake::default();
-        let err = s.feed(&mut f, 8172, &[7u8; 21]).unwrap_err();
+
+        // When
+        let fed = s.feed(&mut f, 8172, &[7u8; 21]);
+
+        // Then
         assert_eq!(
-            err,
-            SinkError::PastSlotEnd {
+            fed,
+            Err(SinkError::PastSlotEnd {
                 offset: 8172,
                 len: 21,
                 slot: 8192,
-            }
+            })
         );
     }
 
     #[test]
     fn a_refused_write_touches_nothing() {
+        // Given
         let mut s = Sectors::new(8192);
         let mut f = Fake::default();
+
+        // When
         s.feed(&mut f, 8172, &[7u8; 21]).unwrap_err();
+
+        // Then
         assert!(f.erased.is_empty());
         assert!(f.written.is_empty());
         assert!(f.events.is_empty());
@@ -260,16 +337,21 @@ mod tests {
 
     #[test]
     fn an_overflowing_end_is_refused_not_wrapped() {
+        // Given
         let mut s = Sectors::new(0x1D0000);
         let mut f = Fake::default();
-        let err = s.feed(&mut f, u32::MAX - 4, &[9u8; 10]).unwrap_err();
+
+        // When
+        let fed = s.feed(&mut f, u32::MAX - 4, &[9u8; 10]);
+
+        // Then
         assert_eq!(
-            err,
-            SinkError::PastSlotEnd {
+            fed,
+            Err(SinkError::PastSlotEnd {
                 offset: u32::MAX - 4,
                 len: 10,
                 slot: 0x1D0000,
-            }
+            })
         );
     }
 }
