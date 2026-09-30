@@ -29,38 +29,64 @@ mod tests {
 
     #[test]
     fn one_whole_cycle_starts_and_ends_at_the_zero_crossing() {
-        assert_eq!(SINE[0], 0);
-        // The seam: the sample after the last must be the first again.
-        assert!(
-            SINE[SINE.len() - 1] < 0,
-            "the cycle must approach zero from below"
-        );
+        // Given
+        let cycle = &SINE;
+
+        // When
+        let (first, last) = (cycle[0], cycle[cycle.len() - 1]);
+
+        // Then: the sample after the last is the first again, so the seam is
+        // smooth only if the cycle approaches zero from below.
+        assert_eq!(first, 0);
+        assert!(last < 0, "the cycle must approach zero from below");
     }
 
     #[test]
     fn the_peak_is_a_quarter_of_the_way_through() {
-        assert_eq!(SINE[SINE.len() / 4], PEAK);
-        assert_eq!(SINE[3 * SINE.len() / 4], -PEAK);
+        // Given
+        let cycle = &SINE;
+
+        // When
+        let quarters = (cycle[cycle.len() / 4], cycle[3 * cycle.len() / 4]);
+
+        // Then
+        assert_eq!(quarters, (PEAK, -PEAK));
     }
 
     /// A DC offset would heat the speaker coil.
     #[test]
     fn the_cycle_has_no_direct_current() {
-        let sum: i32 = SINE.iter().map(|&s| i32::from(s)).sum();
+        // Given
+        let cycle = &SINE;
+
+        // When
+        let sum: i32 = cycle.iter().map(|&s| i32::from(s)).sum();
+
+        // Then
         assert_eq!(sum, 0);
     }
 
     /// The second half is the negative of the first.
     #[test]
     fn the_second_half_mirrors_the_first() {
-        let half = SINE.len() / 2;
-        for i in 0..half {
-            assert_eq!(SINE[i], -SINE[i + half], "at {i}");
-        }
+        // Given
+        let (first, second) = SINE.split_at(SINE.len() / 2);
+
+        // When
+        let second_negated: [i16; SINE.len() / 2] = core::array::from_fn(|i| -second[i]);
+
+        // Then
+        assert_eq!(first, second_negated);
     }
 
     #[test]
     fn the_tone_is_the_rate_divided_by_the_cycle() {
-        assert_eq!(TONE_HZ, 1_000);
+        // Given: a cycle of SINE's length, repeated at SAMPLE_RATE_HZ
+
+        // When
+        let tone = TONE_HZ;
+
+        // Then
+        assert_eq!(tone, 1_000);
     }
 }
