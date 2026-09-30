@@ -202,6 +202,9 @@ impl<'b, S: PageSource, D: OpusDecode> TafDecoder<'b, S, D> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use std::vec::Vec;
+
     use super::*;
     use teddiebox_taf::SlicePages;
 
@@ -217,18 +220,20 @@ mod tests {
         TafDecoder::open(SlicePages::new(taf).unwrap(), decoder, buffers).unwrap()
     }
 
-    /// Records what it was asked to decode and emits silence, so the container
-    /// plumbing can be tested without libopus.
-    struct StubDecoder {
-        calls: usize,
-        saw_opus_header: bool,
+    /// Keeps every packet it is asked to decode and emits silence, so the
+    /// container plumbing can be tested without libopus. Set to fail, it
+    /// refuses the first packet it is given.
+    #[derive(Default)]
+    struct Recorder {
+        packets: Vec<Vec<u8>>,
+        fail_first: bool,
     }
 
-    impl OpusDecode for StubDecoder {
+    impl OpusDecode for Recorder {
         fn decode(&mut self, packet: &[u8], pcm: &mut [i16]) -> Result<usize, AudioError> {
-            self.calls += 1;
-            if packet.starts_with(b"OpusHead") || packet.starts_with(b"OpusTags") {
-                self.saw_opus_header = true;
+            self.packets.push(packet.to_vec());
+            if self.fail_first && self.packets.len() == 1 {
+                return Err(AudioError::Decode);
             }
             let n = 960 * CHANNELS;
             pcm[..n].fill(0);
@@ -236,25 +241,22 @@ mod tests {
         }
     }
 
-    fn stub() -> StubDecoder {
-        StubDecoder {
-            calls: 0,
-            saw_opus_header: false,
-        }
-    }
-
     #[test]
     fn the_opus_header_packets_are_never_sent_to_the_decoder() {
         // Given
         let mut buffers = TafBuffers::new();
-        let mut dec = open(FIXTURE, stub(), &mut buffers);
+        let mut dec = open(FIXTURE, Recorder::default(), &mut buffers);
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
 
         // When: the whole stream, not just the first packet
         while dec.next_frame(&mut pcm).unwrap().is_some() {}
 
         // Then
-        assert!(!dec.decoder.saw_opus_header);
+        assert!(!dec
+            .decoder
+            .packets
+            .iter()
+            .any(|packet| packet.starts_with(b"OpusHead") || packet.starts_with(b"OpusTags")));
     }
 
     #[test]
@@ -263,7 +265,7 @@ mod tests {
         // encodes 60 ms Opus frames (2880 samples/channel): 83 x 2880 = 239040
         // samples = 4.98 s.
         let mut buffers = TafBuffers::new();
-        let mut dec = open(FIXTURE, stub(), &mut buffers);
+        let mut dec = open(FIXTURE, Recorder::default(), &mut buffers);
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
 
         // When
@@ -282,7 +284,7 @@ mod tests {
     fn rejects_a_pcm_buffer_that_is_too_small() {
         // Given
         let mut buffers = TafBuffers::new();
-        let mut dec = open(FIXTURE, stub(), &mut buffers);
+        let mut dec = open(FIXTURE, Recorder::default(), &mut buffers);
         let mut pcm = [0i16; 8];
 
         // When
@@ -298,7 +300,7 @@ mod tests {
     fn the_decoder_reports_the_chapter_it_is_playing() {
         // Given
         let mut buffers = TafBuffers::new();
-        let mut dec = open(CHAPTERS, stub(), &mut buffers);
+        let mut dec = open(CHAPTERS, Recorder::default(), &mut buffers);
         assert_eq!(dec.chapter(), 0);
 
         // When
@@ -314,7 +316,7 @@ mod tests {
     fn the_decoder_returns_to_the_page_it_reported() {
         // Given: the page chapter 2 starts on, then a seek away from it
         let mut buffers = TafBuffers::new();
-        let mut dec = open(CHAPTERS, stub(), &mut buffers);
+        let mut dec = open(CHAPTERS, Recorder::default(), &mut buffers);
         dec.seek_to_chapter(2).unwrap();
         let page = dec.page();
         dec.seek_to_chapter(0).unwrap();
@@ -328,33 +330,8 @@ mod tests {
         assert_eq!(dec.chapter(), 2, "and it is back in that chapter");
     }
 
-    /// Records the last packet it was asked to decode, so a test can see
-    /// where in the file the decoder is.
-    struct LastPacket {
-        buf: [u8; MAX_PACKET],
-        len: usize,
-    }
-    impl OpusDecode for LastPacket {
-        fn decode(&mut self, packet: &[u8], pcm: &mut [i16]) -> Result<usize, AudioError> {
-            self.buf[..packet.len()].copy_from_slice(packet);
-            self.len = packet.len();
-            let n = 960 * CHANNELS;
-            pcm[..n].fill(0);
-            Ok(n)
-        }
-    }
-
-    fn chapters_decoder(
-        buffers: &mut TafBuffers,
-    ) -> TafDecoder<'_, SlicePages<'static>, LastPacket> {
-        open(
-            CHAPTERS,
-            LastPacket {
-                buf: [0u8; MAX_PACKET],
-                len: 0,
-            },
-            buffers,
-        )
+    fn chapters_decoder(buffers: &mut TafBuffers) -> TafDecoder<'_, SlicePages<'static>, Recorder> {
+        open(CHAPTERS, Recorder::default(), buffers)
     }
 
     #[test]
@@ -406,19 +383,16 @@ mod tests {
     /// nothing.
     #[test]
     fn going_back_from_the_first_chapter_starts_it_again() {
-        // Given: the first packet noted, then two more decoded
+        // Given: three packets decoded, the last unlike the first
         let mut buffers = TafBuffers::new();
         let mut dec = chapters_decoder(&mut buffers);
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
-        dec.next_frame(&mut pcm).unwrap();
-        let mut first = [0u8; MAX_PACKET];
-        let first_len = dec.decoder.len;
-        first[..first_len].copy_from_slice(&dec.decoder.buf[..first_len]);
-        dec.next_frame(&mut pcm).unwrap();
-        dec.next_frame(&mut pcm).unwrap();
+        for _ in 0..3 {
+            dec.next_frame(&mut pcm).unwrap();
+        }
+        let first = dec.decoder.packets[0].clone();
         assert_ne!(
-            &dec.decoder.buf[..dec.decoder.len],
-            &first[..first_len],
+            dec.decoder.packets[2], first,
             "the fixture must have moved on, or this proves nothing"
         );
 
@@ -428,7 +402,7 @@ mod tests {
 
         // Then
         assert_eq!(back, Ok(0));
-        assert_eq!(&dec.decoder.buf[..dec.decoder.len], &first[..first_len]);
+        assert_eq!(dec.decoder.packets.last(), Some(&first));
     }
 
     #[test]
@@ -441,27 +415,7 @@ mod tests {
         let mut expected = [0u8; MAX_PACKET];
         let expected_len = direct.next_packet(&mut expected).unwrap().unwrap();
 
-        /// Records the first packet it is asked to decode.
-        struct CapturingDecoder {
-            first_packet: Option<([u8; MAX_PACKET], usize)>,
-        }
-        impl OpusDecode for CapturingDecoder {
-            fn decode(&mut self, packet: &[u8], pcm: &mut [i16]) -> Result<usize, AudioError> {
-                if self.first_packet.is_none() {
-                    let mut buf = [0u8; MAX_PACKET];
-                    buf[..packet.len()].copy_from_slice(packet);
-                    self.first_packet = Some((buf, packet.len()));
-                }
-                let n = 960 * CHANNELS;
-                pcm[..n].fill(0);
-                Ok(n)
-            }
-        }
-        let mut dec = open(
-            CHAPTERS,
-            CapturingDecoder { first_packet: None },
-            &mut buffers,
-        );
+        let mut dec = open(CHAPTERS, Recorder::default(), &mut buffers);
 
         // When
         dec.seek_to_chapter(1).unwrap();
@@ -469,9 +423,8 @@ mod tests {
         dec.next_frame(&mut pcm).unwrap();
 
         // Then
-        let (buf, len) = dec.decoder.first_packet.expect("decode was called");
         assert_eq!(
-            &buf[..len],
+            dec.decoder.packets[0],
             &expected[..expected_len],
             "expected chapter 1's first packet, got a different one \
              (the positional header skip re-triggered after a seek)"
@@ -491,30 +444,11 @@ mod tests {
         let mut expected = [0u8; MAX_PACKET];
         let expected_len = direct.next_packet(&mut expected).unwrap().unwrap();
 
-        /// Fails to decode the first packet it sees, then records the next.
-        struct FlakyDecoder {
-            calls: usize,
-            second_packet: Option<([u8; MAX_PACKET], usize)>,
-        }
-        impl OpusDecode for FlakyDecoder {
-            fn decode(&mut self, packet: &[u8], pcm: &mut [i16]) -> Result<usize, AudioError> {
-                self.calls += 1;
-                if self.calls == 1 {
-                    return Err(AudioError::Decode);
-                }
-                let mut buf = [0u8; MAX_PACKET];
-                buf[..packet.len()].copy_from_slice(packet);
-                self.second_packet = Some((buf, packet.len()));
-                let n = 960 * CHANNELS;
-                pcm[..n].fill(0);
-                Ok(n)
-            }
-        }
         let mut dec = open(
             FIXTURE,
-            FlakyDecoder {
-                calls: 0,
-                second_packet: None,
+            Recorder {
+                fail_first: true,
+                ..Recorder::default()
             },
             &mut buffers,
         );
@@ -527,12 +461,8 @@ mod tests {
         // Then
         assert_eq!(failed, Err(AudioError::Decode));
         assert!(resumed.is_some());
-        let (buf, len) = dec
-            .decoder
-            .second_packet
-            .expect("second call should have decoded a packet");
         assert_eq!(
-            &buf[..len],
+            dec.decoder.packets[1],
             &expected[..expected_len],
             "a decode error should consume the failed packet, so the next \
              call must resume at the following packet, not repeat it"
@@ -566,27 +496,7 @@ mod tests {
             }
         }
 
-        /// Records the first packet it is asked to decode.
-        struct CapturingDecoder {
-            first_packet: Option<([u8; MAX_PACKET], usize)>,
-        }
-        impl OpusDecode for CapturingDecoder {
-            fn decode(&mut self, packet: &[u8], pcm: &mut [i16]) -> Result<usize, AudioError> {
-                if self.first_packet.is_none() {
-                    let mut buf = [0u8; MAX_PACKET];
-                    buf[..packet.len()].copy_from_slice(packet);
-                    self.first_packet = Some((buf, packet.len()));
-                }
-                let n = 960 * CHANNELS;
-                pcm[..n].fill(0);
-                Ok(n)
-            }
-        }
-        let mut dec = open(
-            FIXTURE,
-            CapturingDecoder { first_packet: None },
-            &mut buffers,
-        );
+        let mut dec = open(FIXTURE, Recorder::default(), &mut buffers);
 
         // When
         dec.seek_to_chapter(0).unwrap();
@@ -594,9 +504,8 @@ mod tests {
         dec.next_frame(&mut pcm).unwrap();
 
         // Then
-        let (buf, len) = dec.decoder.first_packet.expect("decode was called");
         assert_eq!(
-            &buf[..len],
+            dec.decoder.packets[0],
             &expected[..expected_len],
             "chapter 0 begins at the same container block as OpusHead and OpusTags; \
              seeking there must decode the first real audio packet, identified by \
