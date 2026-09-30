@@ -191,6 +191,27 @@ mod tests {
         assert_eq!(h.audio_id, 7);
     }
 
+    /// A newer TAF may carry fields this parser does not know, in any of the
+    /// four wire types. Each is placed last, so a fixed-width one ends exactly
+    /// where the message does.
+    #[test]
+    fn skips_an_unknown_field_of_every_wire_type() {
+        // Given: audio_id 7, then an unknown field 9 of each wire type
+        let fields: [&[u8]; 4] = [
+            &[0x18, 0x07, 0x48, 0x96, 0x01],             // varint 150
+            &[0x18, 0x07, 0x49, 1, 2, 3, 4, 5, 6, 7, 8], // fixed64
+            &[0x18, 0x07, 0x4A, 0x02, 0xAA, 0xBB],       // two length-delimited bytes
+            &[0x18, 0x07, 0x4D, 1, 2, 3, 4],             // fixed32
+        ];
+
+        // When
+        let audio_ids =
+            fields.map(|fields| TonieHeader::parse(&header_page(fields)).map(|h| h.audio_id));
+
+        // Then
+        assert_eq!(audio_ids, [Ok(7); 4]);
+    }
+
     #[test]
     fn rejects_length_prefix_larger_than_the_page() {
         // Given
