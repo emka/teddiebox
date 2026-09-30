@@ -1,8 +1,8 @@
-//! Just enough HTTP to answer two routes.
+//! Just enough HTTP to answer the portal's few routes.
 //!
-//! Written by hand rather than with a server crate, because there are only
-//! two routes, and the HTTP client in `teddiebox-cloud` is written the same
-//! way.
+//! Written by hand rather than with a server crate, because the portal has
+//! one page and three posts, and the HTTP client in `teddiebox-cloud` is
+//! written the same way.
 
 use crate::MAX_BODY;
 
@@ -22,8 +22,9 @@ pub enum RequestError {
     Malformed,
     /// `Content-Length` exceeds [`MAX_BODY`], so the body is not read.
     ///
-    /// This is about the *request*, not the file inside it. A file that is too
-    /// long is refused later by `form::field`, with a clearer message.
+    /// This is about the *request*, not the file inside it. A file that fits
+    /// the request but not the box is refused later, with a clearer message:
+    /// a config by `form::field`, a certificate by its size check.
     TooLarge,
 }
 

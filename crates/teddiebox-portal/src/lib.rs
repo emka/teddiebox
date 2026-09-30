@@ -31,15 +31,13 @@ pub const MAX_CONFIG: usize = 1024;
 
 /// The largest request body this box will accept.
 ///
-/// Three times [`MAX_CONFIG`] plus room for the `config=` prefix. The form
-/// body is the file percent-encoded, and every byte outside
-/// `[A-Za-z0-9*-._]` becomes three bytes. A realistic config grows by about
-/// 1.35x; a file made only of encoded bytes grows by 3x.
+/// Sized for the config form: three times [`MAX_CONFIG`] plus room for the
+/// `config=` prefix. The form body is the file percent-encoded, and every
+/// byte outside `[A-Za-z0-9*-._]` becomes three bytes, so a smaller cap would
+/// refuse files the page can show. A file that really is too long is still
+/// refused, when [`form::field::<MAX_CONFIG>`](form::field) cannot decode it
+/// into its capacity.
 ///
-/// If the body were capped at [`MAX_CONFIG`], a file of about 760 bytes could
-/// be shown on the page but not saved back.
-///
-/// A file that really is too long is still refused, when
-/// [`form::field::<MAX_CONFIG>`](form::field) cannot decode it into its
-/// capacity.
+/// A certificate upload fits too: the firmware's largest certificate plus
+/// the multipart headers and delimiters is well under this.
 pub const MAX_BODY: usize = MAX_CONFIG * 3 + 16;
