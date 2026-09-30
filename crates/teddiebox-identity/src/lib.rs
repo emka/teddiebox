@@ -180,14 +180,26 @@ mod tests {
     const CERTIFICATE: &[u8] = b"not-a-certificate";
     const KEY: &[u8] = b"not-a-key";
 
+    /// The placeholders rendered into a 64-byte buffer, and how much of it
+    /// the image used.
+    fn rendered() -> ([u8; 64], usize) {
+        let mut image = [0u8; 64];
+        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        (image, len)
+    }
+
     /// What the tool writes is what the box reads.
     #[test]
     fn a_rendered_image_parses_back_to_what_it_held() {
+        // Given
         let mut image = [0xFFu8; 64];
         let len = render(CERTIFICATE, KEY, &mut image).unwrap();
         assert_eq!(len, HEADER + CERTIFICATE.len() + KEY.len());
 
+        // When
         let header = parse_header(&image, image.len()).unwrap();
+
+        // Then
         assert_eq!(header.certificate_len, CERTIFICATE.len());
         assert_eq!(header.key_len, KEY.len());
         assert_eq!(
@@ -205,89 +217,118 @@ mod tests {
     /// arrived; the checksum catches it.
     #[test]
     fn a_body_that_does_not_match_its_checksum_is_refused() {
-        let mut image = [0u8; 64];
-        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        // Given
+        let (image, len) = rendered();
         let header = parse_header(&image, len).unwrap();
-
         let mut torn = image;
         torn[HEADER] ^= 0xFF;
-        let certificate = &torn[header.certificate_offset()..header.key_offset()];
-        let key = &torn[header.key_offset()..header.total_len()];
-        assert_eq!(
-            verify(&header, certificate, key),
-            Err(IdentityError::Corrupt)
+
+        // When
+        let verified = verify(
+            &header,
+            &torn[header.certificate_offset()..header.key_offset()],
+            &torn[header.key_offset()..header.total_len()],
         );
+
+        // Then
+        assert_eq!(verified, Err(IdentityError::Corrupt));
     }
 
     #[test]
     fn an_intact_image_verifies() {
-        let mut image = [0u8; 64];
-        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        // Given
+        let (image, len) = rendered();
         let header = parse_header(&image, len).unwrap();
-        let certificate = &image[header.certificate_offset()..header.key_offset()];
-        let key = &image[header.key_offset()..header.total_len()];
-        assert_eq!(verify(&header, certificate, key), Ok(()));
+
+        // When
+        let verified = verify(
+            &header,
+            &image[header.certificate_offset()..header.key_offset()],
+            &image[header.key_offset()..header.total_len()],
+        );
+
+        // Then
+        assert_eq!(verified, Ok(()));
     }
 
     /// An image from before the checksum existed is refused.
     #[test]
     fn an_image_from_the_version_before_the_checksum_is_refused() {
-        let mut image = [0u8; 64];
-        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        // Given
+        let (mut image, len) = rendered();
         image[4..6].copy_from_slice(&1u16.to_le_bytes());
-        assert_eq!(
-            parse_header(&image[..len], len),
-            Err(IdentityError::Version)
-        );
+
+        // When
+        let parsed = parse_header(&image[..len], len);
+
+        // Then
+        assert_eq!(parsed, Err(IdentityError::Version));
     }
 
     /// An unprovisioned box, which is normal, not a fault.
     #[test]
     fn erased_flash_is_blank_rather_than_malformed() {
+        // Given
         let image = [0xFFu8; 64];
-        assert_eq!(parse_header(&image, image.len()), Err(IdentityError::Blank));
+
+        // When
+        let parsed = parse_header(&image, image.len());
+
+        // Then
+        assert_eq!(parsed, Err(IdentityError::Blank));
     }
 
     #[test]
     fn something_that_is_not_ours_is_refused_by_its_magic() {
-        let mut image = [0u8; 64];
-        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        // Given
+        let (mut image, len) = rendered();
         image[0] = b'X';
-        assert_eq!(parse_header(&image[..len], len), Err(IdentityError::Magic));
+
+        // When
+        let parsed = parse_header(&image[..len], len);
+
+        // Then
+        assert_eq!(parsed, Err(IdentityError::Magic));
     }
 
     /// A layout change is refused, not misread.
     #[test]
     fn a_version_this_firmware_does_not_know_is_refused() {
-        let mut image = [0u8; 64];
-        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        // Given
+        let (mut image, len) = rendered();
         image[4..6].copy_from_slice(&(VERSION + 1).to_le_bytes());
-        assert_eq!(
-            parse_header(&image[..len], len),
-            Err(IdentityError::Version)
-        );
+
+        // When
+        let parsed = parse_header(&image[..len], len);
+
+        // Then
+        assert_eq!(parsed, Err(IdentityError::Version));
     }
 
     #[test]
     fn a_body_longer_than_the_buffers_is_refused() {
-        let mut image = [0u8; 64];
-        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        // Given
+        let (mut image, len) = rendered();
         image[6..8].copy_from_slice(&((MAX_BODY + 1) as u16).to_le_bytes());
-        assert_eq!(
-            parse_header(&image[..len], len),
-            Err(IdentityError::TooLong)
-        );
+
+        // When
+        let parsed = parse_header(&image[..len], len);
+
+        // Then
+        assert_eq!(parsed, Err(IdentityError::TooLong));
     }
 
     /// Stops a body read from running past the end of the partition.
     #[test]
     fn an_image_claiming_more_than_it_has_is_refused() {
-        let mut image = [0u8; 64];
-        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
-        assert_eq!(
-            parse_header(&image[..len], len - 1),
-            Err(IdentityError::Truncated)
-        );
+        // Given
+        let (image, len) = rendered();
+
+        // When
+        let parsed = parse_header(&image[..len], len - 1);
+
+        // Then
+        assert_eq!(parsed, Err(IdentityError::Truncated));
     }
 
     /// The other tests write with `render` and read with `parse_header`, so a
@@ -295,9 +336,13 @@ mod tests {
     /// exact bytes, written by hand.
     #[test]
     fn a_rendered_image_matches_the_documented_byte_layout() {
+        // Given
         let mut image = [0u8; 64];
+
+        // When
         let len = render(CERTIFICATE, KEY, &mut image).unwrap();
 
+        // Then
         #[rustfmt::skip]
         let expected: [u8; 42] = [
             // 0x00-0x03: magic "TBID"
@@ -320,35 +365,43 @@ mod tests {
             // key: "not-a-key"
             b'n', b'o', b't', b'-', b'a', b'-', b'k', b'e', b'y',
         ];
-
-        assert_eq!(len, expected.len());
         assert_eq!(&image[..len], &expected[..]);
     }
 
     #[test]
     fn a_zero_length_body_is_refused() {
-        let mut image = [0u8; 64];
-        let len = render(CERTIFICATE, KEY, &mut image).unwrap();
+        // Given
+        let (mut image, len) = rendered();
         image[8..10].copy_from_slice(&0u16.to_le_bytes());
-        assert_eq!(parse_header(&image[..len], len), Err(IdentityError::Empty));
+
+        // When
+        let parsed = parse_header(&image[..len], len);
+
+        // Then
+        assert_eq!(parsed, Err(IdentityError::Empty));
     }
 
     #[test]
     fn a_header_that_did_not_all_arrive_is_refused() {
-        let mut image = [0u8; 64];
-        render(CERTIFICATE, KEY, &mut image).unwrap();
-        assert_eq!(
-            parse_header(&image[..HEADER - 1], HEADER - 1),
-            Err(IdentityError::Truncated)
-        );
+        // Given
+        let (image, _) = rendered();
+
+        // When
+        let parsed = parse_header(&image[..HEADER - 1], HEADER - 1);
+
+        // Then
+        assert_eq!(parsed, Err(IdentityError::Truncated));
     }
 
     #[test]
     fn rendering_refuses_a_buffer_it_would_overrun() {
+        // Given
         let mut image = [0u8; HEADER + 4];
-        assert_eq!(
-            render(CERTIFICATE, KEY, &mut image),
-            Err(IdentityError::Truncated)
-        );
+
+        // When
+        let rendered = render(CERTIFICATE, KEY, &mut image);
+
+        // Then
+        assert_eq!(rendered, Err(IdentityError::Truncated));
     }
 }
