@@ -409,6 +409,21 @@ mod tests {
         assert_eq!(&big_enough[..n.min(8)], b"OpusHead");
     }
 
+    #[test]
+    fn a_buffer_exactly_the_packets_size_is_big_enough() {
+        // Given: the OpusHead packet is 19 bytes
+        let mut page = [0u8; PAGE_SIZE];
+        let mut r = open(FIXTURE, &mut page);
+        let mut exact = [0u8; 19];
+
+        // When
+        let read = r.next_packet(&mut exact);
+
+        // Then
+        assert_eq!(read, Ok(Some(19)));
+        assert_eq!(&exact[..8], b"OpusHead");
+    }
+
     /// Builds a minimal TAF header page with the given protobuf field bytes.
     /// A copy of the private helper in `header.rs`.
     fn header_page(fields: &[u8]) -> [u8; PAGE_SIZE] {
