@@ -856,6 +856,21 @@ mod tests {
         assert!(matches!(opened, Err(TafError::TruncatedFile)));
     }
 
+    /// The check must be exact: a file one page short is as cut off as one
+    /// ten pages short.
+    #[test]
+    fn a_file_one_page_short_of_its_declared_length_is_rejected_as_truncated() {
+        // Given: sine.taf's fifteen pages, cut to fourteen
+        let mut page = [0u8; PAGE_SIZE];
+        let truncated = &FIXTURE[..PAGE_SIZE * 14];
+
+        // When
+        let opened = TafReader::open(SlicePages::new(truncated).unwrap(), &mut page);
+
+        // Then
+        assert!(matches!(opened, Err(TafError::TruncatedFile)));
+    }
+
     #[test]
     fn both_real_fixtures_still_open_and_yield_their_existing_packet_counts() {
         // Given
