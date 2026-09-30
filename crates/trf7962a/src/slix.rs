@@ -120,8 +120,14 @@ mod tests {
     /// plate.
     #[test]
     fn the_random_number_request_is_not_addressed_to_a_uid() {
+        // Given: nothing to address it to yet
+
+        // When
+        let request = get_random_number_request();
+
+        // Then
         assert_eq!(
-            get_random_number_request(),
+            request,
             [0x02, 0xB2, 0x04],
             "the UID is what an unlock does not yet know"
         );
@@ -129,14 +135,25 @@ mod tests {
 
     #[test]
     fn the_password_request_is_not_addressed_to_a_uid() {
-        assert_eq!(&set_password_request(0, 0)[..3], &[0x02, 0xB3, 0x04]);
+        // Given
+        let (password, random) = (0, 0);
+
+        // When
+        let request = set_password_request(password, random);
+
+        // Then
+        assert_eq!(&request[..3], &[0x02, 0xB3, 0x04]);
     }
 
     #[test]
     fn the_password_is_masked_with_the_random_number_in_both_halves() {
-        let request = set_password_request(0x0000_0000, 0xABCD);
-        // With a zero password, the result is the mask itself: the two
-        // random bytes in the order the tag sent them, repeated.
+        // Given: with a zero password, the result is the mask itself
+        let (password, random) = (0x0000_0000, 0xABCD);
+
+        // When
+        let request = set_password_request(password, random);
+
+        // Then: the two random bytes in the order the tag sent them, repeated
         assert_eq!(&request[4..], &[0xCD, 0xAB, 0xCD, 0xAB]);
     }
 
@@ -145,13 +162,25 @@ mod tests {
     /// plate.
     #[test]
     fn the_password_goes_on_the_air_most_significant_byte_first() {
-        let request = set_password_request(0x1122_3344, 0x0000);
+        // Given: with no mask, the password shows through
+        let (password, random) = (0x1122_3344, 0x0000);
+
+        // When
+        let request = set_password_request(password, random);
+
+        // Then
         assert_eq!(&request[4..], &[0x11, 0x22, 0x33, 0x44]);
     }
 
     #[test]
     fn the_request_carries_the_privacy_password_identifier() {
-        let request = set_password_request(1, 1);
+        // Given
+        let (password, random) = (1, 1);
+
+        // When
+        let request = set_password_request(password, random);
+
+        // Then
         assert_eq!(request[3], PASSWORD_ID_PRIVACY);
     }
 
@@ -159,7 +188,13 @@ mod tests {
     /// is the irreversible DESTROY, so a typo in the constant must be caught.
     #[test]
     fn the_privacy_request_carries_the_enable_privacy_command_and_not_destroy() {
-        let request = enable_privacy_request(0, 0);
+        // Given
+        let (password, random) = (0, 0);
+
+        // When
+        let request = enable_privacy_request(password, random);
+
+        // Then
         assert_eq!(request[1], 0xBA, "0xB9 is DESTROY");
     }
 
@@ -168,8 +203,15 @@ mod tests {
     /// byte. The Address flag must stay clear.
     #[test]
     fn the_privacy_request_is_never_addressed_to_a_uid() {
+        // Given
+        let (password, random) = (0, 0);
+
+        // When
+        let request = enable_privacy_request(password, random);
+
+        // Then
         assert_eq!(
-            &enable_privacy_request(0, 0)[..3],
+            &request[..3],
             &[0x02, 0xBA, 0x04],
             "the Address flag is what keeps a slip to DESTROY inert"
         );
@@ -179,7 +221,13 @@ mod tests {
     /// masked password follows the manufacturer code directly.
     #[test]
     fn the_privacy_request_masks_the_password_with_no_identifier_byte() {
-        let request = enable_privacy_request(0x1122_3344, 0x0000);
+        // Given: with no mask, the password shows through
+        let (password, random) = (0x1122_3344, 0x0000);
+
+        // When
+        let request = enable_privacy_request(password, random);
+
+        // Then
         assert_eq!(&request[3..], &[0x11, 0x22, 0x33, 0x44]);
         assert_eq!(request.len(), 7);
     }
