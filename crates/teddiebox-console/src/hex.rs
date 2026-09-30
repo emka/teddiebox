@@ -65,13 +65,13 @@ mod tests {
     #[test]
     fn either_case_of_letter_is_accepted() {
         // Given
-        let (upper, lower) = (b"ABCDEF01", b"abcdef01");
+        let texts: [&[u8]; 2] = [b"ABCDEF01", b"abcdef01"];
 
         // When
-        let values = (u32_from_hex(upper), u32_from_hex(lower));
+        let values = texts.map(u32_from_hex);
 
         // Then
-        assert_eq!(values.0, values.1);
+        assert_eq!(values, [Some(0xABCD_EF01); 2]);
     }
 
     /// Seven digits is a typo, not a shorter password.
