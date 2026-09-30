@@ -1,4 +1,4 @@
-//! The setup portal: one page, one form, one lease.
+//! The setup portal: one page, its forms, one lease.
 //!
 //! Started by holding both ears while powering on. While it runs, the box
 //! plays nothing: no decoder, codec, NFC or media loop.
@@ -6,7 +6,7 @@
 //! See [`REQUEST`] and [`place`] for where its memory comes from.
 //!
 //! The wire formats are in `teddiebox_portal` and tested on the host. This
-//! file has the access point, the sockets, the card, and the save order.
+//! file has the access point, the sockets, the card, and the write order.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -20,6 +20,7 @@ use esp_hal::peripherals::{GPIO44, UART0, WIFI};
 use esp_hal::uart::{Config as UartConfig, ConfigError, UartRx};
 use teddiebox_console::{Command, CommandWatch};
 use teddiebox_core::{heapless, LedState};
+use teddiebox_portal::page::Message;
 use teddiebox_portal::submission::{examine, Submission};
 use teddiebox_portal::{dhcp, http, page, MAX_BODY, MAX_CONFIG};
 
@@ -78,13 +79,13 @@ const REQUEST: usize = MAX_BODY + HEAD_ROOM;
 
 /// Raises the access point and serves until it is done with.
 ///
-/// Never returns. It resets the box itself once a config has been saved, or
-/// once [`SETUP_WINDOW`] is up; if the radio will not start at all it stops
+/// Never returns. It resets the box itself on Restart, or once
+/// [`SETUP_WINDOW`] is up; if the radio will not start at all it stops
 /// where it stands instead.
 ///
 /// `card` is an `Option` because the access point is still useful without a
 /// card (a loose card is a common reason to use setup mode). Without a card
-/// the page says so and only saving is refused.
+/// the page says so and only writing is refused.
 ///
 /// `paint` sets the LED. `main` owns the LED controller and passes a closure
 /// instead, since this never reaches `main`'s loop.
@@ -245,7 +246,7 @@ async fn stay_put() -> ! {
 
 /// Answers one connection at a time on port 80, for as long as it is polled.
 ///
-/// Never returns. [`run`] ends the portal after its time window, and a save
+/// Never returns. [`run`] ends the portal after its time window, and Restart
 /// resets the box from inside the handler.
 async fn serve_http(stack: Stack<'_>, card: Option<&Mounted>) {
     // The portal's buffers: 1536 + 1536 + 4112 here, `CHUNK` in `send_page`,
@@ -277,7 +278,9 @@ async fn serve_http(stack: Stack<'_>, card: Option<&Mounted>) {
 async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut [u8]) {
     let filled = match receive(socket, buffer).await {
         Received::Request(filled) => filled,
-        Received::Refused(status, why) => return send_page(socket, status, b"", Some(why)).await,
+        Received::Refused(status, why) => {
+            return send_page(socket, status, b"", Some(Message::Error(why))).await
+        }
         Received::Gone => return,
     };
 
@@ -290,7 +293,7 @@ async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut
             socket,
             http::Status::BadRequest,
             b"",
-            Some("that request did not make sense to the box"),
+            Some(Message::Error("that request did not make sense to the box")),
         )
         .await;
     };
@@ -310,8 +313,9 @@ async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut
         (http::Method::Get, "/") => show(socket, card).await,
         (http::Method::Post, "/config") => {
             let body = &buffer[request.header_len..request.header_len + request.content_length];
-            save(socket, card, body).await
+            write_config(socket, card, body).await
         }
+        (http::Method::Post, "/restart") => restart(socket).await,
         // Everything else gets an empty 404. A phone probing `/generate_204`
         // or `/hotspot-detect.html` then correctly reports no internet.
         _ => send(socket, http::Status::NotFound, b"").await,
@@ -378,7 +382,7 @@ async fn receive(socket: &mut TcpSocket<'_>, buffer: &mut [u8]) -> Received {
 ///
 /// The whole file is parsed before writing, so `teddiebox_config` decides
 /// what is valid, and a file that was already broken is not saved. As in
-/// `save`: check first, then write.
+/// `write_config`: check first, then write.
 fn rewrite_setup_password(card: Option<&Mounted>, value: Option<&str>) -> bool {
     let Some(card) = card else {
         esp_println::println!("teddiebox: setup no card to write to");
@@ -484,7 +488,7 @@ const NO_CARD: &str = "the box could not read its card — check it is pushed in
 /// `GET /` — the card's file, in the box, as it is.
 async fn show(socket: &mut TcpSocket<'_>, card: Option<&Mounted>) {
     let Some(card) = card else {
-        return respond_page(socket, b"", Some(NO_CARD)).await;
+        return respond_page(socket, b"", Some(Message::Error(NO_CARD))).await;
     };
 
     let mut config = [0u8; MAX_CONFIG];
@@ -492,47 +496,51 @@ async fn show(socket: &mut TcpSocket<'_>, card: Option<&Mounted>) {
         // `Ok(0)` is a card with no config yet, as on a new box: show an empty
         // textarea, not an error.
         Ok(filled) => respond_page(socket, &config[..filled], None).await,
-        Err(why) => respond_page(socket, b"", Some(why)).await,
+        Err(why) => respond_page(socket, b"", Some(Message::Error(why))).await,
     }
 }
 
-/// `POST /config` — decode, validate, write, reset.
+/// `POST /config` — decode, validate, write, and show the page again.
 ///
 /// [`examine`] decides what the submission means (tested on the host); this
 /// handles the card and the socket.
-async fn save(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, body: &[u8]) {
+async fn write_config(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, body: &[u8]) {
     let submitted = match examine(body) {
         Submission::Refuse(why) => return respond_error(socket, why).await,
-        Submission::HandBack(bytes, why) => return respond_page(socket, &bytes, Some(why)).await,
+        Submission::HandBack(bytes, why) => {
+            return respond_page(socket, &bytes, Some(Message::Error(why))).await
+        }
         Submission::Write(bytes) => bytes,
     };
 
     // Checked after decoding, so a config typed without a card is still
     // checked and shown back, not lost.
     let Some(card) = card else {
-        return respond_page(socket, &submitted, Some(NO_CARD)).await;
+        return respond_page(socket, &submitted, Some(Message::Error(NO_CARD))).await;
     };
 
     match card.write_config(&submitted) {
-        // Only reset after a successful write. After a failure the box stays
-        // here so it can be tried again.
         Ok(()) => {
-            esp_println::println!(
-                "teddiebox: portal wrote {} bytes — restarting",
-                submitted.len()
-            );
-            respond_saved(socket).await;
-            crate::drain_console();
-            Timer::after(SETTLE).await;
-            esp_hal::system::software_reset();
+            esp_println::println!("teddiebox: portal wrote {} bytes", submitted.len());
+            let written = Some(Message::Notice("config.txt written"));
+            respond_page(socket, &submitted, written).await
         }
-        Err(why) => respond_page(socket, &submitted, Some(why)).await,
+        Err(why) => respond_page(socket, &submitted, Some(Message::Error(why))).await,
     }
 }
 
+/// `POST /restart` — say so, then reset into a normal boot.
+async fn restart(socket: &mut TcpSocket<'_>) {
+    esp_println::println!("teddiebox: portal restarting");
+    respond_restarting(socket).await;
+    crate::drain_console();
+    Timer::after(SETTLE).await;
+    esp_hal::system::software_reset();
+}
+
 /// The page, with whatever should be in the textarea and whatever went wrong.
-async fn respond_page(socket: &mut TcpSocket<'_>, config: &[u8], error: Option<&str>) {
-    send_page(socket, http::Status::Ok, config, error).await
+async fn respond_page(socket: &mut TcpSocket<'_>, config: &[u8], message: Option<Message<'_>>) {
+    send_page(socket, http::Status::Ok, config, message).await
 }
 
 /// The page again, but as a refusal, with nothing in the textarea.
@@ -540,24 +548,30 @@ async fn respond_page(socket: &mut TcpSocket<'_>, config: &[u8], error: Option<&
 /// For a form that did not decode or is not text. Browsers do not send
 /// either, so nothing typed is lost.
 async fn respond_error(socket: &mut TcpSocket<'_>, message: &str) {
-    send_page(socket, http::Status::BadRequest, b"", Some(message)).await
+    send_page(
+        socket,
+        http::Status::BadRequest,
+        b"",
+        Some(Message::Error(message)),
+    )
+    .await
 }
 
 /// The last thing the phone sees before the network disappears.
 ///
-/// Its own page rather than [`page::pieces`], which always has the form: a
-/// Save button would be pointless while the box reboots.
-async fn respond_saved(socket: &mut TcpSocket<'_>) {
-    send(socket, http::Status::Ok, SAVED.as_bytes()).await
+/// Its own page rather than [`page::pieces`]: the forms are pointless while
+/// the box reboots.
+async fn respond_restarting(socket: &mut TcpSocket<'_>) {
+    send(socket, http::Status::Ok, RESTARTING.as_bytes()).await
 }
 
 /// Self-contained, like `page.rs`: the phone cannot load anything from the
 /// internet on this network.
-const SAVED: &str = "<!doctype html><html><head><meta charset=\"utf-8\">\
+const RESTARTING: &str = "<!doctype html><html><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <title>teddiebox setup</title><style>\
 body{font:16px system-ui;margin:0;padding:1rem;background:#f6f5f3;color:#1a1a1a}\
-</style></head><body><h1>saved</h1>\
+</style></head><body><h1>restarting</h1>\
 <p>The box is restarting. This network will disappear on its own.</p>\
 </body></html>";
 
@@ -577,13 +591,13 @@ async fn send_page(
     socket: &mut TcpSocket<'_>,
     status: http::Status,
     config: &[u8],
-    error: Option<&str>,
+    message: Option<Message<'_>>,
 ) {
-    let head = http::head(status, page::length(config, error));
+    let head = http::head(status, page::length(config, message));
     if write_all(socket, &head).await.is_err() {
         return;
     }
-    for piece in page::pieces(config, error) {
+    for piece in page::pieces(config, message) {
         let sent = match piece {
             page::Piece::Literal(text) => write_all(socket, text.as_bytes()).await,
             page::Piece::Escaped(bytes) => write_escaped(socket, bytes).await,

@@ -14,7 +14,7 @@ use heapless::Vec;
 
 /// How many [`Piece`]s a page is ever made of.
 ///
-/// The head, three for the error paragraph, the form's two halves, and the
+/// The head, three for the message paragraph, the form's two halves, and the
 /// config between them.
 const PIECES: usize = 7;
 
@@ -36,30 +36,45 @@ padding:.5rem;box-sizing:border-box}\
 button{font:16px system-ui;padding:.6rem 1.2rem;margin-top:.75rem}\
 .error{background:#fde8e6;border-left:4px solid #c0392b;padding:.6rem;\
 margin-bottom:.75rem}\
+.notice{background:#e6f4ea;border-left:4px solid #2e7d32;padding:.6rem;\
+margin-bottom:.75rem}\
 </style></head><body><h1>config.txt</h1>";
 
+/// A line shown above the form: what went wrong, or what was done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Message<'a> {
+    Error(&'a str),
+    Notice(&'a str),
+}
+
 const ERROR_OPEN: &str = "<p class=\"error\">";
-const ERROR_CLOSE: &str = "</p>";
+const NOTICE_OPEN: &str = "<p class=\"notice\">";
+const MESSAGE_CLOSE: &str = "</p>";
 
 const FORM_OPEN: &str = "<form method=\"post\" action=\"/config\">\
 <textarea name=\"config\" spellcheck=\"false\" autocapitalize=\"off\">";
 
-const FORM_CLOSE: &str = "</textarea><button type=\"submit\">Save and restart</button>\
-</form></body></html>";
+const FORM_CLOSE: &str = "</textarea><button type=\"submit\">Write config.txt</button>\
+</form><form method=\"post\" action=\"/restart\">\
+<button type=\"submit\">Restart</button></form></body></html>";
 
 /// The page, in the order it goes out.
 ///
-/// The card's bytes go in the textarea, with the error (if any) above it.
+/// The card's bytes go in the textarea, with the message (if any) above it.
 /// Nothing is copied: the pieces borrow, and the caller writes them.
-pub fn pieces<'a>(config: &'a [u8], error: Option<&'a str>) -> Vec<Piece<'a>, PIECES> {
+pub fn pieces<'a>(config: &'a [u8], message: Option<Message<'a>>) -> Vec<Piece<'a>, PIECES> {
     let mut out = Vec::new();
     // The vector has room for all `PIECES`, so no push can fail. `let _ =`
     // rather than `unwrap`, to avoid a panic path in the firmware.
     let _ = out.push(Piece::Literal(HEAD));
-    if let Some(message) = error {
-        let _ = out.push(Piece::Literal(ERROR_OPEN));
-        let _ = out.push(Piece::Escaped(message.as_bytes()));
-        let _ = out.push(Piece::Literal(ERROR_CLOSE));
+    if let Some(message) = message {
+        let (open, text) = match message {
+            Message::Error(text) => (ERROR_OPEN, text),
+            Message::Notice(text) => (NOTICE_OPEN, text),
+        };
+        let _ = out.push(Piece::Literal(open));
+        let _ = out.push(Piece::Escaped(text.as_bytes()));
+        let _ = out.push(Piece::Literal(MESSAGE_CLOSE));
     }
     let _ = out.push(Piece::Literal(FORM_OPEN));
     let _ = out.push(Piece::Escaped(config));
@@ -70,8 +85,8 @@ pub fn pieces<'a>(config: &'a [u8], error: Option<&'a str>) -> Vec<Piece<'a>, PI
 /// How many bytes [`pieces`] will produce once escaped.
 ///
 /// Needed before anything is written, for the `Content-Length` header.
-pub fn length(config: &[u8], error: Option<&str>) -> usize {
-    pieces(config, error)
+pub fn length(config: &[u8], message: Option<Message<'_>>) -> usize {
+    pieces(config, message)
         .iter()
         .map(|piece| match piece {
             Piece::Literal(text) => text.len(),
@@ -144,9 +159,9 @@ mod tests {
     ///
     /// The chunk is only eight bytes, just over the longest escape, so every
     /// test crosses chunk boundaries.
-    fn page_of(config: &[u8], error: Option<&str>) -> StdVec<u8> {
+    fn page_of(config: &[u8], message: Option<Message<'_>>) -> StdVec<u8> {
         let mut out = StdVec::new();
-        for piece in pieces(config, error) {
+        for piece in pieces(config, message) {
             match piece {
                 Piece::Literal(text) => out.extend_from_slice(text.as_bytes()),
                 Piece::Escaped(bytes) => {
@@ -164,8 +179,8 @@ mod tests {
         out
     }
 
-    fn text_of(config: &[u8], error: Option<&str>) -> String {
-        String::from_utf8(page_of(config, error)).unwrap()
+    fn text_of(config: &[u8], message: Option<Message<'_>>) -> String {
+        String::from_utf8(page_of(config, message)).unwrap()
     }
 
     #[test]
@@ -189,6 +204,46 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_is_shown_apart_from_an_error() {
+        // Given
+        let message = Message::Notice("config.txt written");
+
+        // When
+        let text = text_of(b"", Some(message));
+
+        // Then
+        assert!(text.contains("<p class=\"notice\">config.txt written</p>"));
+        assert!(!text.contains("class=\"error\""));
+    }
+
+    #[test]
+    fn the_write_button_does_not_promise_a_restart() {
+        // Given
+        let config = b"";
+
+        // When
+        let text = text_of(config, None);
+
+        // Then
+        assert!(text.contains(">Write config.txt</button>"));
+        assert!(!text.contains("Save and restart"));
+    }
+
+    #[test]
+    fn restarting_is_its_own_post() {
+        // Given
+        let config = b"";
+
+        // When
+        let text = text_of(config, None);
+
+        // Then
+        assert!(text.contains(
+            "<form method=\"post\" action=\"/restart\"><button type=\"submit\">Restart</button></form>"
+        ));
+    }
+
+    #[test]
     fn markup_in_the_file_is_escaped() {
         let text = text_of(b"ssid = <b>&\"x\"", None);
         assert!(text.contains("&lt;b&gt;&amp;&quot;x&quot;"));
@@ -206,7 +261,7 @@ mod tests {
 
     #[test]
     fn an_error_is_shown_when_there_is_one() {
-        assert!(text_of(b"", Some("ssid is missing")).contains("ssid is missing"));
+        assert!(text_of(b"", Some(Message::Error("ssid is missing"))).contains("ssid is missing"));
     }
 
     #[test]
@@ -216,7 +271,7 @@ mod tests {
 
     #[test]
     fn markup_in_the_error_is_escaped_too() {
-        let text = text_of(b"", Some("<script>x</script>"));
+        let text = text_of(b"", Some(Message::Error("<script>x</script>")));
         assert!(text.contains("&lt;script&gt;x&lt;/script&gt;"));
         assert!(!text.contains("<script"));
     }
@@ -233,13 +288,14 @@ mod tests {
     /// the phone would wait for missing bytes or read too far.
     #[test]
     fn the_promised_length_is_the_length_that_arrives() {
-        for (config, error) in [
+        for (config, message) in [
             (&b""[..], None),
             (&b"ssid = x\n"[..], None),
-            (&b"pass = a&b<c>d\"e\n"[..], Some("a & b")),
-            (&[b'"'; 1024][..], Some("<<<")),
+            (&b"pass = a&b<c>d\"e\n"[..], Some(Message::Error("a & b"))),
+            (&b"ssid = x\n"[..], Some(Message::Notice("a & b"))),
+            (&[b'"'; 1024][..], Some(Message::Error("<<<"))),
         ] {
-            assert_eq!(length(config, error), page_of(config, error).len());
+            assert_eq!(length(config, message), page_of(config, message).len());
         }
     }
 

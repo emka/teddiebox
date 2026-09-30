@@ -152,10 +152,11 @@ plain text anyway.
    starts a WiFi network instead of playing.
 2. Join `teddiebox-setup` with passphrase `teddiebox`.
 3. Open <http://192.168.4.1/>. It shows `config.txt` for editing.
-4. Press **Save and restart**. The file is checked first; errors are shown on
-   the page. The box then restarts.
+4. Press **Write config.txt**. The file is checked first; errors are shown on
+   the page and nothing is written.
+5. Press **Restart** to leave setup mode with the new settings.
 
-Setup mode ends by itself after ten minutes, or when saving.
+Setup mode also ends by itself after ten minutes.
 
 Security:
 
