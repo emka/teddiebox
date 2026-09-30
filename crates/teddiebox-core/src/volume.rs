@@ -274,6 +274,19 @@ mod tests {
     }
 
     #[test]
+    fn stepping_down_decreases_by_one() {
+        // Given
+        let mut v = VolumeModel::new(4);
+
+        // When
+        let stepped = v.down();
+
+        // Then
+        assert_eq!(stepped, Some(Volume(1)));
+        assert_eq!(v.current(), Volume(1));
+    }
+
+    #[test]
     fn stepping_down_stops_at_silence() {
         // Given
         let mut v = VolumeModel::new(2);
