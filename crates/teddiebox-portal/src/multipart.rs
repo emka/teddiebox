@@ -122,15 +122,19 @@ Content-Type: application/octet-stream\r\n\
     }
 
     #[test]
-    fn a_crlf_dash_dash_inside_the_file_does_not_end_it() {
-        // Given
-        let (content_type, body) = (CHROME_TYPE, CHROME_BODY);
+    fn only_the_whole_delimiter_ends_the_file() {
+        // Given: a file holding `\r\n--` and the first half of the boundary.
+        let body = b"------WebKitFormBoundary7MA4YWxkTrZu0gW\r\n\
+Content-Disposition: form-data; name=\"ca\"; filename=\"ca.der\"\r\n\
+\r\n\
+\x30\r\n------WebKitFormBound\x01\
+\r\n------WebKitFormBoundary7MA4YWxkTrZu0gW--\r\n";
 
         // When
-        let got = file(Some(content_type), body).unwrap();
+        let got = file(Some(CHROME_TYPE), body);
 
         // Then
-        assert_eq!(got.len(), 8);
+        assert_eq!(got, Ok(&b"\x30\r\n------WebKitFormBound\x01"[..]));
     }
 
     #[test]
