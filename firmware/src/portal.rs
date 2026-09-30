@@ -27,7 +27,7 @@ use teddiebox_portal::{dhcp, http, multipart, page, MAX_BODY, MAX_CONFIG};
 
 use crate::net;
 use crate::stack;
-use crate::storage::Mounted;
+use crate::storage::{CertificateError, Mounted};
 use crate::tls;
 
 /// How long the box will sit with its radio up before restarting itself.
@@ -640,10 +640,18 @@ body{font:16px system-ui;margin:0;padding:1rem;background:#f6f5f3;color:#1a1a1a}
 </body></html>";
 
 /// What the page says about the card's `CERT/TCCA.DER`.
-fn ca_status(card: Option<&Mounted>) -> heapless::String<16> {
+fn ca_status(card: Option<&Mounted>) -> heapless::String<{ page::CA_STATUS }> {
+    use page::CaOnCard;
+
     let mut certificate = [0u8; tls::CERT_BYTES];
-    let len = card.and_then(|card| card.read_certificate("TCCA.DER", &mut certificate).ok());
-    page::ca_status(len)
+    let found = match card.map(|card| card.read_certificate("TCCA.DER", &mut certificate)) {
+        None | Some(Err(CertificateError::Missing)) => CaOnCard::Missing,
+        Some(Err(CertificateError::TooLarge)) => CaOnCard::TooLarge,
+        Some(Err(CertificateError::Unreadable)) => CaOnCard::Unreadable,
+        Some(Ok(n)) if tls::is_certificate(&certificate[..n]) => CaOnCard::Certificate(n),
+        Some(Ok(n)) => CaOnCard::NotACertificate(n),
+    };
+    page::ca_status(found)
 }
 
 /// How much of an escaped run is held at a time.

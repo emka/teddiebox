@@ -69,17 +69,38 @@ const RESTART: &str = "<form method=\"post\" action=\"/restart\">\
 <button type=\"submit\">Restart</button></form></body></html>";
 
 /// What the page says about the card's `cert/tcca.der`.
-pub fn ca_status(len: Option<usize>) -> heapless::String<16> {
+pub fn ca_status(card: CaOnCard) -> heapless::String<CA_STATUS> {
     use core::fmt::Write;
 
     let mut out = heapless::String::new();
-    // Sixteen bytes hold ten digits and " bytes"; a certificate the box
-    // accepts has at most four.
-    let _ = match len {
-        Some(n) => write!(out, "{n} bytes"),
-        None => write!(out, "missing"),
+    let _ = match card {
+        CaOnCard::Certificate(n) => write!(out, "{n} bytes"),
+        CaOnCard::Missing => write!(out, "missing"),
+        CaOnCard::TooLarge => write!(out, "too large"),
+        CaOnCard::Unreadable => write!(out, "unreadable"),
+        CaOnCard::NotACertificate(n) => write!(out, "{n} bytes, not a certificate"),
     };
     out
+}
+
+/// Room for the longest [`ca_status`]: a size no larger than
+/// [`crate::MAX_BODY`] and ", not a certificate".
+pub const CA_STATUS: usize = 40;
+
+/// What the card holds at `cert/tcca.der`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaOnCard {
+    /// A certificate, this many bytes long.
+    Certificate(usize),
+    /// No file there, or no card.
+    Missing,
+    /// A file larger than any certificate the box can hold.
+    TooLarge,
+    /// A file the card would not give back.
+    Unreadable,
+    /// A file this many bytes long that does not parse as a certificate,
+    /// such as one cut short by a failed write.
+    NotACertificate(usize),
 }
 
 /// The page, in the order it goes out.
@@ -319,10 +340,10 @@ mod tests {
     #[test]
     fn a_certificate_on_the_card_is_described_by_its_size() {
         // Given
-        let len = Some(787);
+        let card = CaOnCard::Certificate(787);
 
         // When
-        let status = ca_status(len);
+        let status = ca_status(card);
 
         // Then
         assert_eq!(status.as_str(), "787 bytes");
@@ -331,13 +352,49 @@ mod tests {
     #[test]
     fn no_certificate_on_the_card_is_described_as_missing() {
         // Given
-        let len = None;
+        let card = CaOnCard::Missing;
 
         // When
-        let status = ca_status(len);
+        let status = ca_status(card);
 
         // Then
         assert_eq!(status.as_str(), "missing");
+    }
+
+    #[test]
+    fn a_file_too_large_for_the_box_is_described_as_such() {
+        // Given
+        let card = CaOnCard::TooLarge;
+
+        // When
+        let status = ca_status(card);
+
+        // Then
+        assert_eq!(status.as_str(), "too large");
+    }
+
+    #[test]
+    fn a_file_that_will_not_read_is_described_as_unreadable() {
+        // Given
+        let card = CaOnCard::Unreadable;
+
+        // When
+        let status = ca_status(card);
+
+        // Then
+        assert_eq!(status.as_str(), "unreadable");
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_certificate_is_described_by_its_size_and_why() {
+        // Given
+        let card = CaOnCard::NotACertificate(1536);
+
+        // When
+        let status = ca_status(card);
+
+        // Then
+        assert_eq!(status.as_str(), "1536 bytes, not a certificate");
     }
 
     #[test]

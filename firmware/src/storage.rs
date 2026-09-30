@@ -92,6 +92,28 @@ const CACHE_DIR: &str = "CACHE";
 /// `cert` flash partition. Already an 8.3 name.
 const CERT_DIR: &str = "CERT";
 
+/// Why a certificate could not be read off the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertificateError {
+    /// No `CERT` directory, or no file of that name in it.
+    Missing,
+    /// Larger than the buffer, so not one the box can use.
+    TooLarge,
+    /// The card would not give it back.
+    Unreadable,
+}
+
+impl CertificateError {
+    /// Says what went wrong, for the console.
+    pub fn why(self) -> &'static str {
+        match self {
+            CertificateError::Missing => "no CERT/TCCA.DER on the card",
+            CertificateError::TooLarge => "the certificate is larger than its buffer",
+            CertificateError::Unreadable => "the certificate would not read",
+        }
+    }
+}
+
 /// Why the card's configuration could not be used.
 ///
 /// Three cases with different meanings: no file (normal on a new card), a
@@ -923,24 +945,28 @@ impl Mounted {
     ///
     /// Returns how many bytes were read. A read that fills the buffer is
     /// refused rather than cut short, since part of a certificate is useless.
-    pub fn read_certificate(&self, name: &str, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    pub fn read_certificate(
+        &self,
+        name: &str,
+        buffer: &mut [u8],
+    ) -> Result<usize, CertificateError> {
         let dir = self
             .volumes
             .open_dir(self.root, CERT_DIR)
-            .map_err(|_| "no CERT directory on the card")?;
+            .map_err(|_| CertificateError::Missing)?;
         let file = self.volumes.open_file_in_dir(dir, name, Mode::ReadOnly);
         let _ = self.volumes.close_dir(dir);
-        let file = file.map_err(|_| "no such certificate")?;
+        let file = file.map_err(|_| CertificateError::Missing)?;
 
         let mut filled = 0;
         let outcome = loop {
             if filled == buffer.len() {
-                break Err("the certificate is larger than its buffer");
+                break Err(CertificateError::TooLarge);
             }
             match self.volumes.read(file, &mut buffer[filled..]) {
                 Ok(0) => break Ok(filled),
                 Ok(n) => filled += n,
-                Err(_) => break Err("the certificate would not read"),
+                Err(_) => break Err(CertificateError::Unreadable),
             }
         };
         self.close_file(file);
