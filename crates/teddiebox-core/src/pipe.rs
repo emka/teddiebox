@@ -87,10 +87,16 @@ mod tests {
 
     #[test]
     fn what_goes_in_comes_out_in_order() {
+        // Given
         let mut pipe: Pipe<8> = Pipe::new();
         assert_eq!(pipe.write(b"abcd"), 4);
+
+        // When
         let mut out = [0u8; 4];
-        assert_eq!(pipe.read(&mut out), 4);
+        let given = pipe.read(&mut out);
+
+        // Then
+        assert_eq!(given, 4);
         assert_eq!(&out, b"abcd");
         assert!(pipe.is_empty());
     }
@@ -98,11 +104,17 @@ mod tests {
     /// A short write tells the producer the pipe is full.
     #[test]
     fn a_write_that_does_not_fit_takes_what_it_can_and_says_so() {
+        // Given
         let mut pipe: Pipe<4> = Pipe::new();
-        assert_eq!(pipe.write(b"abcdef"), 4);
-        assert_eq!(pipe.free(), 0);
-        assert_eq!(pipe.write(b"gh"), 0, "a full pipe takes nothing");
 
+        // When
+        let taken = pipe.write(b"abcdef");
+        let taken_when_full = pipe.write(b"gh");
+
+        // Then
+        assert_eq!(taken, 4);
+        assert_eq!(pipe.free(), 0);
+        assert_eq!(taken_when_full, 0, "a full pipe takes nothing");
         let mut out = [0u8; 6];
         assert_eq!(pipe.read(&mut out), 4);
         assert_eq!(
@@ -115,9 +127,15 @@ mod tests {
     /// An empty pipe is normal between bursts from the server.
     #[test]
     fn reading_an_empty_pipe_yields_nothing_rather_than_failing() {
+        // Given
         let mut pipe: Pipe<8> = Pipe::new();
+
+        // When
         let mut out = [0u8; 4];
-        assert_eq!(pipe.read(&mut out), 0);
+        let given = pipe.read(&mut out);
+
+        // Then
+        assert_eq!(given, 0);
     }
 
     /// After a partial read the queue starts partway along the array, so the
@@ -125,19 +143,21 @@ mod tests {
     /// and none may be overwritten.
     #[test]
     fn bytes_survive_wrapping_around_the_end_of_the_buffer() {
+        // Given: two bytes queued, with the head at index 4
         let mut pipe: Pipe<8> = Pipe::new();
         assert_eq!(pipe.write(b"abcdef"), 6);
-
         let mut first = [0u8; 4];
         assert_eq!(pipe.read(&mut first), 4);
         assert_eq!(&first, b"abcd");
 
-        // Two bytes queued, head sitting at index 4: this wraps.
-        assert_eq!(pipe.write(b"ghijk"), 5);
-        assert_eq!(pipe.len(), 7);
-
+        // When: a write that wraps past the end, and a read of everything
+        let taken = pipe.write(b"ghijk");
         let mut rest = [0u8; 7];
-        assert_eq!(pipe.read(&mut rest), 7);
+        let given = pipe.read(&mut rest);
+
+        // Then
+        assert_eq!(taken, 5);
+        assert_eq!(given, 7);
         assert_eq!(&rest, b"efghijk", "the wrap reordered or clobbered bytes");
     }
 
@@ -145,32 +165,42 @@ mod tests {
     /// records, the card takes pages.
     #[test]
     fn many_small_writes_drain_as_one_run() {
+        // Given
         let mut pipe: Pipe<16> = Pipe::new();
-        for chunk in [b"ab".as_slice(), b"cde", b"f", b"ghij"] {
-            assert_eq!(pipe.write(chunk), chunk.len());
-        }
+        let chunks = [b"ab".as_slice(), b"cde", b"f", b"ghij"];
+
+        // When
+        let taken = chunks.map(|chunk| pipe.write(chunk));
         let mut out = [0u8; 16];
-        assert_eq!(pipe.read(&mut out), 10);
+        let given = pipe.read(&mut out);
+
+        // Then
+        assert_eq!(taken, [2, 3, 1, 4]);
+        assert_eq!(given, 10);
         assert_eq!(&out[..10], b"abcdefghij");
     }
 
     /// Repeated writes and reads, so the indices wrap many times.
     #[test]
     fn a_pipe_stays_correct_over_many_wraps() {
+        // Given
         let mut pipe: Pipe<8> = Pipe::new();
-        let mut expected = 0u8;
         let mut next = 0u8;
+        let mut drained = [0u8; 150];
+        let mut count = 0;
+
+        // When: rounds of writing up to five bytes and reading up to three
         for _ in 0..50 {
             let batch: [u8; 5] = core::array::from_fn(|i| next.wrapping_add(i as u8));
-            let taken = pipe.write(&batch);
-            next = next.wrapping_add(taken as u8);
-
-            let mut out = [0u8; 3];
-            let given = pipe.read(&mut out);
-            for &byte in &out[..given] {
-                assert_eq!(byte, expected, "stream came out of order");
-                expected = expected.wrapping_add(1);
-            }
+            next = next.wrapping_add(pipe.write(&batch) as u8);
+            count += pipe.read(&mut drained[count..count + 3]);
         }
+
+        // Then
+        let in_order = drained[..count]
+            .iter()
+            .enumerate()
+            .all(|(i, &byte)| byte == i as u8);
+        assert!(in_order, "stream came out of order");
     }
 }
