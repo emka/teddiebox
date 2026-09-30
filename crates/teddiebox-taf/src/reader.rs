@@ -561,18 +561,16 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_seek_still_reports_the_right_error() {
+    fn a_failed_seek_reports_the_right_error() {
         // Given: chapter 0 at ogg page 0 (file page 1, holding two packets);
         // chapter 1 at ogg page 1 (file page 2, deliberately not a real Ogg
         // page at all). data_length (field 2) = 8192 = two pages, so chapter
         // 1 fails because page 2 is not an Ogg page, not because it is out
         // of range.
         //
-        // `load_page` reads straight into `self.page` (no separate
-        // candidate buffer — see its own doc comment), so a failed seek no
-        // longer guarantees the reader is still positioned where it was;
-        // this crate's one caller always stops on any `Err` here rather
-        // than reading on, and this test only pins the error itself.
+        // `load_page` reads straight into the reader's one block, so after a
+        // failed seek the reader's position is not defined. The one caller
+        // stops on any `Err` here, so this test pins only the error.
         let mut page = [0u8; PAGE_SIZE];
         let mut file = [0u8; PAGE_SIZE * 3];
         file[0..PAGE_SIZE]
