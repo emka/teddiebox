@@ -267,26 +267,43 @@ mod tests {
         gates
     }
 
-    /// The LED has no orange channel; orange is red and green together.
-    /// Lighting only red would look like a fault.
+    /// Each colour as the red (GPIO19), green (GPIO18) and blue (GPIO17) pin
+    /// levels it drives. Literal pins, so swapped channels fail.
     #[test]
-    fn orange_lights_the_red_and_green_channels_together() {
+    fn each_colour_lights_its_own_channels() {
         // Given
         let gates = powered();
+        let colours = [
+            Colour::Off,
+            Colour::Red,
+            Colour::Green,
+            Colour::Blue,
+            Colour::Orange,
+            Colour::Cyan,
+            Colour::Magenta,
+        ];
 
         // When
-        let levels = gates.led(Colour::Orange).expect("the rail is up");
+        let lit = colours.map(|colour| {
+            let levels = gates.led(colour).expect("the rail is up");
+            (colour, levels.map(|level| (level.gpio, level.high)))
+        });
 
         // Then
-        for level in levels {
-            let lit = level.high == LED_ACTIVE_HIGH;
-            match level.gpio {
-                LED_RED => assert!(lit, "red is half of orange"),
-                LED_GREEN => assert!(lit, "green is the other half"),
-                LED_BLUE => assert!(!lit, "blue would wash it out to white"),
-                other => panic!("unexpected channel {other}"),
-            }
-        }
+        assert_eq!(
+            lit,
+            [
+                (Colour::Off, [(19, false), (18, false), (17, false)]),
+                (Colour::Red, [(19, true), (18, false), (17, false)]),
+                (Colour::Green, [(19, false), (18, true), (17, false)]),
+                (Colour::Blue, [(19, false), (18, false), (17, true)]),
+                // No orange channel: red and green together. Blue would wash
+                // it out to white; red alone would look like a fault.
+                (Colour::Orange, [(19, true), (18, true), (17, false)]),
+                (Colour::Cyan, [(19, false), (18, true), (17, true)]),
+                (Colour::Magenta, [(19, true), (18, false), (17, true)]),
+            ]
+        );
     }
 
     /// The two rails have opposite polarity. Getting one backwards leaves the
@@ -404,105 +421,6 @@ mod tests {
 
         // Then
         assert_eq!(levels, Err(NotPowered));
-    }
-
-    #[test]
-    fn red_lights_only_the_red_channel() {
-        // Given
-        let gates = powered();
-
-        // When
-        let levels = gates.led(Colour::Red);
-
-        // Then
-        assert_eq!(
-            levels,
-            Ok([
-                PinLevel {
-                    gpio: 19,
-                    high: true
-                },
-                PinLevel {
-                    gpio: 18,
-                    high: false
-                },
-                PinLevel {
-                    gpio: 17,
-                    high: false
-                },
-            ])
-        );
-    }
-
-    #[test]
-    fn off_darkens_every_channel() {
-        // Given
-        let gates = powered();
-
-        // When
-        let levels = gates.led(Colour::Off).unwrap();
-
-        // Then
-        assert!(levels.iter().all(|p| !p.high));
-    }
-
-    /// Together with the blue test, catches `LED_GREEN` and `LED_BLUE` being
-    /// swapped.
-    #[test]
-    fn green_lights_only_the_green_channel() {
-        // Given
-        let gates = powered();
-
-        // When
-        let levels = gates.led(Colour::Green);
-
-        // Then
-        assert_eq!(
-            levels,
-            Ok([
-                PinLevel {
-                    gpio: 19,
-                    high: false
-                },
-                PinLevel {
-                    gpio: 18,
-                    high: true
-                },
-                PinLevel {
-                    gpio: 17,
-                    high: false
-                },
-            ])
-        );
-    }
-
-    /// See `green_lights_only_the_green_channel`.
-    #[test]
-    fn blue_lights_only_the_blue_channel() {
-        // Given
-        let gates = powered();
-
-        // When
-        let levels = gates.led(Colour::Blue);
-
-        // Then
-        assert_eq!(
-            levels,
-            Ok([
-                PinLevel {
-                    gpio: 19,
-                    high: false
-                },
-                PinLevel {
-                    gpio: 18,
-                    high: false
-                },
-                PinLevel {
-                    gpio: 17,
-                    high: true
-                },
-            ])
-        );
     }
 
     /// Literal values, so the test can disagree with the code.
