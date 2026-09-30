@@ -15,13 +15,26 @@ const FIXTURE: &[u8] = include_bytes!("data/sine.taf");
 
 #[test]
 fn file_is_a_whole_number_of_pages() {
-    assert_eq!(FIXTURE.len() % PAGE_SIZE, 0);
-    assert!(FIXTURE.len() >= 2 * PAGE_SIZE);
+    // Given
+    let file = FIXTURE;
+
+    // When
+    let (whole_pages, leftover) = (file.len() / PAGE_SIZE, file.len() % PAGE_SIZE);
+
+    // Then
+    assert_eq!(leftover, 0);
+    assert!(whole_pages >= 2);
 }
 
 #[test]
 fn header_page_starts_with_big_endian_protobuf_length() {
-    let len = u32::from_be_bytes(FIXTURE[0..4].try_into().unwrap()) as usize;
+    // Given
+    let file = FIXTURE;
+
+    // When
+    let len = u32::from_be_bytes(file[0..4].try_into().unwrap()) as usize;
+
+    // Then
     assert!(len > 0);
     assert!(len <= PAGE_SIZE - 4);
 }
@@ -32,7 +45,13 @@ fn header_page_starts_with_big_endian_protobuf_length() {
 /// `header_tail_is_zero_padded_inside_the_protobuf_message` below.
 #[test]
 fn header_protobuf_message_fills_the_entire_page() {
-    let len = u32::from_be_bytes(FIXTURE[0..4].try_into().unwrap()) as usize;
+    // Given
+    let file = FIXTURE;
+
+    // When
+    let len = u32::from_be_bytes(file[0..4].try_into().unwrap()) as usize;
+
+    // Then
     assert_eq!(
         4 + len,
         PAGE_SIZE,
@@ -47,7 +66,13 @@ fn header_protobuf_message_fills_the_entire_page() {
 /// it does not depend on the exact offset.
 #[test]
 fn header_tail_is_zero_padded_inside_the_protobuf_message() {
-    let tail = &FIXTURE[PAGE_SIZE - 4000..PAGE_SIZE];
+    // Given
+    let file = FIXTURE;
+
+    // When
+    let tail = &file[PAGE_SIZE - 4000..PAGE_SIZE];
+
+    // Then
     assert!(
         tail.iter().all(|&b| b == 0x00),
         "expected zero padding in the tail of the header protobuf message, not 0xFF"
@@ -56,15 +81,22 @@ fn header_tail_is_zero_padded_inside_the_protobuf_message() {
 
 #[test]
 fn every_page_after_the_header_is_an_ogg_page() {
-    for (i, page) in FIXTURE
+    // Given
+    let file = FIXTURE;
+
+    // When
+    let not_ogg: Vec<usize> = file
         .as_chunks::<PAGE_SIZE>()
         .0
         .iter()
         .enumerate()
         .skip(1)
-    {
-        assert_eq!(&page[0..4], b"OggS", "page {i} is not an Ogg page");
-    }
+        .filter(|(_, page)| &page[0..4] != b"OggS")
+        .map(|(i, _)| i)
+        .collect();
+
+    // Then
+    assert_eq!(not_ogg, Vec::<usize>::new(), "pages that are not Ogg pages");
 }
 
 /// Every Ogg page in the file — including the small ones packed in behind
@@ -75,15 +107,20 @@ fn every_page_after_the_header_is_an_ogg_page() {
 /// `TafReader::check_stream` enforces it.
 #[test]
 fn every_ogg_page_carries_the_audio_id_as_its_stream_serial() {
+    // Given
+    let file = FIXTURE;
+
+    // When
     let mut serials = Vec::new();
     let mut offset = PAGE_SIZE;
-    while let Some(found) = find_capture_pattern(FIXTURE, offset) {
+    while let Some(found) = find_capture_pattern(file, offset) {
         serials.push(u32::from_le_bytes(
-            FIXTURE[found + 14..found + 18].try_into().unwrap(),
+            file[found + 14..found + 18].try_into().unwrap(),
         ));
         offset = found + 1;
     }
 
+    // Then
     assert!(
         serials.len() > 1,
         "expected several pages, found {serials:?}"
@@ -103,8 +140,13 @@ fn find_capture_pattern(data: &[u8], from: usize) -> Option<usize> {
 
 #[test]
 fn the_real_fixture_header_parses() {
+    // Given
     let page: &[u8; PAGE_SIZE] = FIXTURE[0..PAGE_SIZE].try_into().unwrap();
+
+    // When
     let h = teddiebox_taf::TonieHeader::parse(page).expect("header should parse");
+
+    // Then
     assert_eq!(
         h.audio_id, 0x1234_5678,
         "audio id the fixture was written with"
