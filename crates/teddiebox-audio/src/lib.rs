@@ -241,6 +241,20 @@ mod tests {
         }
     }
 
+    /// Every fixture uses 60 ms frames, but Opus allows 120 ms, and a story
+    /// encoded that way would not fit a smaller buffer.
+    #[test]
+    fn the_pcm_buffer_holds_the_longest_opus_frame() {
+        // Given: 120 ms at 48 kHz, in stereo
+        let longest_frame = 120 * 48 * 2;
+
+        // When
+        let room = MAX_FRAME_SAMPLES;
+
+        // Then
+        assert_eq!(room, longest_frame);
+    }
+
     #[test]
     fn the_opus_header_packets_are_never_sent_to_the_decoder() {
         // Given
