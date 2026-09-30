@@ -1,7 +1,7 @@
 #![no_std]
 
-//! The setup portal's wire formats: the one page it serves, the form it takes
-//! back, and the four DHCP messages it answers.
+//! The setup portal's wire formats: the one page it serves, the config form
+//! and the uploaded file it takes back, and the four DHCP messages it answers.
 //!
 //! Everything here is bytes in and bytes out, so it can be tested on the host.
 //! The parts that need hardware — the access point, the sockets, the SD card —
@@ -15,6 +15,7 @@ extern crate std;
 pub mod dhcp;
 pub mod form;
 pub mod http;
+pub mod multipart;
 pub mod page;
 pub mod submission;
 
