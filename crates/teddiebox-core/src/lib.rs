@@ -1057,17 +1057,32 @@ mod tests {
         c.note_in_use(true);
 
         // When
-        let during = c.handle(Event::Tick(60 * 60 * 1_000), &Index);
+        let actions = c.handle(Event::Tick(60 * 60 * 1_000), &Index);
+
+        // Then
+        assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
+    }
+
+    /// A job longer than the idle timeout must not switch the box off the
+    /// moment it ends.
+    #[test]
+    fn the_idle_countdown_starts_when_the_firmware_is_done() {
+        // Given: an hour of something only the firmware can see, then done
+        let mut c = core();
+        c.handle(Event::Tick(0), &Index);
+        c.note_in_use(true);
+        c.handle(Event::Tick(60 * 60 * 1_000), &Index);
         c.note_in_use(false);
+
+        // When
         let a_second_after = c.handle(Event::Tick(60 * 60 * 1_000 + 1_000), &Index);
         let a_timeout_after = c.handle(Event::Tick(65 * 60 * 1_000 + 1), &Index);
 
         // Then
-        assert!(!contains(&during, Action::PowerOff(PowerOffReason::Idle)));
-        assert!(
-            !contains(&a_second_after, Action::PowerOff(PowerOffReason::Idle)),
-            "the countdown starts when it ended"
-        );
+        assert!(!contains(
+            &a_second_after,
+            Action::PowerOff(PowerOffReason::Idle)
+        ));
         assert!(contains(
             &a_timeout_after,
             Action::PowerOff(PowerOffReason::Idle)
