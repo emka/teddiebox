@@ -126,15 +126,17 @@ impl WavFormat {
 
     /// How long the file plays for, in milliseconds.
     ///
-    /// Used to check a test file is long enough.
+    /// Used to check a test file is long enough. Zero for a header whose
+    /// numbers cannot describe a playable file.
     pub const fn duration_ms(&self) -> u32 {
         let bytes_per_frame = self.channels as u32 * (self.bits_per_sample as u32 / 8);
-        if bytes_per_frame == 0 || self.sample_rate == 0 {
-            return 0;
-        }
         // Divide instead of multiplying by 1000, so a long file cannot
         // overflow.
-        (self.data_len / bytes_per_frame) / (self.sample_rate / 1000)
+        let frames_per_ms = self.sample_rate / 1000;
+        if bytes_per_frame == 0 || frames_per_ms == 0 {
+            return 0;
+        }
+        (self.data_len / bytes_per_frame) / frames_per_ms
     }
 }
 
@@ -229,6 +231,22 @@ mod tests {
 
         // Then
         assert_eq!(duration, 4980);
+    }
+
+    /// The firmware logs the duration of any WAV it finds before checking
+    /// that the codec can play it, so a nonsense rate must not panic.
+    #[test]
+    fn a_rate_below_one_kilohertz_has_no_duration() {
+        // Given
+        let mut file = REAL_HEADER;
+        file[24..28].copy_from_slice(&500u32.to_le_bytes());
+        let format = WavFormat::parse(&file).expect("still a valid WAV");
+
+        // When
+        let duration = format.duration_ms();
+
+        // Then
+        assert_eq!(duration, 0);
     }
 
     /// A file with an extra chunk before `fmt `, so `data` is not at offset
