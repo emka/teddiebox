@@ -20,6 +20,10 @@
 #      air. --flash-size is stated rather than detected because the same table
 #      is refused against espflash's offline 4 MB default, and that failure
 #      reads as a bad table rather than a missing flag.
+#   6. espflash writes the app into ota_0, but the bootloader boots whichever
+#      slot `otadata` selects. After an over-the-air update that is ota_1, so
+#      the flashed image would never run. Erasing `otadata` makes the
+#      bootloader fall back to ota_0.
 
 set -euo pipefail
 
@@ -103,7 +107,7 @@ if [ -n "$BIN_FILE" ]; then
 else
     echo "flash: writing $ELF"
     if ! espflash flash --port "$PORT" --before no-reset --after no-reset \
-        --flash-size 8mb --partition-table "$TABLE" \
+        --flash-size 8mb --partition-table "$TABLE" --erase-parts otadata \
         -B 921600 --non-interactive "$ELF"; then
         die "espflash failed.
      NOT running esptool — after a failed flash it leaves the box needing a
