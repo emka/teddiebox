@@ -62,44 +62,78 @@ mod tests {
     /// Real readings from the box, not derived from `charger_mv`.
     #[test]
     fn the_charger_is_seen_when_the_reading_rails_and_not_when_it_floats() {
-        assert!(
-            charger_present(4095),
-            "on the charger, railed at full scale"
-        );
-        assert!(!charger_present(1957), "nothing connected, first reading");
-        assert!(!charger_present(1933), "nothing connected, second reading");
+        // Given: on the charger, railed at full scale; then nothing connected,
+        // read twice
+        let readings = [4095, 1957, 1933];
+
+        // When
+        let present = readings.map(charger_present);
+
+        // Then
+        assert_eq!(present, [true, false, false]);
     }
 
     #[test]
     fn a_full_scale_reading_is_the_rail_times_its_divider() {
-        assert_eq!(battery_mv(ADC_MAX), 5_028);
-        assert_eq!(charger_mv(ADC_MAX), 2_514);
+        // Given
+        let full_scale = ADC_MAX;
+
+        // When
+        let mv = (battery_mv(full_scale), charger_mv(full_scale));
+
+        // Then
+        assert_eq!(mv, (5_028, 2_514));
     }
 
     #[test]
     fn a_zero_reading_is_zero_millivolts() {
-        assert_eq!(battery_mv(0), 0);
-        assert_eq!(charger_mv(0), 0);
+        // Given
+        let zero = 0;
+
+        // When
+        let mv = (battery_mv(zero), charger_mv(zero));
+
+        // Then
+        assert_eq!(mv, (0, 0));
     }
 
     /// Literal expected values, so the test can disagree with the code.
     #[test]
     fn a_midscale_reading_converts_with_its_own_divider() {
-        assert_eq!(battery_mv(2048), 2_514);
-        assert_eq!(charger_mv(1024), 628);
+        // Given
+        let (battery, charger) = (2048, 1024);
+
+        // When
+        let mv = (battery_mv(battery), charger_mv(charger));
+
+        // Then
+        assert_eq!(mv, (2_514, 628));
     }
 
     /// A reading above full scale is a broken driver, not a 20 V battery.
     #[test]
     fn a_reading_beyond_full_scale_is_clamped() {
-        assert_eq!(battery_mv(9_999), battery_mv(ADC_MAX));
+        // Given
+        let beyond = 9_999;
+
+        // When
+        let mv = battery_mv(beyond);
+
+        // Then
+        assert_eq!(mv, battery_mv(ADC_MAX));
     }
 
     /// The calibration point: the ADC read 3111 while a multimeter read 3.82 V
     /// across the pack.
     #[test]
     fn the_measured_calibration_point_reproduces_the_meter() {
-        let mv = battery_mv(3111);
+        // Given
+        let reading = 3111;
+
+        // When
+        let mv = battery_mv(reading);
+
+        // Then
         assert!(
             (3_780..=3_860).contains(&mv),
             "expected about 3820 mV, got {mv}"
