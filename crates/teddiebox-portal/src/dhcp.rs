@@ -183,10 +183,15 @@ mod tests {
     /// The parser against real bytes.
     #[test]
     fn a_real_handsets_discover_is_recognised() {
-        let got = parse(&captured_discover()).unwrap();
+        // Given
+        let datagram = captured_discover();
+
+        // When
+        let got = parse(&datagram).unwrap();
+
+        // Then: no broadcast flag, unlike the minimal fixture
         assert_eq!(got.kind, Kind::Discover);
         assert_eq!(got.chaddr, [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
-        // No broadcast flag, unlike the minimal fixture.
         assert_eq!(got.flags, [0x00, 0x00]);
         assert_eq!(got.xid, [0x64, 0xEC, 0x7F, 0x98]);
     }
@@ -217,23 +222,39 @@ mod tests {
 
     #[test]
     fn the_option_walk_reaches_a_message_type_behind_a_zero_length_option() {
-        assert_eq!(
-            parse(&discover_with_message_type_last()).unwrap().kind,
-            Kind::Discover
-        );
+        // Given
+        let datagram = discover_with_message_type_last();
+
+        // When
+        let got = parse(&datagram).unwrap();
+
+        // Then
+        assert_eq!(got.kind, Kind::Discover);
     }
 
     #[test]
     fn the_option_walk_reads_a_request_behind_a_zero_length_option() {
+        // Given: the message type, last, changed to DHCPREQUEST
         let mut d = discover_with_message_type_last();
         let last = d.len() - 2;
-        d[last] = 3; // DHCPREQUEST
-        assert_eq!(parse(&d).unwrap().kind, Kind::Request);
+        d[last] = 3;
+
+        // When
+        let got = parse(&d).unwrap();
+
+        // Then
+        assert_eq!(got.kind, Kind::Request);
     }
 
     #[test]
     fn a_discover_is_recognised() {
-        let got = parse(&discover()).unwrap();
+        // Given
+        let datagram = discover();
+
+        // When
+        let got = parse(&datagram).unwrap();
+
+        // Then
         assert_eq!(got.kind, Kind::Discover);
         assert_eq!(got.xid, [0xDE, 0xAD, 0xBE, 0xEF]);
         assert_eq!(got.chaddr, [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
@@ -242,48 +263,90 @@ mod tests {
 
     #[test]
     fn a_request_is_recognised() {
+        // Given: DHCPREQUEST
         let mut d = discover();
-        d[242] = 3; // DHCPREQUEST
-        assert_eq!(parse(&d).unwrap().kind, Kind::Request);
+        d[242] = 3;
+
+        // When
+        let got = parse(&d);
+
+        // Then
+        assert_eq!(got.map(|g| g.kind), Some(Kind::Request));
     }
 
     #[test]
     fn a_release_is_neither() {
+        // Given: DHCPRELEASE
         let mut d = discover();
-        d[242] = 7; // DHCPRELEASE
-        assert_eq!(parse(&d).unwrap().kind, Kind::Other);
+        d[242] = 7;
+
+        // When
+        let got = parse(&d);
+
+        // Then
+        assert_eq!(got.map(|g| g.kind), Some(Kind::Other));
     }
 
     #[test]
     fn a_reply_from_another_server_is_not_ours_to_answer() {
+        // Given: BOOTREPLY
         let mut d = discover();
-        d[0] = 2; // BOOTREPLY
-        assert!(parse(&d).is_none());
+        d[0] = 2;
+
+        // When
+        let got = parse(&d);
+
+        // Then
+        assert!(got.is_none());
     }
 
     #[test]
     fn a_datagram_without_the_cookie_is_not_dhcp() {
+        // Given: the cookie broken
         let mut d = discover();
         d[236] = 0;
-        assert!(parse(&d).is_none());
+
+        // When
+        let got = parse(&d);
+
+        // Then
+        assert!(got.is_none());
     }
 
     #[test]
     fn a_datagram_too_short_for_the_fixed_fields_is_refused() {
-        assert!(parse(&[0u8; 100]).is_none());
+        // Given
+        let datagram = [0u8; 100];
+
+        // When
+        let got = parse(&datagram);
+
+        // Then
+        assert!(got.is_none());
     }
 
     #[test]
     fn an_option_running_past_the_end_does_not_panic() {
+        // Given: an option whose length lies
         let mut d = discover();
-        d[240..243].copy_from_slice(&[53, 200, 1]); // length lies
-        assert!(parse(&d).is_none());
+        d[240..243].copy_from_slice(&[53, 200, 1]);
+
+        // When
+        let got = parse(&d);
+
+        // Then
+        assert!(got.is_none());
     }
 
     #[test]
     fn an_offer_is_exactly_these_bytes() {
-        let built = reply(&parse(&discover()).unwrap(), Reply::Offer);
+        // Given
+        let incoming = parse(&discover()).unwrap();
 
+        // When
+        let built = reply(&incoming, Reply::Offer);
+
+        // Then
         assert_eq!(built[0], 2); // op: BOOTREPLY
         assert_eq!(built[1], 1); // htype
         assert_eq!(built[2], 6); // hlen
@@ -306,9 +369,13 @@ mod tests {
 
     #[test]
     fn an_ack_differs_from_an_offer_only_in_its_message_type() {
+        // Given
         let incoming = parse(&discover()).unwrap();
-        let offer = reply(&incoming, Reply::Offer);
-        let ack = reply(&incoming, Reply::Ack);
+
+        // When
+        let (offer, ack) = (reply(&incoming, Reply::Offer), reply(&incoming, Reply::Ack));
+
+        // Then
         assert_eq!(offer[242], 2);
         assert_eq!(ack[242], 5);
         assert_eq!(offer[..242], ack[..242]);
@@ -319,7 +386,13 @@ mod tests {
     /// use would make it wait for one.
     #[test]
     fn no_router_or_dns_option_is_offered() {
-        let built = reply(&parse(&discover()).unwrap(), Reply::Offer);
+        // Given
+        let incoming = parse(&discover()).unwrap();
+
+        // When
+        let built = reply(&incoming, Reply::Offer);
+
+        // Then
         let options = &built[240..];
         let mut i = 0;
         while i < options.len() && options[i] != 255 {
