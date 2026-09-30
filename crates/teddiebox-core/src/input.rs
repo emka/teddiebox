@@ -113,16 +113,30 @@ mod tests {
     }
 
     #[test]
-    fn a_level_held_for_the_window_reports_one_press() {
+    fn a_level_held_for_the_window_reports_a_press() {
         // Given
         let mut button = Debounced::released();
+        button.update(true, 0);
 
         // When
-        let edges =
-            [0, DEBOUNCE_MS - 1, DEBOUNCE_MS, DEBOUNCE_MS + 100].map(|at| button.update(true, at));
+        let edges = [DEBOUNCE_MS - 1, DEBOUNCE_MS].map(|at| button.update(true, at));
 
         // Then
-        assert_eq!(edges, [None, None, Some(Edge::Pressed), None]);
+        assert_eq!(edges, [None, Some(Edge::Pressed)]);
+    }
+
+    #[test]
+    fn a_held_press_is_reported_only_once() {
+        // Given
+        let mut button = Debounced::released();
+        button.update(true, 0);
+        assert_eq!(button.update(true, DEBOUNCE_MS), Some(Edge::Pressed));
+
+        // When
+        let edge = button.update(true, DEBOUNCE_MS + 100);
+
+        // Then
+        assert_eq!(edge, None);
     }
 
     #[test]
