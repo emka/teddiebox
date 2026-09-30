@@ -95,37 +95,60 @@ mod tests {
 
     #[test]
     fn a_well_formed_descriptor_reports_its_version() {
-        assert_eq!(image_version(&WELL_FORMED).unwrap(), "0e469de");
+        // Given
+
+        // When
+        let version = image_version(&WELL_FORMED).unwrap();
+
+        // Then
+        assert_eq!(version, "0e469de");
     }
 
     #[test]
     fn the_version_field_truncates_at_the_first_nul() {
-        // Like WELL_FORMED, with a non-NUL byte inside the padding, to check
+        // Given: Like WELL_FORMED, with a non-NUL byte inside the padding, to check
         // the version ends at the *first* NUL.
         let mut head = WELL_FORMED;
         head[0x30 + 10] = b'X'; // well past "0e469de\0", inside the padding
-        assert_eq!(image_version(&head).unwrap(), "0e469de");
+
+        // When
+        let version = image_version(&head).unwrap();
+
+        // Then
+        assert_eq!(version, "0e469de");
     }
 
     #[test]
     fn a_head_shorter_than_the_descriptor_is_not_an_image() {
+        // Given
         let short = &WELL_FORMED[..0x4F];
-        assert_eq!(image_version(short), Err(OtaError::NotAnImage));
+
+        // When
+        let version = image_version(short);
+
+        // Then
+        assert_eq!(version, Err(OtaError::NotAnImage));
     }
 
     #[test]
     fn a_wrong_magic_word_is_not_an_image() {
+        // Given
         let mut head = WELL_FORMED;
         head[0x20] = 0x00;
         head[0x21] = 0x00;
         head[0x22] = 0x00;
         head[0x23] = 0x00;
-        assert_eq!(image_version(&head), Err(OtaError::NotAnImage));
+
+        // When
+        let version = image_version(&head);
+
+        // Then
+        assert_eq!(version, Err(OtaError::NotAnImage));
     }
 
     #[test]
     fn a_full_32_byte_version_with_no_nul_returns_all_32_bytes() {
-        // 0x30-0x4F filled with 'a' and no NUL: a full field needs no NUL.
+        // Given: 0x30-0x4F filled with 'a' and no NUL: a full field needs no NUL.
         #[rustfmt::skip]
         let head: [u8; 0x50] = [
             // 0x00-0x1F: image header + segment header, unread.
@@ -140,13 +163,24 @@ mod tests {
         ];
         let expected = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         assert_eq!(expected.len(), 32);
-        assert_eq!(image_version(&head).unwrap(), expected);
+
+        // When
+        let version = image_version(&head).unwrap();
+
+        // Then
+        assert_eq!(version, expected);
     }
 
     #[test]
     fn may_activate_accepts_a_matching_version() {
+        // Given
         let m = manifest("0e469de");
-        assert_eq!(may_activate(&WELL_FORMED, &m), Ok(()));
+
+        // When
+        let activation = may_activate(&WELL_FORMED, &m);
+
+        // Then
+        assert_eq!(activation, Ok(()));
     }
 
     /// A manifest version with a trailing comment (which the manifest parser
@@ -154,6 +188,7 @@ mod tests {
     /// the box would reflash forever.
     #[test]
     fn may_activate_refuses_the_manifest_image_mismatch_that_causes_the_reflash_loop() {
+        // Given
         let m = manifest("v1 # published today");
         let mut head = WELL_FORMED;
         // Overwrite the version field with "v1", NUL-padded.
@@ -162,6 +197,11 @@ mod tests {
         }
         head[0x30] = b'v';
         head[0x31] = b'1';
-        assert_eq!(may_activate(&head, &m), Err(OtaError::VersionMismatch));
+
+        // When
+        let activation = may_activate(&head, &m);
+
+        // Then
+        assert_eq!(activation, Err(OtaError::VersionMismatch));
     }
 }
