@@ -61,40 +61,63 @@ mod tests {
 
     #[test]
     fn the_promised_image_may_be_activated() {
-        assert_eq!(verify(&manifest("0e469de"), 3, &digest(ABC), &HEAD), Ok(()));
+        // Given
+        let (promised, received, computed) = (manifest("0e469de"), 3, digest(ABC));
+
+        // When
+        let verified = verify(&promised, received, &computed, &HEAD);
+
+        // Then
+        assert_eq!(verified, Ok(()));
     }
 
     #[test]
     fn a_body_shorter_than_the_manifest_length_is_refused() {
-        assert_eq!(
-            verify(&manifest("0e469de"), 2, &digest(ABC), &HEAD),
-            Err(OtaError::LengthMismatch)
-        );
+        // Given
+        let (promised, received, computed) = (manifest("0e469de"), 2, digest(ABC));
+
+        // When
+        let verified = verify(&promised, received, &computed, &HEAD);
+
+        // Then
+        assert_eq!(verified, Err(OtaError::LengthMismatch));
     }
 
     #[test]
     fn a_body_longer_than_the_manifest_length_is_refused() {
-        assert_eq!(
-            verify(&manifest("0e469de"), 4, &digest(ABC), &HEAD),
-            Err(OtaError::LengthMismatch)
-        );
+        // Given
+        let (promised, received, computed) = (manifest("0e469de"), 4, digest(ABC));
+
+        // When
+        let verified = verify(&promised, received, &computed, &HEAD);
+
+        // Then
+        assert_eq!(verified, Err(OtaError::LengthMismatch));
     }
 
     #[test]
     fn a_digest_that_differs_in_one_bit_is_refused() {
-        let mut wrong = digest(ABC);
-        wrong[31] ^= 1;
-        assert_eq!(
-            verify(&manifest("0e469de"), 3, &wrong, &HEAD),
-            Err(OtaError::DigestMismatch)
-        );
+        // Given
+        let promised = manifest("0e469de");
+        let mut computed = digest(ABC);
+        computed[31] ^= 1;
+
+        // When
+        let verified = verify(&promised, 3, &computed, &HEAD);
+
+        // Then
+        assert_eq!(verified, Err(OtaError::DigestMismatch));
     }
 
     #[test]
     fn a_genuine_image_of_another_version_is_refused() {
-        assert_eq!(
-            verify(&manifest("1234567"), 3, &digest(ABC), &HEAD),
-            Err(OtaError::VersionMismatch)
-        );
+        // Given
+        let (promised, received, computed) = (manifest("1234567"), 3, digest(ABC));
+
+        // When
+        let verified = verify(&promised, received, &computed, &HEAD);
+
+        // Then
+        assert_eq!(verified, Err(OtaError::VersionMismatch));
     }
 }
