@@ -16,7 +16,12 @@ const READER_BYTES: usize = PAGE_SIZE / 4;
 
 #[test]
 fn the_reader_stays_within_its_memory_budget() {
+    // Given: the reader as the firmware holds it
+
+    // When
     let actual = size_of::<TafReader<SlicePages>>();
+
+    // Then
     assert!(
         actual <= READER_BYTES,
         "TafReader is {actual} bytes, budget is {READER_BYTES}"
