@@ -254,108 +254,142 @@ mod tests {
     const A: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
     const B: TagUid = TagUid([9, 9, 9, 9, 9, 9, 9, 9]);
 
+    fn presence() -> Presence {
+        Presence::new(2, 4)
+    }
+
+    /// A plate on which `tag` has arrived.
+    fn holding(tag: TagUid) -> Presence {
+        let mut p = presence();
+        p.feed(Some(tag));
+        assert_eq!(p.feed(Some(tag)), Some(TagEvent::Arrived(tag)));
+        p
+    }
+
     /// One stray reading must not stop a story. While Wi-Fi is busy, the
     /// reader sometimes returns a UID that was never on the plate.
     #[test]
     fn a_single_stray_reading_of_another_tag_does_not_end_the_story() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        assert_eq!(p.feed(Some(A)), Some(TagEvent::Arrived(A)));
+        // Given
+        let mut p = holding(A);
 
-        assert_eq!(p.feed(Some(B)), None, "one reading is not a swap");
-        assert_eq!(p.feed(Some(A)), None, "the figure never left");
+        // When: one reading is not a swap, and the figure never left
+        let events = [Some(B), Some(A)].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None, None]);
     }
 
     /// Two different wrong readings in a row are two pieces of noise, not the
     /// beginning of a swap: neither has been seen twice.
     #[test]
     fn disagreeing_stray_readings_do_not_add_up_to_a_swap() {
+        // Given
         const C: TagUid = TagUid([7, 7, 7, 7, 7, 7, 7, 7]);
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
+        let mut p = holding(A);
 
-        assert_eq!(p.feed(Some(B)), None);
-        assert_eq!(p.feed(Some(C)), None);
-        assert_eq!(p.feed(Some(A)), None, "still the same figure throughout");
+        // When
+        let events = [Some(B), Some(C), Some(A)].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(
+            events,
+            [None, None, None],
+            "still the same figure throughout"
+        );
     }
 
     /// A figure lifted while a stray reading is pending still departs on the
     /// misses, so noise cannot keep a story alive after its figure is gone.
     #[test]
     fn a_lift_during_a_stray_reading_still_ends_the_story() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
+        // Given
+        let mut p = holding(A);
 
-        assert_eq!(p.feed(Some(B)), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), Some(TagEvent::Left));
+        // When
+        let events = [Some(B), None, None, None, None].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None, None, None, None, Some(TagEvent::Left)]);
     }
 
     /// Two agreeing readings, and not one before them.
     #[test]
     fn a_tag_arrives_only_once_its_readings_agree() {
-        let mut p = Presence::new(2, 4);
-        assert_eq!(p.feed(Some(A)), None);
-        assert_eq!(p.feed(Some(A)), Some(TagEvent::Arrived(A)));
+        // Given
+        let mut p = presence();
+
+        // When
+        let events = [Some(A), Some(A)].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None, Some(TagEvent::Arrived(A))]);
     }
 
     #[test]
     fn an_arrival_is_announced_once_not_on_every_reading() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
-        assert_eq!(p.feed(Some(A)), None);
-        assert_eq!(p.feed(Some(A)), None);
+        // Given
+        let mut p = holding(A);
+
+        // When
+        let events = [Some(A), Some(A)].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None, None]);
     }
 
     /// A stray reading shorter than the threshold is not a placement.
     #[test]
     fn a_flicker_below_the_threshold_produces_nothing() {
-        let mut p = Presence::new(2, 4);
-        assert_eq!(p.feed(Some(A)), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(Some(A)), None);
-        assert_eq!(p.feed(None), None);
+        // Given
+        let mut p = presence();
+
+        // When
+        let events = [Some(A), None, Some(A), None].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None; 4]);
     }
 
     /// The case that matters most: a tag that reads intermittently is still
     /// on the plate, and stopping its story would be the visible failure.
     #[test]
     fn a_tag_that_reads_three_times_in_five_stays_present() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        assert_eq!(p.feed(Some(A)), Some(TagEvent::Arrived(A)));
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(Some(A)), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(Some(A)), None);
+        // Given: the first two of the five readings, which made it arrive
+        let mut p = holding(A);
+
+        // When
+        let events = [None, Some(A), None, None, Some(A)].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None; 5]);
     }
 
     #[test]
     fn four_consecutive_misses_are_a_departure() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), Some(TagEvent::Left));
+        // Given
+        let mut p = holding(A);
+
+        // When
+        let events = [None; 4].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None, None, None, Some(TagEvent::Left)]);
     }
 
     #[test]
     fn a_departure_is_announced_once() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
+        // Given
+        let mut p = holding(A);
         for _ in 0..4 {
             p.feed(None);
         }
-        assert_eq!(p.feed(None), None);
+
+        // When
+        let event = p.feed(None);
+
+        // Then
+        assert_eq!(event, None);
     }
 
     /// Swapping figures without a gap must not look like one long presence.
@@ -363,31 +397,43 @@ mod tests {
     /// figure reports nothing.
     #[test]
     fn swapping_one_figure_for_another_leaves_before_it_arrives() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        assert_eq!(p.feed(Some(A)), Some(TagEvent::Arrived(A)));
-        assert_eq!(p.feed(Some(B)), None);
-        assert_eq!(p.feed(Some(B)), Some(TagEvent::Left));
-        assert_eq!(p.feed(Some(B)), None);
-        assert_eq!(p.feed(Some(B)), Some(TagEvent::Arrived(B)));
+        // Given
+        let mut p = holding(A);
+
+        // When
+        let events = [Some(B); 4].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(
+            events,
+            [None, Some(TagEvent::Left), None, Some(TagEvent::Arrived(B))]
+        );
     }
 
     #[test]
     fn nothing_on_an_empty_plate_is_not_a_departure() {
-        let mut p = Presence::new(2, 4);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), None);
-        assert_eq!(p.feed(None), None);
+        // Given
+        let mut p = presence();
+
+        // When
+        let events = [None; 5].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None; 5]);
     }
 
     /// Every placement starts on an empty plate, so this sets about half of
     /// how long a placement takes to be noticed.
     #[test]
     fn an_empty_plate_is_looked_at_every_200_ms() {
-        let p = Presence::new(2, 4);
-        assert_eq!(p.poll_again_in_ms(), 200);
+        // Given
+        let p = presence();
+
+        // When
+        let wait = p.poll_again_in_ms();
+
+        // Then
+        assert_eq!(wait, 200);
     }
 
     /// Waiting a whole poll for the second reading took about 500 of the
@@ -395,8 +441,13 @@ mod tests {
     /// second reading is what protects; the wait is not.
     #[test]
     fn a_first_reading_is_confirmed_at_once() {
-        let mut p = Presence::new(2, 4);
+        // Given
+        let mut p = presence();
+
+        // When
         p.feed(Some(A));
+
+        // Then
         assert_eq!(p.poll_again_in_ms(), 20);
     }
 
@@ -405,10 +456,14 @@ mod tests {
     /// 500 ms caused 4 in 47 s.
     #[test]
     fn a_figure_on_the_plate_is_looked_at_every_500_ms() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
-        assert_eq!(p.poll_again_in_ms(), 500);
+        // Given
+        let p = holding(A);
+
+        // When
+        let wait = p.poll_again_in_ms();
+
+        // Then
+        assert_eq!(wait, 500);
     }
 
     /// Corrupt readings that look like a swap happen while Wi-Fi is busy, so a
@@ -416,10 +471,13 @@ mod tests {
     /// more likely to be corrupt for the same reason.
     #[test]
     fn a_possible_swap_is_not_confirmed_at_once() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
+        // Given
+        let mut p = holding(A);
+
+        // When
         p.feed(Some(B));
+
+        // Then
         assert_eq!(p.poll_again_in_ms(), 500);
     }
 
@@ -428,10 +486,10 @@ mod tests {
     /// silence, then three quick ones to agree it.
     #[test]
     fn a_lifted_figure_is_gone_after_800_ms_of_silence() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
+        // Given
+        let mut p = holding(A);
 
+        // When
         let mut silent_ms = 0;
         loop {
             silent_ms += p.poll_again_in_ms();
@@ -439,6 +497,8 @@ mod tests {
                 break;
             }
         }
+
+        // Then
         assert_eq!(silent_ms, 800);
     }
 
@@ -446,10 +506,13 @@ mod tests {
     /// quickly. Reading quickly all through a story causes audible glitches.
     #[test]
     fn a_missed_figure_is_looked_at_again_after_100_ms() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
+        // Given
+        let mut p = holding(A);
+
+        // When
         p.feed(None);
+
+        // Then
         assert_eq!(p.poll_again_in_ms(), 100);
     }
 
@@ -457,11 +520,14 @@ mod tests {
     /// back to the slow rate.
     #[test]
     fn a_figure_answering_after_a_miss_is_looked_at_every_500_ms_again() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A));
-        p.feed(Some(A));
+        // Given
+        let mut p = holding(A);
         p.feed(None);
+
+        // When
         p.feed(Some(A));
+
+        // Then
         assert_eq!(p.poll_again_in_ms(), 500);
     }
 
@@ -469,10 +535,15 @@ mod tests {
     /// toward its own arrival, since there is no departure to report.
     #[test]
     fn a_figure_swapped_before_the_first_one_settled_starts_its_own_count() {
-        let mut p = Presence::new(2, 4);
-        p.feed(Some(A)); // A begins arriving but hasn't confirmed
-        assert_eq!(p.feed(Some(B)), None); // B displaces mid-arriving A
-        assert_eq!(p.feed(Some(B)), Some(TagEvent::Arrived(B))); // B arrives on second reading
+        // Given: A has begun arriving but has not been confirmed
+        let mut p = presence();
+        p.feed(Some(A));
+
+        // When
+        let events = [Some(B), Some(B)].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(events, [None, Some(TagEvent::Arrived(B))]);
     }
 }
 
@@ -644,78 +715,100 @@ mod plate_poll_tests {
         }
     }
 
+    /// How often each call was made: `identify`, `tag_present`, then
+    /// `inventory_unlocked`.
+    fn calls(reader: &FakeReader) -> (u8, u8, u8) {
+        (
+            reader.identify_calls,
+            reader.tag_present_calls,
+            reader.inventory_unlocked_calls,
+        )
+    }
+
+    /// A plate nothing answers.
+    fn empty_plate() -> FakeReader {
+        FakeReader::default()
+    }
+
+    /// A figure that answers whichever way it is asked: once the first poll
+    /// finds it, later polls believe it present and switch to `identify`.
+    fn figure_on_plate() -> FakeReader {
+        FakeReader {
+            tag_present: true,
+            inventory_unlocked: Some(UID),
+            identify: Some(UID),
+            ..FakeReader::default()
+        }
+    }
+
     #[test]
     fn polling_off_never_touches_the_reader() {
+        // Given
         let mut poll = PlatePoll::new(2, 4);
-        let mut reader = FakeReader::default();
+        let mut reader = figure_on_plate();
 
-        assert_eq!(poll.poll(&mut reader, false, PASSWORD, 0), None);
-        assert_eq!(reader.identify_calls, 0);
-        assert_eq!(reader.tag_present_calls, 0);
-        assert_eq!(reader.inventory_unlocked_calls, 0);
+        // When
+        let polled = poll.poll(&mut reader, false, PASSWORD, 0);
+
+        // Then
+        assert_eq!(polled, None);
+        assert_eq!(calls(&reader), (0, 0, 0));
     }
 
     #[test]
     fn not_due_yet_returns_none_without_touching_the_reader() {
+        // Given
         let mut poll = PlatePoll::new(2, 4);
-        let mut first = FakeReader::default();
-        poll.poll(&mut first, true, PASSWORD, 0);
+        poll.poll(&mut empty_plate(), true, PASSWORD, 0);
+        let mut reader = empty_plate();
 
-        let mut second = FakeReader::default();
-        assert_eq!(poll.poll(&mut second, true, PASSWORD, 0), None);
-        assert_eq!(second.identify_calls, 0);
-        assert_eq!(second.tag_present_calls, 0);
-        assert_eq!(second.inventory_unlocked_calls, 0);
+        // When
+        let polled = poll.poll(&mut reader, true, PASSWORD, 0);
+
+        // Then
+        assert_eq!(polled, None);
+        assert_eq!(calls(&reader), (0, 0, 0));
     }
 
     #[test]
     fn neither_present_nor_believed_polls_nothing_further() {
+        // Given
         let mut poll = PlatePoll::new(2, 4);
-        let mut reader = FakeReader {
-            tag_present: false,
-            ..FakeReader::default()
-        };
+        let mut reader = empty_plate();
 
+        // When
         poll.poll(&mut reader, true, PASSWORD, 0);
-        assert_eq!(reader.tag_present_calls, 1);
-        assert_eq!(reader.identify_calls, 0);
-        assert_eq!(reader.inventory_unlocked_calls, 0);
+
+        // Then
+        assert_eq!(calls(&reader), (0, 1, 0));
     }
 
     #[test]
     fn a_figure_not_yet_believed_present_is_unlocked_with_the_password() {
+        // Given
         let mut poll = PlatePoll::new(2, 4);
-        let mut reader = FakeReader {
-            tag_present: true,
-            inventory_unlocked: Some(UID),
-            ..FakeReader::default()
-        };
+        let mut reader = figure_on_plate();
 
+        // When
         poll.poll(&mut reader, true, PASSWORD, 0);
-        assert_eq!(reader.tag_present_calls, 1);
-        assert_eq!(reader.inventory_unlocked_calls, 1);
+
+        // Then
+        assert_eq!(calls(&reader), (0, 1, 1));
         assert_eq!(reader.inventory_unlocked_password, Some(PASSWORD));
-        assert_eq!(reader.identify_calls, 0);
     }
 
     #[test]
     fn a_figure_believed_present_is_only_re_identified() {
+        // Given
         let mut poll = PlatePoll::new(2, 4);
-        let mut first = FakeReader {
-            tag_present: true,
-            inventory_unlocked: Some(UID),
-            ..FakeReader::default()
-        };
-        poll.poll(&mut first, true, PASSWORD, 0); // believed_present becomes true
+        poll.poll(&mut figure_on_plate(), true, PASSWORD, 0);
+        let mut reader = figure_on_plate();
 
-        let mut second = FakeReader {
-            identify: Some(UID),
-            ..FakeReader::default()
-        };
-        poll.poll(&mut second, true, PASSWORD, 1000);
-        assert_eq!(second.identify_calls, 1);
-        assert_eq!(second.tag_present_calls, 0);
-        assert_eq!(second.inventory_unlocked_calls, 0);
+        // When
+        poll.poll(&mut reader, true, PASSWORD, 1000);
+
+        // Then
+        assert_eq!(calls(&reader), (1, 0, 0));
     }
 
     /// The documented reason polling has to reset on: without it, turning
@@ -724,129 +817,87 @@ mod plate_poll_tests {
     /// polling was off is exactly what the next poll needs to notice.
     #[test]
     fn switching_polling_on_forgets_a_previously_believed_figure() {
+        // Given: a figure believed present, then polling switched off
         let mut poll = PlatePoll::new(2, 4);
-        let mut first = FakeReader {
-            tag_present: true,
-            inventory_unlocked: Some(UID),
-            ..FakeReader::default()
-        };
-        poll.poll(&mut first, true, PASSWORD, 0); // believed_present becomes true
+        poll.poll(&mut figure_on_plate(), true, PASSWORD, 0);
+        assert_eq!(poll.poll(&mut empty_plate(), false, PASSWORD, 1000), None);
+        let mut reader = empty_plate();
 
-        let mut while_off = FakeReader::default();
-        assert_eq!(poll.poll(&mut while_off, false, PASSWORD, 1000), None);
+        // When
+        poll.poll(&mut reader, true, PASSWORD, 2000);
 
-        let mut after_on = FakeReader {
-            tag_present: false,
-            ..FakeReader::default()
-        };
-        poll.poll(&mut after_on, true, PASSWORD, 2000);
+        // Then
         assert_eq!(
-            after_on.tag_present_calls, 1,
+            calls(&reader),
+            (0, 1, 0),
             "a forgotten figure is asked for like a new one, not re-identified"
         );
-        assert_eq!(after_on.identify_calls, 0);
     }
 
     #[test]
     fn a_miss_is_not_reported_until_the_plate_answers_again() {
+        // Given
         let mut poll = PlatePoll::new(2, 4);
-        let empty = || FakeReader {
-            tag_present: false,
-            ..FakeReader::default()
-        };
 
-        assert_eq!(
-            poll.poll(&mut empty(), true, PASSWORD, 0)
+        // When
+        let resumed = [
+            (empty_plate(), 0),
+            (empty_plate(), 1000),
+            (figure_on_plate(), 2000),
+        ]
+        .map(|(mut reader, at)| {
+            poll.poll(&mut reader, true, PASSWORD, at)
                 .unwrap()
-                .resumed_after_misses,
-            None
-        );
-        assert_eq!(
-            poll.poll(&mut empty(), true, PASSWORD, 1000)
-                .unwrap()
-                .resumed_after_misses,
-            None
-        );
+                .resumed_after_misses
+        });
 
-        let mut answers = FakeReader {
-            tag_present: true,
-            inventory_unlocked: Some(UID),
-            ..FakeReader::default()
-        };
-        assert_eq!(
-            poll.poll(&mut answers, true, PASSWORD, 2000)
-                .unwrap()
-                .resumed_after_misses,
-            Some(2)
-        );
+        // Then
+        assert_eq!(resumed, [None, None, Some(2)]);
     }
 
     #[test]
     fn a_first_ever_answer_reports_no_resume() {
+        // Given
         let mut poll = PlatePoll::new(2, 4);
-        let mut reader = FakeReader {
-            tag_present: true,
-            inventory_unlocked: Some(UID),
-            ..FakeReader::default()
-        };
 
-        assert_eq!(
-            poll.poll(&mut reader, true, PASSWORD, 0)
-                .unwrap()
-                .resumed_after_misses,
-            None
-        );
+        // When
+        let polled = poll
+            .poll(&mut figure_on_plate(), true, PASSWORD, 0)
+            .unwrap();
+
+        // Then
+        assert_eq!(polled.resumed_after_misses, None);
     }
 
     #[test]
     fn an_arrival_needs_two_agreeing_reads_like_presence_alone() {
+        // Given
         let mut poll = PlatePoll::new(2, 4);
-        // Once the first poll finds it, later polls believe it present and
-        // switch to `identify`, so every reader here must answer either way.
-        let make_reader = || FakeReader {
-            tag_present: true,
-            inventory_unlocked: Some(UID),
-            identify: Some(UID),
-            ..FakeReader::default()
-        };
 
-        assert_eq!(
-            poll.poll(&mut make_reader(), true, PASSWORD, 0)
+        // When
+        let events = [0, 20].map(|at| {
+            poll.poll(&mut figure_on_plate(), true, PASSWORD, at)
                 .unwrap()
-                .event,
-            None
-        );
-        assert_eq!(
-            poll.poll(&mut make_reader(), true, PASSWORD, 20)
-                .unwrap()
-                .event,
-            Some(TagEvent::Arrived(TagUid(UID)))
-        );
+                .event
+        });
+
+        // Then
+        assert_eq!(events, [None, Some(TagEvent::Arrived(TagUid(UID)))]);
     }
 
     #[test]
     fn four_misses_leave_with_the_full_run_length() {
+        // Given: a figure that has arrived
         let mut poll = PlatePoll::new(2, 4);
-        let make_reader = || FakeReader {
-            tag_present: true,
-            inventory_unlocked: Some(UID),
-            identify: Some(UID),
-            ..FakeReader::default()
-        };
-        poll.poll(&mut make_reader(), true, PASSWORD, 0);
-        poll.poll(&mut make_reader(), true, PASSWORD, 20); // Arrived
+        poll.poll(&mut figure_on_plate(), true, PASSWORD, 0);
+        poll.poll(&mut figure_on_plate(), true, PASSWORD, 20);
 
-        let empty = || FakeReader {
-            tag_present: false,
-            ..FakeReader::default()
-        };
-        let mut now = 1000;
-        let mut last = None;
-        for _ in 0..4 {
-            last = poll.poll(&mut empty(), true, PASSWORD, now);
-            now += 1000;
-        }
-        let last = last.unwrap();
+        // When
+        let polls = [1000, 2000, 3000, 4000]
+            .map(|at| poll.poll(&mut empty_plate(), true, PASSWORD, at).unwrap());
+
+        // Then
+        let last = polls[3];
         assert_eq!(last.event, Some(TagEvent::Left));
         assert_eq!(last.misses_now, 4);
     }
@@ -1009,12 +1060,14 @@ mod placed_tests {
 
     #[test]
     fn a_figure_arriving_is_announced_and_its_token_kept() {
+        // Given
         let mut placed = Placed::empty();
 
-        assert_eq!(
-            placed.observe(figure(A, Some(TOKEN_A))),
-            Event::TagPresent(A)
-        );
+        // When
+        let event = placed.observe(figure(A, Some(TOKEN_A)));
+
+        // Then
+        assert_eq!(event, Event::TagPresent(A));
         assert_eq!(placed.figure(), Some(A));
         assert_eq!(placed.token(), Some(TOKEN_A));
     }
@@ -1023,9 +1076,14 @@ mod placed_tests {
     /// play what the card already holds; only a download needs the token.
     #[test]
     fn a_figure_whose_token_was_not_read_is_still_announced() {
+        // Given
         let mut placed = Placed::empty();
 
-        assert_eq!(placed.observe(figure(A, None)), Event::TagPresent(A));
+        // When
+        let event = placed.observe(figure(A, None));
+
+        // Then
+        assert_eq!(event, Event::TagPresent(A));
         assert_eq!(placed.figure(), Some(A));
         assert_eq!(placed.token(), None);
     }
@@ -1034,10 +1092,15 @@ mod placed_tests {
     /// download.
     #[test]
     fn a_figure_leaving_takes_its_token_with_it() {
+        // Given
         let mut placed = Placed::empty();
         placed.observe(figure(A, Some(TOKEN_A)));
 
-        assert_eq!(placed.observe(Seen::Nothing), Event::TagAbsent);
+        // When
+        let event = placed.observe(Seen::Nothing);
+
+        // Then
+        assert_eq!(event, Event::TagAbsent);
         assert_eq!(placed.figure(), None);
         assert_eq!(placed.token(), None);
     }
@@ -1045,49 +1108,70 @@ mod placed_tests {
     /// The same rule during a swap: figure and token change together.
     #[test]
     fn a_replacing_figure_brings_its_own_token_and_not_the_last_one() {
+        // Given
         let mut placed = Placed::empty();
         placed.observe(figure(A, Some(TOKEN_A)));
 
-        assert_eq!(
-            placed.observe(figure(B, Some(TOKEN_B))),
-            Event::TagPresent(B)
-        );
+        // When
+        let event = placed.observe(figure(B, Some(TOKEN_B)));
+
+        // Then
+        assert_eq!(event, Event::TagPresent(B));
         assert_eq!(placed.figure(), Some(B));
         assert_eq!(placed.token(), Some(TOKEN_B));
     }
 
     #[test]
     fn a_figure_replacing_one_that_had_a_token_does_not_inherit_it() {
+        // Given
         let mut placed = Placed::empty();
         placed.observe(figure(A, Some(TOKEN_A)));
 
+        // When
         placed.observe(figure(B, None));
+
+        // Then
         assert_eq!(placed.token(), None, "B has no token of its own");
     }
 
     #[test]
     fn an_answer_naming_the_figure_on_the_plate_is_about_it() {
+        // Given
         let mut placed = Placed::empty();
         placed.observe(figure(A, Some(TOKEN_A)));
 
-        assert_eq!(placed.answering(A.ruid()), Answering::TheFigure(A));
+        // When
+        let answering = placed.answering(A.ruid());
+
+        // Then
+        assert_eq!(answering, Answering::TheFigure(A));
     }
 
     /// A console `get` that finishes while another figure is on the plate
     /// must not be reported for that figure.
     #[test]
     fn an_answer_naming_a_different_figure_is_not_about_the_one_on_the_plate() {
+        // Given
         let mut placed = Placed::empty();
         placed.observe(figure(A, Some(TOKEN_A)));
 
-        assert_eq!(placed.answering(B.ruid()), Answering::AnotherFigure);
+        // When
+        let answering = placed.answering(B.ruid());
+
+        // Then
+        assert_eq!(answering, Answering::AnotherFigure);
     }
 
     #[test]
     fn an_answer_arriving_at_an_empty_plate_is_about_nothing() {
+        // Given
         let placed = Placed::empty();
 
-        assert_eq!(placed.answering(A.ruid()), Answering::NoFigure);
+        // When
+        let answering = placed.answering(A.ruid());
+
+        // Then
+        assert_eq!(answering, Answering::NoFigure);
     }
 }
 
@@ -1100,32 +1184,57 @@ mod settle_fetch_outcome_tests {
 
     #[test]
     fn a_completed_download_for_the_figure_on_the_plate_makes_content_ready() {
-        assert_eq!(
-            settle_fetch_outcome(Answering::TheFigure(A), Outcome::Completed),
-            Settlement::ForTheFigure(Event::ContentReady(A))
-        );
+        // Given
+        let answering = Answering::TheFigure(A);
+
+        // When
+        let settled = settle_fetch_outcome(answering, Outcome::Completed);
+
+        // Then
+        assert_eq!(settled, Settlement::ForTheFigure(Event::ContentReady(A)));
     }
 
     #[test]
     fn an_unreachable_server_for_the_figure_on_the_plate_reports_why() {
+        // Given
+        let answering = Answering::TheFigure(A);
+
+        // When
+        let settled = settle_fetch_outcome(answering, Outcome::Unreachable);
+
+        // Then
         assert_eq!(
-            settle_fetch_outcome(Answering::TheFigure(A), Outcome::Unreachable),
+            settled,
             Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::Unreachable))
         );
     }
 
     #[test]
     fn no_content_for_the_figure_on_the_plate_reports_why() {
+        // Given
+        let answering = Answering::TheFigure(A);
+
+        // When
+        let settled = settle_fetch_outcome(answering, Outcome::NoContent);
+
+        // Then
         assert_eq!(
-            settle_fetch_outcome(Answering::TheFigure(A), Outcome::NoContent),
+            settled,
             Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::NoContent))
         );
     }
 
     #[test]
     fn a_refused_join_for_the_figure_on_the_plate_reports_why() {
+        // Given
+        let answering = Answering::TheFigure(A);
+
+        // When
+        let settled = settle_fetch_outcome(answering, Outcome::Refused);
+
+        // Then
         assert_eq!(
-            settle_fetch_outcome(Answering::TheFigure(A), Outcome::Refused),
+            settled,
             Settlement::ForTheFigure(Event::ContentMissing(A, Unavailable::Refused))
         );
     }
@@ -1134,18 +1243,26 @@ mod settle_fetch_outcome_tests {
     /// was fetching for must not be reported for that figure.
     #[test]
     fn an_outcome_for_another_figure_is_not_settled_against_the_one_on_the_plate() {
-        assert_eq!(
-            settle_fetch_outcome(Answering::AnotherFigure, Outcome::Completed),
-            Settlement::ForAnotherFigure
-        );
+        // Given
+        let answering = Answering::AnotherFigure;
+
+        // When
+        let settled = settle_fetch_outcome(answering, Outcome::Completed);
+
+        // Then
+        assert_eq!(settled, Settlement::ForAnotherFigure);
     }
 
     #[test]
     fn an_outcome_with_nobody_waiting_settles_nothing() {
-        assert_eq!(
-            settle_fetch_outcome(Answering::NoFigure, Outcome::Completed),
-            Settlement::NothingWaiting
-        );
+        // Given
+        let answering = Answering::NoFigure;
+
+        // When
+        let settled = settle_fetch_outcome(answering, Outcome::Completed);
+
+        // Then
+        assert_eq!(settled, Settlement::NothingWaiting);
     }
 }
 
@@ -1157,25 +1274,37 @@ mod resolve_tests {
 
     #[test]
     fn resolving_the_figure_on_the_plate_calls_settle_with_it() {
-        assert_eq!(
-            Answering::TheFigure(A).resolve(Event::ContentReady),
-            Settlement::ForTheFigure(Event::ContentReady(A))
-        );
+        // Given
+        let answering = Answering::TheFigure(A);
+
+        // When
+        let settled = answering.resolve(Event::ContentReady);
+
+        // Then
+        assert_eq!(settled, Settlement::ForTheFigure(Event::ContentReady(A)));
     }
 
     #[test]
     fn resolving_another_figure_never_calls_settle() {
-        assert_eq!(
-            Answering::AnotherFigure.resolve(|_| panic!("must not be called")),
-            Settlement::<Event>::ForAnotherFigure
-        );
+        // Given
+        let answering = Answering::AnotherFigure;
+
+        // When
+        let settled = answering.resolve(|_| panic!("must not be called"));
+
+        // Then
+        assert_eq!(settled, Settlement::<Event>::ForAnotherFigure);
     }
 
     #[test]
     fn resolving_with_nobody_waiting_never_calls_settle() {
-        assert_eq!(
-            Answering::NoFigure.resolve(|_| panic!("must not be called")),
-            Settlement::<Event>::NothingWaiting
-        );
+        // Given
+        let answering = Answering::NoFigure;
+
+        // When
+        let settled = answering.resolve(|_| panic!("must not be called"));
+
+        // Then
+        assert_eq!(settled, Settlement::<Event>::NothingWaiting);
     }
 }
