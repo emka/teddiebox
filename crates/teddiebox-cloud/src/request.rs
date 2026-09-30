@@ -695,6 +695,20 @@ mod tests {
         );
     }
 
+    /// The limit is the buffer's length, so a request that fills it exactly
+    /// is still written.
+    #[test]
+    fn a_path_request_that_fills_the_buffer_exactly_is_written() {
+        // Given: the 55 bytes of this request, and room for exactly that
+        let mut buf = [0u8; 55];
+
+        // When
+        let built = build_path_request(&mut buf, "/teddiebox.txt", "teddycloud.local", None);
+
+        // Then
+        assert_eq!(built, Ok(55));
+    }
+
     #[test]
     fn a_path_request_that_will_not_fit_the_buffer_is_refused() {
         // Given
