@@ -821,7 +821,6 @@ version = "0.1.0"
 name = "teddiebox-cloud"
 version = "0.1.0"
 dependencies = [
- "embedded-io",
  "embedded-io-async",
  "heapless",
  "pollster",

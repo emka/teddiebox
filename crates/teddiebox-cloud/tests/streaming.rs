@@ -95,8 +95,8 @@ fn request(from: Option<u32>) -> ContentRequest<'static> {
 
 #[test]
 fn a_body_larger_than_the_buffer_is_pumped_rather_than_refused() {
-    // 200 bytes of body through a 64-byte buffer, which `fetch` would refuse
-    // with ResponseTooLong. The buffer must still fit the 40-byte head.
+    // 200 bytes of body through a 64-byte buffer, which could never hold it
+    // whole. The buffer must still fit the 40-byte head.
     let body: Vec<u8> = (0..200u32).map(|n| n as u8).collect();
     let mut raw = Vec::from(*b"HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n");
     raw.extend_from_slice(&body);
