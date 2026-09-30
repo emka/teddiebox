@@ -41,6 +41,15 @@ pub struct Request<'a> {
     pub header_len: usize,
 }
 
+impl<'a> Request<'a> {
+    /// The path without its query: which page or form this is for.
+    pub fn route(&self) -> &'a str {
+        self.path
+            .split_once('?')
+            .map_or(self.path, |(route, _)| route)
+    }
+}
+
 pub fn parse(buf: &[u8]) -> Result<Request<'_>, RequestError> {
     let end = find(buf, b"\r\n\r\n").ok_or(RequestError::Incomplete)?;
     let header_len = end + 4;
@@ -146,6 +155,24 @@ Connection: close\r\n\r\n",
     heapless::Vec::from_slice(out.as_bytes()).unwrap_or_default()
 }
 
+/// Sends the browser to `location` with a GET, after a write.
+///
+/// So reloading the page it lands on asks again for the page, not for the
+/// write.
+pub fn see_other(location: &str) -> heapless::Vec<u8, 128> {
+    use core::fmt::Write;
+
+    let mut out = heapless::String::<128>::new();
+    let _ = write!(
+        out,
+        "HTTP/1.1 303 See Other\r\n\
+Location: {location}\r\n\
+Content-Length: 0\r\n\
+Connection: close\r\n\r\n"
+    );
+    heapless::Vec::from_slice(out.as_bytes()).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +186,36 @@ mod tests {
         assert_eq!(r.path, "/");
         assert_eq!(r.content_length, 0);
         assert_eq!(r.header_len, GET.len());
+    }
+
+    #[test]
+    fn a_write_is_answered_by_sending_the_browser_back_to_the_page() {
+        // Given
+        let location = "/?written=config";
+
+        // When
+        let head = see_other(location);
+
+        // Then
+        assert_eq!(
+            &head[..],
+            b"HTTP/1.1 303 See Other\r\n\
+Location: /?written=config\r\n\
+Content-Length: 0\r\n\
+Connection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn a_query_does_not_change_which_page_is_asked_for() {
+        // Given
+        let raw = b"GET /?written=ca HTTP/1.1\r\nHost: 192.168.4.1\r\n\r\n";
+
+        // When
+        let request = parse(raw).unwrap();
+
+        // Then
+        assert_eq!(request.route(), "/");
     }
 
     #[test]

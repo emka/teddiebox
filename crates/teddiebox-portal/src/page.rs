@@ -97,6 +97,15 @@ pub enum Written {
     Ca,
 }
 
+/// What the request path says was just written, if anything.
+pub fn written(path: &str) -> Option<Written> {
+    match path.strip_prefix("/?written=")? {
+        "config" => Some(Written::Config),
+        "ca" => Some(Written::Ca),
+        _ => None,
+    }
+}
+
 /// How the notice after a certificate write begins; a [`ca_status`] follows.
 const CA_WRITTEN: &str = "certificate written, ";
 
@@ -457,6 +466,42 @@ mod tests {
 
         // Then
         assert!(text.ends_with("</body></html>"));
+    }
+
+    #[test]
+    fn the_page_after_a_config_write_knows_it_was_written() {
+        // Given
+        let path = "/?written=config";
+
+        // When
+        let done = written(path);
+
+        // Then
+        assert_eq!(done, Some(Written::Config));
+    }
+
+    #[test]
+    fn the_page_after_a_certificate_write_knows_it_was_written() {
+        // Given
+        let path = "/?written=ca";
+
+        // When
+        let done = written(path);
+
+        // Then
+        assert_eq!(done, Some(Written::Ca));
+    }
+
+    #[test]
+    fn a_page_asked_for_plainly_or_with_an_unknown_value_says_nothing_was_written() {
+        // Given
+        let paths = ["/", "/?written=", "/?written=everything", "/?other=config"];
+
+        // When
+        let done = paths.map(written);
+
+        // Then
+        assert_eq!(done, [None, None, None, None]);
     }
 
     #[test]

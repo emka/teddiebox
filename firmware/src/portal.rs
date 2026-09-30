@@ -320,8 +320,19 @@ async fn handle(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, buffer: &mut
         REQUEST
     );
 
-    match (request.method, request.path) {
-        (http::Method::Get, "/") => show(socket, card, http::Status::Ok, None).await,
+    match (request.method, request.route()) {
+        (http::Method::Get, "/") => {
+            // After a write the browser comes back here, so a reload asks for
+            // the page again rather than repeating the write.
+            let text = page::written(request.path).map(|done| page::notice(done, ca_on_card(card)));
+            show(
+                socket,
+                card,
+                http::Status::Ok,
+                text.as_deref().map(Message::Notice),
+            )
+            .await
+        }
         (http::Method::Post, "/config") => {
             let body = &buffer[request.header_len..request.header_len + request.content_length];
             write_config(socket, card, body).await
@@ -547,8 +558,7 @@ async fn write_config(socket: &mut TcpSocket<'_>, card: Option<&Mounted>, body: 
     match mounted.write_config(&submitted) {
         Ok(()) => {
             esp_println::println!("teddiebox: portal wrote {} bytes", submitted.len());
-            let written = page::notice(page::Written::Config, ca_on_card(card));
-            respond_page(socket, card, &submitted, Some(Message::Notice(&written))).await
+            redirect(socket, "/?written=config").await
         }
         Err(why) => respond_page(socket, card, &submitted, Some(Message::Error(why))).await,
     }
@@ -590,14 +600,7 @@ async fn write_ca(
                 "teddiebox: portal wrote the certificate, {} bytes",
                 der.len()
             );
-            let written = page::notice(page::Written::Ca, ca_on_card(card));
-            show(
-                socket,
-                card,
-                http::Status::Ok,
-                Some(Message::Notice(&written)),
-            )
-            .await
+            redirect(socket, "/?written=ca").await
         }
         Err(why) => show(socket, card, http::Status::Ok, Some(Message::Error(why))).await,
     }
@@ -723,6 +726,15 @@ async fn write_escaped(socket: &mut TcpSocket<'_>, bytes: &[u8]) -> Result<(), (
         write_all(socket, &chunk[..written]).await?;
     }
     Ok(())
+}
+
+/// Sends the browser back to the page at `location`, after a write.
+///
+/// Flushed like [`send`], so the connection can close right afterwards.
+async fn redirect(socket: &mut TcpSocket<'_>, location: &str) {
+    if write_all(socket, &http::see_other(location)).await.is_ok() {
+        let _ = socket.flush().await;
+    }
 }
 
 /// Head, body, and a flush that waits for the phone to have it.
