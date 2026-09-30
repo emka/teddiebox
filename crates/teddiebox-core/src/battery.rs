@@ -242,8 +242,9 @@ mod tests {
         settle(&mut b, 4_000, false);
         assert_eq!(b.level(), BatteryLevel::Full);
 
-        // When
-        let reported = b.update(3_950, false);
+        // When: below Full's threshold plus its margin, for as long as a
+        // change would need
+        let reported = settle(&mut b, 3_950, false);
 
         // Then
         assert_eq!(reported, None);
@@ -276,8 +277,9 @@ mod tests {
         settle(&mut b, 4_000, false);
         assert_eq!(settle(&mut b, 3_490, false), Some(BatteryLevel::Low));
 
-        // When: back above the threshold, but not by the hysteresis margin
-        let reported = b.update(3_510, false);
+        // When: back above the threshold, but not by the hysteresis margin,
+        // for as long as a change would need
+        let reported = settle(&mut b, 3_510, false);
 
         // Then
         assert_eq!(reported, None);
