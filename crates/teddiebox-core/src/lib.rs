@@ -922,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn placing_a_figure_starts_playback_and_updates_the_indicator() {
+    fn placing_a_figure_starts_playback() {
         // Given
         let mut c = core();
 
@@ -937,6 +937,17 @@ mod tests {
                 from: Position::Exact { page: 1 }
             }
         ));
+    }
+
+    #[test]
+    fn placing_a_figure_shows_playing_on_the_indicator() {
+        // Given
+        let mut c = core();
+
+        // When
+        let actions = c.handle(Event::TagPresent(TAG), &Index);
+
+        // Then
         assert!(contains(&actions, Action::SetLed(LedState::Playing)));
     }
 
