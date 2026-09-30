@@ -109,19 +109,25 @@ mod tests {
 
         // When
         let taken = pipe.write(b"abcdef");
-        let taken_when_full = pipe.write(b"gh");
 
-        // Then
+        // Then: it kept the first four, not the last
         assert_eq!(taken, 4);
-        assert_eq!(pipe.free(), 0);
-        assert_eq!(taken_when_full, 0, "a full pipe takes nothing");
         let mut out = [0u8; 6];
         assert_eq!(pipe.read(&mut out), 4);
-        assert_eq!(
-            &out[..4],
-            b"abcd",
-            "and it kept the first four, not the last"
-        );
+        assert_eq!(&out[..4], b"abcd");
+    }
+
+    #[test]
+    fn a_full_pipe_takes_nothing() {
+        // Given
+        let mut pipe: Pipe<4> = Pipe::new();
+        assert_eq!(pipe.write(b"abcd"), 4);
+
+        // When
+        let taken = pipe.write(b"gh");
+
+        // Then
+        assert_eq!(taken, 0);
     }
 
     /// An empty pipe is normal between bursts from the server.
