@@ -276,16 +276,26 @@ mod tests {
         settle(&mut b, 4_000, false);
         assert_eq!(settle(&mut b, 3_490, false), Some(BatteryLevel::Low));
 
-        // When: back above the threshold, but not by the hysteresis margin;
-        // then clearly above it
-        let just_above = b.update(3_510, false);
-        let level_just_above = b.level();
-        let clearly_above = settle(&mut b, 3_990, false);
+        // When: back above the threshold, but not by the hysteresis margin
+        let reported = b.update(3_510, false);
 
         // Then
-        assert_eq!(just_above, None);
-        assert_eq!(level_just_above, BatteryLevel::Low);
-        assert_eq!(clearly_above, Some(BatteryLevel::Full));
+        assert_eq!(reported, None);
+        assert_eq!(b.level(), BatteryLevel::Low);
+    }
+
+    #[test]
+    fn a_reading_clearly_above_a_threshold_raises_the_level() {
+        // Given: Full, then just under the Ok threshold, so Low
+        let mut b = model();
+        settle(&mut b, 4_000, false);
+        assert_eq!(settle(&mut b, 3_490, false), Some(BatteryLevel::Low));
+
+        // When
+        let reported = settle(&mut b, 3_990, false);
+
+        // Then
+        assert_eq!(reported, Some(BatteryLevel::Full));
     }
 
     #[test]
