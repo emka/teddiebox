@@ -552,6 +552,63 @@ fn unlocking_fetches_a_random_number_then_sends_the_masked_password() {
     finish(r);
 }
 
+/// ENABLE PRIVACY with password 0, masked with random number 0xABCD, spelled
+/// out rather than taken from `slix`. Seven bytes, with no password
+/// identifier.
+const ENABLE_PRIVACY_0: [u8; 7] = [0x02, 0xBA, 0x04, 0xCD, 0xAB, 0xCD, 0xAB];
+
+#[test]
+fn relocking_fetches_a_random_number_then_sends_the_masked_password() {
+    // Given: seven bytes split the length field as 0x00 / 0x70
+    let mut spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &[0x00, 0xCD, 0xAB]);
+    spi.extend(transceive_transactions(
+        &ENABLE_PRIVACY_0,
+        [0x00, 0x70],
+        0,
+        &[0x00],
+    ));
+    let mut irq = irq_exchange();
+    irq.extend(irq_exchange());
+    let mut delay = answered(0);
+    delay.extend(answered(0));
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&delay),
+        PinMock::new(&irq),
+    );
+
+    // When
+    let relocked = r.enable_privacy(0);
+
+    // Then
+    assert_eq!(relocked, Ok(()));
+    finish(r);
+}
+
+/// A tag that did not answer did not confirm it is locked again.
+#[test]
+fn relocking_a_tag_that_does_not_answer_is_a_timeout() {
+    // Given
+    let mut spi = transceive_transactions(&GET_RANDOM_NUMBER, [0x00, 0x30], 2, &[0x00, 0xCD, 0xAB]);
+    spi.extend(transmit_transactions(&ENABLE_PRIVACY_0, [0x00, 0x70]));
+    let mut irq = irq_exchange();
+    irq.extend(irq_never());
+    let mut delay = answered(0);
+    delay.extend(polls(IRQ_POLL_ATTEMPTS as usize));
+    let mut r = Trf7962a::new(
+        SpiMock::new(&spi),
+        CheckedDelay::new(&delay),
+        PinMock::new(&irq),
+    );
+
+    // When
+    let relocked = r.enable_privacy(0);
+
+    // Then
+    assert_eq!(relocked, Err(Error::Timeout));
+    finish(r);
+}
+
 #[test]
 fn a_rejected_password_is_reported_rather_than_read_as_success() {
     // Given
