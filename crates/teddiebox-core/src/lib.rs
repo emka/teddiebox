@@ -867,6 +867,12 @@ mod tests {
 
         // Then
         assert!(contains(&actions, Action::PlayCue(Cue::VolumeLimit)));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::SetVolume { .. })),
+            "{actions:?}"
+        );
     }
 
     /// The larger ear is on the box's right, and right goes forward, like a
