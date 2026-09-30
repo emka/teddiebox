@@ -151,7 +151,8 @@ plain text anyway.
 ### Changing settings without a card reader
 
 1. Hold both ears while switching the box on, until the light turns on. The box
-   starts a WiFi network instead of playing.
+   starts a WiFi network instead of playing. A bench image also enters setup
+   mode on the console command `setup`.
 2. Join `teddiebox-setup` with passphrase `teddiebox`.
 3. Open <http://192.168.4.1/>. It shows `config.txt` for editing.
 4. Press **Write config.txt**. The file is checked first; errors are shown on

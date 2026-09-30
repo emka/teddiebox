@@ -2965,8 +2965,19 @@ async fn main(spawner: Spawner) {
     // measurements in `portal.rs`.
     //
     // Active low, so held reads low. In setup mode the ears are not read
-    // again.
-    if larger.is_low() && smaller.is_low() {
+    // again. The console's `setup` command asks for the same thing across a
+    // restart; the request is taken on every boot, so it never outlives one.
+    let requested = setup::take_request();
+    let held = larger.is_low() && smaller.is_low();
+    if requested || held {
+        esp_println::println!(
+            "teddiebox: {} — setup portal",
+            if held {
+                "both ears held"
+            } else {
+                "setup asked for on the console"
+            }
+        );
         setup::enter(
             &mut board,
             &mut gates,
@@ -3008,7 +3019,7 @@ async fn main(spawner: Spawner) {
     // confirming an update also needs the card, which is mounted later.
     let mut boot_confirmed = false;
     esp_println::println!(
-        "teddiebox: dl rb | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | pcmcrc on|off | awake on|off | sleep | autosleep on|off | reval"
+        "teddiebox: dl rb setup | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | pcmcrc on|off | awake on|off | sleep | autosleep on|off | reval"
     );
 
     // Here rather than next to `ota::confirm_boot_or_revert()`: loaded before

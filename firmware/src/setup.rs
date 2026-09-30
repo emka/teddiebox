@@ -6,6 +6,9 @@
 
 use core::sync::atomic::Ordering;
 
+use portable_atomic::AtomicU32;
+use teddiebox_core::setup_request;
+
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::peripherals::{GPIO34, GPIO35, GPIO36, GPIO38, GPIO44, SPI2, UART0, WIFI};
@@ -16,10 +19,32 @@ use teddiebox_core::{colour_for, LedState};
 use crate::pins::BoardPins;
 use crate::{audio, battery, led, net, portal, storage};
 
-/// Both ears held at power-on start the setup portal instead of the normal
-/// boot. Checked before `net` is started (the only other user of `p.WIFI`)
-/// and before the rest of the boot, because setup mode runs almost none of
-/// the tasks below: no decoder, codec, NFC or media loop.
+/// A request for setup mode that survives the software reset between the
+/// `setup` command and the next boot. See [`setup_request`] for why only one
+/// exact word counts.
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static REQUEST: AtomicU32 = AtomicU32::new(0);
+
+/// Asks the next boot for setup mode. The caller then resets.
+pub(crate) fn request() {
+    REQUEST.store(setup_request::REQUESTED, Ordering::Relaxed);
+}
+
+/// Whether the run before this boot asked for setup mode.
+///
+/// Clears the request, so only this boot answers it and Restart in the
+/// portal boots normally.
+pub(crate) fn take_request() -> bool {
+    let word = REQUEST.load(Ordering::Relaxed);
+    REQUEST.store(0, Ordering::Relaxed);
+    setup_request::is_requested(word)
+}
+
+/// Starts the setup portal instead of the normal boot, when both ears are
+/// held at power-on or the console's `setup` command asked for it. Checked
+/// before `net` is started (the only other user of `p.WIFI`) and before the
+/// rest of the boot, because setup mode runs almost none of the tasks below:
+/// no decoder, codec, NFC or media loop.
 ///
 /// Skipping those tasks does not make room for the portal: its buffers are
 /// held across `await` points, so they are part of this task's future in
@@ -39,8 +64,6 @@ pub(crate) async fn enter(
     uart0: UART0<'static>,
     uart_rx: GPIO44<'static>,
 ) -> ! {
-    esp_println::println!("teddiebox: both ears held — setup portal");
-
     // Nothing drains `INPUT_EVENTS` here: the reducer lives in the media
     // task and that is never spawned. Told now rather than discovered
     // later, so `sense` keeps its readings to the console instead of

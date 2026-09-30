@@ -1,7 +1,8 @@
 //! The setup portal: one page, its forms, one lease.
 //!
-//! Started by holding both ears while powering on. While it runs, the box
-//! plays nothing: no decoder, codec, NFC or media loop.
+//! Started by holding both ears while powering on, or by the console's
+//! `setup` command. While it runs, the box plays nothing: no decoder, codec,
+//! NFC or media loop.
 //!
 //! See [`REQUEST`] and [`place`] for where its memory comes from.
 //!

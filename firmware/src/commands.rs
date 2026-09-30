@@ -54,6 +54,12 @@ pub(crate) async fn bench(
             i2c_bus::quieten_codec().await;
             reboot(board, gates)
         }
+        Some(Command::EnterSetup) => {
+            esp_println::println!("teddiebox: setup asked for — restarting into setup mode");
+            crate::setup::request();
+            i2c_bus::quieten_codec().await;
+            reboot(board, gates)
+        }
         Some(Command::Tone) => {
             // The output is off until something plays, so every audio
             // command must switch it on first.
@@ -271,7 +277,7 @@ pub(crate) async fn bench(
         // Only setup mode's console handles this; outside setup mode
         // the access point it configures is not running.
         Some(Command::SetupPassword(_)) => esp_println::println!(
-            "teddiebox: setup pw only works in setup mode — hold both ears at switch-on"
+            "teddiebox: setup pw only works in setup mode — type setup, or hold both ears at switch-on"
         ),
         Some(Command::Storage) => {
             // Switched on here, because this loop owns the pins, and

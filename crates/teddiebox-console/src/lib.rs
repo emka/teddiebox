@@ -119,6 +119,10 @@ pub enum Command {
     /// setup mode acts on this; it is the way back into a box whose
     /// `setup_password` was forgotten.
     SetupPassword(Option<String<MAX_PASSPHRASE>>),
+    /// Restart into setup mode, as if both ears were held at power-on.
+    ///
+    /// For the bench, where nobody may be at the box to hold them.
+    EnterSetup,
     /// Associate with the remembered network and take a DHCP lease.
     NetUp,
     /// Open a TLS connection to the configured server and hang up.
@@ -312,6 +316,7 @@ impl CommandWatch {
             } else {
                 match &self.line[..self.len] {
                     b"dl" => Some(Command::DownloadMode),
+                    b"setup" => Some(Command::EnterSetup),
                     b"rb" => Some(Command::Reboot),
                     b"t" => Some(Command::Tone),
                     b"sd" => Some(Command::Storage),
@@ -642,6 +647,30 @@ mod tests {
             feed_all(&mut watch, b"setup pw off\n"),
             Some(Command::SetupPassword(None))
         );
+    }
+
+    #[test]
+    fn setup_asks_for_setup_mode() {
+        // Given
+        let mut watch = CommandWatch::new();
+
+        // When
+        let command = feed_all(&mut watch, b"setup\n");
+
+        // Then
+        assert_eq!(command, Some(Command::EnterSetup));
+    }
+
+    #[test]
+    fn setup_pw_is_not_mistaken_for_setup() {
+        // Given
+        let mut watch = CommandWatch::new();
+
+        // When
+        let command = feed_all(&mut watch, b"setup pw off\n");
+
+        // Then
+        assert_ne!(command, Some(Command::EnterSetup));
     }
 
     #[test]

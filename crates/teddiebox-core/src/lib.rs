@@ -13,6 +13,7 @@ pub mod plate;
 mod playback;
 pub mod position;
 pub mod power;
+pub mod setup_request;
 pub mod sounds;
 pub mod tone;
 mod types;
