@@ -432,18 +432,23 @@ mod tests {
 
     #[test]
     fn placing_a_known_figure_plays_from_the_start() {
-        // Given
+        // Given: a figure on the card with nothing saved for it
         let mut p = Playback::new();
+        let never_played = Index {
+            available: true,
+            resume: Position::Start,
+            wants_asking: false,
+        };
 
         // When
-        let actions = p.on_tag_present(TAG, &known(1));
+        let actions = p.on_tag_present(TAG, &never_played);
 
         // Then
         assert_eq!(
             actions.as_slice(),
             &[Action::Play {
                 tag: TAG,
-                from: Position::Exact { page: 1 }
+                from: Position::Start
             }]
         );
         assert_eq!(p.kind(), PlaybackKind::Playing);
