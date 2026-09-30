@@ -118,49 +118,85 @@ mod tests {
         out
     }
 
-    // IEEE 802.11i-2004 Annex H.4; values re-derived with Python's hashlib.
+    /// IEEE 802.11i-2004 Annex H.4; values re-derived with Python's hashlib.
+    const IEEE_KEY: &str = "f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e";
+
     #[test]
     fn derives_the_ieee_vector() {
-        assert_eq!(
-            whole(b"IEEE", b"password"),
-            hex("f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e")
-        );
+        // Given
+        let (ssid, passphrase) = (b"IEEE", b"password");
+
+        // When
+        let key = whole(ssid, passphrase);
+
+        // Then
+        assert_eq!(key, hex(IEEE_KEY));
     }
 
     #[test]
     fn derives_the_second_ieee_vector() {
+        // Given
+        let (ssid, passphrase) = (b"ThisIsASSID", b"ThisIsAPassword");
+
+        // When
+        let key = whole(ssid, passphrase);
+
+        // Then
         assert_eq!(
-            whole(b"ThisIsASSID", b"ThisIsAPassword"),
+            key,
             hex("0dc0d6eb90555ed6419756b9a15ec3e3209b63df707dd508d14581f8982721af")
         );
     }
 
     #[test]
     fn derives_for_the_longest_ssid() {
+        // Given
+        let (ssid, passphrase) = ([b'Z'; 32], [b'a'; 32]);
+
+        // When
+        let key = whole(&ssid, &passphrase);
+
+        // Then
         assert_eq!(
-            whole(&[b'Z'; 32], &[b'a'; 32]),
+            key,
             hex("becb93866bb8c3832cb777c2f559807c8c59afcb6eae734885001300a981cc62")
         );
     }
 
-    // python3 -c "import hashlib;print(hashlib.pbkdf2_hmac('sha1',b'p'*63,b'IEEE',4096,32).hex())"
+    /// `python3 -c "import hashlib;print(hashlib.pbkdf2_hmac('sha1',b'p'*63,b'IEEE',4096,32).hex())"`
     #[test]
     fn derives_for_the_longest_passphrase() {
+        // Given
+        let (ssid, passphrase) = (b"IEEE", [b'p'; 63]);
+
+        // When
+        let key = whole(ssid, &passphrase);
+
+        // Then
         assert_eq!(
-            whole(b"IEEE", &[b'p'; 63]),
+            key,
             hex("4fce3de309b0d3e56b403791a4dcc712417e575546d16dd6024265cd2faee56e")
         );
     }
 
     #[test]
     fn a_short_budget_is_not_a_key() {
+        // Given
         let mut d = Derivation::new(b"IEEE", b"password");
-        assert!(d.step(ITERATIONS - 2).is_none());
+
+        // When
+        let key = d.step(ITERATIONS - 2);
+
+        // Then
+        assert!(key.is_none());
     }
 
     #[test]
     fn slices_reach_the_same_key_as_one_step() {
+        // Given
         let mut d = Derivation::new(b"IEEE", b"password");
+
+        // When: slices of seven rounds until the key is ready
         let mut got = None;
         for _ in 0..ITERATIONS {
             got = d.step(7);
@@ -168,37 +204,46 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(
-            *got.expect("finishes").as_bytes(),
-            hex("f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e")
-        );
+
+        // Then
+        assert_eq!(*got.expect("finishes").as_bytes(), hex(IEEE_KEY));
     }
 
     #[test]
     fn a_finished_derivation_keeps_answering() {
+        // Given
         let mut d = Derivation::new(b"IEEE", b"password");
         let first = d.step(ITERATIONS + 100).expect("finishes");
-        assert_eq!(
-            d.step(0).expect("still finished").as_bytes(),
-            first.as_bytes()
-        );
+
+        // When
+        let again = d.step(0);
+
+        // Then
+        assert_eq!(again.expect("still finished").as_bytes(), first.as_bytes());
     }
 
     #[test]
     fn hex_is_what_the_driver_takes() {
-        let psk = Psk::from_bytes(hex(
-            "f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e",
-        ));
-        assert_eq!(
-            &psk.hex(),
-            b"f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e"
-        );
+        // Given
+        let psk = Psk::from_bytes(hex(IEEE_KEY));
+
+        // When
+        let text = psk.hex();
+
+        // Then
+        assert_eq!(&text, IEEE_KEY.as_bytes());
     }
 
     #[test]
     fn debug_never_shows_the_key() {
+        // Given
         extern crate std;
-        let shown = std::format!("{:?}", Psk::from_bytes([0xab; 32]));
+        let psk = Psk::from_bytes([0xab; 32]);
+
+        // When
+        let shown = std::format!("{psk:?}");
+
+        // Then
         assert!(!shown.contains("ab"), "{shown}");
     }
 }
