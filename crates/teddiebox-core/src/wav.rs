@@ -173,7 +173,13 @@ mod tests {
     /// The generated test file is five minutes long.
     #[test]
     fn the_step_8_test_file_is_five_minutes_the_codec_can_play() {
-        let format = WavFormat::parse(&GENERATED_HEADER).expect("the generator's header parses");
+        // Given
+        let header = GENERATED_HEADER;
+
+        // When
+        let format = WavFormat::parse(&header).expect("the generator's header parses");
+
+        // Then
         assert!(format.matches_codec());
         assert_eq!(format.data_offset, 44);
         assert_eq!(format.duration_ms(), 300_000);
@@ -181,25 +187,48 @@ mod tests {
 
     #[test]
     fn a_real_file_from_taf2wav_is_read_correctly() {
-        let format = WavFormat::parse(&REAL_HEADER).expect("a real header parses");
-        assert_eq!(format.channels, 2);
-        assert_eq!(format.sample_rate, 48_000);
-        assert_eq!(format.bits_per_sample, 16);
-        assert_eq!(format.data_offset, 44);
-        assert_eq!(format.data_len, 956_160);
+        // Given
+        let header = REAL_HEADER;
+
+        // When
+        let format = WavFormat::parse(&header);
+
+        // Then
+        assert_eq!(
+            format,
+            Ok(WavFormat {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                data_offset: 44,
+                data_len: 956_160,
+            })
+        );
     }
 
     #[test]
     fn a_real_file_matches_what_the_codec_was_configured_for() {
+        // Given
         let format = WavFormat::parse(&REAL_HEADER).unwrap();
-        assert!(format.matches_codec());
+
+        // When
+        let matches = format.matches_codec();
+
+        // Then
+        assert!(matches);
     }
 
     /// 956160 bytes / 4 bytes per frame / 48000 frames per second.
     #[test]
     fn the_duration_comes_from_the_data_length() {
+        // Given
         let format = WavFormat::parse(&REAL_HEADER).unwrap();
-        assert_eq!(format.duration_ms(), 4980);
+
+        // When
+        let duration = format.duration_ms();
+
+        // Then
+        assert_eq!(duration, 4980);
     }
 
     /// A file with an extra chunk before `fmt `, so `data` is not at offset
@@ -216,10 +245,13 @@ mod tests {
 
     #[test]
     fn a_chunk_before_the_format_chunk_is_stepped_over() {
-        // "LIST", size 4, "INFO"
+        // Given: "LIST", size 4, "INFO"
         let file = with_leading_chunk(b"LIST\x04\x00\x00\x00INFO");
 
+        // When
         let format = WavFormat::parse(&file[..56]).expect("LIST is skipped");
+
+        // Then
         assert_eq!(format.sample_rate, 48_000);
         assert_eq!(format.data_offset, 56, "12 bytes further on than usual");
     }
@@ -228,58 +260,94 @@ mod tests {
     /// counted in the chunk's size.
     #[test]
     fn an_odd_sized_chunk_is_padded_to_an_even_boundary() {
-        // "LIST", size 3, "abc", then one pad byte that the size does not count
+        // Given: "LIST", size 3, "abc", then one pad byte that the size does
+        // not count
         let file = with_leading_chunk(b"LIST\x03\x00\x00\x00abc\x00");
 
+        // When
         let format = WavFormat::parse(&file[..56]).expect("the pad byte is accounted for");
+
+        // Then
         assert_eq!(format.sample_rate, 48_000);
     }
 
     #[test]
     fn a_file_that_is_not_riff_is_rejected() {
+        // Given
         let mut file = REAL_HEADER;
         file[0] = b'X';
-        assert_eq!(WavFormat::parse(&file), Err(WavError::NotWave));
+
+        // When
+        let format = WavFormat::parse(&file);
+
+        // Then
+        assert_eq!(format, Err(WavError::NotWave));
     }
 
     #[test]
     fn a_riff_file_that_is_not_wave_is_rejected() {
+        // Given
         let mut file = REAL_HEADER;
         file[8] = b'X';
-        assert_eq!(WavFormat::parse(&file), Err(WavError::NotWave));
+
+        // When
+        let format = WavFormat::parse(&file);
+
+        // Then
+        assert_eq!(format, Err(WavError::NotWave));
     }
 
     #[test]
     fn a_header_cut_short_is_an_error_rather_than_a_guess() {
-        assert_eq!(
-            WavFormat::parse(&REAL_HEADER[..20]),
-            Err(WavError::Truncated)
-        );
-        assert_eq!(WavFormat::parse(&[]), Err(WavError::NotWave));
+        // Given
+        let cut_short: [&[u8]; 2] = [&REAL_HEADER[..20], &[]];
+
+        // When
+        let formats = cut_short.map(WavFormat::parse);
+
+        // Then
+        assert_eq!(formats, [Err(WavError::Truncated), Err(WavError::NotWave)]);
     }
 
     /// Playing a compressed WAV as PCM would be loud noise.
     #[test]
     fn a_file_that_is_not_plain_pcm_is_rejected() {
+        // Given
         let mut file = REAL_HEADER;
         file[20] = 0x11; // IMA ADPCM
-        assert_eq!(WavFormat::parse(&file), Err(WavError::NotPcm));
+
+        // When
+        let format = WavFormat::parse(&file);
+
+        // Then
+        assert_eq!(format, Err(WavError::NotPcm));
     }
 
     #[test]
     fn a_chunk_claiming_an_impossible_size_is_rejected() {
+        // Given
         let mut file = REAL_HEADER;
         file[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_eq!(WavFormat::parse(&file), Err(WavError::Malformed));
+
+        // When
+        let format = WavFormat::parse(&file);
+
+        // Then
+        assert_eq!(format, Err(WavError::Malformed));
     }
 
     /// Mono or 44.1 kHz would play at the wrong speed. The file is still
     /// valid, so parsing succeeds and only the codec check fails.
     #[test]
     fn a_file_the_codec_was_not_configured_for_parses_but_does_not_match() {
+        // Given
         let mut file = REAL_HEADER;
         file[22] = 1; // mono
+
+        // When
         let format = WavFormat::parse(&file).expect("still a valid WAV");
+
+        // Then
         assert_eq!(format.channels, 1);
         assert!(!format.matches_codec());
     }
