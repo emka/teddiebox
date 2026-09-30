@@ -177,21 +177,18 @@ mod tests {
         assert_eq!(levels, [-55, -48, -41, -34, -27]);
     }
 
-    /// Step 0 is silence on both outputs; the offset is not applied. The codec
-    /// cannot go below -63.5 dB, so -75 dB is not possible.
+    /// The offset is not applied to silence: the codec cannot go below
+    /// -63.5 dB, so -75 dB is not possible.
     #[test]
-    fn silence_is_the_codecs_floor_on_both_outputs() {
+    fn headphone_silence_is_the_codecs_floor_too() {
         // Given
         let silence = Volume(0);
 
         // When
-        let levels = (
-            db_for(Output::Headphones, silence),
-            db_for(Output::Speaker, silence),
-        );
+        let level = db_for(Output::Headphones, silence);
 
         // Then
-        assert_eq!(levels, (-63, -63));
+        assert_eq!(level, -63);
     }
 
     /// The two outputs' steps are a fixed distance apart. Step 0 is skipped
@@ -211,20 +208,15 @@ mod tests {
 
     /// The same for headphones, where a too-loud level matters most.
     #[test]
-    fn a_step_above_the_maximum_is_answered_with_the_ceiling_on_both_outputs() {
+    fn a_step_above_the_maximum_is_answered_with_the_headphone_ceiling() {
         // Given
         let too_loud = [Volume(MAX_VOLUME + 1), Volume(255)];
 
         // When
-        let levels = too_loud.map(|step| {
-            (
-                db_for(Output::Headphones, step),
-                db_for(Output::Speaker, step),
-            )
-        });
+        let levels = too_loud.map(|step| db_for(Output::Headphones, step));
 
         // Then
-        assert_eq!(levels, [(-27, -15), (-27, -15)]);
+        assert_eq!(levels, [-27, -27]);
     }
 
     #[test]
