@@ -206,6 +206,16 @@ mod tests {
     use teddiebox_taf::SlicePages;
 
     const FIXTURE: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/sine.taf");
+    const CHAPTERS: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
+
+    /// Opens `taf` with `decoder` in `buffers`.
+    fn open<'b, D: OpusDecode>(
+        taf: &'static [u8],
+        decoder: D,
+        buffers: &'b mut TafBuffers,
+    ) -> TafDecoder<'b, SlicePages<'static>, D> {
+        TafDecoder::open(SlicePages::new(taf).unwrap(), decoder, buffers).unwrap()
+    }
 
     /// Records what it was asked to decode and emits silence, so the container
     /// plumbing can be tested without libopus.
@@ -226,84 +236,75 @@ mod tests {
         }
     }
 
+    fn stub() -> StubDecoder {
+        StubDecoder {
+            calls: 0,
+            saw_opus_header: false,
+        }
+    }
+
     #[test]
     fn the_opus_header_packets_are_never_sent_to_the_decoder() {
+        // Given
         let mut buffers = TafBuffers::new();
-        let mut dec = TafDecoder::open(
-            SlicePages::new(FIXTURE).unwrap(),
-            StubDecoder {
-                calls: 0,
-                saw_opus_header: false,
-            },
-            &mut buffers,
-        )
-        .unwrap();
+        let mut dec = open(FIXTURE, stub(), &mut buffers);
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
 
-        // Decode the whole stream, not just the first packet.
+        // When: the whole stream, not just the first packet
         while dec.next_frame(&mut pcm).unwrap().is_some() {}
+
+        // Then
         assert!(!dec.decoder.saw_opus_header);
     }
 
     #[test]
     fn decodes_every_audio_packet_then_reports_end_of_stream() {
+        // Given: 85 packets, OpusHead, OpusTags and 83 audio frames. `toniefile`
+        // encodes 60 ms Opus frames (2880 samples/channel): 83 x 2880 = 239040
+        // samples = 4.98 s.
         let mut buffers = TafBuffers::new();
-        let mut dec = TafDecoder::open(
-            SlicePages::new(FIXTURE).unwrap(),
-            StubDecoder {
-                calls: 0,
-                saw_opus_header: false,
-            },
-            &mut buffers,
-        )
-        .unwrap();
+        let mut dec = open(FIXTURE, stub(), &mut buffers);
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
 
+        // When
         let mut frames = 0;
         while dec.next_frame(&mut pcm).unwrap().is_some() {
             frames += 1;
         }
-        // The fixture has 85 packets: OpusHead, OpusTags and 83 audio frames.
-        // `toniefile` encodes 60 ms Opus frames (2880 samples/channel):
-        // 83 x 2880 = 239040 samples = 4.98 s.
+        let after_the_end = dec.next_frame(&mut pcm).unwrap();
+
+        // Then
         assert_eq!(frames, 83, "expected 83 audio frames, got {frames}");
-        assert_eq!(dec.next_frame(&mut pcm).unwrap(), None);
+        assert_eq!(after_the_end, None);
     }
 
     #[test]
     fn rejects_a_pcm_buffer_that_is_too_small() {
+        // Given
         let mut buffers = TafBuffers::new();
-        let mut dec = TafDecoder::open(
-            SlicePages::new(FIXTURE).unwrap(),
-            StubDecoder {
-                calls: 0,
-                saw_opus_header: false,
-            },
-            &mut buffers,
-        )
-        .unwrap();
+        let mut dec = open(FIXTURE, stub(), &mut buffers);
         let mut pcm = [0i16; 8];
-        assert_eq!(dec.next_frame(&mut pcm), Err(AudioError::BufferTooSmall));
+
+        // When
+        let frame = dec.next_frame(&mut pcm);
+
+        // Then
+        assert_eq!(frame, Err(AudioError::BufferTooSmall));
     }
 
     /// A chapter skip needs to know the current chapter, so the decoder
     /// reports it.
     #[test]
     fn the_decoder_reports_the_chapter_it_is_playing() {
+        // Given
         let mut buffers = TafBuffers::new();
-        const CHAPTERS_FIXTURE: &[u8] =
-            include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
-        let mut dec = TafDecoder::open(
-            SlicePages::new(CHAPTERS_FIXTURE).unwrap(),
-            StubDecoder {
-                calls: 0,
-                saw_opus_header: false,
-            },
-            &mut buffers,
-        )
-        .unwrap();
+        let mut dec = open(CHAPTERS, stub(), &mut buffers);
         assert_eq!(dec.chapter(), 0);
+
+        // When
         dec.seek_to_chapter(2).unwrap();
+
+        // Then
         assert_eq!(dec.chapter(), 2);
     }
 
@@ -311,25 +312,18 @@ mod tests {
     /// pass page positions through.
     #[test]
     fn the_decoder_returns_to_the_page_it_reported() {
+        // Given: the page chapter 2 starts on, then a seek away from it
         let mut buffers = TafBuffers::new();
-        const CHAPTERS_FIXTURE: &[u8] =
-            include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
-        let mut dec = TafDecoder::open(
-            SlicePages::new(CHAPTERS_FIXTURE).unwrap(),
-            StubDecoder {
-                calls: 0,
-                saw_opus_header: false,
-            },
-            &mut buffers,
-        )
-        .unwrap();
+        let mut dec = open(CHAPTERS, stub(), &mut buffers);
         dec.seek_to_chapter(2).unwrap();
         let page = dec.page();
-
         dec.seek_to_chapter(0).unwrap();
         assert_ne!(dec.page(), page, "the seek away has to move it");
 
+        // When
         dec.seek_to_page(page).unwrap();
+
+        // Then
         assert_eq!(dec.page(), page);
         assert_eq!(dec.chapter(), 2, "and it is back in that chapter");
     }
@@ -353,46 +347,58 @@ mod tests {
     fn chapters_decoder(
         buffers: &mut TafBuffers,
     ) -> TafDecoder<'_, SlicePages<'static>, LastPacket> {
-        const CHAPTERS_FIXTURE: &[u8] =
-            include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
-        TafDecoder::open(
-            SlicePages::new(CHAPTERS_FIXTURE).unwrap(),
+        open(
+            CHAPTERS,
             LastPacket {
                 buf: [0u8; MAX_PACKET],
                 len: 0,
             },
             buffers,
         )
-        .unwrap()
     }
 
     #[test]
     fn the_next_chapter_is_the_one_after_the_chapter_playing() {
+        // Given
         let mut buffers = TafBuffers::new();
         let mut dec = chapters_decoder(&mut buffers);
-        assert_eq!(dec.next_chapter(), Ok(Skip::To(1)));
-        assert_eq!(dec.chapter(), 1);
-        assert_eq!(dec.next_chapter(), Ok(Skip::To(2)));
-        assert_eq!(dec.chapter(), 2);
+
+        // When
+        let skips = [(); 2].map(|_| (dec.next_chapter(), dec.chapter()));
+
+        // Then
+        assert_eq!(skips, [(Ok(Skip::To(1)), 1), (Ok(Skip::To(2)), 2)]);
     }
 
     /// Skipping forward from the last chapter ends the story, instead of
     /// playing the last chapter again.
     #[test]
     fn there_is_no_chapter_after_the_last_one() {
+        // Given
         let mut buffers = TafBuffers::new();
         let mut dec = chapters_decoder(&mut buffers);
         dec.seek_to_chapter(2).unwrap();
-        assert_eq!(dec.next_chapter(), Ok(Skip::PastTheEnd));
+
+        // When
+        let skip = dec.next_chapter();
+
+        // Then
+        assert_eq!(skip, Ok(Skip::PastTheEnd));
         assert_eq!(dec.chapter(), 2, "a refused skip must not move the story");
     }
 
     #[test]
     fn the_previous_chapter_is_the_one_before_the_chapter_playing() {
+        // Given
         let mut buffers = TafBuffers::new();
         let mut dec = chapters_decoder(&mut buffers);
         dec.seek_to_chapter(2).unwrap();
-        assert_eq!(dec.previous_chapter(), Ok(1));
+
+        // When
+        let back = dec.previous_chapter();
+
+        // Then
+        assert_eq!(back, Ok(1));
         assert_eq!(dec.chapter(), 1);
     }
 
@@ -400,15 +406,14 @@ mod tests {
     /// nothing.
     #[test]
     fn going_back_from_the_first_chapter_starts_it_again() {
+        // Given: the first packet noted, then two more decoded
         let mut buffers = TafBuffers::new();
         let mut dec = chapters_decoder(&mut buffers);
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
-
         dec.next_frame(&mut pcm).unwrap();
         let mut first = [0u8; MAX_PACKET];
         let first_len = dec.decoder.len;
         first[..first_len].copy_from_slice(&dec.decoder.buf[..first_len]);
-
         dec.next_frame(&mut pcm).unwrap();
         dec.next_frame(&mut pcm).unwrap();
         assert_ne!(
@@ -417,22 +422,21 @@ mod tests {
             "the fixture must have moved on, or this proves nothing"
         );
 
-        assert_eq!(dec.previous_chapter(), Ok(0));
+        // When
+        let back = dec.previous_chapter();
         dec.next_frame(&mut pcm).unwrap();
+
+        // Then
+        assert_eq!(back, Ok(0));
         assert_eq!(&dec.decoder.buf[..dec.decoder.len], &first[..first_len]);
     }
 
     #[test]
     fn seeking_to_a_chapter_decodes_its_first_packet_not_a_later_one() {
-        const CHAPTERS_FIXTURE: &[u8] =
-            include_bytes!("../../teddiebox-taf/tests/data/chapters.taf");
-
-        // Independently determine what the first packet of chapter 1 actually
-        // is, without going through `TafDecoder` at all.
+        // Given: chapter 1's first packet, read without `TafDecoder`
         let mut buffers = TafBuffers::new();
         let mut page = [0u8; PAGE_SIZE];
-        let mut direct =
-            TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
+        let mut direct = TafReader::open(SlicePages::new(CHAPTERS).unwrap(), &mut page).unwrap();
         direct.seek_to_chapter(1).unwrap();
         let mut expected = [0u8; MAX_PACKET];
         let expected_len = direct.next_packet(&mut expected).unwrap().unwrap();
@@ -453,17 +457,18 @@ mod tests {
                 Ok(n)
             }
         }
-
-        let mut dec = TafDecoder::open(
-            SlicePages::new(CHAPTERS_FIXTURE).unwrap(),
+        let mut dec = open(
+            CHAPTERS,
             CapturingDecoder { first_packet: None },
             &mut buffers,
-        )
-        .unwrap();
+        );
+
+        // When
         dec.seek_to_chapter(1).unwrap();
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
         dec.next_frame(&mut pcm).unwrap();
 
+        // Then
         let (buf, len) = dec.decoder.first_packet.expect("decode was called");
         assert_eq!(
             &buf[..len],
@@ -475,7 +480,7 @@ mod tests {
 
     #[test]
     fn a_decode_error_consumes_the_packet_so_the_next_call_resumes_after_it() {
-        // Independently determine what the second real audio packet is.
+        // Given: the second real audio packet, read without `TafDecoder`
         let mut buffers = TafBuffers::new();
         let mut page = [0u8; PAGE_SIZE];
         let mut direct = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
@@ -505,21 +510,23 @@ mod tests {
                 Ok(n)
             }
         }
-
-        let mut dec = TafDecoder::open(
-            SlicePages::new(FIXTURE).unwrap(),
+        let mut dec = open(
+            FIXTURE,
             FlakyDecoder {
                 calls: 0,
                 second_packet: None,
             },
             &mut buffers,
-        )
-        .unwrap();
+        );
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
 
-        assert_eq!(dec.next_frame(&mut pcm), Err(AudioError::Decode));
-        assert!(dec.next_frame(&mut pcm).unwrap().is_some());
+        // When
+        let failed = dec.next_frame(&mut pcm);
+        let resumed = dec.next_frame(&mut pcm).unwrap();
 
+        // Then
+        assert_eq!(failed, Err(AudioError::Decode));
+        assert!(resumed.is_some());
         let (buf, len) = dec
             .decoder
             .second_packet
@@ -534,17 +541,15 @@ mod tests {
 
     #[test]
     fn seeking_to_chapter_zero_decodes_its_first_real_audio_packet_not_opus_head() {
-        // Chapter 0 begins in the same block as OpusHead and OpusTags, so the
-        // headers must be recognised by their magic bytes, not by position.
-
-        // Independently determine what the first real audio packet of chapter 0 is.
+        // Given: chapter 0 begins in the same block as OpusHead and OpusTags,
+        // so the headers must be recognised by their magic bytes, not by
+        // position. Its first real audio packet, read without `TafDecoder`.
         let mut buffers = TafBuffers::new();
         let mut page = [0u8; PAGE_SIZE];
         let mut direct = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
         direct.seek_to_chapter(0).unwrap();
         let mut expected = [0u8; MAX_PACKET];
         let expected_len;
-        // Skip OpusHead and OpusTags by their magic.
         loop {
             match direct.next_packet(&mut expected).unwrap() {
                 None => panic!("unexpected end of stream"),
@@ -577,17 +582,18 @@ mod tests {
                 Ok(n)
             }
         }
-
-        let mut dec = TafDecoder::open(
-            SlicePages::new(FIXTURE).unwrap(),
+        let mut dec = open(
+            FIXTURE,
             CapturingDecoder { first_packet: None },
             &mut buffers,
-        )
-        .unwrap();
+        );
+
+        // When
         dec.seek_to_chapter(0).unwrap();
         let mut pcm = [0i16; MAX_FRAME_SAMPLES];
         dec.next_frame(&mut pcm).unwrap();
 
+        // Then
         let (buf, len) = dec.decoder.first_packet.expect("decode was called");
         assert_eq!(
             &buf[..len],
