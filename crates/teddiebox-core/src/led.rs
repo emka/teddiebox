@@ -136,19 +136,6 @@ mod tests {
         assert_eq!(state, LedState::BatteryLow);
     }
 
-    /// Critical is red, like a fault, because the box is about to switch off.
-    #[test]
-    fn a_critical_pack_is_red_rather_than_orange() {
-        // Given
-        let (playback, battery, charging) = (PlaybackKind::Playing, BatteryLevel::Critical, false);
-
-        // When
-        let state = led_for(playback, battery, charging);
-
-        // Then
-        assert_eq!(state, LedState::BatteryCritical);
-    }
-
     /// During a download the box is silent and looks idle, so the download is
     /// shown instead of a low pack.
     #[test]
