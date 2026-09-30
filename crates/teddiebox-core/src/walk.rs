@@ -114,15 +114,27 @@ mod tests {
 
     #[test]
     fn an_empty_root_finishes_without_visiting_anything() {
+        // Given
         let mut cursor = Cursor::new();
-        assert_eq!(cursor.advance(Found::Nothing), Action::Finished);
+
+        // When
+        let action = cursor.advance(Found::Nothing);
+
+        // Then
+        assert_eq!(action, Action::Finished);
     }
 
     #[test]
     fn a_file_is_read_and_the_cursor_moves_on() {
+        // Given
         let mut cursor = Cursor::new();
         assert_eq!(cursor.index(), 0);
-        assert_eq!(cursor.advance(Found::File), Action::ReadFile);
+
+        // When
+        let action = cursor.advance(Found::File);
+
+        // Then
+        assert_eq!(action, Action::ReadFile);
         assert_eq!(
             cursor.index(),
             1,
@@ -132,8 +144,14 @@ mod tests {
 
     #[test]
     fn a_directory_is_descended_into_at_its_first_entry() {
+        // Given
         let mut cursor = Cursor::new();
-        assert_eq!(cursor.advance(Found::Directory), Action::Descend);
+
+        // When
+        let action = cursor.advance(Found::Directory);
+
+        // Then
+        assert_eq!(action, Action::Descend);
         assert_eq!(cursor.depth(), 1);
         assert_eq!(cursor.index(), 0, "a freshly opened directory starts at 0");
     }
@@ -142,19 +160,30 @@ mod tests {
     /// walk never ends.
     #[test]
     fn leaving_a_directory_resumes_the_parent_after_it() {
+        // Given
         let mut cursor = Cursor::new();
         cursor.advance(Found::Directory);
-        assert_eq!(cursor.advance(Found::Nothing), Action::Ascend);
+
+        // When
+        let action = cursor.advance(Found::Nothing);
+
+        // Then
+        assert_eq!(action, Action::Ascend);
         assert_eq!(cursor.depth(), 0);
         assert_eq!(cursor.index(), 1, "not 0, or the same subdirectory repeats");
     }
 
     #[test]
     fn the_walk_finishes_only_when_the_root_is_exhausted() {
+        // Given
         let mut cursor = Cursor::new();
         cursor.advance(Found::Directory);
-        assert_eq!(cursor.advance(Found::Nothing), Action::Ascend);
-        assert_eq!(cursor.advance(Found::Nothing), Action::Finished);
+
+        // When
+        let actions = [Found::Nothing; 2].map(|found| cursor.advance(found));
+
+        // Then
+        assert_eq!(actions, [Action::Ascend, Action::Finished]);
     }
 
     /// Descends to the deepest allowed level, so the next directory must be
@@ -169,14 +198,25 @@ mod tests {
 
     #[test]
     fn descending_stops_at_the_depth_limit() {
+        // Given
         let mut cursor = at_the_deepest_allowed_level();
-        assert_eq!(cursor.advance(Found::Directory), Action::TooDeep);
+
+        // When
+        let action = cursor.advance(Found::Directory);
+
+        // Then
+        assert_eq!(action, Action::TooDeep);
     }
 
     #[test]
     fn a_directory_too_deep_to_enter_is_not_entered() {
+        // Given
         let mut cursor = at_the_deepest_allowed_level();
+
+        // When
         cursor.advance(Found::Directory);
+
+        // Then
         assert_eq!(cursor.depth(), MAX_DEPTH - 1);
     }
 
@@ -184,25 +224,46 @@ mod tests {
     /// ends.
     #[test]
     fn a_directory_too_deep_to_enter_is_still_stepped_over() {
+        // Given
         let mut cursor = at_the_deepest_allowed_level();
         let before = cursor.index();
+
+        // When
         cursor.advance(Found::Directory);
+
+        // Then
         assert_eq!(cursor.index(), before + 1);
     }
 
     #[test]
     fn every_level_above_the_limit_is_descended_into() {
+        // Given
         let mut cursor = Cursor::new();
-        for expected_depth in 1..MAX_DEPTH {
-            assert_eq!(cursor.advance(Found::Directory), Action::Descend);
-            assert_eq!(cursor.depth(), expected_depth);
-        }
+
+        // When
+        let steps: [(Action, usize); MAX_DEPTH - 1] =
+            core::array::from_fn(|_| (cursor.advance(Found::Directory), cursor.depth()));
+
+        // Then
+        assert_eq!(
+            steps,
+            [
+                (Action::Descend, 1),
+                (Action::Descend, 2),
+                (Action::Descend, 3)
+            ]
+        );
     }
 
     #[test]
     fn an_unreadable_entry_is_stepped_over() {
+        // Given
         let mut cursor = Cursor::new();
+
+        // When
         cursor.skip();
+
+        // Then
         assert_eq!(cursor.index(), 1);
     }
 
@@ -210,26 +271,50 @@ mod tests {
     /// a file, then a directory holding one file, then the end.
     #[test]
     fn a_directory_between_two_files_is_walked_in_order() {
+        // Given
         let mut cursor = Cursor::new();
-        assert_eq!(cursor.advance(Found::File), Action::ReadFile);
-        assert_eq!(cursor.advance(Found::Directory), Action::Descend);
-        assert_eq!(cursor.advance(Found::File), Action::ReadFile);
-        assert_eq!(cursor.advance(Found::Nothing), Action::Ascend);
-        assert_eq!(cursor.index(), 2, "back in the root, past the directory");
-        assert_eq!(cursor.advance(Found::File), Action::ReadFile);
-        assert_eq!(cursor.advance(Found::Nothing), Action::Finished);
+        let tree = [
+            Found::File,
+            Found::Directory,
+            Found::File,
+            Found::Nothing,
+            Found::File,
+            Found::Nothing,
+        ];
+
+        // When
+        let actions = tree.map(|found| cursor.advance(found));
+
+        // Then
+        assert_eq!(
+            actions,
+            [
+                Action::ReadFile,
+                Action::Descend,
+                Action::ReadFile,
+                Action::Ascend,
+                Action::ReadFile,
+                Action::Finished,
+            ]
+        );
     }
 
     /// Sibling directories must not inherit each other's position.
     #[test]
     fn a_second_subdirectory_starts_from_its_own_beginning() {
+        // Given: a first subdirectory walked two entries in, then left
         let mut cursor = Cursor::new();
         cursor.advance(Found::Directory);
         cursor.advance(Found::File);
         cursor.advance(Found::File);
         assert_eq!(cursor.index(), 2);
         cursor.advance(Found::Nothing);
-        assert_eq!(cursor.advance(Found::Directory), Action::Descend);
+
+        // When
+        let action = cursor.advance(Found::Directory);
+
+        // Then
+        assert_eq!(action, Action::Descend);
         assert_eq!(cursor.index(), 0, "the new directory starts at its own 0");
     }
 }
