@@ -121,6 +121,38 @@ Content-Type: application/octet-stream\r\n\
         assert_eq!(got, Ok(&b"\x30\x82\x01\x02"[..]));
     }
 
+    /// The page shows these words to the person uploading, so each refusal
+    /// must say what they can do about it: a broken upload is tried again, a
+    /// missing file is chosen.
+    #[test]
+    fn each_refused_upload_is_explained_in_words_a_person_can_act_on() {
+        // Given
+        let troubles = [
+            MultipartError::NotMultipart,
+            MultipartError::NoFile,
+            MultipartError::Empty,
+        ];
+
+        // When
+        let explained = troubles.map(|trouble| (trouble, describe(trouble)));
+
+        // Then
+        assert_eq!(
+            explained,
+            [
+                (
+                    MultipartError::NotMultipart,
+                    "that upload did not arrive intact"
+                ),
+                (MultipartError::NoFile, "that upload did not arrive intact"),
+                (
+                    MultipartError::Empty,
+                    "no file chosen — pick tcca.der first"
+                ),
+            ]
+        );
+    }
+
     /// RFC 2046 allows text before the first delimiter, which a reader
     /// skips; the file still starts after the part's own headers. The
     /// preamble is longer than those headers, so skipping it by the wrong
