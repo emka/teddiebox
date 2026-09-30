@@ -263,48 +263,75 @@ mod tests {
 
     const FIXTURE: &[u8] = include_bytes!("../tests/data/sine.taf");
 
+    /// A reader over `taf`, holding its current block in `page`.
+    fn open<'p, 'a>(taf: &'a [u8], page: &'p mut [u8; PAGE_SIZE]) -> TafReader<'p, SlicePages<'a>> {
+        TafReader::open(SlicePages::new(taf).unwrap(), page).unwrap()
+    }
+
+    /// How many packets `r` yields from where it stands to the end.
+    fn count_packets<S: PageSource>(r: &mut TafReader<'_, S>) -> usize {
+        let mut buf = [0u8; MAX_PACKET];
+        let mut count = 0;
+        while r.next_packet(&mut buf).unwrap().is_some() {
+            count += 1;
+        }
+        count
+    }
+
     #[test]
     fn opens_the_real_fixture() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let r = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
+
+        // When
+        let r = open(FIXTURE, &mut page);
+
+        // Then
         assert_eq!(r.header().audio_id, 0x1234_5678);
     }
 
     #[test]
     fn reads_packets_until_the_stream_ends() {
+        // Given: 5 s of audio (granule 239_040 at 48 kHz) in 83 packets of
+        // about 60 ms, plus the two header packets: 85 in total, checked by
+        // walking the raw file bytes
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
-        let mut buf = [0u8; MAX_PACKET];
-        let mut count = 0usize;
-        while r.next_packet(&mut buf).unwrap().is_some() {
-            count += 1;
-        }
-        // The fixture is 5 s of audio (granule 239_040 at 48 kHz) in 83
-        // packets of about 60 ms, plus the two header packets: 85 in total,
-        // checked by walking the raw file bytes.
+        let mut r = open(FIXTURE, &mut page);
+
+        // When
+        let count = count_packets(&mut r);
+
+        // Then
         assert_eq!(count, 85, "expected the fixture's exact packet count");
     }
 
     #[test]
     fn the_first_two_packets_are_the_opus_headers() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
-        let mut buf = [0u8; MAX_PACKET];
+        let mut r = open(FIXTURE, &mut page);
+        let (mut first, mut second) = ([0u8; MAX_PACKET], [0u8; MAX_PACKET]);
 
-        let n = r.next_packet(&mut buf).unwrap().unwrap();
-        assert_eq!(&buf[..8], b"OpusHead");
+        // When
+        let n = r.next_packet(&mut first).unwrap().unwrap();
+        let n2 = r.next_packet(&mut second).unwrap().unwrap();
 
-        let n2 = r.next_packet(&mut buf).unwrap().unwrap();
-        assert_eq!(&buf[..8], b"OpusTags");
+        // Then
+        assert_eq!(&first[..8], b"OpusHead");
+        assert_eq!(&second[..8], b"OpusTags");
         assert!(n > 0 && n2 > 0);
     }
 
     #[test]
     fn the_fixture_has_one_chapter_starting_at_the_first_ogg_page() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let r = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
+
+        // When
+        let r = open(FIXTURE, &mut page);
+
+        // Then: Ogg-stream-relative, so 0 is the first Ogg page, at file page 1
         assert_eq!(r.chapter_count(), 1);
-        // Ogg-stream-relative: 0 is the first Ogg page, at file page 1.
         assert_eq!(r.header().chapter_pages.as_slice(), &[0]);
     }
 
@@ -312,14 +339,17 @@ mod tests {
     /// packet of chapter 0 is `OpusHead`, not audio.)
     #[test]
     fn seeking_to_chapter_zero_returns_packet_payload_not_a_raw_unparsed_page() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
-        r.seek_to_chapter(0).unwrap();
+        let mut r = open(FIXTURE, &mut page);
         let mut buf = [0u8; MAX_PACKET];
+
+        // When: without the `+1` in `seek_to_chapter`, the header page would
+        // load and fail, and the `expect` below would panic
+        r.seek_to_chapter(0).unwrap();
         let n = r.next_packet(&mut buf).unwrap().expect("a packet");
-        // Without the `+1` in `seek_to_chapter`, the header page would load
-        // and fail, and the `unwrap` above would panic. This assertion checks
-        // that the page header and lacing table were skipped.
+
+        // Then: the page header and lacing table were skipped
         assert!(n > 0);
         assert_ne!(
             &buf[..n.min(4)],
@@ -330,46 +360,52 @@ mod tests {
 
     #[test]
     fn seeking_past_the_last_chapter_is_an_error() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
-        let n = r.chapter_count();
-        assert_eq!(r.seek_to_chapter(n), Err(TafError::PageOutOfRange));
+        let mut r = open(FIXTURE, &mut page);
+        let past_the_last = r.chapter_count();
+
+        // When
+        let sought = r.seek_to_chapter(past_the_last);
+
+        // Then
+        assert_eq!(sought, Err(TafError::PageOutOfRange));
     }
 
     #[test]
     fn reads_a_packet_as_large_as_a_page_can_hold() {
+        // Given: 4053 bytes is the largest packet seen in a real Toniebox
+        // file. The fixtures' packets are at most 719 bytes, so this uses a
+        // synthetic page, with data_length (field 2) = 4096: one Ogg page of
+        // stream.
         let mut page = [0u8; PAGE_SIZE];
-        // 4053 bytes is the largest packet seen in a real Toniebox file. The
-        // fixtures' packets are at most 719 bytes, so this uses a synthetic
-        // page.
-        //
-        // data_length (field 2) = 4096: one Ogg page of stream.
-        let packet_len = 4053usize;
         let mut file = [0u8; PAGE_SIZE * 2];
         file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
         file[PAGE_SIZE..].copy_from_slice(&ogg_page(&[&[0xAB; 4053]]));
-
-        let mut r = TafReader::open(SlicePages::new(&file).unwrap(), &mut page).unwrap();
+        let mut r = open(&file, &mut page);
         let mut buf = [0u8; MAX_PACKET];
 
+        // When
         let n = r.next_packet(&mut buf).unwrap().unwrap();
-        assert_eq!(n, packet_len);
+
+        // Then
+        assert_eq!(n, 4053);
         assert!(buf[..n].iter().all(|&b| b == 0xAB));
     }
 
     #[test]
     fn a_packet_too_large_for_the_buffer_can_be_retried_with_a_bigger_one() {
+        // Given: the OpusHead packet is 19 bytes, so 4 bytes is too small
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
-
-        // The OpusHead packet is 19 bytes, so 4 bytes is too small.
+        let mut r = open(FIXTURE, &mut page);
         let mut too_small = [0u8; 4];
         assert_eq!(r.next_packet(&mut too_small), Err(TafError::BufferTooSmall));
 
-        // The failed attempt did not consume the packet: a retry gets the
-        // same packet.
+        // When
         let mut big_enough = [0u8; MAX_PACKET];
         let n = r.next_packet(&mut big_enough).unwrap().unwrap();
+
+        // Then: the failed attempt did not consume the packet
         assert_eq!(&big_enough[..n.min(8)], b"OpusHead");
     }
 
@@ -417,124 +453,127 @@ mod tests {
 
     #[test]
     fn a_first_page_whose_serial_disagrees_with_the_header_is_rejected() {
-        let mut page = [0u8; PAGE_SIZE];
-        // In real files every page's serial equals the header's audio_id, so
-        // a first page that disagrees is not part of this file.
-        //
+        // Given: in real files every page's serial equals the header's
+        // audio_id, so a first page that disagrees is not part of this file.
         // data_length (field 2) = 4096 = one page; audio_id (field 3) =
         // 0xAAAA. The page has a different serial, 0xBBBB.
+        let mut page = [0u8; PAGE_SIZE];
         let mut file = [0u8; PAGE_SIZE * 2];
         file[0..PAGE_SIZE]
             .copy_from_slice(&header_page(&[0x10, 0x80, 0x20, 0x18, 0xAA, 0xD5, 0x02]));
         file[PAGE_SIZE..].copy_from_slice(&ogg_page_with_serial(0xBBBB, &[b"AAAA"]));
 
-        assert_eq!(
-            TafReader::open(SlicePages::new(&file).unwrap(), &mut page).err(),
-            Some(TafError::WrongStream)
-        );
+        // When
+        let opened = TafReader::open(SlicePages::new(&file).unwrap(), &mut page);
+
+        // Then
+        assert_eq!(opened.err(), Some(TafError::WrongStream));
     }
 
     #[test]
     fn a_block_belonging_to_another_stream_is_rejected_rather_than_decoded() {
-        let mut page = [0u8; PAGE_SIZE];
-        // After an interrupted write, page 2 is a valid Ogg page left over
-        // from an older, longer recording. Only its stream serial shows it
-        // does not belong. Playing it would play the end of the old story.
-        //
+        // Given: after an interrupted write, page 2 is a valid Ogg page left
+        // over from an older, longer recording. Only its stream serial shows
+        // it does not belong; playing it would play the end of the old story.
         // data_length (field 2) = 8192, declaring both pages as stream;
         // audio_id (field 3) = 0xAAAA, matching the first page, so only the
         // second page is wrong.
+        let mut page = [0u8; PAGE_SIZE];
         let mut file = [0u8; PAGE_SIZE * 3];
         file[0..PAGE_SIZE]
             .copy_from_slice(&header_page(&[0x10, 0x80, 0x40, 0x18, 0xAA, 0xD5, 0x02]));
         file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&ogg_page_with_serial(0xAAAA, &[b"AAAA"]));
         file[PAGE_SIZE * 2..].copy_from_slice(&ogg_page_with_serial(0xBBBB, &[b"BBBB"]));
-
-        let mut r = TafReader::open(SlicePages::new(&file).unwrap(), &mut page).unwrap();
+        let mut r = open(&file, &mut page);
         let mut buf = [0u8; MAX_PACKET];
-
         let n = r.next_packet(&mut buf).unwrap().unwrap();
         assert_eq!(&buf[..n], b"AAAA");
-        assert_eq!(r.next_packet(&mut buf), Err(TafError::WrongStream));
+
+        // When
+        let next = r.next_packet(&mut buf);
+
+        // Then
+        assert_eq!(next, Err(TafError::WrongStream));
     }
 
     #[test]
     fn a_page_packed_behind_another_is_checked_against_the_stream_too() {
+        // Given: the same leftover page, but packed behind a good page in the
+        // same block, which is a different code path. audio_id (field 3) =
+        // 0xAAAA, matching the block's first page.
         let mut page = [0u8; PAGE_SIZE];
-        // The same leftover page, but packed behind a good page in the same
-        // block. This is a different code path, so it has its own test.
-        //
-        // audio_id (field 3) = 0xAAAA, matching the block's first page.
         let mut file = [0u8; PAGE_SIZE * 2];
         file[0..PAGE_SIZE]
             .copy_from_slice(&header_page(&[0x10, 0x80, 0x20, 0x18, 0xAA, 0xD5, 0x02]));
-
         let block = &mut file[PAGE_SIZE..];
         block[..PAGE_SIZE].copy_from_slice(&ogg_page_with_serial(0xAAAA, &[b"AAAA"]));
-
-        // A second page immediately behind the first one's payload.
         const SECOND: usize = 27 + 1 + 4;
         let foreign = ogg_page_with_serial(0xBBBB, &[b"BBBB"]);
         block[SECOND..SECOND + 32].copy_from_slice(&foreign[..32]);
-
-        let mut r = TafReader::open(SlicePages::new(&file).unwrap(), &mut page).unwrap();
+        let mut r = open(&file, &mut page);
         let mut buf = [0u8; MAX_PACKET];
-
         let n = r.next_packet(&mut buf).unwrap().unwrap();
         assert_eq!(&buf[..n], b"AAAA");
-        assert_eq!(r.next_packet(&mut buf), Err(TafError::WrongStream));
+
+        // When
+        let next = r.next_packet(&mut buf);
+
+        // Then
+        assert_eq!(next, Err(TafError::WrongStream));
     }
 
     #[test]
     fn seeking_onto_a_block_from_another_stream_is_rejected() {
+        // Given: a chapter can point at a leftover page from an older
+        // recording inside the declared range, so `last_usable_page` does not
+        // catch it; the stream serial does. data_length = 8192; chapter_pages
+        // (field 4, packed) = [0, 1]; audio_id (field 3) = 0xAAAA, matching
+        // the first page's serial.
         let mut page = [0u8; PAGE_SIZE];
-        // A chapter can point at a leftover page from an older recording
-        // inside the declared range, so `last_usable_page` does not catch
-        // it; the stream serial does.
-        //
-        // data_length = 8192; chapter_pages (field 4, packed) = [0, 1];
-        // audio_id (field 3) = 0xAAAA, matching the first page's serial.
         let mut file = [0u8; PAGE_SIZE * 3];
         file[0..PAGE_SIZE].copy_from_slice(&header_page(&[
             0x10, 0x80, 0x40, 0x18, 0xAA, 0xD5, 0x02, 0x22, 0x02, 0x00, 0x01,
         ]));
         file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&ogg_page_with_serial(0xAAAA, &[b"AAAA"]));
         file[PAGE_SIZE * 2..].copy_from_slice(&ogg_page_with_serial(0xBBBB, &[b"BBBB"]));
+        let mut r = open(&file, &mut page);
 
-        let mut r = TafReader::open(SlicePages::new(&file).unwrap(), &mut page).unwrap();
+        // When
+        let sought = r.seek_to_chapter(1);
 
-        assert_eq!(r.seek_to_chapter(1), Err(TafError::WrongStream));
+        // Then
+        assert_eq!(sought, Err(TafError::WrongStream));
     }
 
     #[test]
     fn a_failed_seek_still_reports_the_right_error() {
-        let mut page = [0u8; PAGE_SIZE];
-        // Chapter 0 at ogg page 0 (file page 1, holding two packets);
+        // Given: chapter 0 at ogg page 0 (file page 1, holding two packets);
         // chapter 1 at ogg page 1 (file page 2, deliberately not a real Ogg
-        // page at all).
-        //
-        // data_length (field 2) = 8192 = two pages, so chapter 1 fails
-        // because page 2 is not an Ogg page, not because it is out of range.
+        // page at all). data_length (field 2) = 8192 = two pages, so chapter
+        // 1 fails because page 2 is not an Ogg page, not because it is out
+        // of range.
         //
         // `load_page` reads straight into `self.page` (no separate
         // candidate buffer — see its own doc comment), so a failed seek no
         // longer guarantees the reader is still positioned where it was;
         // this crate's one caller always stops on any `Err` here rather
         // than reading on, and this test only pins the error itself.
+        let mut page = [0u8; PAGE_SIZE];
         let mut file = [0u8; PAGE_SIZE * 3];
         file[0..PAGE_SIZE]
             .copy_from_slice(&header_page(&[0x10, 0x80, 0x40, 0x22, 0x02, 0x00, 0x01]));
         file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&ogg_page(&[b"AAAA", b"BBBB"]));
-        // file[PAGE_SIZE * 2..] is left all zero: not "OggS", not a page.
-
-        let mut r = TafReader::open(SlicePages::new(&file).unwrap(), &mut page).unwrap();
+        let mut r = open(&file, &mut page);
         let mut buf = [0u8; MAX_PACKET];
-
         let n = r.next_packet(&mut buf).unwrap().unwrap();
         assert_eq!(&buf[..n], b"AAAA");
 
+        // When
+        let sought = r.seek_to_chapter(1);
+
+        // Then
         assert_eq!(
-            r.seek_to_chapter(1),
+            sought,
             Err(TafError::NotAnOggPage),
             "chapter 1 points at a page that isn't a real Ogg page"
         );
@@ -542,15 +581,14 @@ mod tests {
 
     #[test]
     fn an_oversized_packet_does_not_leave_stale_state_for_a_retry() {
+        // Given: data_length (field 2) = 4096 = one page, and audio_id 0,
+        // matching the page's serial (also 0). The page has 20 segments: the
+        // first 17 (sixteen 255s and a 1) declare a 4081-byte packet at
+        // payload offset 47, which overruns the 4096-byte page, and three
+        // lacing entries follow it (as in the test in `page.rs`).
         let mut block = [0u8; PAGE_SIZE];
-        // data_length (field 2) = 4096 = one page. audio_id is 0, which
-        // matches the page's serial (also 0).
         let mut file = [0u8; PAGE_SIZE * 2];
         file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
-
-        // 20 segments: the first 17 (sixteen 255s and a 1) declare a
-        // 4081-byte packet at payload offset 47, which overruns the 4096-byte
-        // page. Three lacing entries follow it (as in the test in `page.rs`).
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(b"OggS");
         page[26] = 20;
@@ -562,14 +600,18 @@ mod tests {
         page[27 + 18] = 0;
         page[27 + 19] = 0;
         file[PAGE_SIZE..PAGE_SIZE * 2].copy_from_slice(&page);
-
-        let mut r = TafReader::open(SlicePages::new(&file).unwrap(), &mut block).unwrap();
+        let mut r = open(&file, &mut block);
         let mut buf = [0u8; MAX_PACKET];
 
-        assert_eq!(r.next_packet(&mut buf), Err(TafError::NotAnOggPage));
-        // A retry must not continue from a stale cursor with the remaining
-        // lacing entries.
-        assert_eq!(r.next_packet(&mut buf), Err(TafError::NotAnOggPage));
+        // When: a read, and a retry
+        let reads = [r.next_packet(&mut buf), r.next_packet(&mut buf)];
+
+        // Then: the retry does not continue from a stale cursor with the
+        // remaining lacing entries
+        assert_eq!(
+            reads,
+            [Err(TafError::NotAnOggPage), Err(TafError::NotAnOggPage)]
+        );
     }
 
     const CHAPTERS_FIXTURE: &[u8] = include_bytes!("../tests/data/chapters.taf");
@@ -582,66 +624,100 @@ mod tests {
     /// return to the same page.
     #[test]
     fn a_reader_returns_to_the_page_it_reported() {
+        // Given: the page chapter 1 starts on, then a seek away from it
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
+        let mut r = open(CHAPTERS_FIXTURE, &mut page);
         r.seek_to_chapter(1).unwrap();
-        let page = r.current_page();
-
+        let reported = r.current_page();
         r.seek_to_chapter(0).unwrap();
-        assert_ne!(r.current_page(), page, "the seek away has to move it");
+        assert_ne!(r.current_page(), reported, "the seek away has to move it");
 
-        r.seek_to_page(page).unwrap();
-        assert_eq!(r.current_page(), page);
+        // When
+        r.seek_to_page(reported).unwrap();
+
+        // Then
+        assert_eq!(r.current_page(), reported);
     }
 
     /// Like `seek_to_chapter`: a page after the declared stream is padding,
     /// not audio.
     #[test]
     fn a_page_beyond_the_declared_stream_is_refused() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
-        assert_eq!(r.seek_to_page(u32::MAX), Err(TafError::PageOutOfRange));
+        let mut r = open(CHAPTERS_FIXTURE, &mut page);
+
+        // When
+        let sought = r.seek_to_page(u32::MAX);
+
+        // Then
+        assert_eq!(sought, Err(TafError::PageOutOfRange));
     }
 
     /// File page 0 is the header, not audio.
     #[test]
     fn the_header_page_is_not_a_place_to_resume() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
-        assert_eq!(r.seek_to_page(0), Err(TafError::PageOutOfRange));
+        let mut r = open(CHAPTERS_FIXTURE, &mut page);
+
+        // When
+        let sought = r.seek_to_page(0);
+
+        // Then
+        assert_eq!(sought, Err(TafError::PageOutOfRange));
     }
 
     #[test]
     fn the_fixtures_chapters_start_where_the_chapter_tests_assume() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
+
+        // When
+        let r = open(CHAPTERS_FIXTURE, &mut page);
+
+        // Then
         assert_eq!(r.header().chapter_pages.as_slice(), CHAPTERS_FIXTURE_PAGES);
     }
 
     #[test]
     fn a_freshly_opened_reader_is_in_the_first_chapter() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
+
+        // When
+        let r = open(CHAPTERS_FIXTURE, &mut page);
+
+        // Then
         assert_eq!(r.current_chapter(), 0);
     }
 
     #[test]
     fn seeking_reports_the_chapter_that_was_sought() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
-        r.seek_to_chapter(2).unwrap();
-        assert_eq!(r.current_chapter(), 2);
-        r.seek_to_chapter(1).unwrap();
-        assert_eq!(r.current_chapter(), 1);
+        let mut r = open(CHAPTERS_FIXTURE, &mut page);
+
+        // When
+        let chapters = [2, 1].map(|chapter| {
+            r.seek_to_chapter(chapter).unwrap();
+            r.current_chapter()
+        });
+
+        // Then
+        assert_eq!(chapters, [2, 1]);
     }
 
     /// A story played straight through moves into later chapters without
     /// any seek, and the reported chapter must follow.
     #[test]
     fn reading_straight_through_reports_each_chapter_in_turn() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
+        let mut r = open(CHAPTERS_FIXTURE, &mut page);
         let mut buf = [0u8; MAX_PACKET];
+
+        // When: the chapter after every packet, noting each change
         let mut seen: heapless::Vec<usize, 8> = heapless::Vec::new();
         seen.push(r.current_chapter()).unwrap();
         while r.next_packet(&mut buf).unwrap().is_some() {
@@ -650,6 +726,8 @@ mod tests {
                 seen.push(now).unwrap();
             }
         }
+
+        // Then
         assert_eq!(seen.as_slice(), &[0, 1, 2]);
     }
 
@@ -657,71 +735,85 @@ mod tests {
     /// change either.
     #[test]
     fn a_failed_seek_leaves_the_chapter_where_it_was() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
+        let mut r = open(CHAPTERS_FIXTURE, &mut page);
         r.seek_to_chapter(1).unwrap();
-        assert_eq!(r.seek_to_chapter(3), Err(TafError::PageOutOfRange));
+
+        // When
+        let sought = r.seek_to_chapter(3);
+
+        // Then
+        assert_eq!(sought, Err(TafError::PageOutOfRange));
         assert_eq!(r.current_chapter(), 1);
     }
 
     #[test]
     fn the_multi_chapter_fixture_has_three_chapters() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
+
+        // When
+        let r = open(CHAPTERS_FIXTURE, &mut page);
+
+        // Then
         assert_eq!(r.chapter_count(), 3);
     }
 
     #[test]
     fn multi_chapter_pages_are_strictly_increasing() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
+
+        // When
+        let r = open(CHAPTERS_FIXTURE, &mut page);
+
+        // Then
         let pages = r.header().chapter_pages.as_slice();
-        for w in pages.windows(2) {
-            assert!(
-                w[0] < w[1],
-                "chapter pages must be strictly increasing: {pages:?}"
-            );
-        }
+        assert!(
+            pages.windows(2).all(|w| w[0] < w[1]),
+            "chapter pages must be strictly increasing: {pages:?}"
+        );
     }
 
     #[test]
     fn seeking_to_each_chapter_succeeds_and_lands_on_different_audio() {
+        // Given: for each chapter, two freshly opened readers seek to it and
+        // must return the same first packet, so the result does not depend on
+        // the reader's earlier position. Then every chapter's first packet
+        // must differ from the others, so a seek that does nothing would
+        // fail.
         let mut page0 = [0u8; PAGE_SIZE];
         let mut page1 = [0u8; PAGE_SIZE];
         let mut page2 = [0u8; PAGE_SIZE];
-        // For each chapter, two freshly opened readers seek to it and must
-        // return the same first packet, so the result does not depend on the
-        // reader's earlier position. Then every chapter's first packet must
-        // differ from the others, so a seek that does nothing would fail.
-        let chapter_count = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page0)
-            .unwrap()
-            .chapter_count();
+        let chapter_count = open(CHAPTERS_FIXTURE, &mut page0).chapter_count();
 
+        // When
         let mut first_packets: heapless::Vec<([u8; MAX_PACKET], usize), 8> = heapless::Vec::new();
-
+        let mut disagreeing: heapless::Vec<usize, 8> = heapless::Vec::new();
         for chapter in 0..chapter_count {
-            let mut a =
-                TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page1).unwrap();
+            let mut a = open(CHAPTERS_FIXTURE, &mut page1);
             a.seek_to_chapter(chapter).unwrap();
             let mut buf_a = [0u8; MAX_PACKET];
             let len_a = a.next_packet(&mut buf_a).unwrap().expect("a packet");
 
-            let mut b =
-                TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page2).unwrap();
+            let mut b = open(CHAPTERS_FIXTURE, &mut page2);
             b.seek_to_chapter(chapter).unwrap();
             let mut buf_b = [0u8; MAX_PACKET];
             let len_b = b.next_packet(&mut buf_b).unwrap().expect("a packet");
 
-            assert_eq!(
-                &buf_a[..len_a],
-                &buf_b[..len_b],
-                "two independent fresh readers seeking to chapter {chapter} must land \
-                 on the same packet"
-            );
-
+            if buf_a[..len_a] != buf_b[..len_b] {
+                disagreeing.push(chapter).unwrap();
+            }
             first_packets.push((buf_a, len_a)).unwrap();
         }
 
+        // Then
+        assert_eq!(
+            disagreeing.as_slice(),
+            &[] as &[usize],
+            "two independent fresh readers seeking to a chapter must land on the same packet"
+        );
         for i in 0..first_packets.len() {
             for j in (i + 1)..first_packets.len() {
                 let (buf_i, len_i) = &first_packets[i];
@@ -737,142 +829,156 @@ mod tests {
 
     #[test]
     fn seeking_past_the_last_chapter_of_the_multi_chapter_fixture_is_an_error() {
+        // Given
         let mut page = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page).unwrap();
-        let n = r.chapter_count();
-        assert_eq!(r.seek_to_chapter(n), Err(TafError::PageOutOfRange));
+        let mut r = open(CHAPTERS_FIXTURE, &mut page);
+        let past_the_last = r.chapter_count();
+
+        // When
+        let sought = r.seek_to_chapter(past_the_last);
+
+        // Then
+        assert_eq!(sought, Err(TafError::PageOutOfRange));
     }
 
     #[test]
     fn a_file_with_fewer_pages_than_the_header_declares_is_rejected_as_truncated() {
+        // Given: sine.taf declares data_length 57344 = 14 pages of Ogg stream
+        // (15 with the header). Cut to 10 whole pages, it would otherwise
+        // play as a valid but shorter file.
         let mut page = [0u8; PAGE_SIZE];
-        // sine.taf declares data_length 57344 = 14 pages of Ogg stream (15
-        // with the header). Cut to 10 whole pages, it would otherwise play as
-        // a valid but shorter file.
         let truncated = &FIXTURE[..PAGE_SIZE * 10];
-        assert!(matches!(
-            TafReader::open(SlicePages::new(truncated).unwrap(), &mut page),
-            Err(TafError::TruncatedFile)
-        ));
+
+        // When
+        let opened = TafReader::open(SlicePages::new(truncated).unwrap(), &mut page);
+
+        // Then
+        assert!(matches!(opened, Err(TafError::TruncatedFile)));
     }
 
     #[test]
     fn both_real_fixtures_still_open_and_yield_their_existing_packet_counts() {
+        // Given
         let mut page0 = [0u8; PAGE_SIZE];
         let mut page1 = [0u8; PAGE_SIZE];
-        let mut r = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page0).unwrap();
-        let mut buf = [0u8; MAX_PACKET];
-        let mut count = 0usize;
-        while r.next_packet(&mut buf).unwrap().is_some() {
-            count += 1;
-        }
-        assert_eq!(count, 85, "sine.taf's packet count must be unaffected");
+        let mut sine = open(FIXTURE, &mut page0);
+        let mut chapters = open(CHAPTERS_FIXTURE, &mut page1);
 
-        let mut r2 =
-            TafReader::open(SlicePages::new(CHAPTERS_FIXTURE).unwrap(), &mut page1).unwrap();
-        let mut count2 = 0usize;
-        while r2.next_packet(&mut buf).unwrap().is_some() {
-            count2 += 1;
-        }
-        assert_eq!(count2, 97, "chapters.taf's packet count must be unaffected");
+        // When
+        let counts = (count_packets(&mut sine), count_packets(&mut chapters));
+
+        // Then
+        assert_eq!(counts.0, 85, "sine.taf's packet count must be unaffected");
+        assert_eq!(
+            counts.1, 97,
+            "chapters.taf's packet count must be unaffected"
+        );
     }
 
     #[test]
     fn a_header_declaring_zero_data_length_is_rejected_not_opened() {
+        // Given: sine.taf's data_length varint is at file offsets 27..30,
+        // encoded as [0x80, 0xC0, 0x03] (57344). Replaced with a 3-byte
+        // encoding of zero ([0x80, 0x80, 0x00]) so no other field moves.
+        // With zero bytes of stream there is no page to open: even file page
+        // 1 (OpusHead) is out of bounds.
         let mut page = [0u8; PAGE_SIZE];
-        // sine.taf's data_length varint is at file offsets 27..30, encoded as
-        // [0x80, 0xC0, 0x03] (57344). Replace it with a 3-byte encoding of
-        // zero ([0x80, 0x80, 0x00]) so no other field moves.
-        //
-        // With zero bytes of stream there is no page to open: even file
-        // page 1 (OpusHead) is out of bounds.
         let mut file = [0u8; PAGE_SIZE * 15];
         file.copy_from_slice(FIXTURE);
         file[27..30].copy_from_slice(&[0x80, 0x80, 0x00]);
 
+        // When
+        let opened = TafReader::open(SlicePages::new(&file).unwrap(), &mut page);
+
+        // Then
         assert!(
-            TafReader::open(SlicePages::new(&file).unwrap(), &mut page).is_err(),
+            opened.is_err(),
             "a header declaring zero data_length must not open"
         );
     }
 
     #[test]
     fn seeking_to_a_chapter_beyond_the_declared_stream_is_rejected_not_decoded() {
+        // Given: chapters.taf's data_length varint is at the same offsets
+        // (27..30), encoded as [0x80, 0x80, 0x04] (65536, 16 pages). Replaced
+        // with [0x80, 0xC0, 0x01] (24576, 6 pages), the same width, so no
+        // other field moves. Chapter 2 (Ogg page 11, file page 12) is a valid
+        // Ogg page, but with the smaller data_length it is no longer part of
+        // the stream.
         let mut page = [0u8; PAGE_SIZE];
-        // chapters.taf's data_length varint is at the same offsets (27..30),
-        // encoded as [0x80, 0x80, 0x04] (65536, 16 pages). Replace it with
-        // [0x80, 0xC0, 0x01] (24576, 6 pages), the same width, so no other
-        // field moves.
-        //
-        // Chapter 2 (Ogg page 11, file page 12) is a valid Ogg page, but with
-        // the smaller data_length it is no longer part of the stream. Seeking
-        // there must fail.
         let mut file = [0u8; PAGE_SIZE * 17];
         file.copy_from_slice(CHAPTERS_FIXTURE);
         file[27..30].copy_from_slice(&[0x80, 0xC0, 0x01]);
+        let mut r = open(&file, &mut page);
 
-        let mut r = TafReader::open(SlicePages::new(&file).unwrap(), &mut page).unwrap();
-        assert_eq!(r.seek_to_chapter(2), Err(TafError::PageOutOfRange));
+        // When
+        let sought = r.seek_to_chapter(2);
+
+        // Then
+        assert_eq!(sought, Err(TafError::PageOutOfRange));
     }
 
     #[test]
     fn an_extra_all_zero_trailing_block_is_accepted_as_padding_and_ignored() {
+        // Given: whole-page padding after the declared data is allowed, since
+        // a real card may have zero blocks left over from an older, longer
+        // recording
         let mut page0 = [0u8; PAGE_SIZE];
         let mut page1 = [0u8; PAGE_SIZE];
-        // Whole-page padding after the declared data is allowed: a real card
-        // may have zero blocks left over from an older, longer recording.
         let mut padded = [0u8; PAGE_SIZE * 16];
         padded[..FIXTURE.len()].copy_from_slice(FIXTURE);
-        // padded[FIXTURE.len()..] is left all zero by initialization.
+        let mut original = open(FIXTURE, &mut page0);
+        let mut padded_reader = open(&padded, &mut page1);
 
-        let mut original = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page0).unwrap();
-        let mut padded_reader =
-            TafReader::open(SlicePages::new(&padded).unwrap(), &mut page1).unwrap();
-
+        // When: both read side by side to the end
         let mut buf_a = [0u8; MAX_PACKET];
         let mut buf_b = [0u8; MAX_PACKET];
-        loop {
+        let mut first_difference = None;
+        for packet in 0.. {
             let a = original.next_packet(&mut buf_a).unwrap();
             let b = padded_reader.next_packet(&mut buf_b).unwrap();
             match (a, b) {
                 (None, None) => break,
-                (Some(na), Some(nb)) => assert_eq!(
-                    &buf_a[..na],
-                    &buf_b[..nb],
-                    "padded file must yield exactly the same packets as the original"
-                ),
+                (Some(na), Some(nb)) if buf_a[..na] == buf_b[..nb] => {}
                 _ => {
-                    panic!("packet stream length differs between the original and the padded file")
+                    first_difference = Some(packet);
+                    break;
                 }
             }
         }
+
+        // Then
+        assert_eq!(
+            first_difference, None,
+            "padded file must yield exactly the same packets as the original"
+        );
     }
 
     #[test]
     fn a_dropped_fragment_does_not_hide_a_page_packed_in_behind_it() {
+        // Given: one block holding two Ogg pages. The first ends with a
+        // lacing entry of 255 and no terminator, so its last packet is
+        // dropped. Its 255 bytes still take up space, and the second page
+        // starts after them.
         let mut page = [0u8; PAGE_SIZE];
-        // One block holding two Ogg pages. The first ends with a lacing entry
-        // of 255 and no terminator, so its last packet is dropped. Its 255
-        // bytes still take up space, and the second page starts after them.
-        // A reader that did not skip them would miss the second page.
         let mut file = [0u8; PAGE_SIZE * 2];
         file[0..PAGE_SIZE].copy_from_slice(&header_page(&[0x10, 0x80, 0x20]));
-
         let block = &mut file[PAGE_SIZE..];
         block[0..4].copy_from_slice(b"OggS");
         block[26] = 1;
         block[27] = 255; // unterminated: 255 bytes at 28..283, no more lacing
-
         const SECOND: usize = 283;
         block[SECOND..SECOND + 4].copy_from_slice(b"OggS");
         block[SECOND + 26] = 1;
         block[SECOND + 27] = 4;
         block[SECOND + 28..SECOND + 32].copy_from_slice(b"CCCC");
-
-        let mut r = TafReader::open(SlicePages::new(&file).unwrap(), &mut page).unwrap();
+        let mut r = open(&file, &mut page);
         let mut buf = [0u8; MAX_PACKET];
 
+        // When
         let n = r.next_packet(&mut buf).unwrap().unwrap();
+
+        // Then: a reader that did not skip them would miss the second page
         assert_eq!(&buf[..n], b"CCCC");
     }
 
@@ -910,22 +1016,26 @@ mod tests {
 
     #[test]
     fn a_page_that_cannot_be_read_is_an_io_error_not_a_range_error() {
+        // Given: page 1 is within the file, so this is a storage error, not
+        // `PageOutOfRange`
         let mut page = [0u8; PAGE_SIZE];
-        // Page 1 is within the file, so this is a storage error, not
-        // `PageOutOfRange`.
-        assert_eq!(
-            TafReader::open(failing_at(1), &mut page).err(),
-            Some(TafError::Io)
-        );
+
+        // When
+        let opened = TafReader::open(failing_at(1), &mut page);
+
+        // Then
+        assert_eq!(opened.err(), Some(TafError::Io));
     }
 
     #[test]
     fn a_header_that_cannot_be_read_is_an_io_error_not_a_malformed_header() {
+        // Given: the header may be fine; it just could not be read
         let mut page = [0u8; PAGE_SIZE];
-        // The header may be fine; it just could not be read.
-        assert_eq!(
-            TafReader::open(failing_at(0), &mut page).err(),
-            Some(TafError::Io)
-        );
+
+        // When
+        let opened = TafReader::open(failing_at(0), &mut page);
+
+        // Then
+        assert_eq!(opened.err(), Some(TafError::Io));
     }
 }
