@@ -4,7 +4,7 @@
 //! exactly 1000 Hz, with no click where it repeats, because the table holds
 //! exactly one cycle.
 
-/// Samples per cycle at 48 kHz.
+/// The rate the cycle is played at.
 pub const SAMPLE_RATE_HZ: u32 = 48_000;
 
 /// The tone this produces, in hertz.
