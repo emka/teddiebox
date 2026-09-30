@@ -504,48 +504,88 @@ mod tests {
     /// network called "".
     #[test]
     fn an_ssid_with_no_value_is_missing_rather_than_empty() {
-        let err = Config::parse("ssid =\nserver = box.lan:8080\n").unwrap_err();
+        // Given
+        let text = "ssid =\nserver = box.lan:8080\n";
+
+        // When
+        let err = Config::parse(text).unwrap_err();
+
+        // Then
         assert_eq!(err, ConfigError::MissingSsid);
     }
 
     #[test]
     fn a_server_with_no_value_is_missing_rather_than_empty() {
-        let err = Config::parse("ssid = home\nserver =   \n").unwrap_err();
+        // Given
+        let text = "ssid = home\nserver =   \n";
+
+        // When
+        let err = Config::parse(text).unwrap_err();
+
+        // Then
         assert_eq!(err, ConfigError::MissingServer);
     }
 
     #[test]
     fn a_trailing_comment_is_not_part_of_the_server() {
-        let c = Config::parse("ssid = home\nserver = box.lan:8080 # our box\n").unwrap();
+        // Given
+        let text = "ssid = home\nserver = box.lan:8080 # our box\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.server.as_str(), "box.lan:8080");
     }
 
     /// Only a `#` that starts a word is a comment, so a value may contain one.
     #[test]
     fn a_hash_inside_a_value_is_part_of_the_value() {
-        let c = Config::parse("ssid = net#1\nserver = box.lan:8080\n").unwrap();
+        // Given
+        let text = "ssid = net#1\nserver = box.lan:8080\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.ssid.as_str(), "net#1");
     }
 
     /// Wi-Fi passwords often contain `#`, so the password keeps everything.
     #[test]
     fn a_password_keeps_a_hash_and_everything_after_it() {
-        let c =
-            Config::parse("ssid = home\npassword = hunter2 #1\nserver = box.lan:8080\n").unwrap();
+        // Given
+        let text = "ssid = home\npassword = hunter2 #1\nserver = box.lan:8080\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.password.as_str(), "hunter2 #1");
     }
 
     /// Allowed, for open networks.
     #[test]
     fn an_empty_password_is_allowed() {
-        let c = Config::parse("ssid = home\npassword =\nserver = box.lan:8080\n").unwrap();
+        // Given
+        let text = "ssid = home\npassword =\nserver = box.lan:8080\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.password.as_str(), "");
     }
 
     #[test]
     fn parses_a_minimal_file() {
-        let c =
-            Config::parse("ssid = HomeNet\npassword = hunter2\nserver = 10.0.0.5:8080\n").unwrap();
+        // Given
+        let text = "ssid = HomeNet\npassword = hunter2\nserver = 10.0.0.5:8080\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.ssid.as_str(), "HomeNet");
         assert_eq!(c.password.as_str(), "hunter2");
         assert_eq!(c.server.as_str(), "10.0.0.5:8080");
@@ -553,89 +593,152 @@ mod tests {
 
     #[test]
     fn ignores_comments_and_blank_lines() {
+        // Given
         let text = "# my box\n\nssid = HomeNet\n\n# the server\nserver = box.lan:8080\n";
+
+        // When
         let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.ssid.as_str(), "HomeNet");
         assert_eq!(c.server.as_str(), "box.lan:8080");
     }
 
     #[test]
     fn tolerates_missing_and_extra_whitespace() {
-        let c = Config::parse("ssid=HomeNet\n   server   =   box.lan:8080   \n").unwrap();
+        // Given
+        let text = "ssid=HomeNet\n   server   =   box.lan:8080   \n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.ssid.as_str(), "HomeNet");
         assert_eq!(c.server.as_str(), "box.lan:8080");
     }
 
     #[test]
     fn accepts_windows_line_endings() {
-        let c = Config::parse("ssid = HomeNet\r\nserver = box.lan:8080\r\n").unwrap();
+        // Given
+        let text = "ssid = HomeNet\r\nserver = box.lan:8080\r\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.ssid.as_str(), "HomeNet");
         assert_eq!(c.server.as_str(), "box.lan:8080");
     }
 
     #[test]
     fn an_open_network_needs_no_password() {
-        let c = Config::parse("ssid = Cafe\nserver = box.lan:8080\n").unwrap();
+        // Given
+        let text = "ssid = Cafe\nserver = box.lan:8080\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert!(c.password.is_empty());
     }
 
     #[test]
     fn a_password_may_contain_equals_signs() {
-        let c = Config::parse("ssid = A\npassword = a=b=c\nserver = s:1\n").unwrap();
+        // Given
+        let text = "ssid = A\npassword = a=b=c\nserver = s:1\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.password.as_str(), "a=b=c");
     }
 
     #[test]
     fn a_missing_ssid_is_an_error() {
-        assert_eq!(
-            Config::parse("server = box.lan:8080\n"),
-            Err(ConfigError::MissingSsid)
-        );
+        // Given
+        let text = "server = box.lan:8080\n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::MissingSsid));
     }
 
     /// `server` is copied unescaped into a `Host:` header, and lines are split
     /// on `\n` only, so a `CR` inside the value would end the header line.
     #[test]
     fn a_server_carrying_a_bare_cr_is_refused() {
-        assert_eq!(
-            Config::parse("ssid = A\nserver = box.lan:8080\rX-Thing: 1\n"),
-            Err(ConfigError::MalformedValue)
-        );
+        // Given
+        let text = "ssid = A\nserver = box.lan:8080\rX-Thing: 1\n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::MalformedValue));
     }
 
     #[test]
     fn a_missing_server_is_an_error() {
-        assert_eq!(
-            Config::parse("ssid = HomeNet\n"),
-            Err(ConfigError::MissingServer)
-        );
+        // Given
+        let text = "ssid = HomeNet\n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::MissingServer));
     }
 
     #[test]
     fn a_line_without_a_separator_is_an_error() {
-        assert_eq!(
-            Config::parse("ssid = A\nserver = s:1\nnonsense\n"),
-            Err(ConfigError::MalformedLine)
-        );
+        // Given
+        let text = "ssid = A\nserver = s:1\nnonsense\n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::MalformedLine));
     }
 
     #[test]
     fn an_overlong_value_is_rejected_rather_than_truncated() {
+        // Given
         // 40 characters, over the 32-byte SSID limit.
         const TEXT: &str = "ssid = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nserver = s:1\n";
-        assert_eq!(Config::parse(TEXT), Err(ConfigError::ValueTooLong));
+
+        // When
+        let parsed = Config::parse(TEXT);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::ValueTooLong));
     }
 
     /// Skipping is on unless the card turns it off.
     #[test]
     fn a_missing_ears_skip_key_leaves_the_ears_skipping() {
-        let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
+        // Given
+        let text = "ssid = A\nserver = s:1\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert!(c.ears_skip);
     }
 
     #[test]
     fn ears_skip_no_makes_the_ears_volume_only() {
-        let c = Config::parse("ssid = A\nserver = s:1\nears_skip = no\n").unwrap();
+        // Given
+        let text = "ssid = A\nserver = s:1\nears_skip = no\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert!(!c.ears_skip);
     }
 
@@ -643,46 +746,67 @@ mod tests {
     /// the parser.
     #[test]
     fn ears_skip_accepts_the_spellings_a_parent_might_reach_for() {
-        for text in [
-            "ssid = A\nserver = s:1\nears_skip = yes\n",
-            "ssid = A\nserver = s:1\nears_skip = true\n",
-            "ssid = A\nserver = s:1\nears_skip = TRUE\n",
-            "ssid = A\nserver = s:1\nears_skip = 1\n",
-        ] {
-            assert!(Config::parse(text).unwrap().ears_skip, "{text}");
-        }
-        for text in [
-            "ssid = A\nserver = s:1\nears_skip = no\n",
-            "ssid = A\nserver = s:1\nears_skip = false\n",
-            "ssid = A\nserver = s:1\nears_skip = False\n",
-            "ssid = A\nserver = s:1\nears_skip = 0\n",
-        ] {
-            assert!(!Config::parse(text).unwrap().ears_skip, "{text}");
-        }
+        // Given
+        let spellings = ["yes", "true", "TRUE", "1", "no", "false", "False", "0"];
+
+        // When
+        let read = spellings.map(|value| {
+            let text = format!("ssid = A\nserver = s:1\nears_skip = {value}\n");
+            (value, Config::parse(&text).unwrap().ears_skip)
+        });
+
+        // Then
+        assert_eq!(
+            read,
+            [
+                ("yes", true),
+                ("true", true),
+                ("TRUE", true),
+                ("1", true),
+                ("no", false),
+                ("false", false),
+                ("False", false),
+                ("0", false),
+            ]
+        );
     }
 
     /// A typo is an error, not silently `false`.
     #[test]
     fn a_misspelled_ears_skip_value_is_refused() {
-        assert_eq!(
-            Config::parse("ssid = A\nserver = s:1\nears_skip = yse\n"),
-            Err(ConfigError::MalformedValue)
-        );
+        // Given
+        let text = "ssid = A\nserver = s:1\nears_skip = yse\n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::MalformedValue));
     }
 
     /// An empty value is an error too.
     #[test]
     fn an_empty_ears_skip_value_is_refused() {
-        assert_eq!(
-            Config::parse("ssid = A\nserver = s:1\nears_skip =\n"),
-            Err(ConfigError::MalformedValue)
-        );
+        // Given
+        let text = "ssid = A\nserver = s:1\nears_skip =\n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::MalformedValue));
     }
 
     /// Unlike `password`, booleans have comments stripped.
     #[test]
     fn a_trailing_comment_is_not_part_of_a_boolean_value() {
-        let c = Config::parse("ssid = A\nserver = s:1\nears_skip = no # volume only\n").unwrap();
+        // Given
+        let text = "ssid = A\nserver = s:1\nears_skip = no # volume only\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert!(!c.ears_skip);
     }
 
@@ -690,28 +814,39 @@ mod tests {
     /// refused. A cut-off `server = teddycloud.l` would still parse.
     #[test]
     fn a_read_that_filled_the_buffer_is_refused_rather_than_parsed() {
+        // Given
         let raw = b"ssid = A\nserver = s:1\n";
-        assert_eq!(
-            Config::parse_read(raw, raw.len()),
-            Err(ConfigError::Truncated)
-        );
+
+        // When
+        let parsed = Config::parse_read(raw, raw.len());
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::Truncated));
     }
 
     /// Room left over means the file ended on its own.
     #[test]
     fn a_read_with_room_to_spare_is_a_whole_file() {
+        // Given
         let raw = b"ssid = A\nserver = s:1\n";
+
+        // When
         let c = Config::parse_read(raw, raw.len() + 1).unwrap();
+
+        // Then
         assert_eq!(c.ssid.as_str(), "A");
     }
 
     /// Bytes that are not UTF-8 text are not a config file.
     #[test]
     fn bytes_that_are_not_text_are_refused() {
-        assert_eq!(
-            Config::parse_read(&[0xFF, 0xFE, 0x00], 64),
-            Err(ConfigError::NotText)
-        );
+        // Given
+
+        // When
+        let parsed = Config::parse_read(&[0xFF, 0xFE, 0x00], 64);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::NotText));
     }
     fn card() -> Config {
         Config::parse("ssid = FromCard\npassword = cardpw\nserver = card:1\nears_skip = no\n")
@@ -722,6 +857,8 @@ mod tests {
     /// typed value must survive.
     #[test]
     fn a_later_card_read_does_not_undo_what_the_bench_set() {
+        // Given: skipping switched on at the bench, over a card that turns it
+        // off
         let mut held = card();
         held.ears_skip = true;
         let overridden = Overridden {
@@ -729,7 +866,10 @@ mod tests {
             ..Overridden::default()
         };
 
+        // When
         let merged = overridden.merge(card(), &held);
+
+        // Then
         assert!(merged.ears_skip, "the card undid the override");
         assert_eq!(
             merged.ssid.as_str(),
@@ -741,8 +881,13 @@ mod tests {
     /// With nothing typed, the card's values are used.
     #[test]
     fn an_untouched_setting_is_taken_from_the_card() {
+        // Given
         let held = Config::parse("ssid = Old\nserver = old:1\n").unwrap();
+
+        // When
         let merged = Overridden::default().merge(card(), &held);
+
+        // Then
         assert_eq!(merged.ssid.as_str(), "FromCard");
         assert_eq!(merged.server.as_str(), "card:1");
         assert!(!merged.ears_skip);
@@ -752,6 +897,7 @@ mod tests {
     /// SSID from before the card was read.
     #[test]
     fn overrides_are_per_field() {
+        // Given: only the passphrase typed
         let mut held = card();
         held.password = heapless::String::try_from("typed").unwrap();
         let overridden = Overridden {
@@ -759,7 +905,10 @@ mod tests {
             ..Overridden::default()
         };
 
+        // When
         let merged = overridden.merge(card(), &held);
+
+        // Then
         assert_eq!(merged.password.as_str(), "typed");
         assert_eq!(merged.ssid.as_str(), "FromCard");
         assert_eq!(merged.server.as_str(), "card:1");
@@ -767,10 +916,13 @@ mod tests {
 
     #[test]
     fn update_url_parses_when_present() {
-        let c = Config::parse(
-            "ssid = A\nserver = s:1\nupdate_url = https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt\n",
-        )
-        .unwrap();
+        // Given
+        let text = "ssid = A\nserver = s:1\nupdate_url = https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(
             c.update_url.as_deref(),
             Some("https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt")
@@ -780,59 +932,94 @@ mod tests {
     /// A missing key turns OTA off; there is no default location.
     #[test]
     fn a_missing_update_url_key_leaves_it_none() {
-        let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
+        // Given
+        let text = "ssid = A\nserver = s:1\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.update_url, None);
     }
 
     #[test]
     fn an_overlong_update_url_is_rejected_rather_than_truncated() {
+        // Given
         // 143 characters, over the 128-byte limit.
         const TEXT: &str = "ssid = A\nserver = s:1\nupdate_url = https://example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
-        assert_eq!(Config::parse(TEXT), Err(ConfigError::ValueTooLong));
+
+        // When
+        let parsed = Config::parse(TEXT);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::ValueTooLong));
     }
 
     /// Tests the exact limit, so a change to `MAX_UPDATE_URL` is caught.
     #[test]
     fn an_update_url_at_exactly_the_limit_is_accepted() {
+        // Given
         let value = format!("https://example.com/{}", "x".repeat(MAX_UPDATE_URL - 20));
         assert_eq!(value.len(), MAX_UPDATE_URL);
         let text = format!("ssid = A\nserver = s:1\nupdate_url = {value}\n");
+
+        // When
         let c = Config::parse(&text).unwrap();
+
+        // Then
         assert_eq!(c.update_url.as_deref(), Some(value.as_str()));
     }
 
     #[test]
     fn an_update_url_one_byte_over_the_limit_is_refused() {
+        // Given
         let value = format!("https://example.com/{}", "x".repeat(MAX_UPDATE_URL - 19));
         assert_eq!(value.len(), MAX_UPDATE_URL + 1);
         let text = format!("ssid = A\nserver = s:1\nupdate_url = {value}\n");
-        assert_eq!(Config::parse(&text), Err(ConfigError::ValueTooLong));
+
+        // When
+        let parsed = Config::parse(&text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::ValueTooLong));
     }
 
     /// `update_url =` with nothing after it is probably a mistake, not a way
     /// to turn OTA off.
     #[test]
     fn an_empty_update_url_is_refused() {
-        assert_eq!(
-            Config::parse("ssid = A\nserver = s:1\nupdate_url =\n"),
-            Err(ConfigError::EmptyUpdateUrl)
-        );
+        // Given
+        let text = "ssid = A\nserver = s:1\nupdate_url =\n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::EmptyUpdateUrl));
     }
 
     #[test]
     fn a_whitespace_only_update_url_is_refused() {
-        assert_eq!(
-            Config::parse("ssid = A\nserver = s:1\nupdate_url =    \n"),
-            Err(ConfigError::EmptyUpdateUrl)
-        );
+        // Given
+        let text = "ssid = A\nserver = s:1\nupdate_url =    \n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::EmptyUpdateUrl));
     }
 
     #[test]
     fn a_trailing_comment_is_not_part_of_the_update_url() {
-        let c = Config::parse(
-            "ssid = A\nserver = s:1\nupdate_url = https://teddycloud.local/teddiebox.txt # ours\n",
-        )
-        .unwrap();
+        // Given
+        let text =
+            "ssid = A\nserver = s:1\nupdate_url = https://teddycloud.local/teddiebox.txt # ours\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(
             c.update_url.as_deref(),
             Some("https://teddycloud.local/teddiebox.txt")
@@ -843,7 +1030,13 @@ mod tests {
     /// `ssid` and `server`.
     #[test]
     fn a_hash_inside_the_update_url_is_part_of_the_value() {
-        let c = Config::parse("ssid = A\nserver = s:1\nupdate_url = https://x/y#z\n").unwrap();
+        // Given
+        let text = "ssid = A\nserver = s:1\nupdate_url = https://x/y#z\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.update_url.as_deref(), Some("https://x/y#z"));
     }
 
@@ -851,12 +1044,15 @@ mod tests {
     /// value wins, and every other value comes from the card.
     #[test]
     fn a_typed_value_wins_over_a_card_read_after_it() {
+        // Given
         let mut settings = Settings::new();
         settings.set_ssid(String::try_from("Typed").unwrap());
         settings.set_ears_skip(true);
 
+        // When
         settings.take_card(card());
 
+        // Then
         assert_eq!(settings.config().ssid.as_str(), "Typed");
         assert!(settings.config().ears_skip);
         assert_eq!(settings.config().server.as_str(), "card:1");
@@ -866,11 +1062,14 @@ mod tests {
     /// it.
     #[test]
     fn a_value_typed_after_a_card_read_still_wins() {
+        // Given
         let mut settings = Settings::new();
         settings.take_card(card());
 
+        // When
         settings.set_ssid(String::try_from("Typed").unwrap());
 
+        // Then
         assert_eq!(settings.config().ssid.as_str(), "Typed");
         assert_eq!(settings.config().server.as_str(), "card:1");
     }
@@ -878,26 +1077,45 @@ mod tests {
     /// Credentials need both SSID and passphrase.
     #[test]
     fn credentials_are_withheld_until_both_halves_are_there() {
+        // Given
         let mut settings = Settings::new();
-        assert!(settings.credentials().is_none(), "nothing typed yet");
 
+        // When: nothing typed, then an SSID, then a passphrase
+        let with_nothing = settings.credentials().is_some();
         settings.set_ssid(String::try_from("Typed").unwrap());
-        assert!(settings.credentials().is_none(), "no passphrase yet");
-
+        let with_an_ssid = settings.credentials().is_some();
         settings.set_password(String::try_from("hunter2").unwrap());
-        assert!(settings.credentials().is_some());
+        let with_both = settings.credentials().is_some();
+
+        // Then
+        assert_eq!(
+            (with_nothing, with_an_ssid, with_both),
+            (false, false, true)
+        );
     }
 
     #[test]
     fn a_setup_password_is_read_when_the_card_gives_one() {
-        let c = Config::parse("ssid = A\nserver = s:1\nsetup_password = our#house\n").unwrap();
+        // Given
+        let text = "ssid = A\nserver = s:1\nsetup_password = our#house\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.setup_password.as_deref(), Some("our#house"));
     }
 
     /// No `setup_password` means the built-in one is used.
     #[test]
     fn no_setup_password_is_absent_rather_than_empty() {
-        let c = Config::parse("ssid = A\nserver = s:1\n").unwrap();
+        // Given
+        let text = "ssid = A\nserver = s:1\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
         assert_eq!(c.setup_password, None);
     }
 
@@ -905,26 +1123,36 @@ mod tests {
     /// not start, so the parser rejects it.
     #[test]
     fn a_setup_password_too_short_for_wpa2_is_refused() {
-        assert_eq!(
-            Config::parse("ssid = A\nserver = s:1\nsetup_password = short\n"),
-            Err(ConfigError::MalformedValue)
-        );
+        // Given
+        let text = "ssid = A\nserver = s:1\nsetup_password = short\n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::MalformedValue));
     }
 
     #[test]
     fn a_setup_password_too_long_for_wpa2_is_refused() {
+        // Given
         let long = "x".repeat(64);
-        assert_eq!(
-            Config::parse(&format!(
-                "ssid = A\nserver = s:1\nsetup_password = {long}\n"
-            )),
-            Err(ConfigError::MalformedValue)
-        );
+
+        // When
+        let parsed = Config::parse(&format!(
+            "ssid = A\nserver = s:1\nsetup_password = {long}\n"
+        ));
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::MalformedValue));
     }
 
     #[test]
     fn rewriting_a_key_leaves_every_other_line_exactly_as_it_was() {
+        // Given
         let mut out = String::<256>::new();
+
+        // When
         set_key(
             "# our box\n\nssid = Home\nsetup_password = old one\nserver = s:1\n",
             "setup_password",
@@ -932,6 +1160,8 @@ mod tests {
             &mut out,
         )
         .unwrap();
+
+        // Then
         assert_eq!(
             out.as_str(),
             "# our box\n\nssid = Home\nsetup_password = a new one\nserver = s:1\n"
@@ -940,7 +1170,10 @@ mod tests {
 
     #[test]
     fn removing_a_key_takes_its_whole_line_with_it() {
+        // Given
         let mut out = String::<256>::new();
+
+        // When
         set_key(
             "ssid = Home\nsetup_password = old one\nserver = s:1\n",
             "setup_password",
@@ -948,12 +1181,17 @@ mod tests {
             &mut out,
         )
         .unwrap();
+
+        // Then
         assert_eq!(out.as_str(), "ssid = Home\nserver = s:1\n");
     }
 
     #[test]
     fn a_key_that_is_not_there_yet_is_appended() {
+        // Given
         let mut out = String::<256>::new();
+
+        // When
         set_key(
             "ssid = Home\n",
             "setup_password",
@@ -961,14 +1199,21 @@ mod tests {
             &mut out,
         )
         .unwrap();
+
+        // Then
         assert_eq!(out.as_str(), "ssid = Home\nsetup_password = a new one\n");
     }
 
     /// What `setup pw off` does on a card that never had the key.
     #[test]
     fn removing_a_key_that_is_not_there_changes_nothing() {
+        // Given
         let mut out = String::<256>::new();
+
+        // When
         set_key("ssid = Home\n", "setup_password", None, &mut out).unwrap();
+
+        // Then
         assert_eq!(out.as_str(), "ssid = Home\n");
     }
 
@@ -976,28 +1221,37 @@ mod tests {
     /// on one line.
     #[test]
     fn appending_to_a_file_with_no_trailing_newline_still_starts_a_line() {
+        // Given
         let mut out = String::<256>::new();
+
+        // When
         set_key("ssid = Home", "setup_password", Some("a new one"), &mut out).unwrap();
+
+        // Then
         assert_eq!(out.as_str(), "ssid = Home\nsetup_password = a new one\n");
     }
 
     #[test]
     fn a_result_too_long_for_the_buffer_is_refused_rather_than_truncated() {
+        // Given
         let mut out = String::<16>::new();
-        assert_eq!(
-            set_key(
-                "ssid = Home\n",
-                "setup_password",
-                Some("a new one"),
-                &mut out
-            ),
-            Err(ConfigError::ValueTooLong)
+
+        // When
+        let result = set_key(
+            "ssid = Home\n",
+            "setup_password",
+            Some("a new one"),
+            &mut out,
         );
+
+        // Then
+        assert_eq!(result, Err(ConfigError::ValueTooLong));
     }
 
     /// A typed `update_url` survives a later card read.
     #[test]
     fn overridden_update_url_survives_a_later_card_read() {
+        // Given
         let mut held = card();
         held.update_url = Some(heapless::String::try_from("https://typed/teddiebox.txt").unwrap());
         let overridden = Overridden {
@@ -1005,7 +1259,10 @@ mod tests {
             ..Overridden::default()
         };
 
+        // When
         let merged = overridden.merge(card(), &held);
+
+        // Then
         assert_eq!(
             merged.update_url.as_deref(),
             Some("https://typed/teddiebox.txt")
@@ -1015,12 +1272,16 @@ mod tests {
 
     #[test]
     fn an_untouched_update_url_is_taken_from_the_card() {
+        // Given
         let mut typed_card = card();
         typed_card.update_url =
             Some(heapless::String::try_from("https://card/teddiebox.txt").unwrap());
         let held = Config::parse("ssid = Old\nserver = old:1\n").unwrap();
 
+        // When
         let merged = Overridden::default().merge(typed_card, &held);
+
+        // Then
         assert_eq!(
             merged.update_url.as_deref(),
             Some("https://card/teddiebox.txt")
@@ -1029,57 +1290,85 @@ mod tests {
 
     #[test]
     fn a_host_and_port_split_on_the_last_colon() {
-        assert_eq!(
-            split_host_port("teddycloud.local:443", 80),
-            Ok(("teddycloud.local", 443))
-        );
+        // Given
+        let value = "teddycloud.local:443";
+
+        // When
+        let split = split_host_port(value, 80);
+
+        // Then
+        assert_eq!(split, Ok(("teddycloud.local", 443)));
     }
 
     #[test]
     fn a_value_with_no_colon_has_no_port() {
-        assert_eq!(
-            split_host_port("teddycloud.local", 80),
-            Err(SplitHostPortError::NoPort)
-        );
+        // Given
+        let value = "teddycloud.local";
+
+        // When
+        let split = split_host_port(value, 80);
+
+        // Then
+        assert_eq!(split, Err(SplitHostPortError::NoPort));
     }
 
     #[test]
     fn a_port_that_is_not_a_number_is_refused() {
-        assert_eq!(
-            split_host_port("teddycloud.local:https", 80),
-            Err(SplitHostPortError::BadPort)
-        );
+        // Given
+        let value = "teddycloud.local:https";
+
+        // When
+        let split = split_host_port(value, 80);
+
+        // Then
+        assert_eq!(split, Err(SplitHostPortError::BadPort));
     }
 
     #[test]
     fn a_port_above_u16_is_refused() {
-        assert_eq!(
-            split_host_port("teddycloud.local:65536", 80),
-            Err(SplitHostPortError::BadPort)
-        );
+        // Given
+        let value = "teddycloud.local:65536";
+
+        // When
+        let split = split_host_port(value, 80);
+
+        // Then
+        assert_eq!(split, Err(SplitHostPortError::BadPort));
     }
 
     #[test]
     fn an_empty_host_is_refused() {
-        assert_eq!(
-            split_host_port(":443", 80),
-            Err(SplitHostPortError::EmptyHost)
-        );
+        // Given
+        let value = ":443";
+
+        // When
+        let split = split_host_port(value, 80);
+
+        // Then
+        assert_eq!(split, Err(SplitHostPortError::EmptyHost));
     }
 
     #[test]
     fn a_host_longer_than_the_buffer_is_refused_rather_than_truncated() {
-        assert_eq!(
-            split_host_port("teddycloud.local:443", 5),
-            Err(SplitHostPortError::HostTooLong)
-        );
+        // Given
+        let value = "teddycloud.local:443";
+
+        // When
+        let split = split_host_port(value, 5);
+
+        // Then
+        assert_eq!(split, Err(SplitHostPortError::HostTooLong));
     }
 
     #[test]
     fn a_host_exactly_at_the_limit_is_accepted() {
-        assert_eq!(
-            split_host_port("teddycloud.local:443", "teddycloud.local".len()),
-            Ok(("teddycloud.local", 443))
-        );
+        // Given
+        let value = "teddycloud.local:443";
+
+        // When
+        let split = split_host_port(value, "teddycloud.local".len());
+
+        // Then
+        assert_eq!(split, Ok(("teddycloud.local", 443)));
     }
 }
