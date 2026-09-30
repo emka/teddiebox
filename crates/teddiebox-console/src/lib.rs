@@ -1420,6 +1420,26 @@ mod tests {
         assert_eq!(parsed, None);
     }
 
+    /// The limit is the buffer's size, so a dump that fills it exactly is
+    /// still asked for.
+    #[test]
+    fn a_memory_dump_that_fills_the_buffer_exactly_is_a_command() {
+        // Given: 0x20 is the 32 blocks the buffer holds
+        let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"mem 00 20\r");
+
+        // Then
+        assert_eq!(
+            parsed,
+            Some(Command::ReadMemory {
+                first: 0,
+                count: 32
+            })
+        );
+    }
+
     /// A count of zero is a typo.
     #[test]
     fn a_memory_dump_of_no_blocks_is_refused() {
