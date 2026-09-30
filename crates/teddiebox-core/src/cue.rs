@@ -451,18 +451,29 @@ mod tests {
     }
 
     #[test]
-    fn the_gaps_between_notes_are_silent() {
+    fn the_gap_between_a_skips_notes_is_silent() {
         // Given
-        let (skip, limit) = (Cue::SkipForward, Cue::VolumeLimit);
+        let cue = Cue::SkipForward;
 
         // When
-        let (skip, limit) = (render(skip), render(limit));
+        let skip = render(cue);
 
         // Then
-        let (_, skip_gap, _) = skip_parts(&skip);
-        let (_, limit_gap, _) = limit_parts(&limit);
-        assert!(skip_gap.iter().all(|&s| s == 0));
-        assert!(limit_gap.iter().all(|&s| s == 0));
+        let (_, gap, _) = skip_parts(&skip);
+        assert!(gap.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn the_gap_between_the_limit_beeps_is_silent() {
+        // Given
+        let cue = Cue::VolumeLimit;
+
+        // When
+        let limit = render(cue);
+
+        // Then
+        let (_, gap, _) = limit_parts(&limit);
+        assert!(gap.iter().all(|&s| s == 0));
     }
 
     /// A jump from or to silence is a click.
