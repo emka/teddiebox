@@ -173,6 +173,7 @@ mod tests {
             Sound::ConfigError,
             Sound::NoInternet,
             Sound::WrongPassword,
+            Sound::NoStory,
         ];
 
         // When
