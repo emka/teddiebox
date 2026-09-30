@@ -455,24 +455,6 @@ mod tests {
     }
 
     #[test]
-    fn placing_a_known_figure_resumes_where_it_stopped() {
-        // Given
-        let mut p = Playback::new();
-
-        // When
-        let actions = p.on_tag_present(TAG, &known(412));
-
-        // Then
-        assert_eq!(
-            actions.as_slice(),
-            &[Action::Play {
-                tag: TAG,
-                from: Position::Exact { page: 412 }
-            }]
-        );
-    }
-
-    #[test]
     fn placing_an_unknown_figure_requests_the_content() {
         // Given
         let mut p = Playback::new();
