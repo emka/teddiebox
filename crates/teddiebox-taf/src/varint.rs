@@ -54,6 +54,21 @@ mod tests {
         assert_eq!(pos, 2);
     }
 
+    /// At shift 63 only the lowest payload bit fits, and it must: without it
+    /// the top half of the range could not be read.
+    #[test]
+    fn reads_the_largest_value() {
+        // Given: nine bytes of seven ones, then the top bit
+        let bytes = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        let mut pos = 0;
+
+        // When
+        let parsed = read_varint(&bytes, &mut pos);
+
+        // Then
+        assert_eq!(parsed, Some(u64::MAX));
+    }
+
     #[test]
     fn rejects_truncated_input() {
         // Given
