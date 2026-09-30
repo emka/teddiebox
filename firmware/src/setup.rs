@@ -131,10 +131,9 @@ pub(crate) async fn enter(
     //
     // The scratch is taken through the same check the decoder uses, so
     // both can never have it at once.
-    let Some(portal) = portal::place(
-        scratch,
-        portal::run(wifi, uart0, uart_rx, card, seed, paint),
-    ) else {
+    let Some(portal) = portal::place(scratch, || {
+        portal::run(wifi, uart0, uart_rx, card, seed, paint)
+    }) else {
         // `place` has already printed what did not fit. Park rather than
         // reset: the ears may still be held, so a reset would come
         // straight back here.

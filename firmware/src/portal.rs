@@ -192,12 +192,19 @@ pub async fn run(
 /// `room` comes from [`crate::audio::take_scratch_bytes`]: the decoder's
 /// scratch, which setup mode never uses.
 ///
-/// Returns `None` if `room` is too small for `future` (after alignment),
+/// Returns `None` if `room` is too small for the future (after alignment),
 /// instead of writing past it. The size is printed either way.
+///
+/// Takes a function that makes the future rather than the future itself, and
+/// is never inlined. A future built by the caller is a temporary in the
+/// caller's stack frame, and that frame is `main`'s: its size counts against
+/// every boot, setup mode or not. Built here, it only occupies this frame,
+/// which exists only in setup mode.
 ///
 /// The borrow uses `room`'s lifetime, not `'static`, because the future
 /// captures the LED closure, which borrows `main`'s LED controller.
-pub fn place<F: Future>(room: &mut [u8], future: F) -> Option<Pin<&mut F>> {
+#[inline(never)]
+pub fn place<F: Future>(room: &mut [u8], make: impl FnOnce() -> F) -> Option<Pin<&mut F>> {
     let size = core::mem::size_of::<F>();
     esp_println::println!(
         "teddiebox: portal future is {size} bytes of {} in the decode scratch",
@@ -224,7 +231,7 @@ pub fn place<F: Future>(room: &mut [u8], future: F) -> Option<Pin<&mut F>> {
     // it is never dropped, and its storage is a `static` that is never reused.
     unsafe {
         let slot = room.as_mut_ptr().add(offset).cast::<F>();
-        slot.write(future);
+        slot.write(make());
         Some(Pin::new_unchecked(&mut *slot))
     }
 }
