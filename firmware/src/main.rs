@@ -993,13 +993,20 @@ fn read_anchor(card: &storage::Mounted) {
     // Printed as `ca`, not `identity`, which is used for the box's own
     // certificate and key, so the two are not confused.
     match card.read_certificate("TCCA.DER", &mut certificate) {
+        // A write cut short leaves a file like this; setting it as the anchor
+        // would fail every download with no word about why.
+        Ok(n) if !tls::is_certificate(&certificate[..n]) => esp_println::println!(
+            "teddiebox: ca unusable — {n} bytes that are not a certificate; \
+             every download will fail until TCCA.DER is written again"
+        ),
         Ok(n) if tls::set_anchor(&certificate[..n]) => {
             esp_println::println!("teddiebox: ca {n} bytes — the server is checked against it")
         }
         Ok(_) => esp_println::println!("teddiebox: ca already set"),
         Err(reason) => esp_println::println!(
-            "teddiebox: ca none — {reason}; the server cannot be verified, \
-             so every download will fail until TCCA.DER is on the card"
+            "teddiebox: ca none — {}; the server cannot be verified, \
+             so every download will fail until TCCA.DER is on the card",
+            reason.why()
         ),
     }
 }
