@@ -32,6 +32,9 @@ pub struct Request<'a> {
     pub method: Method,
     pub path: &'a str,
     pub content_length: usize,
+    /// The `Content-Type` value, trimmed, if the request sent one. An
+    /// upload's boundary is in it.
+    pub content_type: Option<&'a str>,
     /// Bytes up to and including the blank line, so `buf[header_len..]` is
     /// the part of the body that has arrived.
     pub header_len: usize,
@@ -52,6 +55,7 @@ pub fn parse(buf: &[u8]) -> Result<Request<'_>, RequestError> {
     let path = request_line.next().ok_or(RequestError::Malformed)?;
 
     let mut content_length = 0;
+    let mut content_type = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -61,6 +65,8 @@ pub fn parse(buf: &[u8]) -> Result<Request<'_>, RequestError> {
                 .trim()
                 .parse::<usize>()
                 .map_err(|_| RequestError::Malformed)?;
+        } else if name.eq_ignore_ascii_case("content-type") {
+            content_type = Some(value.trim());
         }
     }
     if content_length > MAX_BODY {
@@ -71,6 +77,7 @@ pub fn parse(buf: &[u8]) -> Result<Request<'_>, RequestError> {
         method,
         path,
         content_length,
+        content_type,
         header_len,
     })
 }
@@ -89,7 +96,7 @@ pub fn is_complete(buffer: &[u8]) -> Result<bool, RequestError> {
     }
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
@@ -151,6 +158,51 @@ mod tests {
         assert_eq!(r.path, "/");
         assert_eq!(r.content_length, 0);
         assert_eq!(r.header_len, GET.len());
+    }
+
+    #[test]
+    fn a_multipart_post_carries_its_content_type() {
+        // Given
+        let raw = b"POST /ca HTTP/1.1\r\nHost: 192.168.4.1\r\n\
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW\r\n\
+Content-Length: 0\r\n\r\n";
+
+        // When
+        let request = parse(raw).unwrap();
+
+        // Then
+        assert_eq!(
+            request.content_type,
+            Some("multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW")
+        );
+    }
+
+    #[test]
+    fn the_content_type_header_name_is_matched_in_any_case() {
+        // Given
+        let raw =
+            b"POST /config HTTP/1.1\r\ncontent-type: application/x-www-form-urlencoded\r\n\r\n";
+
+        // When
+        let request = parse(raw).unwrap();
+
+        // Then
+        assert_eq!(
+            request.content_type,
+            Some("application/x-www-form-urlencoded")
+        );
+    }
+
+    #[test]
+    fn a_get_has_no_content_type() {
+        // Given
+        let raw = GET;
+
+        // When
+        let request = parse(raw).unwrap();
+
+        // Then
+        assert_eq!(request.content_type, None);
     }
 
     #[test]
