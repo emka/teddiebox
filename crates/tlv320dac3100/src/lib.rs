@@ -827,6 +827,37 @@ mod tests {
         delay.done();
     }
 
+    /// Any one stage still on is a stage that could pop, so each on its own
+    /// keeps the driver waiting.
+    #[test]
+    fn powering_down_waits_while_any_single_stage_is_still_on() {
+        // Given: each stage reported as the only one on, in turn, then none
+        let w = |bytes: Vec<u8>| Transaction::write(DEFAULT_ADDRESS, bytes);
+        let r =
+            |reg: u8, value: u8| Transaction::write_read(DEFAULT_ADDRESS, vec![reg], vec![value]);
+        let expected = [
+            w(vec![0x00, 0x01]),
+            w(vec![0x2E, 0x80]),
+            w(vec![0x00, 0x00]),
+            r(0x25, 0x80), // left DAC
+            r(0x25, 0x08), // right DAC
+            r(0x25, 0x20), // headphone driver
+            r(0x25, 0x10), // left class-D
+            r(0x25, 0x01), // right class-D
+            r(0x25, 0x00), // everything off
+        ];
+        let mut dac = Tlv320Dac3100::new(I2cMock::new(&expected), DEFAULT_ADDRESS);
+        let mut delay = CheckedDelay::new(&vec![DelayTransaction::delay_ms(POWER_DOWN_POLL_MS); 5]);
+
+        // When
+        let result = dac.power_down(&mut delay);
+
+        // Then
+        assert_eq!(result, Ok(()));
+        dac.release().done();
+        delay.done();
+    }
+
     /// A codec that never reports itself off must not stall a reboot forever.
     #[test]
     fn powering_down_gives_up_rather_than_waiting_for_ever() {
