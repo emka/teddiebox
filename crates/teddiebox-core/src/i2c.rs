@@ -33,26 +33,50 @@ mod tests {
 
     #[test]
     fn the_shared_address_names_both_candidates() {
-        let at_18 = describe(0x18).expect("something is expected at 0x18");
-        assert!(at_18.contains("TLV320DAC3100"));
-        assert!(at_18.contains("LIS3DH"));
+        // Given
+        let shared = 0x18;
+
+        // When
+        let name = describe(shared).expect("something is expected at 0x18");
+
+        // Then
+        assert!(name.contains("TLV320DAC3100"));
+        assert!(name.contains("LIS3DH"));
     }
 
     #[test]
     fn the_second_accelerometer_address_is_unambiguous() {
-        assert_eq!(describe(0x19), Some("LIS3DH with SDO high"));
+        // Given
+        let second = 0x19;
+
+        // When
+        let name = describe(second);
+
+        // Then
+        assert_eq!(name, Some("LIS3DH with SDO high"));
     }
 
     #[test]
     fn an_unexpected_address_has_no_name() {
-        assert_eq!(describe(0x50), None);
-        assert_eq!(describe(0x00), None);
+        // Given
+        let unexpected = [0x50, 0x00];
+
+        // When
+        let names = unexpected.map(describe);
+
+        // Then
+        assert_eq!(names, [None, None]);
     }
 
     /// Reserved addresses are not probed.
     #[test]
     fn the_scan_range_excludes_the_reserved_addresses() {
-        assert_eq!(FIRST_ADDRESS, 0x08);
-        assert_eq!(LAST_ADDRESS, 0x77);
+        // Given: the constants the scan loops over
+
+        // When
+        let scanned = FIRST_ADDRESS..=LAST_ADDRESS;
+
+        // Then
+        assert_eq!(scanned, 0x08..=0x77);
     }
 }
