@@ -67,10 +67,15 @@ mod tests {
 
     #[test]
     fn the_linked_libopus_reports_a_stereo_decoder_state_size() {
-        // Checks the library is found, linked and callable. The declarations
-        // above cannot be checked by the compiler.
+        // Given: checks the library is found, linked and callable. The
+        // declarations above cannot be checked by the compiler.
+        let stereo = 2;
+
+        // When
         // SAFETY: takes no pointers; 2 is a channel count libopus accepts.
-        let size = unsafe { opus_decoder_get_size(2) };
+        let size = unsafe { opus_decoder_get_size(stereo) };
+
+        // Then
         assert!(
             size > 0,
             "libopus reported {size} bytes for a stereo decoder"
