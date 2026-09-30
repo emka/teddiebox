@@ -181,7 +181,12 @@ mod tests {
 
     #[test]
     fn a_get_is_parsed() {
+        // Given
+
+        // When
         let r = parse(GET).unwrap();
+
+        // Then
         assert_eq!(r.method, Method::Get);
         assert_eq!(r.path, "/");
         assert_eq!(r.content_length, 0);
@@ -265,8 +270,13 @@ Content-Length: 0\r\n\r\n";
 
     #[test]
     fn a_post_carries_its_length() {
+        // Given
         let raw = b"POST /config HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\n\r\nconfig=ssid=";
+
+        // When
         let r = parse(raw).unwrap();
+
+        // Then
         assert_eq!(r.method, Method::Post);
         assert_eq!(r.path, "/config");
         assert_eq!(r.content_length, 12);
@@ -275,19 +285,28 @@ Content-Length: 0\r\n\r\n";
 
     #[test]
     fn a_header_name_is_matched_without_regard_to_case() {
+        // Given
         let raw = b"POST /config HTTP/1.1\r\ncontent-length: 5\r\n\r\nabcde";
-        assert_eq!(parse(raw).unwrap().content_length, 5);
+
+        // When
+        let request = parse(raw).unwrap();
+
+        // Then
+        assert_eq!(request.content_length, 5);
     }
 
     /// The socket returns whatever has arrived. Headers split in the middle
     /// mean "not yet", not a malformed request.
     #[test]
     fn headers_still_arriving_are_incomplete_not_malformed() {
-        assert_eq!(parse(b"GET / HTT").unwrap_err(), RequestError::Incomplete);
-        assert_eq!(
-            parse(b"GET / HTTP/1.1\r\nHost: x\r\n").unwrap_err(),
-            RequestError::Incomplete
-        );
+        // Given: a request line cut short, and headers with no blank line yet
+        let partial: [&[u8]; 2] = [b"GET / HTT", b"GET / HTTP/1.1\r\nHost: x\r\n"];
+
+        // When
+        let parsed = partial.map(|raw| parse(raw).unwrap_err());
+
+        // Then
+        assert_eq!(parsed, [RequestError::Incomplete; 2]);
     }
 
     /// Headers complete, body still arriving: the request parses, and the
@@ -295,29 +314,51 @@ Content-Length: 0\r\n\r\n";
     /// read more.
     #[test]
     fn a_body_still_arriving_parses_so_the_caller_can_wait_for_it() {
+        // Given
         let raw = b"POST /config HTTP/1.1\r\nContent-Length: 20\r\n\r\nconfig=";
+
+        // When
         let r = parse(raw).unwrap();
+
+        // Then
         assert_eq!(r.content_length, 20);
         assert_eq!(raw.len() - r.header_len, 7);
     }
 
     #[test]
     fn an_unsupported_method_is_recognised_not_refused() {
-        assert_eq!(
-            parse(b"PUT / HTTP/1.1\r\n\r\n").unwrap().method,
-            Method::Other
-        );
+        // Given
+        let raw = b"PUT / HTTP/1.1\r\n\r\n";
+
+        // When
+        let request = parse(raw).unwrap();
+
+        // Then
+        assert_eq!(request.method, Method::Other);
     }
 
     #[test]
     fn a_request_line_without_a_path_is_malformed() {
-        assert_eq!(parse(b"GET\r\n\r\n").unwrap_err(), RequestError::Malformed);
+        // Given
+        let raw = b"GET\r\n\r\n";
+
+        // When
+        let request = parse(raw).unwrap_err();
+
+        // Then
+        assert_eq!(request, RequestError::Malformed);
     }
 
     #[test]
     fn a_body_larger_than_the_cap_is_refused_before_it_is_read() {
+        // Given
         let raw = b"POST /config HTTP/1.1\r\nContent-Length: 99999\r\n\r\n";
-        assert_eq!(parse(raw).unwrap_err(), RequestError::TooLarge);
+
+        // When
+        let request = parse(raw).unwrap_err();
+
+        // Then
+        assert_eq!(request, RequestError::TooLarge);
     }
 
     /// The limit applies to the encoded body, not the file. Written as
@@ -325,37 +366,67 @@ Content-Length: 0\r\n\r\n";
     /// tests.
     #[test]
     fn a_body_of_exactly_the_cap_is_accepted() {
+        // Given
         assert_eq!(MAX_BODY, 3088);
         let raw = b"POST /config HTTP/1.1\r\nContent-Length: 3088\r\n\r\n";
-        assert_eq!(parse(raw).unwrap().content_length, 3088);
+
+        // When
+        let request = parse(raw).unwrap();
+
+        // Then
+        assert_eq!(request.content_length, 3088);
     }
 
     #[test]
     fn one_byte_over_the_cap_is_refused() {
+        // Given
         let raw = b"POST /config HTTP/1.1\r\nContent-Length: 3089\r\n\r\n";
-        assert_eq!(parse(raw).unwrap_err(), RequestError::TooLarge);
+
+        // When
+        let request = parse(raw).unwrap_err();
+
+        // Then
+        assert_eq!(request, RequestError::TooLarge);
     }
 
     /// A 1024-byte file encodes to more than 1024 bytes, and must still be
     /// accepted.
     #[test]
     fn a_form_encoded_full_size_config_is_no_longer_refused() {
-        // 1024 file bytes at 1.35, the ratio for a realistic config. Most of
+        // Given: 1024 file bytes at 1.35, the ratio for a realistic config. Most of
         // it is line endings: a textarea sends CRLF, encoded as `%0D%0A`.
         let raw = b"POST /config HTTP/1.1\r\nContent-Length: 1382\r\n\r\n";
-        assert_eq!(parse(raw).unwrap().content_length, 1382);
+
+        // When
+        let request = parse(raw).unwrap();
+
+        // Then
+        assert_eq!(request.content_length, 1382);
     }
 
     #[test]
     fn a_content_length_that_is_not_a_number_is_malformed() {
+        // Given
         let raw = b"POST /config HTTP/1.1\r\nContent-Length: yes\r\n\r\n";
-        assert_eq!(parse(raw).unwrap_err(), RequestError::Malformed);
+
+        // When
+        let request = parse(raw).unwrap_err();
+
+        // Then
+        assert_eq!(request, RequestError::Malformed);
     }
 
     #[test]
     fn an_ok_head_is_exactly_these_bytes() {
+        // Given
+        let (status, length) = (Status::Ok, 42);
+
+        // When
+        let built = head(status, length);
+
+        // Then
         assert_eq!(
-            &head(Status::Ok, 42)[..],
+            &built[..],
             b"HTTP/1.1 200 OK\r\n\
 Content-Type: text/html; charset=utf-8\r\n\
 Content-Length: 42\r\n\
@@ -365,8 +436,15 @@ Connection: close\r\n\r\n"
 
     #[test]
     fn a_not_found_head_is_exactly_these_bytes() {
+        // Given
+        let (status, length) = (Status::NotFound, 0);
+
+        // When
+        let built = head(status, length);
+
+        // Then
         assert_eq!(
-            &head(Status::NotFound, 0)[..],
+            &built[..],
             b"HTTP/1.1 404 Not Found\r\n\
 Content-Type: text/html; charset=utf-8\r\n\
 Content-Length: 0\r\n\
@@ -376,8 +454,15 @@ Connection: close\r\n\r\n"
 
     #[test]
     fn a_bad_request_head_is_exactly_these_bytes() {
+        // Given
+        let (status, length) = (Status::BadRequest, 7);
+
+        // When
+        let built = head(status, length);
+
+        // Then
         assert_eq!(
-            &head(Status::BadRequest, 7)[..],
+            &built[..],
             b"HTTP/1.1 400 Bad Request\r\n\
 Content-Type: text/html; charset=utf-8\r\n\
 Content-Length: 7\r\n\
@@ -387,8 +472,15 @@ Connection: close\r\n\r\n"
 
     #[test]
     fn a_too_large_head_is_exactly_these_bytes() {
+        // Given
+        let (status, length) = (Status::TooLarge, 9);
+
+        // When
+        let built = head(status, length);
+
+        // Then
         assert_eq!(
-            &head(Status::TooLarge, 9)[..],
+            &built[..],
             b"HTTP/1.1 413 Content Too Large\r\n\
 Content-Type: text/html; charset=utf-8\r\n\
 Content-Length: 9\r\n\
@@ -398,34 +490,73 @@ Connection: close\r\n\r\n"
 
     #[test]
     fn the_largest_length_still_fits_the_head_buffer() {
-        let built = head(Status::TooLarge, usize::MAX);
+        // Given
+        let length = usize::MAX;
+
+        // When
+        let built = head(Status::TooLarge, length);
+
+        // Then
         assert!(built.ends_with(b"\r\n\r\n"));
     }
 
     #[test]
     fn headers_still_arriving_are_not_complete() {
-        assert_eq!(is_complete(b"GET / HTT"), Ok(false));
+        // Given
+        let raw = b"GET / HTT";
+
+        // When
+        let complete = is_complete(raw);
+
+        // Then
+        assert_eq!(complete, Ok(false));
     }
 
     #[test]
     fn headers_done_but_body_still_arriving_is_not_complete() {
+        // Given
         let raw = b"POST /config HTTP/1.1\r\nContent-Length: 20\r\n\r\nconfig=";
-        assert_eq!(is_complete(raw), Ok(false));
+
+        // When
+        let complete = is_complete(raw);
+
+        // Then
+        assert_eq!(complete, Ok(false));
     }
 
     #[test]
     fn headers_and_the_whole_body_are_complete() {
+        // Given
         let raw = b"POST /config HTTP/1.1\r\nContent-Length: 12\r\n\r\nconfig=ssid=";
-        assert_eq!(is_complete(raw), Ok(true));
+
+        // When
+        let complete = is_complete(raw);
+
+        // Then
+        assert_eq!(complete, Ok(true));
     }
 
     #[test]
     fn a_request_with_no_body_is_complete_at_the_blank_line() {
-        assert_eq!(is_complete(GET), Ok(true));
+        // Given
+        let raw = GET;
+
+        // When
+        let complete = is_complete(raw);
+
+        // Then
+        assert_eq!(complete, Ok(true));
     }
 
     #[test]
     fn a_malformed_request_is_an_error_not_incomplete() {
-        assert_eq!(is_complete(b"GET\r\n\r\n"), Err(RequestError::Malformed));
+        // Given
+        let raw = b"GET\r\n\r\n";
+
+        // When
+        let complete = is_complete(raw);
+
+        // Then
+        assert_eq!(complete, Err(RequestError::Malformed));
     }
 }
