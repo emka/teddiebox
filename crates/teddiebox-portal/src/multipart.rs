@@ -121,6 +121,28 @@ Content-Type: application/octet-stream\r\n\
         assert_eq!(got, Ok(&b"\x30\x82\x01\x02"[..]));
     }
 
+    /// RFC 2046 allows text before the first delimiter, which a reader
+    /// skips; the file still starts after the part's own headers. The
+    /// preamble is longer than those headers, so skipping it by the wrong
+    /// amount cannot land inside them by luck.
+    #[test]
+    fn a_preamble_before_the_first_delimiter_is_skipped() {
+        // Given
+        let body = b"a preamble no browser sends, long enough to outrun the part's own \
+headers if it were skipped by the wrong amount\r\n\
+--X\r\n\
+Content-Disposition: form-data; name=\"ca\"; filename=\"ca.der\"\r\n\
+\r\n\
+\x30\x82\
+\r\n--X--\r\n";
+
+        // When
+        let got = file(Some("multipart/form-data; boundary=X"), body);
+
+        // Then
+        assert_eq!(got, Ok(&b"\x30\x82"[..]));
+    }
+
     #[test]
     fn only_the_whole_delimiter_ends_the_file() {
         // Given: a file holding `\r\n--` and the first half of the boundary.
