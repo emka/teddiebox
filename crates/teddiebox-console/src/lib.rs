@@ -625,13 +625,25 @@ mod tests {
         bytes.iter().find_map(|&b| watch.feed(b))
     }
 
+    /// Each line fed in turn to one watch, with the command it fired, if any.
+    fn fired<const N: usize>(lines: [&'static str; N]) -> [(&'static str, Option<Command>); N] {
+        let mut watch = CommandWatch::new();
+        lines.map(|line| (line, feed_all(&mut watch, line.as_bytes())))
+    }
+
     /// The way back into a box whose `setup_password` was forgotten, typed on
     /// the console the portal already runs.
     #[test]
     fn setup_pw_carries_the_passphrase_as_written() {
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"setup pw our house #1\n");
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"setup pw our house #1\n"),
+            parsed,
             Some(Command::SetupPassword(Some(
                 String::try_from("our house #1").unwrap()
             )))
@@ -642,21 +654,28 @@ mod tests {
     /// collide with a real one: WPA2 will not take three characters.
     #[test]
     fn setup_pw_off_asks_for_the_key_to_be_removed() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"setup pw off\n"),
-            Some(Command::SetupPassword(None))
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"setup pw off\n");
+
+        // Then
+        assert_eq!(parsed, Some(Command::SetupPassword(None)));
     }
 
     #[test]
     fn setup_asks_for_setup_mode() {
         // Given
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
 
         // When
         let command = feed_all(&mut watch, b"setup\n");
 
+        // Then
         // Then
         assert_eq!(command, Some(Command::EnterSetup));
     }
@@ -664,161 +683,282 @@ mod tests {
     #[test]
     fn setup_pw_is_not_mistaken_for_setup() {
         // Given
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
 
         // When
         let command = feed_all(&mut watch, b"setup pw off\n");
 
+        // Then
         // Then
         assert_ne!(command, Some(Command::EnterSetup));
     }
 
     #[test]
     fn setup_pw_with_nothing_after_it_is_not_a_command() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"setup pw \n"), None);
+
+        // When
+        let parsed = feed_all(&mut watch, b"setup pw \n");
+
+        // Then
+        assert_eq!(parsed, None);
     }
 
     #[test]
     fn the_download_command_fires_on_its_terminator() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"dl"), None, "not until the line ends");
-        assert_eq!(watch.feed(b'\r'), Some(Command::DownloadMode));
+
+        // When
+        let before_the_end = feed_all(&mut watch, b"dl");
+        let at_the_end = watch.feed(b'\r');
+
+        // Then
+        assert_eq!(before_the_end, None, "not until the line ends");
+        assert_eq!(at_the_end, Some(Command::DownloadMode));
     }
 
     #[test]
     fn the_reboot_command_is_distinct() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"rb\n"), Some(Command::Reboot));
+
+        // When
+        let parsed = feed_all(&mut watch, b"rb\n");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Reboot));
     }
 
     #[test]
     fn the_tone_command_is_a_single_letter() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"t\r"), Some(Command::Tone));
+
+        // When
+        let parsed = feed_all(&mut watch, b"t\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Tone));
     }
 
     /// Only an exact line matches, so `ddl` does not put the box into
     /// download mode.
     #[test]
     fn a_mistyped_line_does_not_fire() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"ddl\r"), None);
-        assert_eq!(feed_all(&mut watch, b"dl \r"), None);
-        assert_eq!(feed_all(&mut watch, b"DL\r"), None);
-    }
+        // Given
+        let lines = ["ddl\r", "dl \r", "DL\r"];
 
-    #[test]
-    fn a_correct_line_after_a_wrong_one_still_fires() {
-        let mut watch = CommandWatch::new();
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"nonsense\rdl\r"),
-            Some(Command::DownloadMode)
+            commands,
+            [("ddl\r", None), ("dl \r", None), ("DL\r", None),]
         );
     }
 
     #[test]
-    fn the_storage_command_fires_on_its_own_line() {
+    fn a_correct_line_after_a_wrong_one_still_fires() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"sd\r"), Some(Command::Storage));
+
+        // When
+        let parsed = feed_all(&mut watch, b"nonsense\rdl\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::DownloadMode));
+    }
+
+    #[test]
+    fn the_storage_command_fires_on_its_own_line() {
+        // Given
+        let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"sd\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Storage));
     }
 
     #[test]
     fn the_wav_command_fires_on_its_own_line() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"wav\r"), Some(Command::PlayWav));
+
+        // When
+        let parsed = feed_all(&mut watch, b"wav\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::PlayWav));
     }
 
     #[test]
     fn the_taf_command_is_distinct_from_the_wav_one() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"taf\r"), Some(Command::PlayTaf));
-        assert_eq!(feed_all(&mut watch, b"wav\r"), Some(Command::PlayWav));
+        // Given
+        let lines = ["taf\r", "wav\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
+        assert_eq!(
+            commands,
+            [
+                ("taf\r", Some(Command::PlayTaf)),
+                ("wav\r", Some(Command::PlayWav)),
+            ]
+        );
     }
 
     #[test]
     fn the_nfc_command_fires_on_its_own_line() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"nfc\r"), Some(Command::Nfc));
+
+        // When
+        let parsed = feed_all(&mut watch, b"nfc\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Nfc));
     }
 
     #[test]
     fn the_unlock_command_is_distinct_from_the_nfc_one() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
+
+        // When
+        let parsed = feed_all(&mut watch, b"slix\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Unlock));
     }
 
     /// `slix` stops as soon as a plain inventory answers, so on an unlocked
     /// tag it never sends the password. `slixp` always sends it.
     #[test]
     fn the_forced_unlock_command_is_distinct_from_the_unlock_one() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"slixp\r"), Some(Command::ForceUnlock));
-        assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
+        // Given
+        let lines = ["slixp\r", "slix\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
+        assert_eq!(
+            commands,
+            [
+                ("slixp\r", Some(Command::ForceUnlock)),
+                ("slix\r", Some(Command::Unlock)),
+            ]
+        );
     }
 
     /// A locked tag stops answering, so `lock` must not be confused with
     /// `slix` or `slixp`.
     #[test]
     fn the_lock_command_is_distinct_from_the_unlock_ones() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"lock\r"), Some(Command::Lock));
-        assert_eq!(feed_all(&mut watch, b"slix\r"), Some(Command::Unlock));
-        assert_eq!(feed_all(&mut watch, b"slixp\r"), Some(Command::ForceUnlock));
+        // Given
+        let lines = ["lock\r", "slix\r", "slixp\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
+        assert_eq!(
+            commands,
+            [
+                ("lock\r", Some(Command::Lock)),
+                ("slix\r", Some(Command::Unlock)),
+                ("slixp\r", Some(Command::ForceUnlock)),
+            ]
+        );
     }
 
     /// Runs only the codec's software power-down, to hear whether that step
     /// is what clicks.
     #[test]
     fn the_codec_power_down_command_fires_on_its_own_line() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"cdown\r"), Some(Command::CodecDown));
+
+        // When
+        let parsed = feed_all(&mut watch, b"cdown\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::CodecDown));
     }
 
     /// Naming a file lets short system sounds be played as quick tests.
     #[test]
     fn the_play_command_carries_the_content_id_it_names() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["play 00000000/00000003\r", "play 1A2B3C4D/500304E0\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"play 00000000/00000003\r"),
-            Some(Command::PlayContent {
-                directory: 0x0000_0000,
-                file: 0x0000_0003
-            })
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"play 1A2B3C4D/500304E0\r"),
-            Some(Command::PlayContent {
-                directory: 0x1A2B_3C4D,
-                file: 0x5003_04E0
-            })
+            commands,
+            [
+                (
+                    "play 00000000/00000003\r",
+                    Some(Command::PlayContent {
+                        directory: 0x0000_0000,
+                        file: 0x0000_0003
+                    })
+                ),
+                (
+                    "play 1A2B3C4D/500304E0\r",
+                    Some(Command::PlayContent {
+                        directory: 0x1A2B_3C4D,
+                        file: 0x5003_04E0
+                    })
+                ),
+            ]
         );
     }
 
     /// One part means a system sound in the box's language.
     #[test]
     fn a_play_command_with_one_half_names_a_sound_not_a_path() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"play 00000000\r"),
-            Some(Command::PlaySound { file: 0 })
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"play 00000000\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::PlaySound { file: 0 }));
     }
 
     /// Both parts must be eight hex digits, as on the card; a shorter one
     /// would open a different file.
     #[test]
     fn a_malformed_content_id_does_not_fire() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["play 0000000/00000003\r", "play 0000000G/00000003\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"play 0000000/00000003\r"),
-            None,
-            "short"
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"play 0000000G/00000003\r"),
-            None,
-            "not hex"
+            commands,
+            [
+                // short
+                ("play 0000000/00000003\r", None),
+                // not hex
+                ("play 0000000G/00000003\r", None),
+            ]
         );
     }
 
@@ -827,124 +967,176 @@ mod tests {
     /// match.
     #[test]
     fn the_pcm_command_carries_how_many_frames_to_dump() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["pcm 53\r", "pcm ff\r", "pcm\r", "pcm 5\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"pcm 53\r"),
-            Some(Command::DumpPcm { frames: 0x53 })
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"pcm ff\r"),
-            Some(Command::DumpPcm { frames: 0xFF })
-        );
-        assert_eq!(feed_all(&mut watch, b"pcm\r"), None, "no count");
-        assert_eq!(
-            feed_all(&mut watch, b"pcm 5\r"),
-            None,
-            "one digit is a typo"
+            commands,
+            [
+                ("pcm 53\r", Some(Command::DumpPcm { frames: 0x53 })),
+                ("pcm ff\r", Some(Command::DumpPcm { frames: 0xFF })),
+                // no count
+                ("pcm\r", None),
+                // one digit is a typo
+                ("pcm 5\r", None),
+            ]
         );
     }
 
     #[test]
     fn the_batlog_command_carries_an_interval_in_seconds() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"batlog 05\r"),
-            Some(Command::BatteryLog { seconds: 0x05 })
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"batlog 05\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::BatteryLog { seconds: 0x05 }));
     }
 
     /// Zero turns the log off, so it is accepted.
     #[test]
     fn a_batlog_interval_of_zero_stops_the_log() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"batlog 00\r"),
-            Some(Command::BatteryLog { seconds: 0 })
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"batlog 00\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::BatteryLog { seconds: 0 }));
     }
 
     #[test]
     fn the_batlog_command_without_an_interval_does_not_fire() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"batlog\r"), None, "no interval");
+        // Given
+        let lines = ["batlog\r", "batlog 5\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"batlog 5\r"),
-            None,
-            "two digits, like every other count"
+            commands,
+            [
+                // no interval
+                ("batlog\r", None),
+                // two digits, like every other count
+                ("batlog 5\r", None),
+            ]
         );
     }
 
     #[test]
     fn the_slap_command_carries_a_threshold() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"slap 2d\r"),
-            Some(Command::SlapThreshold { threshold: 0x2D })
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"slap 2d\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::SlapThreshold { threshold: 0x2D }));
     }
 
     #[test]
     fn a_slap_command_without_a_threshold_does_not_fire() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"slap\r"), None, "no threshold");
+        // Given
+        let lines = ["slap\r", "slap 5\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"slap 5\r"),
-            None,
-            "one digit is not two"
+            commands,
+            [
+                // no threshold
+                ("slap\r", None),
+                // one digit is not two
+                ("slap 5\r", None),
+            ]
         );
     }
 
     #[test]
     fn the_stop_command_fires_on_its_own_line() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"stop\r"), Some(Command::Stop));
+
+        // When
+        let parsed = feed_all(&mut watch, b"stop\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Stop));
     }
 
     #[test]
     fn the_output_command_carries_which_way_it_goes() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["out 1\r", "out 0\r", "out\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"out 1\r"),
-            Some(Command::Output(true))
+            commands,
+            [
+                ("out 1\r", Some(Command::Output(true))),
+                ("out 0\r", Some(Command::Output(false))),
+                // no direction given
+                ("out\r", None),
+            ]
         );
-        assert_eq!(
-            feed_all(&mut watch, b"out 0\r"),
-            Some(Command::Output(false))
-        );
-        assert_eq!(feed_all(&mut watch, b"out\r"), None, "no direction given");
     }
 
     #[test]
     fn the_speaker_command_carries_which_way_it_goes() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["spk 1\r", "spk 0\r", "spk\r", "spk 2\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"spk 1\r"),
-            Some(Command::Speaker(true))
+            commands,
+            [
+                ("spk 1\r", Some(Command::Speaker(true))),
+                ("spk 0\r", Some(Command::Speaker(false))),
+                // no direction given
+                ("spk\r", None),
+                // not a direction
+                ("spk 2\r", None),
+            ]
         );
-        assert_eq!(
-            feed_all(&mut watch, b"spk 0\r"),
-            Some(Command::Speaker(false))
-        );
-        assert_eq!(feed_all(&mut watch, b"spk\r"), None, "no direction given");
-        assert_eq!(feed_all(&mut watch, b"spk 2\r"), None, "not a direction");
     }
 
     #[test]
     fn the_headphone_commands_ask_and_tell() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["hp\r", "hp 1\r", "hp 0\r", "hp 2\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"hp\r"),
-            Some(Command::HeadphoneStatus)
+            commands,
+            [
+                ("hp\r", Some(Command::HeadphoneStatus)),
+                ("hp 1\r", Some(Command::Headphones(true))),
+                ("hp 0\r", Some(Command::Headphones(false))),
+                // not a routing
+                ("hp 2\r", None),
+            ]
         );
-        assert_eq!(
-            feed_all(&mut watch, b"hp 1\r"),
-            Some(Command::Headphones(true))
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"hp 0\r"),
-            Some(Command::Headphones(false))
-        );
-        assert_eq!(feed_all(&mut watch, b"hp 2\r"), None, "not a routing");
     }
 
     /// Page 3 holds the headset-detect debounce clock. Pages 0 and 1 hold the
@@ -952,46 +1144,79 @@ mod tests {
     /// would write an unrelated register.
     #[test]
     fn cset_reaches_the_headset_debounce_clock_and_no_further() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = [
+            "cset 3 10 01\r",
+            "cset 3 10 81\r",
+            "cset 0 43 8c\r",
+            "cset 2 21 be\r",
+            "cset 4 21 be\r",
+            "cset 5 21 be\r",
+            "cset 6 21 be\r",
+            "cset 7 21 be\r",
+            "cset 8 21 be\r",
+        ];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"cset 3 10 01\r"),
-            Some(Command::CodecSet {
-                page: 3,
-                register: 0x10,
-                value: 0x01
-            })
+            commands,
+            [
+                (
+                    "cset 3 10 01\r",
+                    Some(Command::CodecSet {
+                        page: 3,
+                        register: 0x10,
+                        value: 0x01
+                    })
+                ),
+                // the reset value must be reachable, to answer the question both ways
+                (
+                    "cset 3 10 81\r",
+                    Some(Command::CodecSet {
+                        page: 3,
+                        register: 0x10,
+                        value: 0x81
+                    })
+                ),
+                // page 0 carries headset detection itself and must stay reachable
+                (
+                    "cset 0 43 8c\r",
+                    Some(Command::CodecSet {
+                        page: 0,
+                        register: 0x43,
+                        value: 0x8C
+                    })
+                ),
+                // no page 2
+                ("cset 2 21 be\r", None),
+                // no page 4
+                ("cset 4 21 be\r", None),
+                // no page 5
+                ("cset 5 21 be\r", None),
+                // no page 6
+                ("cset 6 21 be\r", None),
+                // no page 7
+                ("cset 7 21 be\r", None),
+                // no page 8
+                ("cset 8 21 be\r", None),
+            ]
         );
-        assert_eq!(
-            feed_all(&mut watch, b"cset 3 10 81\r"),
-            Some(Command::CodecSet {
-                page: 3,
-                register: 0x10,
-                value: 0x81
-            }),
-            "the reset value must be reachable, to answer the question both ways"
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"cset 0 43 8c\r"),
-            Some(Command::CodecSet {
-                page: 0,
-                register: 0x43,
-                value: 0x8C
-            }),
-            "page 0 carries headset detection itself and must stay reachable"
-        );
-        assert_eq!(feed_all(&mut watch, b"cset 2 21 be\r"), None, "no page 2");
-        assert_eq!(feed_all(&mut watch, b"cset 4 21 be\r"), None, "no page 4");
-        assert_eq!(feed_all(&mut watch, b"cset 5 21 be\r"), None, "no page 5");
-        assert_eq!(feed_all(&mut watch, b"cset 6 21 be\r"), None, "no page 6");
-        assert_eq!(feed_all(&mut watch, b"cset 7 21 be\r"), None, "no page 7");
-        assert_eq!(feed_all(&mut watch, b"cset 8 21 be\r"), None, "no page 8");
     }
 
     #[test]
     fn a_codec_override_carries_its_page_register_and_value() {
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"cset 1 21 be\r");
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"cset 1 21 be\r"),
+            parsed,
             Some(Command::CodecSet {
                 page: 1,
                 register: 0x21,
@@ -1002,105 +1227,178 @@ mod tests {
 
     #[test]
     fn the_codec_rerun_and_clear_commands_fire_on_their_own_lines() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"cinit\r"), Some(Command::CodecInit));
-        assert_eq!(feed_all(&mut watch, b"cclr\r"), Some(Command::CodecClear));
+        // Given
+        let lines = ["cinit\r", "cclr\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
+        assert_eq!(
+            commands,
+            [
+                ("cinit\r", Some(Command::CodecInit)),
+                ("cclr\r", Some(Command::CodecClear)),
+            ]
+        );
     }
 
     /// A mistyped override must not write to a different register.
     #[test]
     fn a_malformed_codec_override_does_not_fire() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"cset 1 21\r"), None, "no value");
+        // Given
+        let lines = [
+            "cset 1 21\r",
+            "cset 1 2 be\r",
+            "cset 9 21 be\r",
+            "cset 1 2g be\r",
+        ];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"cset 1 2 be\r"),
-            None,
-            "short register"
+            commands,
+            [
+                // no value
+                ("cset 1 21\r", None),
+                // short register
+                ("cset 1 2 be\r", None),
+                // no such page
+                ("cset 9 21 be\r", None),
+                // not hex
+                ("cset 1 2g be\r", None),
+            ]
         );
-        assert_eq!(
-            feed_all(&mut watch, b"cset 9 21 be\r"),
-            None,
-            "no such page"
-        );
-        assert_eq!(feed_all(&mut watch, b"cset 1 2g be\r"), None, "not hex");
     }
 
     #[test]
     fn the_password_command_carries_its_value() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"pw DEADBEEF\r"),
-            Some(Command::Password(0xDEAD_BEEF))
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"pw DEADBEEF\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Password(0xDEAD_BEEF)));
     }
 
     /// People usually type lower case.
     #[test]
     fn a_password_in_lower_case_is_accepted() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"pw deadbeef\r"),
-            Some(Command::Password(0xDEAD_BEEF))
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"pw deadbeef\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Password(0xDEAD_BEEF)));
     }
 
     /// Leading zeroes are part of the value, not decoration: a password of
     /// 0x0000FFFF must not be read as 0xFFFF0000 or refused.
     #[test]
     fn a_password_with_leading_zeroes_keeps_its_width() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"pw 0000ffff\r"),
-            Some(Command::Password(0x0000_FFFF))
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"pw 0000ffff\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Password(0x0000_FFFF)));
     }
 
     /// A mistyped password is refused. A tag answers a wrong password with
     /// silence, which would look like a hardware fault.
     #[test]
     fn a_malformed_password_does_not_fire() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"pw DEADBEE\r"), None, "too short");
-        assert_eq!(feed_all(&mut watch, b"pw DEADBEEFF\r"), None, "too long");
-        assert_eq!(feed_all(&mut watch, b"pw DEADBEEG\r"), None, "not hex");
-        assert_eq!(feed_all(&mut watch, b"pw\r"), None, "no value at all");
+        // Given
+        let lines = ["pw DEADBEE\r", "pw DEADBEEFF\r", "pw DEADBEEG\r", "pw\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
+        assert_eq!(
+            commands,
+            [
+                // too short
+                ("pw DEADBEE\r", None),
+                // too long
+                ("pw DEADBEEFF\r", None),
+                // not hex
+                ("pw DEADBEEG\r", None),
+                // no value at all
+                ("pw\r", None),
+            ]
+        );
     }
 
     /// Status lines the box prints on its own must not look like commands.
     #[test]
     fn ordinary_traffic_does_not_fire_anything() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"teddiebox: alive 41\r\n"), None);
+        // Given
+        let lines = [
+            "teddiebox: alive 41\r\n",
+            "teddiebox: accel -6912 1216 14656\r\n",
+        ];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"teddiebox: accel -6912 1216 14656\r\n"),
-            None
+            commands,
+            [
+                ("teddiebox: alive 41\r\n", None),
+                ("teddiebox: accel -6912 1216 14656\r\n", None),
+            ]
         );
     }
 
     /// An overlong line is discarded entirely; its end is not matched.
     #[test]
     fn an_overlong_line_cannot_match_by_its_ending() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"aaaaaaaaaaaaadl\r"), None);
+
+        // When
+        let parsed = feed_all(&mut watch, b"aaaaaaaaaaaaadl\r");
+
+        // Then
+        assert_eq!(parsed, None);
     }
 
     /// The range is typed, not fixed, so any blocks can be read.
     #[test]
     fn a_memory_dump_names_its_first_block_and_a_count() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"mem 00 08\r"),
-            Some(Command::ReadMemory { first: 0, count: 8 })
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"mem 00 08\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::ReadMemory { first: 0, count: 8 }));
     }
 
     /// Reading past the end of the tag's memory is allowed, to find where it
     /// stops answering.
     #[test]
     fn a_memory_dump_may_start_past_the_expected_end() {
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"mem 1f 01\r");
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"mem 1f 01\r"),
+            parsed,
             Some(Command::ReadMemory {
                 first: 0x1F,
                 count: 1
@@ -1112,37 +1410,67 @@ mod tests {
     /// cut short.
     #[test]
     fn a_memory_dump_longer_than_the_buffer_is_refused() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"mem 00 21\r"), None);
+
+        // When
+        let parsed = feed_all(&mut watch, b"mem 00 21\r");
+
+        // Then
+        assert_eq!(parsed, None);
     }
 
     /// A count of zero is a typo.
     #[test]
     fn a_memory_dump_of_no_blocks_is_refused() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"mem 00 00\r"), None);
+
+        // When
+        let parsed = feed_all(&mut watch, b"mem 00 00\r");
+
+        // Then
+        assert_eq!(parsed, None);
     }
 
     /// A scan needs no credentials, so an empty result points at the radio,
     /// not a password.
     #[test]
     fn the_scan_command_asks_the_radio_what_it_can_hear() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"net scan\r"), Some(Command::NetScan));
+
+        // When
+        let parsed = feed_all(&mut watch, b"net scan\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::NetScan));
     }
 
     /// `net` on its own is not a command.
     #[test]
     fn net_without_a_verb_does_not_fire() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"net\r"), None);
+
+        // When
+        let parsed = feed_all(&mut watch, b"net\r");
+
+        // Then
+        assert_eq!(parsed, None);
     }
 
     #[test]
     fn the_ssid_command_carries_the_name_it_names() {
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"net ssid example-ssid\r");
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"net ssid example-ssid\r"),
+            parsed,
             Some(Command::NetSsid(
                 heapless::String::try_from("example-ssid").unwrap()
             ))
@@ -1153,18 +1481,25 @@ mod tests {
     /// short.
     #[test]
     fn an_ssid_longer_than_the_standard_allows_is_refused() {
+        // Given
         let mut watch = CommandWatch::new();
         let mut line = heapless::Vec::<u8, 80>::new();
         line.extend_from_slice(b"net ssid ").unwrap();
         line.extend_from_slice(&[b'a'; 33]).unwrap();
         line.push(b'\r').unwrap();
-        assert_eq!(feed_all(&mut watch, &line), None);
+
+        // When
+        let parsed = feed_all(&mut watch, &line);
+
+        // Then
+        assert_eq!(parsed, None);
     }
 
     /// A WPA2 passphrase can be 63 characters, the longest line the console
     /// accepts.
     #[test]
     fn a_passphrase_of_the_full_length_still_fits_a_line() {
+        // Given
         let mut watch = CommandWatch::new();
         let mut line = heapless::Vec::<u8, 80>::new();
         line.extend_from_slice(b"net pw ").unwrap();
@@ -1172,8 +1507,13 @@ mod tests {
         line.push(b'\r').unwrap();
         let raw = [b'x'; 63];
         let expected = core::str::from_utf8(&raw).unwrap();
+
+        // When
+        let parsed = feed_all(&mut watch, &line);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, &line),
+            parsed,
             Some(Command::NetPassword(
                 heapless::String::try_from(expected).unwrap()
             ))
@@ -1183,39 +1523,64 @@ mod tests {
     /// An empty credential is a typo.
     #[test]
     fn an_empty_ssid_is_refused() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"net ssid \r"), None);
+
+        // When
+        let parsed = feed_all(&mut watch, b"net ssid \r");
+
+        // Then
+        assert_eq!(parsed, None);
     }
 
     #[test]
     fn the_radio_can_be_asked_up_down_and_for_its_state() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"net up\r"), Some(Command::NetUp));
-        assert_eq!(feed_all(&mut watch, b"net down\r"), Some(Command::NetDown));
+        // Given
+        let lines = ["net up\r", "net down\r", "net status\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"net status\r"),
-            Some(Command::NetStatus)
+            commands,
+            [
+                ("net up\r", Some(Command::NetUp)),
+                ("net down\r", Some(Command::NetDown)),
+                ("net status\r", Some(Command::NetStatus)),
+            ]
         );
     }
     /// Uses `on`/`off` like the other console switches (`plate on`,
     /// `awake on`), not the `yes`/`no` of the card.
     #[test]
     fn ears_skip_can_be_switched_from_the_console() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["ears skip off\n", "ears skip on\n"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"ears skip off\n"),
-            Some(Command::EarsSkip(false))
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"ears skip on\n"),
-            Some(Command::EarsSkip(true))
+            commands,
+            [
+                ("ears skip off\n", Some(Command::EarsSkip(false))),
+                ("ears skip on\n", Some(Command::EarsSkip(true))),
+            ]
         );
     }
 
     #[test]
     fn net_tls_is_recognised() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"net tls\n"), Some(Command::NetTls));
+
+        // When
+        let parsed = feed_all(&mut watch, b"net tls\n");
+
+        // Then
+        assert_eq!(parsed, Some(Command::NetTls));
     }
     /// `get` takes the identifier **as it appears in the URL and in
     /// teddyCloud's listing** (the reversed UID), so it can be copied from the
@@ -1223,9 +1588,15 @@ mod tests {
     /// `1D2E3F50500304E0`.
     #[test]
     fn get_takes_the_reversed_uid_as_it_appears_on_the_server() {
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"get 1D2E3F50500304E0\n");
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"get 1D2E3F50500304E0\n"),
+            parsed,
             Some(Command::Get([
                 0x1D, 0x2E, 0x3F, 0x50, 0x50, 0x03, 0x04, 0xE0
             ]))
@@ -1234,9 +1605,15 @@ mod tests {
 
     #[test]
     fn get_accepts_lower_case_hex() {
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"get 1a2b3c4d500304e0\n");
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"get 1a2b3c4d500304e0\n"),
+            parsed,
             Some(Command::Get([
                 0x1A, 0x2B, 0x3C, 0x4D, 0x50, 0x03, 0x04, 0xE0
             ]))
@@ -1247,64 +1624,117 @@ mod tests {
     /// name a different figure and look like "no content".
     #[test]
     fn a_malformed_identifier_is_not_a_command() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304E\n"), None);
-        assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304E00\n"), None);
-        assert_eq!(feed_all(&mut watch, b"get 1D2E3F50500304EZ\n"), None);
-        assert_eq!(feed_all(&mut watch, b"get \n"), None);
+        // Given
+        let lines = [
+            "get 1D2E3F50500304E\n",
+            "get 1D2E3F50500304E00\n",
+            "get 1D2E3F50500304EZ\n",
+            "get \n",
+        ];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
+        assert_eq!(
+            commands,
+            [
+                ("get 1D2E3F50500304E\n", None),
+                ("get 1D2E3F50500304E00\n", None),
+                ("get 1D2E3F50500304EZ\n", None),
+                ("get \n", None),
+            ]
+        );
     }
     #[test]
     fn ota_status_is_recognised() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"otas\n"), Some(Command::OtaStatus));
+
+        // When
+        let parsed = feed_all(&mut watch, b"otas\n");
+
+        // Then
+        assert_eq!(parsed, Some(Command::OtaStatus));
     }
 
     #[test]
     fn ota_write_probe_is_recognised() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"otaw\n"),
-            Some(Command::OtaWriteProbe)
-        );
+
+        // When
+        let parsed = feed_all(&mut watch, b"otaw\n");
+
+        // Then
+        assert_eq!(parsed, Some(Command::OtaWriteProbe));
     }
 
     /// The slot is named explicitly, not "the other one": this command can
     /// leave the box unbootable.
     #[test]
     fn ota_boot_takes_a_slot() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["otaboot 0\n", "otaboot 1\n"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"otaboot 0\n"),
-            Some(Command::OtaBoot { slot: 0 })
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"otaboot 1\n"),
-            Some(Command::OtaBoot { slot: 1 })
+            commands,
+            [
+                ("otaboot 0\n", Some(Command::OtaBoot { slot: 0 })),
+                ("otaboot 1\n", Some(Command::OtaBoot { slot: 1 })),
+            ]
         );
     }
 
     /// There are two slots; anything else is a typo.
     #[test]
     fn ota_boot_refuses_anything_but_a_slot() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"otaboot 2\n"), None);
-        assert_eq!(feed_all(&mut watch, b"otaboot \n"), None);
-        assert_eq!(feed_all(&mut watch, b"otaboot\n"), None);
-        assert_eq!(feed_all(&mut watch, b"otaboot 01\n"), None);
+        // Given
+        let lines = ["otaboot 2\n", "otaboot \n", "otaboot\n", "otaboot 01\n"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
+        assert_eq!(
+            commands,
+            [
+                ("otaboot 2\n", None),
+                ("otaboot \n", None),
+                ("otaboot\n", None),
+                ("otaboot 01\n", None),
+            ]
+        );
     }
 
     #[test]
     fn stack_is_recognised() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"stack\n"), Some(Command::StackReport));
+
+        // When
+        let parsed = feed_all(&mut watch, b"stack\n");
+
+        // Then
+        assert_eq!(parsed, Some(Command::StackReport));
     }
     /// A download is stored in `/CACHE/` under the identifier `get` used, so
     /// the same sixteen digits play it.
     #[test]
     fn play_takes_a_ruid_to_mean_the_cache() {
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"play 1A2B3C4D500304E0\n");
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"play 1A2B3C4D500304E0\n"),
+            parsed,
             Some(Command::PlayCache {
                 directory: 0x1A2B_3C4D,
                 file: 0x5003_04E0
@@ -1316,26 +1746,40 @@ mod tests {
     /// is a path under `CONTENT`.
     #[test]
     fn the_shorter_play_forms_still_mean_what_they_did() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["play 00000010\n", "play 00000001/00000000\n"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"play 00000010\n"),
-            Some(Command::PlaySound { file: 0x10 })
-        );
-        assert_eq!(
-            feed_all(&mut watch, b"play 00000001/00000000\n"),
-            Some(Command::PlayContent {
-                directory: 1,
-                file: 0
-            })
+            commands,
+            [
+                ("play 00000010\n", Some(Command::PlaySound { file: 0x10 })),
+                (
+                    "play 00000001/00000000\n",
+                    Some(Command::PlayContent {
+                        directory: 1,
+                        file: 0
+                    })
+                ),
+            ]
         );
     }
     /// The same sixteen digits as `get` and `play` check a download, without
     /// walking the whole card.
     #[test]
     fn crc_takes_a_ruid_to_mean_the_cache() {
+        // Given
         let mut watch = CommandWatch::new();
+
+        // When
+        let parsed = feed_all(&mut watch, b"crc 1A2B3C4D500304E0\n");
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"crc 1A2B3C4D500304E0\n"),
+            parsed,
             Some(Command::Crc {
                 directory: 0x1A2B_3C4D,
                 file: 0x5003_04E0
@@ -1346,56 +1790,92 @@ mod tests {
     /// Too short, too long or not hex is refused, as for `get`.
     #[test]
     fn a_malformed_crc_identifier_is_not_a_command() {
-        let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"crc 1A2B3C4D500304E\n"), None);
-        assert_eq!(feed_all(&mut watch, b"crc 1A2B3C4D500304E00\n"), None);
-        assert_eq!(feed_all(&mut watch, b"crc 1A2B3C4D500304EZ\n"), None);
-        assert_eq!(feed_all(&mut watch, b"crc \n"), None);
+        // Given
+        let lines = [
+            "crc 1A2B3C4D500304E\n",
+            "crc 1A2B3C4D500304E00\n",
+            "crc 1A2B3C4D500304EZ\n",
+            "crc \n",
+        ];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
+        assert_eq!(
+            commands,
+            [
+                ("crc 1A2B3C4D500304E\n", None),
+                ("crc 1A2B3C4D500304E00\n", None),
+                ("crc 1A2B3C4D500304EZ\n", None),
+                ("crc \n", None),
+            ]
+        );
     }
 
     /// Separate from `mem`: `mem` prints blocks, `token` keeps them for a
     /// download.
     #[test]
     fn token_is_recognised() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"token\n"), Some(Command::ReadToken));
+
+        // When
+        let parsed = feed_all(&mut watch, b"token\n");
+
+        // Then
+        assert_eq!(parsed, Some(Command::ReadToken));
     }
 
     /// Long tests need the idle timeout held off.
     #[test]
     fn the_idle_shutdown_can_be_held_off_from_the_console() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["awake on\r", "awake off\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"awake on\r"),
-            Some(Command::StayAwake(true))
-        );
-        let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"awake off\r"),
-            Some(Command::StayAwake(false))
+            commands,
+            [
+                ("awake on\r", Some(Command::StayAwake(true))),
+                ("awake off\r", Some(Command::StayAwake(false)))
+            ]
         );
     }
 
     /// Sleep on demand, so sleep current can be measured.
     #[test]
     fn sleep_is_its_own_command() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"sleep\r"), Some(Command::Sleep));
+
+        // When
+        let parsed = feed_all(&mut watch, b"sleep\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Sleep));
     }
 
     /// Automatic sleep is off by default and must be turned on after each
     /// reset.
     #[test]
     fn the_automatic_ending_can_be_armed_from_the_console() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["autosleep on\r", "autosleep off\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"autosleep on\r"),
-            Some(Command::AutoSleep(true))
-        );
-        let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"autosleep off\r"),
-            Some(Command::AutoSleep(false))
+            commands,
+            [
+                ("autosleep on\r", Some(Command::AutoSleep(true))),
+                ("autosleep off\r", Some(Command::AutoSleep(false)))
+            ]
         );
     }
 
@@ -1403,35 +1883,49 @@ mod tests {
     /// without a power cycle.
     #[test]
     fn the_box_can_be_told_to_ask_the_server_again() {
+        // Given
         let mut watch = CommandWatch::new();
-        assert_eq!(feed_all(&mut watch, b"reval\r"), Some(Command::Revalidate));
+
+        // When
+        let parsed = feed_all(&mut watch, b"reval\r");
+
+        // Then
+        assert_eq!(parsed, Some(Command::Revalidate));
     }
 
     #[test]
     fn the_playback_checksum_can_be_switched_from_the_console() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["pcmcrc on\r", "pcmcrc off\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"pcmcrc on\r"),
-            Some(Command::PcmCrc(true))
-        );
-        let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"pcmcrc off\r"),
-            Some(Command::PcmCrc(false))
+            commands,
+            [
+                ("pcmcrc on\r", Some(Command::PcmCrc(true))),
+                ("pcmcrc off\r", Some(Command::PcmCrc(false)))
+            ]
         );
     }
 
     #[test]
     fn the_plate_poller_can_be_switched_from_the_console() {
-        let mut watch = CommandWatch::new();
+        // Given
+        let lines = ["plate on\r", "plate off\r"];
+
+        // When
+        let commands = fired(lines);
+
+        // Then
         assert_eq!(
-            feed_all(&mut watch, b"plate on\r"),
-            Some(Command::Plate(true))
-        );
-        let mut watch = CommandWatch::new();
-        assert_eq!(
-            feed_all(&mut watch, b"plate off\r"),
-            Some(Command::Plate(false))
+            commands,
+            [
+                ("plate on\r", Some(Command::Plate(true))),
+                ("plate off\r", Some(Command::Plate(false)))
+            ]
         );
     }
 }
