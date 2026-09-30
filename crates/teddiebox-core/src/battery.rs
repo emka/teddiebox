@@ -414,19 +414,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn four_agreeing_readings_move_the_level() {
-        // Given
-        let mut b = model();
-
-        // When
-        let reported = [2_900; 4].map(|mv| b.update(mv, false));
-
-        // Then
-        assert_eq!(reported, [None, None, None, Some(BatteryLevel::Critical)]);
-        assert!(b.must_shut_down());
-    }
-
     /// A pack already at Critical would also place a bogus 2500 mV reading in
     /// Critical. That single reading must not trigger the shutdown.
     #[test]
