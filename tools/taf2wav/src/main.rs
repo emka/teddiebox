@@ -3,7 +3,9 @@
 
 use std::fs;
 
-use teddiebox_audio::{LibOpus, OpusState, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE};
+use teddiebox_audio::{
+    LibOpus, OpusState, TafBuffers, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE,
+};
 use teddiebox_taf::SlicePages;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,8 +35,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // outlive `decoder`. On the device it is a static; here, on main's stack.
     let mut state = OpusState::new();
     let opus = LibOpus::new(&mut state).map_err(|e| format!("initializing Opus decoder: {e}"))?;
-    let mut decoder =
-        TafDecoder::open(source, opus).map_err(|e| format!("opening {input}: {e}"))?;
+    let mut buffers = TafBuffers::new();
+    let mut decoder = TafDecoder::open(source, opus, &mut buffers)
+        .map_err(|e| format!("opening {input}: {e}"))?;
 
     println!(
         "audio id {:#010x}, {} chapters",

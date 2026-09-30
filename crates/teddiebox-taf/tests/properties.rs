@@ -27,7 +27,7 @@ fn config() -> Config {
 /// A page holds at most 255 lacing segments, so no file of `pages` pages can
 /// yield more than `pages * 255` packets. Reaching that many means the
 /// reader is going round in circles.
-fn read_to_end(reader: &mut TafReader<SlicePages<'_>>, pages: usize) -> Result<(), String> {
+fn read_to_end(reader: &mut TafReader<'_, SlicePages<'_>>, pages: usize) -> Result<(), String> {
     let mut packet = [0u8; MAX_PACKET];
     for _ in 0..=pages * 255 {
         match reader.next_packet(&mut packet) {
@@ -50,7 +50,8 @@ fn exercise(file: &[u8], chapter: usize) -> Result<(), String> {
     let Ok(source) = SlicePages::new(file) else {
         return Ok(());
     };
-    let Ok(mut reader) = TafReader::open(source) else {
+    let mut page = [0u8; PAGE_SIZE];
+    let Ok(mut reader) = TafReader::open(source, &mut page) else {
         return Ok(());
     };
     read_to_end(&mut reader, pages)?;

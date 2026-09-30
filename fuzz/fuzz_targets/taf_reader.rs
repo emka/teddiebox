@@ -32,7 +32,8 @@ fuzz_target!(|data: &[u8]| {
     let Ok(source) = SlicePages::new(data) else {
         return;
     };
-    let Ok(mut reader) = TafReader::open(source) else {
+    let mut page = [0u8; PAGE_SIZE];
+    let Ok(mut reader) = TafReader::open(source, &mut page) else {
         return;
     };
     read_to_end(&mut reader, pages);

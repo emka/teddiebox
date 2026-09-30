@@ -18,7 +18,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use teddiebox_audio::{LibOpus, OpusDecode, OpusState, CHANNELS, MAX_FRAME_SAMPLES};
-use teddiebox_taf::{SlicePages, TafReader, MAX_PACKET};
+use teddiebox_taf::{SlicePages, TafReader, MAX_PACKET, PAGE_SIZE};
 
 const FIXTURE: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/sine.taf");
 
@@ -27,7 +27,8 @@ const SAMPLES_PER_PACKET: usize = 2880;
 
 /// Every audio packet in the fixture, headers excluded.
 fn audio_packets() -> Vec<Vec<u8>> {
-    let mut reader = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
+    let mut page = [0u8; PAGE_SIZE];
+    let mut reader = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
     let mut scratch = [0u8; MAX_PACKET];
     let mut packets = Vec::new();
 

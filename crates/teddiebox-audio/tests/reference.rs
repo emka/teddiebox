@@ -9,7 +9,9 @@
 // failed test, which is what the lint is not meant to prevent.
 #![allow(clippy::unwrap_used)]
 
-use teddiebox_audio::{LibOpus, OpusState, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE};
+use teddiebox_audio::{
+    LibOpus, OpusState, TafBuffers, TafDecoder, CHANNELS, MAX_FRAME_SAMPLES, SAMPLE_RATE,
+};
 use teddiebox_taf::SlicePages;
 
 const FIXTURE: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/sine.taf");
@@ -22,9 +24,11 @@ fn decode_all() -> Vec<i16> {
 /// Decodes `taf` to the end, optionally seeking to a chapter first.
 fn decode_from(taf: &[u8], chapter: Option<usize>) -> Vec<i16> {
     let mut state = OpusState::new();
+    let mut buffers = TafBuffers::new();
     let mut dec = TafDecoder::open(
         SlicePages::new(taf).unwrap(),
         LibOpus::new(&mut state).unwrap(),
+        &mut buffers,
     )
     .unwrap();
     if let Some(n) = chapter {

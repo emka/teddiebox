@@ -118,7 +118,7 @@ impl OpusDecode for LibOpus<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use teddiebox_taf::{SlicePages, TafReader, MAX_PACKET};
+    use teddiebox_taf::{SlicePages, TafReader, MAX_PACKET, PAGE_SIZE};
 
     const FIXTURE: &[u8] = include_bytes!("../../teddiebox-taf/tests/data/sine.taf");
 
@@ -134,7 +134,8 @@ mod tests {
 
     #[test]
     fn decodes_the_first_real_audio_packet_to_a_full_stereo_frame() {
-        let mut reader = TafReader::open(SlicePages::new(FIXTURE).unwrap()).unwrap();
+        let mut page = [0u8; PAGE_SIZE];
+        let mut reader = TafReader::open(SlicePages::new(FIXTURE).unwrap(), &mut page).unwrap();
         let mut scratch = [0u8; MAX_PACKET];
         reader.next_packet(&mut scratch).unwrap(); // OpusHead
         reader.next_packet(&mut scratch).unwrap(); // OpusTags

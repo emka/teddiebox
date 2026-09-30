@@ -13,7 +13,7 @@
 use core::panic::PanicInfo;
 use core::slice;
 
-use teddiebox_audio::{LibOpus, OpusState, TafDecoder, MAX_FRAME_SAMPLES};
+use teddiebox_audio::{LibOpus, OpusState, TafBuffers, TafDecoder, MAX_FRAME_SAMPLES};
 use teddiebox_taf::SlicePages;
 
 /// Decodes the first audio frame of an in-memory TAF image.
@@ -41,7 +41,8 @@ pub unsafe extern "C" fn teddiebox_decode_first_frame(
     let Ok(opus) = LibOpus::new(&mut *state) else {
         return -2;
     };
-    let Ok(mut decoder) = TafDecoder::open(source, opus) else {
+    let mut buffers = TafBuffers::new();
+    let Ok(mut decoder) = TafDecoder::open(source, opus, &mut buffers) else {
         return -3;
     };
 

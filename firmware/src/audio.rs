@@ -21,7 +21,7 @@ use teddiebox_core::cushion::Cushion;
 use teddiebox_core::wav::{WavError, WavFormat};
 use teddiebox_core::Position;
 
-use teddiebox_audio::{LibOpus, OpusState, Skip, TafDecoder, MAX_FRAME_SAMPLES};
+use teddiebox_audio::{LibOpus, OpusState, Skip, TafBuffers, TafDecoder, MAX_FRAME_SAMPLES};
 
 use crate::storage::{CardPages, Mounted, PAGE_READ_MAX_US, PAGE_READ_US};
 use crate::BENCH;
@@ -266,17 +266,21 @@ fn describe(error: WavError) -> &'static str {
     }
 }
 
-/// Decoder state and PCM scratch.
+/// Decoder state, the TAF decoder's two blocks, and PCM scratch.
 ///
-/// Static rather than in an embassy task's future: the Opus state alone is
-/// 28 KB.
+/// Static rather than in an embassy task's future, which is copied between
+/// stack frames at every level of `async fn` nesting. The Opus state and the
+/// TAF blocks are each far larger than a future should be; blocks held inside
+/// the decoder were copied at each level and overflowed the stack.
 struct DecodeScratch {
     opus: OpusState,
+    taf: TafBuffers,
     pcm: [i16; MAX_FRAME_SAMPLES],
 }
 
 static mut SCRATCH: DecodeScratch = DecodeScratch {
     opus: OpusState::new(),
+    taf: TafBuffers::new(),
     pcm: [0; MAX_FRAME_SAMPLES],
 };
 static SCRATCH_TAKEN: AtomicBool = AtomicBool::new(false);
@@ -289,7 +293,9 @@ static SCRATCH_TAKEN: AtomicBool = AtomicBool::new(false);
 pub const SCRATCH_BYTES: usize = core::mem::size_of::<DecodeScratch>();
 const _: () = assert!(
     SCRATCH_BYTES
-        == core::mem::size_of::<OpusState>() + core::mem::size_of::<[i16; MAX_FRAME_SAMPLES]>(),
+        == core::mem::size_of::<OpusState>()
+            + core::mem::size_of::<TafBuffers>()
+            + core::mem::size_of::<[i16; MAX_FRAME_SAMPLES]>(),
     "DecodeScratch has padding, so its bytes are not all initialised"
 );
 
@@ -473,8 +479,8 @@ fn take_scratch() -> Option<&'static mut DecodeScratch> {
 /// Hands the same scratch out as plain bytes, once and for good.
 ///
 /// Used by the setup portal, which needs room for its future (socket buffers
-/// and the radio's `StackResources`) and never decodes. Reusing this 51,712
-/// byte buffer keeps the portal out of `.bss`, which would shrink the stack.
+/// and the radio's `StackResources`) and never decodes. Reusing this buffer
+/// keeps the portal out of `.bss`, which would shrink the stack.
 /// See `portal.rs`.
 ///
 /// Uses the same [`SCRATCH_TAKEN`] flag as [`take_scratch`], so whichever
@@ -534,7 +540,8 @@ pub async fn dump_pcm(card: &Mounted, frames: u8) -> Result<(), &'static str> {
     let result = (|| {
         let opus =
             LibOpus::new(&mut scratch.opus).map_err(|_| "the Opus decoder would not start")?;
-        let mut decoder = TafDecoder::open(pages, opus).map_err(|_| "not a readable TAF file")?;
+        let mut decoder = TafDecoder::open(pages, opus, &mut scratch.taf)
+            .map_err(|_| "not a readable TAF file")?;
         let mut crc = Crc32::new();
         for index in 0..frames {
             match decoder.next_frame(&mut scratch.pcm) {
@@ -631,7 +638,7 @@ fn open_source(card: &Mounted, source: Source) -> Result<(RawFile, u32), &'stati
 /// After a skip, the caller's PCM checksum no longer matches a full decode on
 /// the host.
 fn handle_skip(
-    decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>,
+    decoder: &mut TafDecoder<'_, CardPages<'_>, LibOpus<'_>>,
     pending: &mut core::ops::Range<usize>,
     instead: &mut Option<CueSamples>,
     end_after_cue: &mut bool,
@@ -729,7 +736,7 @@ fn log_progress(
 /// decoded (the caller's main loop continues pushing it) and the frame
 /// count so far.
 fn prefill_taf(
-    decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>,
+    decoder: &mut TafDecoder<'_, CardPages<'_>, LibOpus<'_>>,
     pcm: &mut [i16; MAX_FRAME_SAMPLES],
     buffer: &mut DmaTxStreamBuf,
     pcm_crc: &mut Option<Crc32>,
@@ -858,7 +865,7 @@ enum NextChunk {
 #[allow(clippy::too_many_arguments)]
 fn next_chunk(
     pending: core::ops::Range<usize>,
-    decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>,
+    decoder: &mut TafDecoder<'_, CardPages<'_>, LibOpus<'_>>,
     pcm: &mut [i16; MAX_FRAME_SAMPLES],
     instead: &mut Option<CueSamples>,
     over: &mut Option<CueSamples>,
@@ -915,7 +922,8 @@ fn open_taf<'s>(
     card: &'s Mounted,
     source: Source,
     opus_scratch: &'s mut OpusState,
-) -> Result<(RawFile, TafDecoder<CardPages<'s>, LibOpus<'s>>), &'static str> {
+    taf_scratch: &'s mut TafBuffers,
+) -> Result<(RawFile, TafDecoder<'s, CardPages<'s>, LibOpus<'s>>), &'static str> {
     let (file, size) = open_source(card, source)?;
     esp_println::println!("teddiebox: taf {size} bytes");
     let pages = CardPages::new(card, file, size);
@@ -927,7 +935,7 @@ fn open_taf<'s>(
             return Err("the Opus decoder would not start");
         }
     };
-    match TafDecoder::open(pages, opus) {
+    match TafDecoder::open(pages, opus, taf_scratch) {
         Ok(decoder) => Ok((file, decoder)),
         Err(_) => {
             card.close_file(file);
@@ -939,7 +947,7 @@ fn open_taf<'s>(
 /// Pre-fills the buffer, as the WAV path does — an empty buffer would run
 /// out before the first sample arrived — and starts the I2S transfer.
 fn prefill_and_start(
-    decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>,
+    decoder: &mut TafDecoder<'_, CardPages<'_>, LibOpus<'_>>,
     pcm: &mut [i16; MAX_FRAME_SAMPLES],
     mut buffer: DmaTxStreamBuf,
     pcm_crc: &mut Option<Crc32>,
@@ -957,7 +965,7 @@ fn prefill_and_start(
 
 /// Seeks to a saved position, if any. A replaced or re-downloaded story may
 /// not have the saved page any more; then it plays from the beginning.
-fn seek_to_start(decoder: &mut TafDecoder<CardPages<'_>, LibOpus<'_>>, from: Position) {
+fn seek_to_start(decoder: &mut TafDecoder<'_, CardPages<'_>, LibOpus<'_>>, from: Position) {
     let Position::Exact { page } = from else {
         return;
     };
@@ -983,7 +991,7 @@ async fn play_taf_inner(
         return Err(("the decoder is already in use", i2s_tx, buffer));
     };
 
-    let (file, mut decoder) = match open_taf(card, source, &mut scratch.opus) {
+    let (file, mut decoder) = match open_taf(card, source, &mut scratch.opus, &mut scratch.taf) {
         Ok(pair) => pair,
         Err(reason) => {
             release_scratch();

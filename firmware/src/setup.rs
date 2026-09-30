@@ -101,7 +101,7 @@ pub(crate) async fn enter(
 
     // Setup mode reuses the decoder's scratch memory. `portal::run`'s
     // future (socket buffers, the card and the radio's `StackResources`)
-    // is moved into the 51,712 bytes of `audio::SCRATCH`, which the
+    // is moved into `audio::SCRATCH`, which the
     // decoder does not use in this mode, so only a pointer stays in this
     // task's future. That keeps the stack as large as without the portal;
     // `portal::place` has the numbers.
