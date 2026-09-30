@@ -38,8 +38,13 @@ mod tests {
 
     #[test]
     fn parses_a_lower_case_digest() {
-        let d = parse_hex32("3f786850e387550fdab836ed7e6dc881de23001b000000000000000000000000")
-            .unwrap();
+        // Given
+        let text = "3f786850e387550fdab836ed7e6dc881de23001b000000000000000000000000";
+
+        // When
+        let d = parse_hex32(text).unwrap();
+
+        // Then
         assert_eq!(d[0], 0x3f);
         assert_eq!(d[1], 0x78);
         assert_eq!(d[19], 0x1b);
@@ -48,38 +53,62 @@ mod tests {
 
     #[test]
     fn parses_an_upper_case_digest() {
-        let d = parse_hex32("3F786850E387550FDAB836ED7E6DC881DE23001B000000000000000000000000")
-            .unwrap();
+        // Given
+        let text = "3F786850E387550FDAB836ED7E6DC881DE23001B000000000000000000000000";
+
+        // When
+        let d = parse_hex32(text).unwrap();
+
+        // Then
         assert_eq!(d[0], 0x3f);
         assert_eq!(d[19], 0x1b);
     }
 
     #[test]
     fn refuses_a_digest_that_is_one_character_short() {
-        assert_eq!(
-            parse_hex32("3f786850e387550fdab836ed7e6dc881de23001b00000000000000000000000"),
-            Err(OtaError::MalformedDigest)
-        );
+        // Given
+        let text = "3f786850e387550fdab836ed7e6dc881de23001b00000000000000000000000";
+
+        // When
+        let digest = parse_hex32(text);
+
+        // Then
+        assert_eq!(digest, Err(OtaError::MalformedDigest));
     }
 
     #[test]
     fn refuses_a_digest_that_is_one_character_long() {
-        assert_eq!(
-            parse_hex32("3f786850e387550fdab836ed7e6dc881de23001b0000000000000000000000000"),
-            Err(OtaError::MalformedDigest)
-        );
+        // Given
+        let text = "3f786850e387550fdab836ed7e6dc881de23001b0000000000000000000000000";
+
+        // When
+        let digest = parse_hex32(text);
+
+        // Then
+        assert_eq!(digest, Err(OtaError::MalformedDigest));
     }
 
     #[test]
     fn refuses_a_non_hex_character() {
-        assert_eq!(
-            parse_hex32("3f786850e387550fdab836ed7e6dc881de23001bg0000000000000000000000"),
-            Err(OtaError::MalformedDigest)
-        );
+        // Given
+        let text = "3f786850e387550fdab836ed7e6dc881de23001bg0000000000000000000000";
+
+        // When
+        let digest = parse_hex32(text);
+
+        // Then
+        assert_eq!(digest, Err(OtaError::MalformedDigest));
     }
 
     #[test]
     fn refuses_an_empty_value() {
-        assert_eq!(parse_hex32(""), Err(OtaError::MalformedDigest));
+        // Given
+        let text = "";
+
+        // When
+        let digest = parse_hex32(text);
+
+        // Then
+        assert_eq!(digest, Err(OtaError::MalformedDigest));
     }
 }
