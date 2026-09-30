@@ -282,17 +282,27 @@ mod tests {
     /// before it plays.
     #[test]
     fn a_figure_that_has_not_been_asked_about_is_asked_before_it_plays() {
+        // Given
         let mut p = Playback::new();
+
+        // When
         let actions = p.on_tag_present(TAG, &unchecked(1));
+
+        // Then
         assert_eq!(actions.as_slice(), &[Action::Revalidate(TAG)]);
         assert_eq!(p.kind(), PlaybackKind::Fetching);
     }
 
     #[test]
     fn a_story_the_server_agrees_with_plays_from_where_it_stopped() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unchecked(412));
+
+        // When
         let actions = p.on_revalidated(TAG, Freshness::Current, &unchecked(412));
+
+        // Then
         assert_eq!(
             actions.as_slice(),
             &[Action::Play {
@@ -307,9 +317,14 @@ mod tests {
     /// story, so the child hears the new version.
     #[test]
     fn a_stale_story_is_fetched_again_rather_than_played() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unchecked(412));
+
+        // When
         let actions = p.on_revalidated(TAG, Freshness::Stale, &unchecked(412));
+
+        // Then
         assert_eq!(actions.as_slice(), &[Action::RequestContent(TAG)]);
         assert_eq!(p.kind(), PlaybackKind::Fetching);
     }
@@ -318,9 +333,14 @@ mod tests {
     /// ignored.
     #[test]
     fn an_answer_for_a_figure_no_longer_on_the_plate_is_ignored() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unchecked(1));
+
+        // When
         let actions = p.on_revalidated(OTHER, Freshness::Stale, &unchecked(1));
+
+        // Then
         assert!(actions.as_slice().is_empty());
     }
 
@@ -328,9 +348,14 @@ mod tests {
     /// aborted, because nothing was being downloaded.
     #[test]
     fn lifting_a_figure_that_is_being_asked_about_aborts_nothing() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unchecked(1));
+
+        // When
         let actions = p.on_tag_absent();
+
+        // Then
         assert!(actions.as_slice().is_empty());
         assert_eq!(p.kind(), PlaybackKind::Idle);
     }
@@ -339,8 +364,13 @@ mod tests {
     /// again: Wi-Fi uses the most battery.
     #[test]
     fn a_figure_already_asked_about_plays_straight_away() {
+        // Given
         let mut p = Playback::new();
+
+        // When
         let actions = p.on_tag_present(TAG, &known(3));
+
+        // Then
         assert_eq!(
             actions.as_slice(),
             &[Action::Play {
@@ -356,9 +386,14 @@ mod tests {
     /// needless download.
     #[test]
     fn a_figure_already_playing_is_not_started_again() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &known(1));
+
+        // When
         let again = p.on_tag_present(TAG, &unknown());
+
+        // Then
         assert!(
             again.as_slice().is_empty(),
             "a repeat arrival must do nothing at all: {again:?}"
@@ -370,9 +405,14 @@ mod tests {
     /// restart it from zero.
     #[test]
     fn a_figure_already_being_fetched_is_not_fetched_again() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
+
+        // When
         let again = p.on_tag_present(TAG, &unknown());
+
+        // Then
         assert!(again.as_slice().is_empty(), "got: {again:?}");
         assert_eq!(p.kind(), PlaybackKind::Fetching);
     }
@@ -380,9 +420,14 @@ mod tests {
     /// A *different* figure is a real change and must still be acted on.
     #[test]
     fn a_different_figure_still_replaces_the_one_playing() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &known(1));
+
+        // When
         let swapped = p.on_tag_present(OTHER, &known(7));
+
+        // Then
         assert_eq!(
             swapped.as_slice(),
             &[Action::Play {
@@ -394,8 +439,13 @@ mod tests {
 
     #[test]
     fn placing_a_known_figure_plays_from_the_start() {
+        // Given
         let mut p = Playback::new();
+
+        // When
         let actions = p.on_tag_present(TAG, &known(1));
+
+        // Then
         assert_eq!(
             actions.as_slice(),
             &[Action::Play {
@@ -408,8 +458,13 @@ mod tests {
 
     #[test]
     fn placing_a_known_figure_resumes_where_it_stopped() {
+        // Given
         let mut p = Playback::new();
+
+        // When
         let actions = p.on_tag_present(TAG, &known(412));
+
+        // Then
         assert_eq!(
             actions.as_slice(),
             &[Action::Play {
@@ -421,19 +476,28 @@ mod tests {
 
     #[test]
     fn placing_an_unknown_figure_requests_the_content() {
+        // Given
         let mut p = Playback::new();
+
+        // When
         let actions = p.on_tag_present(TAG, &unknown());
+
+        // Then
         assert_eq!(actions.as_slice(), &[Action::RequestContent(TAG)]);
         assert_eq!(p.kind(), PlaybackKind::Fetching);
     }
 
     #[test]
     fn lifting_the_figure_saves_the_position_and_pauses() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &known(1));
         p.note_position(Position::Exact { page: 77 });
 
+        // When
         let actions: Vec<Action, 8> = p.on_tag_absent();
+
+        // Then
         assert_eq!(
             actions.as_slice(),
             &[
@@ -449,18 +513,28 @@ mod tests {
 
     #[test]
     fn lifting_a_figure_that_was_never_placed_does_nothing() {
+        // Given
         let mut p = Playback::new();
-        assert!(p.on_tag_absent().is_empty());
+
+        // When
+        let actions = p.on_tag_absent();
+
+        // Then
+        assert!(actions.is_empty());
     }
 
     #[test]
     fn replacing_the_same_figure_resumes_from_the_saved_position() {
+        // Given: played to page 77, then lifted
         let mut p = Playback::new();
         p.on_tag_present(TAG, &known(1));
         p.note_position(Position::Exact { page: 77 });
         p.on_tag_absent();
 
+        // When
         let actions = p.on_tag_present(TAG, &known(77));
+
+        // Then
         assert_eq!(
             actions.as_slice(),
             &[Action::Play {
@@ -472,9 +546,14 @@ mod tests {
 
     #[test]
     fn a_completed_download_starts_playback() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
+
+        // When
         let actions = p.on_content_ready(TAG, &known(1));
+
+        // Then
         assert_eq!(
             actions.as_slice(),
             &[Action::Play {
@@ -487,17 +566,28 @@ mod tests {
 
     #[test]
     fn a_download_completing_for_a_figure_no_longer_present_is_ignored() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
-        assert!(p.on_content_ready(OTHER, &known(1)).is_empty());
+
+        // When
+        let actions = p.on_content_ready(OTHER, &known(1));
+
+        // Then
+        assert!(actions.is_empty());
         assert_eq!(p.kind(), PlaybackKind::Fetching);
     }
 
     #[test]
     fn a_figure_the_server_has_no_story_for_says_so() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
+
+        // When
         let actions = p.on_content_missing(TAG, Unavailable::NoContent);
+
+        // Then
         assert_eq!(actions.as_slice(), &[Action::PlayPrompt(Prompt::NoContent)]);
         assert_eq!(p.kind(), PlaybackKind::Failed);
     }
@@ -505,9 +595,14 @@ mod tests {
     /// A network problem gets its own prompt, because the user can check it.
     #[test]
     fn a_figure_that_could_not_be_reached_blames_the_network() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
+
+        // When
         let actions = p.on_content_missing(TAG, Unavailable::Unreachable);
+
+        // Then
         assert_eq!(actions.as_slice(), &[Action::PlayPrompt(Prompt::NoNetwork)]);
         assert_eq!(p.kind(), PlaybackKind::Failed);
     }
@@ -516,9 +611,14 @@ mod tests {
     /// the passphrase on the card, not the router.
     #[test]
     fn a_figure_whose_network_refused_the_passphrase_blames_the_passphrase() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
+
+        // When
         let actions = p.on_content_missing(TAG, Unavailable::Refused);
+
+        // Then
         assert_eq!(
             actions.as_slice(),
             &[Action::PlayPrompt(Prompt::WrongPassword)]
@@ -528,9 +628,14 @@ mod tests {
 
     #[test]
     fn a_failure_for_a_figure_already_lifted_is_ignored() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
+
+        // When
         let actions = p.on_content_missing(OTHER, Unavailable::NoContent);
+
+        // Then
         assert!(actions.is_empty());
     }
 
@@ -538,19 +643,29 @@ mod tests {
     /// its sidecar stay on the card, so placing it again resumes.
     #[test]
     fn lifting_a_figure_that_is_still_fetching_abandons_the_download() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
         assert_eq!(p.kind(), PlaybackKind::Fetching);
+
+        // When
         let actions = p.on_tag_absent();
+
+        // Then
         assert_eq!(actions.as_slice(), &[Action::AbortFetch]);
         assert_eq!(p.kind(), PlaybackKind::Idle);
     }
 
     #[test]
     fn lifting_a_playing_figure_does_not_abort_anything() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &known(7));
+
+        // When
         let actions = p.on_tag_absent();
+
+        // Then
         assert_eq!(
             actions.as_slice(),
             &[
@@ -565,17 +680,28 @@ mod tests {
 
     #[test]
     fn lifting_from_an_empty_plate_does_nothing() {
+        // Given
         let mut p = Playback::new();
-        assert!(p.on_tag_absent().is_empty());
+
+        // When
+        let actions = p.on_tag_absent();
+
+        // Then
+        assert!(actions.is_empty());
     }
 
     /// A story that reaches its end leaves the box idle, with the figure still
     /// on the plate, so the LED updates and the idle timeout can fire.
     #[test]
     fn a_story_reaching_its_end_leaves_the_box_idle() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &known(1));
+
+        // When
         let actions = p.on_playback_ended();
+
+        // Then
         assert!(actions.is_empty());
         assert_eq!(p.kind(), PlaybackKind::Idle);
     }
@@ -584,19 +710,31 @@ mod tests {
     /// cleared on purpose. No `Pause` either: nothing is playing.
     #[test]
     fn a_story_reaching_its_end_saves_no_position() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &known(1));
         p.note_position(Position::Exact { page: 900 });
-        assert!(p.on_playback_ended().is_empty());
+
+        // When
+        let actions = p.on_playback_ended();
+
+        // Then
+        assert!(actions.is_empty());
     }
 
     /// A story ending while the box was fetching something else, or idle already,
     /// changes nothing.
     #[test]
     fn an_end_with_nothing_playing_is_ignored() {
+        // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
-        assert!(p.on_playback_ended().is_empty());
+
+        // When
+        let actions = p.on_playback_ended();
+
+        // Then
+        assert!(actions.is_empty());
         assert_eq!(
             p.kind(),
             PlaybackKind::Fetching,
