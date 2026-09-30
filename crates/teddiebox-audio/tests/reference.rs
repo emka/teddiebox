@@ -111,16 +111,14 @@ fn the_left_and_right_channels_carry_their_own_tones() {
 
 /// Seeks with the real decoder and checks that audio comes out.
 #[test]
-fn seeking_to_a_chapter_yields_audible_audio_from_that_chapter_onward() {
+fn seeking_to_a_chapter_yields_that_chapters_audio() {
     // Given
-    let whole = decode_from(CHAPTERS, None);
+    let taf = CHAPTERS;
 
     // When
-    let from_second = decode_from(CHAPTERS, Some(1));
+    let from_second = decode_from(taf, Some(1));
 
-    // Then: audible, the right tone, and about a third shorter. Chapter 1 of 3
-    // starts about a third in; only checking that it is *shorter* would also
-    // pass if the seek went to the end.
+    // Then
     let peak = from_second.iter().map(|s| s.unsigned_abs()).max().unwrap();
     assert!(peak > 1000, "audio after the seek is silent, peak {peak}");
     let crossings = crossings_over_one_second(&from_second, 0, 0);
@@ -128,6 +126,19 @@ fn seeking_to_a_chapter_yields_audible_audio_from_that_chapter_onward() {
         (860..=900).contains(&crossings),
         "expected ~880 zero crossings for 440 Hz after the seek, got {crossings}"
     );
+}
+
+/// Chapter 1 of 3 starts about a third in. Only checking that the audio is
+/// *shorter* would also pass if the seek went to the end.
+#[test]
+fn seeking_to_a_chapter_skips_the_chapters_before_it() {
+    // Given
+    let whole = decode_from(CHAPTERS, None);
+
+    // When
+    let from_second = decode_from(CHAPTERS, Some(1));
+
+    // Then
     let dropped = whole.len() as f64 - from_second.len() as f64;
     let fraction = dropped / whole.len() as f64;
     assert!(
