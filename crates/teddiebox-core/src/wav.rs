@@ -317,14 +317,22 @@ mod tests {
 
     #[test]
     fn a_header_cut_short_is_an_error_rather_than_a_guess() {
-        // Given
-        let cut_short: [&[u8]; 2] = [&REAL_HEADER[..20], &[]];
+        // Given: cut in the format chunk's fields, in its header, and before
+        // anything at all
+        let cut_short: [&[u8]; 3] = [&REAL_HEADER[..20], &REAL_HEADER[..16], &[]];
 
         // When
         let formats = cut_short.map(WavFormat::parse);
 
         // Then
-        assert_eq!(formats, [Err(WavError::Truncated), Err(WavError::NotWave)]);
+        assert_eq!(
+            formats,
+            [
+                Err(WavError::Truncated),
+                Err(WavError::Truncated),
+                Err(WavError::NotWave),
+            ]
+        );
     }
 
     /// Playing a compressed WAV as PCM would be loud noise.
