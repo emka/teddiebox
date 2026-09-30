@@ -157,6 +157,23 @@ mod tests {
         assert_eq!(&request[4..], &[0xCD, 0xAB, 0xCD, 0xAB]);
     }
 
+    /// The mask is an exclusive or: where password and random number share a
+    /// bit, it cancels. With bits that do not overlap, OR gives the same bytes
+    /// and a wrong mask would pass; a wrong mask mutes the tag until its field
+    /// is cycled.
+    #[test]
+    fn the_password_is_masked_by_exclusive_or() {
+        // Given: the vendor default password, and a random number sharing
+        // bits with it
+        let (password, random) = (0x0F0F_0F0F, 0xABCD);
+
+        // When
+        let request = set_password_request(password, random);
+
+        // Then: 0x0F ^ 0xCD and 0x0F ^ 0xAB, repeated
+        assert_eq!(&request[4..], &[0xC2, 0xA4, 0xC2, 0xA4]);
+    }
+
     /// The password is sent in written order (most significant byte first).
     /// In the other order the tag does not answer, which looks like an empty
     /// plate.
@@ -215,6 +232,19 @@ mod tests {
             &[0x02, 0xBA, 0x04],
             "the Address flag is what keeps a slip to DESTROY inert"
         );
+    }
+
+    /// Masked like SET PASSWORD: see `the_password_is_masked_by_exclusive_or`.
+    #[test]
+    fn the_privacy_request_masks_the_password_by_exclusive_or() {
+        // Given
+        let (password, random) = (0x0F0F_0F0F, 0xABCD);
+
+        // When
+        let request = enable_privacy_request(password, random);
+
+        // Then
+        assert_eq!(&request[3..], &[0xC2, 0xA4, 0xC2, 0xA4]);
     }
 
     /// No password identifier byte, unlike SET PASSWORD: in Table 39 the
