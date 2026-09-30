@@ -101,56 +101,82 @@ mod tests {
     /// A bounce shorter than the debounce time is not a press.
     #[test]
     fn a_bounce_shorter_than_the_window_reports_nothing() {
+        // Given
         let mut button = Debounced::released();
-        assert_eq!(button.update(true, 0), None);
-        assert_eq!(button.update(false, 5), None);
-        assert_eq!(button.update(true, 10), None);
-        assert_eq!(button.update(false, 15), None);
+
+        // When
+        let edges = [(true, 0), (false, 5), (true, 10), (false, 15)]
+            .map(|(pressed, at)| button.update(pressed, at));
+
+        // Then
+        assert_eq!(edges, [None; 4]);
     }
 
     #[test]
     fn a_level_held_for_the_window_reports_one_press() {
+        // Given
         let mut button = Debounced::released();
-        assert_eq!(button.update(true, 0), None);
-        assert_eq!(button.update(true, DEBOUNCE_MS - 1), None);
-        assert_eq!(button.update(true, DEBOUNCE_MS), Some(Edge::Pressed));
-        assert_eq!(button.update(true, DEBOUNCE_MS + 100), None, "only once");
+
+        // When
+        let edges =
+            [0, DEBOUNCE_MS - 1, DEBOUNCE_MS, DEBOUNCE_MS + 100].map(|at| button.update(true, at));
+
+        // Then
+        assert_eq!(edges, [None, None, Some(Edge::Pressed), None]);
     }
 
     #[test]
     fn releasing_is_reported_too() {
+        // Given
         let mut button = Debounced::released();
         button.update(true, 0);
         assert_eq!(button.update(true, DEBOUNCE_MS), Some(Edge::Pressed));
-        assert_eq!(button.update(false, DEBOUNCE_MS + 1), None);
-        assert_eq!(
-            button.update(false, DEBOUNCE_MS * 2 + 1),
-            Some(Edge::Released)
-        );
+
+        // When
+        let edges = [DEBOUNCE_MS + 1, DEBOUNCE_MS * 2 + 1].map(|at| button.update(false, at));
+
+        // Then
+        assert_eq!(edges, [None, Some(Edge::Released)]);
     }
 
     /// The clock wraps every 49 days; the ears must keep working after that.
     #[test]
     fn the_millisecond_clock_may_wrap() {
+        // Given
         let mut button = Debounced::released();
-        assert_eq!(button.update(true, u32::MAX - 5), None);
-        assert_eq!(
-            button.update(true, (u32::MAX - 5).wrapping_add(DEBOUNCE_MS)),
-            Some(Edge::Pressed)
-        );
+        let before_the_wrap = u32::MAX - 5;
+
+        // When
+        let edges = [before_the_wrap, before_the_wrap.wrapping_add(DEBOUNCE_MS)]
+            .map(|at| button.update(true, at));
+
+        // Then
+        assert_eq!(edges, [None, Some(Edge::Pressed)]);
     }
 
     /// Both ears are wired active low, so a pressed ear reads as a low pin.
     #[test]
     fn an_ear_is_pressed_when_its_pin_reads_low() {
-        assert!(ear_pressed(false));
-        assert!(!ear_pressed(true));
+        // Given
+        let (low, high) = (false, true);
+
+        // When
+        let pressed = [low, high].map(ear_pressed);
+
+        // Then
+        assert_eq!(pressed, [true, false]);
     }
 
     /// The wake input documents 1 as inactive, same sense as the ears.
     #[test]
     fn wake_is_asserted_when_its_pin_reads_low() {
-        assert!(wake_asserted(false));
-        assert!(!wake_asserted(true));
+        // Given
+        let (low, high) = (false, true);
+
+        // When
+        let asserted = [low, high].map(wake_asserted);
+
+        // Then
+        assert_eq!(asserted, [true, false]);
     }
 }
