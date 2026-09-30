@@ -141,9 +141,6 @@ impl Sound {
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
-    use std::vec::Vec;
-
     use super::*;
     use crate::Prompt;
 
@@ -151,15 +148,21 @@ mod tests {
     /// were identified by listening.
     #[test]
     fn the_failure_sounds_name_the_files_the_bench_identified() {
-        assert_eq!(Sound::ConfigError.file(), 0x0000_000B);
-        assert_eq!(Sound::NoInternet.file(), 0x0000_0011);
-        assert_eq!(Sound::WrongPassword.file(), 0x0000_0013);
+        // Given
+        let sounds = [Sound::ConfigError, Sound::NoInternet, Sound::WrongPassword];
+
+        // When
+        let files = sounds.map(Sound::file);
+
+        // Then
+        assert_eq!(files, [0x0000_000B, 0x0000_0011, 0x0000_0013]);
     }
 
     /// Two sounds sharing a file would make the box say the wrong thing,
     /// which is worse than silence and hard to notice.
     #[test]
     fn no_two_sounds_share_a_file() {
+        // Given
         let all = [
             Sound::Startup,
             Sound::Confirmation,
@@ -171,11 +174,17 @@ mod tests {
             Sound::NoInternet,
             Sound::WrongPassword,
         ];
-        let mut seen: Vec<u32> = Vec::new();
-        for sound in all {
-            let file = sound.file();
-            assert!(!seen.contains(&file), "{sound:?} reuses file {file:#010X}");
-            seen.push(file);
+
+        // When
+        let files = all.map(Sound::file);
+
+        // Then
+        for (i, file) in files.iter().enumerate() {
+            assert!(
+                !files[..i].contains(file),
+                "{:?} reuses file {file:#010X}",
+                all[i]
+            );
         }
     }
 
@@ -183,54 +192,109 @@ mod tests {
     /// with the code.
     #[test]
     fn each_language_names_its_own_content_directory() {
-        assert_eq!(Language::German.content_directory(), 0x0000_0001);
-        assert_eq!(Language::EnglishGb.content_directory(), 0x0000_0000);
-        assert_eq!(Language::EnglishUs.content_directory(), 0x0000_0002);
-        assert_eq!(Language::French.content_directory(), 0x0000_0003);
+        // Given
+        let languages = [
+            Language::German,
+            Language::EnglishGb,
+            Language::EnglishUs,
+            Language::French,
+        ];
+
+        // When
+        let directories = languages.map(Language::content_directory);
+
+        // Then
+        assert_eq!(
+            directories,
+            [0x0000_0001, 0x0000_0000, 0x0000_0002, 0x0000_0003]
+        );
     }
 
     #[test]
     fn the_envrc_names_map_to_languages() {
-        assert_eq!(Language::from_name("de"), Some(Language::German));
-        assert_eq!(Language::from_name("en-gb"), Some(Language::EnglishGb));
-        assert_eq!(Language::from_name("en-us"), Some(Language::EnglishUs));
-        assert_eq!(Language::from_name("fr"), Some(Language::French));
+        // Given
+        let names = ["de", "en-gb", "en-us", "fr"];
+
+        // When
+        let languages = names.map(Language::from_name);
+
+        // Then
+        assert_eq!(
+            languages,
+            [
+                Some(Language::German),
+                Some(Language::EnglishGb),
+                Some(Language::EnglishUs),
+                Some(Language::French),
+            ]
+        );
     }
 
     /// A mistyped language must be refused, not replaced with a default.
     #[test]
     fn an_unknown_language_is_refused_rather_than_defaulted() {
-        assert_eq!(Language::from_name("german"), None);
-        assert_eq!(Language::from_name("DE"), None);
-        assert_eq!(Language::from_name(""), None);
+        // Given
+        let names = ["german", "DE", ""];
+
+        // When
+        let languages = names.map(Language::from_name);
+
+        // Then
+        assert_eq!(languages, [None; 3]);
     }
 
     #[test]
     fn the_startup_sound_is_the_first_file_of_a_language() {
-        assert_eq!(Sound::Startup.file(), 0x0000_0000);
+        // Given
+        let sounds = [Sound::Startup];
+
+        // When
+        let files = sounds.map(Sound::file);
+
+        // Then
+        assert_eq!(files, [0x0000_0000]);
     }
 
     /// "Caution, battery is low" and "battery is critical, turning off now"
     /// are different files.
     #[test]
     fn the_two_battery_sounds_are_not_the_same_file() {
-        assert_eq!(Sound::BatteryLow.file(), 0x0000_0003);
-        assert_eq!(Sound::BatteryCritical.file(), 0x0000_0009);
+        // Given
+        let sounds = [Sound::BatteryLow, Sound::BatteryCritical];
+
+        // When
+        let files = sounds.map(Sound::file);
+
+        // Then
+        assert_eq!(files, [0x0000_0003, 0x0000_0009]);
     }
 
     #[test]
     fn each_prompt_maps_to_its_file() {
-        assert_eq!(Sound::for_prompt(Prompt::Startup), Sound::Startup);
-        assert_eq!(Sound::for_prompt(Prompt::NoNetwork), Sound::NoInternet);
-        assert_eq!(Sound::for_prompt(Prompt::BatteryLow), Sound::BatteryLow);
+        // Given
+        let prompts = [
+            Prompt::Startup,
+            Prompt::NoNetwork,
+            Prompt::BatteryLow,
+            Prompt::BatteryCritical,
+            Prompt::NoContent,
+            Prompt::WrongPassword,
+        ];
+
+        // When
+        let sounds = prompts.map(Sound::for_prompt);
+
+        // Then
         assert_eq!(
-            Sound::for_prompt(Prompt::BatteryCritical),
-            Sound::BatteryCritical
-        );
-        assert_eq!(Sound::for_prompt(Prompt::NoContent), Sound::NoStory);
-        assert_eq!(
-            Sound::for_prompt(Prompt::WrongPassword),
-            Sound::WrongPassword
+            sounds,
+            [
+                Sound::Startup,
+                Sound::NoInternet,
+                Sound::BatteryLow,
+                Sound::BatteryCritical,
+                Sound::NoStory,
+                Sound::WrongPassword,
+            ]
         );
     }
 
@@ -239,22 +303,42 @@ mod tests {
     /// be easy to miss.
     #[test]
     fn a_refused_passphrase_and_an_absent_network_are_different_files() {
-        assert_eq!(Sound::WrongPassword.file(), 0x0000_0013);
-        assert_eq!(Sound::NoInternet.file(), 0x0000_0011);
-        assert_ne!(Sound::WrongPassword.file(), Sound::NoInternet.file());
+        // Given
+        let sounds = [Sound::WrongPassword, Sound::NoInternet];
+
+        // When
+        let files = sounds.map(Sound::file);
+
+        // Then
+        assert_eq!(files, [0x0000_0013, 0x0000_0011]);
+        assert_ne!(files[0], files[1]);
     }
 
     /// The sound for a figure with no story, identified by listening.
     #[test]
     fn the_figure_with_no_story_has_its_own_file() {
-        assert_eq!(Sound::NoStory.file(), 0x0000_0012);
+        // Given
+        let sounds = [Sound::NoStory];
+
+        // When
+        let files = sounds.map(Sound::file);
+
+        // Then
+        assert_eq!(files, [0x0000_0012]);
     }
 
     /// Identified by listening; the wiki is wrong about this one. 0x09 is
     /// "battery is critical, turning off now", not 0x03.
     #[test]
     fn the_critical_announcement_has_its_own_file() {
-        assert_eq!(Sound::BatteryCritical.file(), 0x0000_0009);
-        assert_ne!(Sound::BatteryCritical.file(), Sound::BatteryLow.file());
+        // Given
+        let sounds = [Sound::BatteryCritical, Sound::BatteryLow];
+
+        // When
+        let files = sounds.map(Sound::file);
+
+        // Then
+        assert_eq!(files[0], 0x0000_0009);
+        assert_ne!(files[0], files[1]);
     }
 }
