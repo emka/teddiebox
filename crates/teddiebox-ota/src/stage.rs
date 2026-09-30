@@ -129,24 +129,35 @@ mod tests {
 
     #[test]
     fn chunks_of_any_size_land_in_the_slot_byte_for_byte() {
+        // Given
         let data = image(3000);
         let mut flash = Memory::new(8192);
         let mut writer = ImageWriter::<512>::new(8192);
+
+        // When: chunks of a size unrelated to the stage's
         for chunk in data.chunks(1373) {
             writer.push(&mut flash, chunk).unwrap();
         }
         writer.finish(&mut flash).unwrap();
+
+        // Then
         assert_eq!(&flash.bytes[..3000], &data[..]);
     }
 
     #[test]
     fn every_write_starts_ends_and_sits_on_a_word_boundary() {
+        // Given
         let mut flash = Memory::new(8192);
         let mut writer = ImageWriter::<512>::new(8192);
+
+        // When: chunks of a size unrelated to the stage's, adding up to an
+        // odd length
         for chunk in image(3001).chunks(1373) {
             writer.push(&mut flash, chunk).unwrap();
         }
         writer.finish(&mut flash).unwrap();
+
+        // Then
         for &(offset, len, address) in &flash.writes {
             assert_eq!((offset % 4, len % 4, address), (0, 0, 0));
         }
@@ -154,38 +165,61 @@ mod tests {
 
     #[test]
     fn the_last_write_is_padded_with_erased_flash() {
+        // Given
         let mut flash = Memory::new(8192);
         let mut writer = ImageWriter::<512>::new(8192);
         writer.push(&mut flash, &[0u8; 3001]).unwrap();
+
+        // When
         writer.finish(&mut flash).unwrap();
+
+        // Then
         assert_eq!(flash.writes.last(), Some(&(2560, 444, 0)));
         assert_eq!(&flash.bytes[3001..3004], &[0xFF, 0xFF, 0xFF]);
     }
 
     #[test]
     fn finish_reports_the_image_length_without_the_padding() {
+        // Given
         let mut flash = Memory::new(8192);
         let mut writer = ImageWriter::<512>::new(8192);
         writer.push(&mut flash, &[0u8; 3001]).unwrap();
-        assert_eq!(writer.finish(&mut flash), Ok(3001));
+
+        // When
+        let length = writer.finish(&mut flash);
+
+        // Then
+        assert_eq!(length, Ok(3001));
     }
 
     #[test]
     fn an_image_that_fills_the_slot_exactly_is_written() {
+        // Given
         let mut flash = Memory::new(8192);
         let mut writer = ImageWriter::<512>::new(8192);
         writer.push(&mut flash, &[1u8; 8192]).unwrap();
-        assert_eq!(writer.finish(&mut flash), Ok(8192));
+
+        // When
+        let length = writer.finish(&mut flash);
+
+        // Then
+        assert_eq!(length, Ok(8192));
     }
 
     #[test]
     fn an_image_one_byte_larger_than_the_slot_is_refused() {
+        // Given
         let mut flash = Memory::new(8192);
         let mut writer = ImageWriter::<512>::new(8192);
         writer.push(&mut flash, &[1u8; 8192]).unwrap();
         writer.push(&mut flash, &[1u8]).unwrap();
+
+        // When
+        let length = writer.finish(&mut flash);
+
+        // Then
         assert_eq!(
-            writer.finish(&mut flash),
+            length,
             Err(SinkError::PastSlotEnd {
                 offset: 8192,
                 len: 4,
@@ -200,9 +234,12 @@ mod tests {
             len in 0usize..6000,
             cuts in proptest::collection::vec(1usize..2000, 1..20),
         ) {
+            // Given: an image of any length, cut at any points
             let data = image(len);
             let mut flash = Memory::new(8192);
             let mut writer = ImageWriter::<512>::new(8192);
+
+            // When
             let mut at = 0;
             for cut in cuts.iter().cycle() {
                 if at >= len {
@@ -212,7 +249,10 @@ mod tests {
                 writer.push(&mut flash, &data[at..end]).unwrap();
                 at = end;
             }
-            proptest::prop_assert_eq!(writer.finish(&mut flash), Ok(len as u32));
+            let length = writer.finish(&mut flash);
+
+            // Then
+            proptest::prop_assert_eq!(length, Ok(len as u32));
             proptest::prop_assert!(flash.bytes[..len] == data[..]);
         }
     }
