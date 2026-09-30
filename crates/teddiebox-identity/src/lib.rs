@@ -251,6 +251,26 @@ mod tests {
         assert_eq!(verified, Err(IdentityError::Corrupt));
     }
 
+    /// The same bytes cut in the wrong place carry the same checksum, so the
+    /// lengths are what catch a body that ends early.
+    #[test]
+    fn bodies_split_in_the_wrong_place_are_refused() {
+        // Given
+        let (image, len) = rendered();
+        let header = parse_header(&image, len).unwrap();
+        let cut = header.key_offset() - 1;
+
+        // When
+        let verified = verify(
+            &header,
+            &image[header.certificate_offset()..cut],
+            &image[cut..header.total_len()],
+        );
+
+        // Then
+        assert_eq!(verified, Err(IdentityError::Corrupt));
+    }
+
     #[test]
     fn an_intact_image_verifies() {
         // Given
