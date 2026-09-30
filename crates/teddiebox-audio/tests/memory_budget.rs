@@ -17,9 +17,16 @@ const DECODER_BYTES: usize = PAGE_SIZE / 4;
 /// and the codec state it borrows.
 const DECODE_PATH_BYTES: usize = 43 * 1024;
 
+type Decoder = TafDecoder<'static, SlicePages<'static>, LibOpus<'static>>;
+
 #[test]
 fn the_decoder_stays_within_its_memory_budget() {
-    let actual = size_of::<TafDecoder<SlicePages, LibOpus<'static>>>();
+    // Given: the decoder as the firmware holds it
+
+    // When
+    let actual = size_of::<Decoder>();
+
+    // Then
     assert!(
         actual <= DECODER_BYTES,
         "TafDecoder is {actual} bytes, budget is {DECODER_BYTES}"
@@ -28,11 +35,15 @@ fn the_decoder_stays_within_its_memory_budget() {
 
 #[test]
 fn the_whole_decode_path_stays_within_its_memory_budget() {
-    let decoder = size_of::<TafDecoder<SlicePages, LibOpus<'static>>>();
+    // Given
+    let decoder = size_of::<Decoder>();
     let buffers = size_of::<TafBuffers>();
     let state = size_of::<OpusState>();
+
+    // When
     let total = decoder + buffers + state;
 
+    // Then
     assert!(
         total <= DECODE_PATH_BYTES,
         "decoding needs {total} bytes live ({decoder} decoder + {buffers} blocks \
@@ -40,13 +51,17 @@ fn the_whole_decode_path_stays_within_its_memory_budget() {
     );
 }
 
+/// The codec state alone is several times a typical embassy task stack,
+/// which is why `LibOpus` borrows it instead of owning it. If this stops
+/// being true, the borrowing API is no longer needed.
 #[test]
 fn the_codec_state_dominates_the_budget_and_so_cannot_live_on_a_task_stack() {
-    // The codec state alone is several times a typical embassy task stack,
-    // which is why `LibOpus` borrows it instead of owning it. If this stops
-    // being true, the borrowing API is no longer needed.
-    let decoder = size_of::<TafDecoder<SlicePages, LibOpus<'static>>>();
+    // Given: the codec state's reservation
 
+    // When
+    let decoder = size_of::<Decoder>();
+
+    // Then
     assert!(
         OPUS_STATE_BYTES > decoder,
         "codec state is {OPUS_STATE_BYTES} bytes against a {decoder}-byte decoder"
