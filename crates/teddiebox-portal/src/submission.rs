@@ -99,8 +99,14 @@ mod tests {
 
     #[test]
     fn a_config_the_box_can_parse_is_cleared_for_the_card() {
+        // Given
+
+        // When
+        let submission = examine(&posted(GOOD));
+
+        // Then
         assert_eq!(
-            examine(&posted(GOOD)),
+            submission,
             Submission::Write(Vec::from_slice(GOOD.as_bytes()).unwrap())
         );
     }
@@ -109,52 +115,72 @@ mod tests {
     /// it, and is not written to the card.
     #[test]
     fn a_config_the_box_would_refuse_at_boot_never_reaches_the_card() {
+        // Given
         let no_server = "ssid = homenet\npassword = hunter2\n";
 
-        match examine(&posted(no_server)) {
-            Submission::HandBack(bytes, why) => {
-                assert_eq!(
-                    bytes,
-                    Vec::<u8, MAX_CONFIG>::from_slice(no_server.as_bytes()).unwrap()
-                );
-                assert_eq!(
-                    why,
-                    "no server line — the box needs somewhere to fetch from"
-                );
-            }
-            other => panic!("a config with no server was not handed back: {other:?}"),
-        }
+        // When
+        let submission = examine(&posted(no_server));
+
+        // Then
+        let Submission::HandBack(bytes, why) = submission else {
+            panic!("a config with no server was not handed back: {submission:?}");
+        };
+        assert_eq!(
+            bytes,
+            Vec::<u8, MAX_CONFIG>::from_slice(no_server.as_bytes()).unwrap()
+        );
+        assert_eq!(
+            why,
+            "no server line — the box needs somewhere to fetch from"
+        );
     }
 
     /// The submitted bytes come back unchanged, so a typo only needs
     /// correcting.
     #[test]
     fn a_rejected_config_comes_back_exactly_as_it_was_typed() {
+        // Given
         let malformed = "ssid = homenet\nthis line has no equals\nserver = teddycloud.local\n";
 
-        match examine(&posted(malformed)) {
-            Submission::HandBack(bytes, why) => {
-                assert_eq!(core::str::from_utf8(&bytes).unwrap(), malformed);
-                assert_eq!(why, "a line without an = on it");
-            }
-            other => panic!("expected the config back in the textarea: {other:?}"),
-        }
+        // When
+        let submission = examine(&posted(malformed));
+
+        // Then
+        let Submission::HandBack(bytes, why) = submission else {
+            panic!("expected the config back in the textarea: {submission:?}");
+        };
+        assert_eq!(core::str::from_utf8(&bytes).unwrap(), malformed);
+        assert_eq!(why, "a line without an = on it");
     }
 
     /// A body with no `config` field is not something a browser sends, so
     /// there is nothing to hand back.
     #[test]
     fn a_body_with_no_config_field_is_refused_with_an_empty_textarea() {
+        // Given
+        let body = b"something=else";
+
+        // When
+        let submission = examine(body);
+
+        // Then
         assert_eq!(
-            examine(b"something=else"),
+            submission,
             Submission::Refuse("that form did not arrive intact")
         );
     }
 
     #[test]
     fn a_body_whose_escaping_is_broken_is_refused_as_a_broken_form() {
+        // Given
+        let body = b"config=ssid%ZZnope";
+
+        // When
+        let submission = examine(body);
+
+        // Then
         assert_eq!(
-            examine(b"config=ssid%ZZnope"),
+            submission,
             Submission::Refuse("that form did not arrive intact")
         );
     }
@@ -163,20 +189,28 @@ mod tests {
     /// person can fix.
     #[test]
     fn a_config_too_long_for_the_box_blames_the_file_and_not_the_form() {
+        // Given
         let huge = "x".repeat(MAX_CONFIG + 1);
 
+        // When
+        let submission = examine(&posted(&huge));
+
+        // Then
         assert_eq!(
-            examine(&posted(&huge)),
+            submission,
             Submission::Refuse("that config is longer than the box will hold")
         );
     }
 
     #[test]
     fn bytes_that_are_not_text_are_refused_rather_than_handed_back() {
-        // A lone continuation byte: valid percent-encoding, invalid UTF-8.
-        assert_eq!(
-            examine(b"config=ssid%80"),
-            Submission::Refuse("that is not text")
-        );
+        // Given: A lone continuation byte: valid percent-encoding, invalid UTF-8.
+        let body = b"config=ssid%80";
+
+        // When
+        let submission = examine(body);
+
+        // Then
+        assert_eq!(submission, Submission::Refuse("that is not text"));
     }
 }
