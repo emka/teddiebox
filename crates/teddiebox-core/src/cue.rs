@@ -660,7 +660,7 @@ mod tests {
     }
 
     /// The byte that carries a cue between tasks. Literal, so the test can
-    /// disagree with the table; 0 means no cue.
+    /// disagree with the table.
     #[test]
     fn each_cue_has_its_own_code() {
         // Given
@@ -668,8 +668,6 @@ mod tests {
 
         // When
         let codes = cues.map(|cue| (cue, cue.code()));
-        let round_tripped = cues.map(|cue| Cue::from_code(cue.code()));
-        let strays = [0, 6].map(Cue::from_code);
 
         // Then
         assert_eq!(
@@ -682,7 +680,30 @@ mod tests {
                 (Cue::VolumeLimit, 5),
             ]
         );
+    }
+
+    #[test]
+    fn every_cue_survives_the_trip_through_its_code() {
+        // Given
+        let cues = ALL;
+
+        // When
+        let round_tripped = cues.map(|cue| Cue::from_code(cue.code()));
+
+        // Then
         assert_eq!(round_tripped, cues.map(Some));
-        assert_eq!(strays, [None, None]);
+    }
+
+    /// 0 means no cue.
+    #[test]
+    fn a_byte_that_names_no_cue_is_refused() {
+        // Given
+        let strays = [0, 6];
+
+        // When
+        let cues = strays.map(Cue::from_code);
+
+        // Then
+        assert_eq!(cues, [None, None]);
     }
 }
