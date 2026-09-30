@@ -162,7 +162,13 @@ mod tests {
 
     #[test]
     fn splits_the_real_example_into_host_and_path() {
-        let u = split("https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt").unwrap();
+        // Given
+        let url = "https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let u = split(url).unwrap();
+
+        // Then
         assert_eq!(u.host.as_str(), "teddycloud.local:8443");
         assert_eq!(u.path.as_str(), "/content/FIRMWARE/teddiebox.txt");
     }
@@ -171,188 +177,303 @@ mod tests {
     // is added.
     #[test]
     fn splits_a_url_with_no_port() {
-        let u = split("https://teddycloud.local/teddiebox.txt").unwrap();
+        // Given
+        let url = "https://teddycloud.local/teddiebox.txt";
+
+        // When
+        let u = split(url).unwrap();
+
+        // Then
         assert_eq!(u.host.as_str(), "teddycloud.local:443");
         assert_eq!(u.path.as_str(), "/teddiebox.txt");
     }
 
     #[test]
     fn refuses_plain_http() {
-        assert_eq!(
-            split("http://teddycloud.local/teddiebox.txt"),
-            Err(OtaError::NotHttps)
-        );
+        // Given
+        let url = "http://teddycloud.local/teddiebox.txt";
+
+        // When
+        let parts = split(url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::NotHttps));
     }
 
     #[test]
     fn refuses_a_url_with_no_scheme_at_all() {
-        assert_eq!(split("teddycloud.local/teddiebox.txt"), Err(OtaError::NotHttps));
+        // Given
+        let url = "teddycloud.local/teddiebox.txt";
+
+        // When
+        let parts = split(url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::NotHttps));
     }
 
     #[test]
     fn refuses_a_host_with_no_slash_after_it() {
-        assert_eq!(
-            split("https://teddycloud.local:8443"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let url = "https://teddycloud.local:8443";
+
+        // When
+        let parts = split(url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn refuses_a_path_ending_in_slash() {
-        assert_eq!(
-            split("https://teddycloud.local:8443/content/FIRMWARE/"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let url = "https://teddycloud.local:8443/content/FIRMWARE/";
+
+        // When
+        let parts = split(url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::MalformedUrl));
     }
 
     /// The host goes into `Host:` and the path into the request line, both
     /// unescaped. A `CR` would add a header; a space would add a token.
     #[test]
     fn refuses_a_host_carrying_a_bare_cr() {
-        assert_eq!(
-            split("https://teddycloud.local\rX-Thing: 1:8443/teddiebox.txt"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let url = "https://teddycloud.local\rX-Thing: 1:8443/teddiebox.txt";
+
+        // When
+        let parts = split(url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn refuses_a_path_carrying_a_space() {
-        assert_eq!(
-            split("https://teddycloud.local:8443/ted diebox.txt"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let url = "https://teddycloud.local:8443/ted diebox.txt";
+
+        // When
+        let parts = split(url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn refuses_an_empty_host() {
-        assert_eq!(split("https:///teddiebox.txt"), Err(OtaError::MalformedUrl));
+        // Given
+        let url = "https:///teddiebox.txt";
+
+        // When
+        let parts = split(url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn refuses_a_host_longer_than_max_host() {
-        // 65 'a's, one past MAX_HOST.
+        // Given: 65 'a's, one past MAX_HOST.
         let host = "a".repeat(MAX_HOST + 1);
         let url = format!("https://{host}/teddiebox.txt");
-        assert_eq!(split(&url), Err(OtaError::ValueTooLong));
+
+        // When
+        let parts = split(&url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::ValueTooLong));
     }
 
     #[test]
     fn refuses_a_path_longer_than_max_path() {
-        // MAX_PATH 'a's after the leading slash, one past MAX_PATH overall.
+        // Given: MAX_PATH 'a's after the leading slash, one past MAX_PATH overall.
         let path = "a".repeat(MAX_PATH);
         let url = format!("https://teddycloud.local/{path}");
-        assert_eq!(split(&url), Err(OtaError::ValueTooLong));
+
+        // When
+        let parts = split(&url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::ValueTooLong));
     }
 
     // The host alone fits under MAX_HOST, but adding the default port pushes
     // it one byte over.
     #[test]
     fn refuses_a_host_that_only_overflows_once_the_default_port_is_added() {
-        // 61 'a's + ":443" is 65, one past MAX_HOST (64).
+        // Given: 61 'a's + ":443" is 65, one past MAX_HOST (64).
         let host = "a".repeat(61);
         let url = format!("https://{host}/teddiebox.txt");
-        assert_eq!(split(&url), Err(OtaError::ValueTooLong));
+
+        // When
+        let parts = split(&url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::ValueTooLong));
     }
 
     // A URL copied from a browser may have a `#fragment`, which must never be
     // sent. No query string is expected either.
     #[test]
     fn refuses_a_path_with_a_fragment() {
-        assert_eq!(
-            split("https://teddycloud.local:8443/x.txt#frag"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let url = "https://teddycloud.local:8443/x.txt#frag";
+
+        // When
+        let parts = split(url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn refuses_a_path_with_a_query_string() {
-        assert_eq!(
-            split("https://teddycloud.local:8443/x.txt?y=1"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let url = "https://teddycloud.local:8443/x.txt?y=1";
+
+        // When
+        let parts = split(url);
+
+        // Then
+        assert_eq!(parts, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn resolve_image_joins_a_bare_filename_to_the_manifest_directory() {
-        let p = resolve_image("/content/FIRMWARE/teddiebox.txt", "teddiebox.bin").unwrap();
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let p = resolve_image(manifest_path, "teddiebox.bin").unwrap();
+
+        // Then
         assert_eq!(p.as_str(), "/content/FIRMWARE/teddiebox.bin");
     }
 
     #[test]
     fn resolve_image_uses_an_absolute_image_unchanged() {
-        let p = resolve_image("/content/FIRMWARE/teddiebox.txt", "/other/teddiebox.bin").unwrap();
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let p = resolve_image(manifest_path, "/other/teddiebox.bin").unwrap();
+
+        // Then
         assert_eq!(p.as_str(), "/other/teddiebox.bin");
     }
 
     #[test]
     fn resolve_image_refuses_a_leading_dotdot_segment() {
-        assert_eq!(
-            resolve_image("/content/FIRMWARE/teddiebox.txt", "../secret.bin"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let resolved = resolve_image(manifest_path, "../secret.bin");
+
+        // Then
+        assert_eq!(resolved, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn resolve_image_refuses_a_dotdot_segment_in_the_middle() {
-        assert_eq!(
-            resolve_image("/content/FIRMWARE/teddiebox.txt", "a/../../b.bin"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let resolved = resolve_image(manifest_path, "a/../../b.bin");
+
+        // Then
+        assert_eq!(resolved, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn resolve_image_refuses_a_trailing_dotdot_segment() {
-        assert_eq!(
-            resolve_image("/content/FIRMWARE/teddiebox.txt", "a/.."),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let resolved = resolve_image(manifest_path, "a/..");
+
+        // Then
+        assert_eq!(resolved, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn resolve_image_accepts_a_filename_that_merely_contains_dots() {
-        let p = resolve_image("/content/FIRMWARE/teddiebox.txt", "teddiebox..bin").unwrap();
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let p = resolve_image(manifest_path, "teddiebox..bin").unwrap();
+
+        // Then
         assert_eq!(p.as_str(), "/content/FIRMWARE/teddiebox..bin");
     }
 
     #[test]
     fn resolve_image_refuses_an_empty_image() {
-        assert_eq!(
-            resolve_image("/content/FIRMWARE/teddiebox.txt", ""),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let resolved = resolve_image(manifest_path, "");
+
+        // Then
+        assert_eq!(resolved, Err(OtaError::MalformedUrl));
     }
 
     // The path goes into the request line unescaped. A space would add a
     // token, as `image = a.bin HTTP/1.1` in the manifest would.
     #[test]
     fn resolve_image_refuses_a_space() {
-        assert_eq!(
-            resolve_image("/content/FIRMWARE/teddiebox.txt", "a.bin HTTP/1.1"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let resolved = resolve_image(manifest_path, "a.bin HTTP/1.1");
+
+        // Then
+        assert_eq!(resolved, Err(OtaError::MalformedUrl));
     }
 
     // Some HTTP parsers treat a lone CR as a line break, which could be used
     // to inject a request. (`str::lines` already removes LF.)
     #[test]
     fn resolve_image_refuses_a_bare_carriage_return() {
-        assert_eq!(
-            resolve_image("/content/FIRMWARE/teddiebox.txt", "a\rb.bin"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let resolved = resolve_image(manifest_path, "a\rb.bin");
+
+        // Then
+        assert_eq!(resolved, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn resolve_image_refuses_a_percent_sign() {
-        assert_eq!(
-            resolve_image("/content/FIRMWARE/teddiebox.txt", "a%2e.bin"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let manifest_path = "/content/FIRMWARE/teddiebox.txt";
+
+        // When
+        let resolved = resolve_image(manifest_path, "a%2e.bin");
+
+        // Then
+        assert_eq!(resolved, Err(OtaError::MalformedUrl));
     }
 
     #[test]
     fn resolve_image_joins_at_a_manifest_path_at_the_root() {
-        let p = resolve_image("/teddiebox.txt", "teddiebox.bin").unwrap();
+        // Given
+        let manifest_path = "/teddiebox.txt";
+
+        // When
+        let p = resolve_image(manifest_path, "teddiebox.bin").unwrap();
+
+        // Then
         assert_eq!(p.as_str(), "/teddiebox.bin");
     }
 
@@ -360,21 +481,27 @@ mod tests {
     // Returning "teddiebox.bin" would build an invalid relative request line.
     #[test]
     fn resolve_image_refuses_a_manifest_path_with_no_slash_at_all() {
-        assert_eq!(
-            resolve_image("m.txt", "teddiebox.bin"),
-            Err(OtaError::MalformedUrl)
-        );
+        // Given
+        let manifest_path = "m.txt";
+
+        // When
+        let resolved = resolve_image(manifest_path, "teddiebox.bin");
+
+        // Then
+        assert_eq!(resolved, Err(OtaError::MalformedUrl));
     }
 
     // A path that is too long is refused, not cut short.
     #[test]
     fn resolve_image_refuses_a_join_that_overflows_max_path() {
-        // The manifest directory alone (93 bytes) fits under MAX_PATH (96);
+        // Given: The manifest directory alone (93 bytes) fits under MAX_PATH (96);
         // appending the 5-byte image pushes the join past it.
         let manifest_path = format!("/{}/m.txt", "a".repeat(MAX_PATH - 5));
-        assert_eq!(
-            resolve_image(&manifest_path, "b.bin"),
-            Err(OtaError::ValueTooLong)
-        );
+
+        // When
+        let resolved = resolve_image(&manifest_path, "b.bin");
+
+        // Then
+        assert_eq!(resolved, Err(OtaError::ValueTooLong));
     }
 }
