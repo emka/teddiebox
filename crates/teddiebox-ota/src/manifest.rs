@@ -109,7 +109,13 @@ image   = teddiebox.bin
 
     #[test]
     fn parses_every_field_of_a_well_formed_manifest() {
-        let m = Manifest::parse_read(GOOD.as_bytes(), MAX_MANIFEST).unwrap();
+        // Given
+        let text = GOOD.as_bytes();
+
+        // When
+        let m = Manifest::parse_read(text, MAX_MANIFEST).unwrap();
+
+        // Then
         assert_eq!(m.version.as_str(), "2026-09-15-a1b2c3d");
         assert_eq!(m.length, 1_103_728);
         assert_eq!(m.image.as_str(), "teddiebox.bin");
