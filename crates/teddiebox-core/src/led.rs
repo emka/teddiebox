@@ -72,15 +72,7 @@ mod tests {
     #[test]
     fn each_state_shows_the_colour_it_was_given() {
         // Given
-        let states = [
-            LedState::Ready,
-            LedState::Playing,
-            LedState::Fetching,
-            LedState::BatteryLow,
-            LedState::BatteryCritical,
-            LedState::Error,
-            LedState::Off,
-        ];
+        let states = LedState::ALL;
 
         // When
         let shown = states.map(|state| (state, colour_for(state)));
@@ -89,13 +81,16 @@ mod tests {
         assert_eq!(
             shown,
             [
+                (LedState::Off, Colour::Off),
+                (LedState::Booting, Colour::Green),
                 (LedState::Ready, Colour::Green),
                 (LedState::Playing, Colour::Green),
                 (LedState::Fetching, Colour::Blue),
+                (LedState::Charging, Colour::Cyan),
                 (LedState::BatteryLow, Colour::Orange),
                 (LedState::BatteryCritical, Colour::Red),
                 (LedState::Error, Colour::Red),
-                (LedState::Off, Colour::Off),
+                (LedState::Setup, Colour::Magenta),
             ]
         );
     }
