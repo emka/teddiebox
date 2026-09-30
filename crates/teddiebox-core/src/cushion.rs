@@ -36,9 +36,6 @@ impl Cushion {
     /// while an empty buffer during playback is an underrun.
     pub fn start(&mut self) {
         self.playing = true;
-        self.low_water = self.capacity;
-        // Only readings during playback decide whether the buffer is empty.
-        self.empty = false;
     }
 
     /// Records the buffer's fill level as the driver reports it.
