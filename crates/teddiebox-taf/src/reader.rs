@@ -654,6 +654,22 @@ mod tests {
         assert_eq!(sought, Err(TafError::PageOutOfRange));
     }
 
+    /// The last page of the declared stream is audio like any other, so a
+    /// position saved there must be one to resume from.
+    #[test]
+    fn the_last_page_of_the_stream_is_a_place_to_resume() {
+        // Given: chapters.taf declares 16 pages of stream, file pages 1 to 16
+        let mut page = [0u8; PAGE_SIZE];
+        let mut r = open(CHAPTERS_FIXTURE, &mut page);
+
+        // When
+        let sought = r.seek_to_page(16);
+
+        // Then
+        assert_eq!(sought, Ok(()));
+        assert_eq!(r.current_page(), 16);
+    }
+
     /// File page 0 is the header, not audio.
     #[test]
     fn the_header_page_is_not_a_place_to_resume() {
