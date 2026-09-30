@@ -176,20 +176,34 @@ mod tests {
     }
 
     #[test]
-    fn playing_pauses_the_derivation_without_losing_it() {
+    fn playing_pauses_the_derivation() {
         // Given: two slices done
         let mut s = Schedule::new();
         s.proved(b"IEEE", b"password");
         idle(&mut s, b"IEEE", b"password");
         idle(&mut s, b"IEEE", b"password");
 
-        // When: ten passes while a story plays, then passes until the key
+        // When
         let paused = [(); 10].map(|_| s.pass(Some((b"IEEE", b"password")), false, true, SLICE));
+
+        // Then
+        assert!(paused.iter().all(|pass| *pass == Pass::Idle));
+    }
+
+    #[test]
+    fn a_paused_derivation_resumes_where_it_stopped() {
+        // Given: two slices done, then paused while a story played
+        let mut s = Schedule::new();
+        s.proved(b"IEEE", b"password");
+        idle(&mut s, b"IEEE", b"password");
+        idle(&mut s, b"IEEE", b"password");
+        s.pass(Some((b"IEEE", b"password")), false, true, SLICE);
+
+        // When
         let resumed = until_done(&mut s, b"IEEE", b"password").map(|(n, _)| n);
 
         // Then: 4095 rounds at 1000 a pass is five passes in all, two already
         // done before the pause
-        assert!(paused.iter().all(|pass| *pass == Pass::Idle));
         assert_eq!(resumed, Some(3));
     }
 
