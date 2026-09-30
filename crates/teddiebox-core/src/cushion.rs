@@ -114,7 +114,13 @@ mod tests {
 
     #[test]
     fn a_new_cushion_has_seen_nothing_go_wrong() {
-        let cushion = Cushion::new(CAPACITY);
+        // Given
+        let capacity = CAPACITY;
+
+        // When
+        let cushion = Cushion::new(capacity);
+
+        // Then
         assert_eq!(cushion.underruns(), 0);
         assert_eq!(cushion.level(), 0);
     }
@@ -122,71 +128,109 @@ mod tests {
     /// Every track starts with an empty buffer; that is not an underrun.
     #[test]
     fn an_empty_buffer_before_playback_starts_is_not_an_underrun() {
+        // Given
         let mut cushion = Cushion::new(CAPACITY);
-        assert!(!cushion.observe(0));
+
+        // When
+        let underrun = cushion.observe(0);
+
+        // Then
+        assert!(!underrun);
         assert_eq!(cushion.underruns(), 0);
     }
 
     #[test]
     fn running_dry_during_playback_is_an_underrun() {
+        // Given
         let mut cushion = Cushion::new(CAPACITY);
         cushion.start();
         cushion.observe(CAPACITY);
-        assert!(cushion.observe(0), "the buffer just ran dry");
+
+        // When
+        let underrun = cushion.observe(0);
+
+        // Then
+        assert!(underrun, "the buffer just ran dry");
         assert_eq!(cushion.underruns(), 1);
     }
 
     /// Reading an empty buffer ten times is one dropout, not ten.
     #[test]
     fn staying_dry_is_one_underrun_rather_than_many() {
+        // Given
         let mut cushion = Cushion::new(CAPACITY);
         cushion.start();
         cushion.observe(CAPACITY);
-        assert!(cushion.observe(0));
-        assert!(!cushion.observe(0));
-        assert!(!cushion.observe(0));
+
+        // When
+        let underruns = [0; 3].map(|level| cushion.observe(level));
+
+        // Then
+        assert_eq!(underruns, [true, false, false]);
         assert_eq!(cushion.underruns(), 1);
     }
 
     #[test]
     fn recovering_and_running_dry_again_is_a_second_underrun() {
+        // Given: one dropout, then a recovery
         let mut cushion = Cushion::new(CAPACITY);
         cushion.start();
         cushion.observe(CAPACITY);
         cushion.observe(0);
         cushion.observe(CAPACITY / 2);
-        assert!(cushion.observe(0), "dry again after recovering");
+
+        // When
+        let underrun = cushion.observe(0);
+
+        // Then
+        assert!(underrun, "dry again after recovering");
         assert_eq!(cushion.underruns(), 2);
     }
 
     /// The low-water mark shows how close the buffer came to running empty.
     #[test]
     fn the_low_water_mark_is_the_emptiest_it_has_been() {
+        // Given
         let mut cushion = Cushion::new(CAPACITY);
         cushion.start();
-        cushion.observe(CAPACITY);
-        cushion.observe(CAPACITY / 4);
-        cushion.observe(CAPACITY / 2);
+
+        // When
+        for level in [CAPACITY, CAPACITY / 4, CAPACITY / 2] {
+            cushion.observe(level);
+        }
+
+        // Then
         assert_eq!(cushion.low_water(), CAPACITY / 4, "not the most recent");
     }
 
     #[test]
     fn the_low_water_mark_ignores_the_empty_buffer_before_playback() {
+        // Given: an empty buffer seen before playback
         let mut cushion = Cushion::new(CAPACITY);
         cushion.observe(0);
+
+        // When
         cushion.start();
         cushion.observe(CAPACITY);
+
+        // Then
         assert_eq!(cushion.low_water(), CAPACITY);
     }
 
     #[test]
     fn occupancy_is_reported_as_a_percentage_for_the_log() {
+        // Given
         let mut cushion = Cushion::new(CAPACITY);
         cushion.start();
-        cushion.observe(CAPACITY / 4);
-        assert_eq!(cushion.percent(), 25);
-        cushion.observe(CAPACITY);
-        assert_eq!(cushion.percent(), 100);
+
+        // When
+        let percents = [CAPACITY / 4, CAPACITY].map(|level| {
+            cushion.observe(level);
+            cushion.percent()
+        });
+
+        // Then
+        assert_eq!(percents, [25, 100]);
         assert_eq!(cushion.low_water_percent(), 25);
     }
 
@@ -194,9 +238,14 @@ mod tests {
     /// must not show more than 100%.
     #[test]
     fn a_level_beyond_capacity_is_clamped_rather_than_believed() {
+        // Given
         let mut cushion = Cushion::new(CAPACITY);
         cushion.start();
+
+        // When
         cushion.observe(CAPACITY * 2);
+
+        // Then
         assert_eq!(cushion.level(), CAPACITY);
         assert_eq!(cushion.percent(), 100);
     }
@@ -205,9 +254,14 @@ mod tests {
     /// panic on the device.
     #[test]
     fn a_zero_capacity_cushion_does_not_divide_by_zero() {
+        // Given
         let mut cushion = Cushion::new(0);
         cushion.start();
+
+        // When
         cushion.observe(0);
+
+        // Then
         assert_eq!(cushion.percent(), 0);
         assert_eq!(cushion.low_water_percent(), 0);
     }
