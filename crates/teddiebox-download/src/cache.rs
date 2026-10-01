@@ -157,37 +157,72 @@ pub fn revalidate(sidecar: &Sidecar, server_length: Option<u32>) -> Freshness {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use teddiebox_cloud::ETag;
 
     /// A download that stops early still leaves a file on the card; only a
     /// file that reached the server's length is whole.
     #[test]
     fn a_body_that_reaches_the_servers_length_is_whole() {
-        assert!(is_whole(0, 38_349_983, Some(38_349_983)));
+        // Given
+        let (offset, body, total) = (0, 38_349_983, Some(38_349_983));
+
+        // When
+        let whole = is_whole(offset, body, total);
+
+        // Then
+        assert!(whole);
     }
 
     #[test]
     fn a_body_that_stops_early_is_not_whole() {
-        assert!(!is_whole(0, 1_089_536, Some(38_349_983)));
+        // Given
+        let (offset, body, total) = (0, 1_089_536, Some(38_349_983));
+
+        // When
+        let whole = is_whole(offset, body, total);
+
+        // Then
+        assert!(!whole);
     }
 
     /// After an interruption, the resumed body finishes the file.
     #[test]
     fn a_resumed_body_that_finishes_the_file_is_whole() {
-        assert!(is_whole(3_145_728, 35_204_255, Some(38_349_983)));
+        // Given
+        let (offset, body, total) = (3_145_728, 35_204_255, Some(38_349_983));
+
+        // When
+        let whole = is_whole(offset, body, total);
+
+        // Then
+        assert!(whole);
     }
 
     /// Without a length from the server, nothing can be called whole.
     #[test]
     fn without_a_length_from_the_server_nothing_is_whole() {
-        assert!(!is_whole(0, 38_349_983, None));
+        // Given
+        let (offset, body, total) = (0, 38_349_983, None);
+
+        // When
+        let whole = is_whole(offset, body, total);
+
+        // Then
+        assert!(!whole);
     }
 
     /// More bytes than the file has cannot be a correct download of it.
     #[test]
     fn a_body_that_overshoots_is_not_whole() {
-        assert!(!is_whole(0, 38_349_984, Some(38_349_983)));
+        // Given
+        let (offset, body, total) = (0, 38_349_984, Some(38_349_983));
+
+        // When
+        let whole = is_whole(offset, body, total);
+
+        // Then
+        assert!(!whole);
     }
-    use teddiebox_cloud::ETag;
 
     /// A normal resume: half of an 8192-byte file is on the card, and the
     /// server sends the rest of the same file.
@@ -202,92 +237,129 @@ mod tests {
 
     #[test]
     fn a_body_that_starts_at_zero_replaces_what_is_there() {
+        // Given
         let declined = Landing {
             offset: 0,
             total: Some(8192),
             ..agreeing()
         };
-        assert_eq!(place(&declined), Placement::Restart);
+
+        // When
+        let placement = place(&declined);
+
+        // Then
+        assert_eq!(placement, Placement::Restart);
     }
 
     #[test]
     fn a_body_that_starts_where_the_file_ends_continues_it() {
-        assert_eq!(place(&agreeing()), Placement::Continue);
+        // Given
+        let landing = agreeing();
+
+        // When
+        let placement = place(&landing);
+
+        // Then
+        assert_eq!(placement, Placement::Continue);
     }
 
     #[test]
     fn a_body_that_starts_past_the_end_is_refused() {
-        assert_eq!(
-            place(&Landing {
-                offset: 8192,
-                ..agreeing()
-            }),
-            Placement::Refuse
-        );
+        // Given
+        let landing = Landing {
+            offset: 8192,
+            ..agreeing()
+        };
+
+        // When
+        let placement = place(&landing);
+
+        // Then
+        assert_eq!(placement, Placement::Refuse);
     }
 
     #[test]
     fn a_body_that_starts_before_the_end_is_refused() {
-        assert_eq!(
-            place(&Landing {
-                offset: 1024,
-                ..agreeing()
-            }),
-            Placement::Refuse
-        );
+        // Given
+        let landing = Landing {
+            offset: 1024,
+            ..agreeing()
+        };
+
+        // When
+        let placement = place(&landing);
+
+        // Then
+        assert_eq!(placement, Placement::Refuse);
     }
 
     #[test]
     fn an_empty_file_takes_a_body_from_the_start() {
-        assert_eq!(
-            place(&Landing {
-                offset: 0,
-                length_on_card: 0,
-                expected: None,
-                total: Some(8192),
-            }),
-            Placement::Restart
-        );
+        // Given
+        let landing = Landing {
+            offset: 0,
+            length_on_card: 0,
+            expected: None,
+            total: Some(8192),
+        };
+
+        // When
+        let placement = place(&landing);
+
+        // Then
+        assert_eq!(placement, Placement::Restart);
     }
 
+    /// The server's file now has a different length, so these bytes are from
+    /// a different file. Appending them could still give the expected length,
+    /// so only this check catches it.
     #[test]
     fn a_tail_of_a_file_that_is_no_longer_the_one_promised_is_refused() {
-        // The server's file now has a different length, so these bytes are
-        // from a different file. Appending them could still give the expected
-        // length, so only this check catches it.
-        assert_eq!(
-            place(&Landing {
-                total: Some(9000),
-                ..agreeing()
-            }),
-            Placement::Refuse
-        );
+        // Given
+        let landing = Landing {
+            total: Some(9000),
+            ..agreeing()
+        };
+
+        // When
+        let placement = place(&landing);
+
+        // Then
+        assert_eq!(placement, Placement::Refuse);
     }
 
+    /// No total is not evidence of a change; refusing would make resuming
+    /// impossible with such a server.
     #[test]
     fn a_server_that_gives_no_total_is_taken_at_its_word_about_the_offset() {
-        // No total is not evidence of a change; refusing would make resuming
-        // impossible with such a server.
-        assert_eq!(
-            place(&Landing {
-                total: None,
-                ..agreeing()
-            }),
-            Placement::Continue
-        );
+        // Given
+        let landing = Landing {
+            total: None,
+            ..agreeing()
+        };
+
+        // When
+        let placement = place(&landing);
+
+        // Then
+        assert_eq!(placement, Placement::Continue);
     }
 
+    /// The body starts at zero, so it replaces whatever was there.
     #[test]
     fn a_whole_file_answer_is_a_restart_even_when_the_length_changed() {
-        // The body starts at zero, so it replaces whatever was there.
-        assert_eq!(
-            place(&Landing {
-                offset: 0,
-                total: Some(9000),
-                ..agreeing()
-            }),
-            Placement::Restart
-        );
+        // Given
+        let landing = Landing {
+            offset: 0,
+            total: Some(9000),
+            ..agreeing()
+        };
+
+        // When
+        let placement = place(&landing);
+
+        // Then
+        assert_eq!(placement, Placement::Restart);
     }
 
     fn sidecar(length: u32) -> Sidecar {
@@ -299,33 +371,48 @@ mod tests {
 
     #[test]
     fn nothing_on_the_card_means_fetch_the_whole_file() {
-        assert_eq!(
-            decide(&Cached {
-                sidecar: None,
-                length_on_card: None,
-            }),
-            Decision::Fetch
-        );
+        // Given
+        let cached = Cached {
+            sidecar: None,
+            length_on_card: None,
+        };
+
+        // When
+        let decision = decide(&cached);
+
+        // Then
+        assert_eq!(decision, Decision::Fetch);
     }
 
     #[test]
     fn a_file_as_long_as_its_sidecar_promises_is_ready_to_play() {
-        assert_eq!(
-            decide(&Cached {
-                sidecar: Some(sidecar(4096)),
-                length_on_card: Some(4096),
-            }),
-            Decision::Play
-        );
+        // Given
+        let cached = Cached {
+            sidecar: Some(sidecar(4096)),
+            length_on_card: Some(4096),
+        };
+
+        // When
+        let decision = decide(&cached);
+
+        // Then
+        assert_eq!(decision, Decision::Play);
     }
 
     #[test]
     fn a_short_file_resumes_from_where_it_stopped() {
+        // Given
+        let cached = Cached {
+            sidecar: Some(sidecar(27841285)),
+            length_on_card: Some(4096),
+        };
+
+        // When
+        let decision = decide(&cached);
+
+        // Then
         assert_eq!(
-            decide(&Cached {
-                sidecar: Some(sidecar(27841285)),
-                length_on_card: Some(4096),
-            }),
+            decision,
             Decision::Resume {
                 from: 4096,
                 etag: ETag::try_from("\"v1\"").ok(),
@@ -337,50 +424,69 @@ mod tests {
     /// looks complete may be cut short.
     #[test]
     fn a_file_with_no_sidecar_is_incomplete_however_long_it_is() {
-        assert_eq!(
-            decide(&Cached {
-                sidecar: None,
-                length_on_card: Some(27841285),
-            }),
-            Decision::Fetch
-        );
+        // Given
+        let cached = Cached {
+            sidecar: None,
+            length_on_card: Some(27841285),
+        };
+
+        // When
+        let decision = decide(&cached);
+
+        // Then
+        assert_eq!(decision, Decision::Fetch);
     }
 
     /// A sidecar with no file is what a crash between the two writes leaves
     /// behind.
     #[test]
     fn a_sidecar_with_no_file_beside_it_fetches_from_the_start() {
-        assert_eq!(
-            decide(&Cached {
-                sidecar: Some(sidecar(4096)),
-                length_on_card: None,
-            }),
-            Decision::Fetch
-        );
+        // Given
+        let cached = Cached {
+            sidecar: Some(sidecar(4096)),
+            length_on_card: None,
+        };
+
+        // When
+        let decision = decide(&cached);
+
+        // Then
+        assert_eq!(decision, Decision::Fetch);
     }
 
     /// Longer than expected cannot come from a correct download, so start
     /// again.
     #[test]
     fn a_file_longer_than_its_sidecar_promises_is_refetched_rather_than_trusted() {
-        assert_eq!(
-            decide(&Cached {
-                sidecar: Some(sidecar(4096)),
-                length_on_card: Some(8192),
-            }),
-            Decision::Fetch
-        );
+        // Given
+        let cached = Cached {
+            sidecar: Some(sidecar(4096)),
+            length_on_card: Some(8192),
+        };
+
+        // When
+        let decision = decide(&cached);
+
+        // Then
+        assert_eq!(decision, Decision::Fetch);
     }
 
     /// An empty file with a sidecar is normal right after the sidecar was
     /// written. Resuming from zero keeps the etag check.
     #[test]
     fn an_empty_file_resumes_from_zero_rather_than_starting_over() {
+        // Given
+        let cached = Cached {
+            sidecar: Some(sidecar(4096)),
+            length_on_card: Some(0),
+        };
+
+        // When
+        let decision = decide(&cached);
+
+        // Then
         assert_eq!(
-            decide(&Cached {
-                sidecar: Some(sidecar(4096)),
-                length_on_card: Some(0),
-            }),
+            decision,
             Decision::Resume {
                 from: 0,
                 etag: ETag::try_from("\"v1\"").ok(),
@@ -390,45 +496,81 @@ mod tests {
 
     #[test]
     fn a_resume_carries_no_etag_when_the_sidecar_had_none() {
+        // Given
         let sidecar = Sidecar {
             length: 4096,
             etag: None,
         };
+        let cached = Cached {
+            sidecar: Some(sidecar),
+            length_on_card: Some(100),
+        };
+
+        // When
+        let decision = decide(&cached);
+
+        // Then
         assert_eq!(
-            decide(&Cached {
-                sidecar: Some(sidecar),
-                length_on_card: Some(100),
-            }),
+            decision,
             Decision::Resume {
                 from: 100,
                 etag: None,
             }
         );
     }
+
     /// The server's file still has the length in the sidecar, so the card's
     /// copy is kept.
     #[test]
     fn a_file_the_length_the_server_still_reports_is_fresh() {
-        assert_eq!(revalidate(&sidecar(60975), Some(60975)), Freshness::Fresh);
+        // Given
+        let on_card = sidecar(60975);
+
+        // When
+        let freshness = revalidate(&on_card, Some(60975));
+
+        // Then
+        assert_eq!(freshness, Freshness::Fresh);
     }
 
     /// A different length is the only sign of a change teddyCloud gives.
     #[test]
     fn a_different_length_means_the_cached_file_is_stale() {
-        assert_eq!(revalidate(&sidecar(60975), Some(61000)), Freshness::Stale);
-        assert_eq!(revalidate(&sidecar(60975), Some(1)), Freshness::Stale);
+        // Given
+        let on_card = sidecar(60975);
+
+        // When
+        let longer = revalidate(&on_card, Some(61000));
+        let shorter = revalidate(&on_card, Some(1));
+
+        // Then
+        assert_eq!(longer, Freshness::Stale);
+        assert_eq!(shorter, Freshness::Stale);
     }
 
     /// No length from the server is not a reason to throw the file away.
     #[test]
     fn a_server_that_gives_no_length_leaves_the_cached_file_alone() {
-        assert_eq!(revalidate(&sidecar(60975), None), Freshness::Unknown);
+        // Given
+        let on_card = sidecar(60975);
+
+        // When
+        let freshness = revalidate(&on_card, None);
+
+        // Then
+        assert_eq!(freshness, Freshness::Unknown);
     }
 
     /// A known weakness: a change that keeps the length is not detected.
     #[test]
     fn a_same_length_change_is_not_detectable() {
+        // Given
         let before = sidecar(60975);
-        assert_eq!(revalidate(&before, Some(60975)), Freshness::Fresh);
+
+        // When
+        let freshness = revalidate(&before, Some(60975));
+
+        // Then
+        assert_eq!(freshness, Freshness::Fresh);
     }
 }
