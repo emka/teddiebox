@@ -8,7 +8,7 @@ The ESP32-S3 on this board has **no USB**: GPIO19/20, the S3's native D−/D+, a
 used for the red LED and the larger ear (on the box's right). There is no
 USB-Serial-JTAG. UART0 on J103 is the debug channel.
 
-## J103 — UART0
+## J103: UART0
 
 Three bare pads in a row, not a populated header, near D100/R149 just below
 J102. The order along the row is:
@@ -17,12 +17,11 @@ J102. The order along the row is:
 TxD   RxD   GND
 ```
 
-Ground is an end pad, so **RxD is the middle pad whichever way round the board
-is turned**. That is the orientation-proof way to read it, and the check that
-catches a mis-crimped cable: if the wire you believe is ground came off the
-middle pad, stop and ring it out against the SD socket shell before connecting
-anything.
+For a stable connection, solder a 3-pin JST PH 2.0 header (2.0 mm pitch) to
+the pads. The pads tear off easily, so heat them briefly.
 
+With the manufacturer's cable colours: white is GND, black is RxD (middle),
+red is TxD.
 
 ## Getting in and out of download mode
 
