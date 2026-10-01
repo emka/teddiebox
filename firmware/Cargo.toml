@@ -28,7 +28,7 @@ teddiebox-identity = { path = "../crates/teddiebox-identity" }
 teddiebox-wifikey = { path = "../crates/teddiebox-wifikey" }
 lis3dh = { path = "../crates/lis3dh" }
 tlv320dac3100 = { path = "../crates/tlv320dac3100" }
-esp-hal = { version = "1.2.0-rc.0", features = ["esp32s3", "unstable", "rt"] }
+esp-hal = { version = "1.2", features = ["esp32s3", "unstable", "rt"] }
 # `esp-radio` enables the esp-radio-rtos-driver integration; without it the
 # Wi-Fi stack has no scheduler for its threads. `esp-alloc` makes those
 # allocations use the same heap as the Wi-Fi stack.
@@ -134,9 +134,9 @@ teddiebox-audio = { version = "0.1.0", path = "../crates/teddiebox-audio" }
 teddiebox-taf = { version = "0.1.0", path = "../crates/teddiebox-taf" }
 portable-atomic = "1.15.0"
 trf7962a = { version = "0.1.0", path = "../crates/trf7962a" }
-# "unstable": needed for `AccessPointConfig::with_max_connections` in the
-# pinned esp-radio. It requires esp-hal's `unstable`, which is on above.
-esp-radio = { version = "1.0.0-beta.0", features = ["esp32s3", "wifi", "unstable"] }
+# "unstable": needed for `AccessPointConfig::with_max_connections` in
+# esp-radio. It requires esp-hal's `unstable`, which is on above.
+esp-radio = { version = "1.0.0-beta.1", features = ["esp32s3", "wifi", "unstable"] }
 # Only the Wi-Fi stack allocates. See the heap comment in src/main.rs.
 esp-alloc = "0.11"
 embassy-net = { version = "0.9.1", features = [
@@ -156,32 +156,18 @@ teddiebox-portal = { path = "../crates/teddiebox-portal" }
 # OTA decisions and flash sector bookkeeping.
 teddiebox-ota = { path = "../crates/teddiebox-ota" }
 
-# esp-radio is only published as 1.0.0-beta.0, which needs esp-hal ~1.1.0
-# and esp-radio-rtos-driver 0.3, incompatible with the esp-hal 1.2.0-rc.0
-# used here. So these crates come from the esp-hal repository at the commit
-# that released esp-rtos 0.4.0, where they match. They are patched rather
-# than given `git` keys, so esp-radio's path dependency on esp-hal resolves
-# to the same package and the HAL is not linked twice.
-#
-# Drop this block once esp-radio 1.0.0-beta.1 publishes against esp-hal 1.2.
 [patch.crates-io]
-esp-hal = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
-esp-rtos = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
-esp-radio = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
-esp-alloc = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
-esp-rom-sys = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
 
-# `mbedtls-rs-sys` 0.3.1 requires `esp-hal = "~1.2.0"`, which excludes
-# 1.2.0-rc.0, so its `esp32s3` feature (hardware acceleration) cannot
-# resolve. The esp-hal APIs it uses are unchanged in 1.2, so the patch is the
-# published crate with that version bound widened. It is created by
-# `scripts/vendor-mbedtls-rs-sys.sh` (run by `just vendor`) rather than
+# `mbedtls-rs-sys` always enables SNI through its `tls-core` feature, and
+# teddyCloud picks a certificate this build cannot use whenever it receives
+# one. The patch is the published crate with that define removed. It is created
+# by `scripts/vendor-mbedtls-rs-sys.sh` (run by `just vendor`) rather than
 # committed, to keep 8.8 MB of C out of git.
 #
 # `firmware/vendor/` is gitignored, so a fresh clone needs `just vendor` (or
 # any `just` recipe that builds) before a plain `cargo build` works.
 #
-# Drop this line once the firmware is on a stable esp-hal 1.2 release.
+# Drop this line once mbedtls-rs-sys offers a switch for SNI.
 mbedtls-rs-sys = { path = "vendor/mbedtls-rs-sys" }
 
 # `mbedtls-rs` 0.3.0 never calls `mbedtls_ssl_conf_max_frag_len` and keeps
