@@ -51,12 +51,10 @@ impl Sidecar {
         let mut etag = None;
 
         for raw in text.lines() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            // Split on the first '=' only: an ETag may contain more.
-            let Some((key, value)) = line.split_once('=') else {
+            // Split on the first '=' only: an ETag may contain more. A line
+            // without one, such as a blank line, carries nothing; a comment's
+            // key never names a field.
+            let Some((key, value)) = raw.split_once('=') else {
                 continue;
             };
             match key.trim() {
@@ -141,6 +139,18 @@ mod tests {
     #[test]
     fn unknown_keys_are_ignored_so_a_newer_box_does_not_break_an_older_one() {
         let parsed = Sidecar::parse("length = 12\nfuture = 7\n").unwrap();
+        assert_eq!(parsed.length, 12);
+    }
+
+    #[test]
+    fn blank_lines_and_comments_are_skipped() {
+        // Given
+        let text = "# written by the box\n\n#length = 99\nlength = 12\n   \n";
+
+        // When
+        let parsed = Sidecar::parse(text).unwrap();
+
+        // Then
         assert_eq!(parsed.length, 12);
     }
 
