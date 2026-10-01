@@ -37,14 +37,17 @@ descending order of convenience:
 
 | Route | Needs | When |
 |---|---|---|
-| Type `dl` + Enter on the console | firmware running and responsive | normal development |
+| Short **J100**, then apply power cold | nothing but the board | works with any firmware, or none; the recovery floor |
+| Type `dl` + Enter on the console | **the custom firmware** running and responsive | normal development |
 | `esptool --before no-reset --after watchdog-reset run` | box already in download mode | to leave download mode |
-| Short **J100**, then apply power cold | nothing but the board | always works; the recovery floor |
 
-The first two need the firmware or the ROM to cooperate. **J100 with a cold
+`dl` is a command of the custom firmware's console. The stock Toniebox firmware
+does not have it, so on a box that has never been flashed, J100 is the only way in.
+
+The other two need the firmware or the ROM to cooperate. **J100 with a cold
 power-on is the one that cannot fail**, because the chip samples GPIO0 in mask
 ROM before it reads a byte of flash. Whatever else you do, that route stays
-open — which is what makes flashing experimental firmware safe.
+open, which is what makes flashing experimental firmware safe.
 
 Note that the DTR and RTS lines are not wired to anything on this board, so
 esptool's and espflash's default auto-reset cannot work. Every invocation needs
@@ -52,7 +55,7 @@ esptool's and espflash's default auto-reset cannot work. Every invocation needs
 watchdog route above or removing power.
 
 **Flash before you probe.** `espflash` must be the first tool to touch the port
-after the box enters download mode. Running `esptool` first — even `flash-id` —
+after the box enters download mode. Running `esptool` first (even `flash-id`)
 leaves esptool's stub loader resident, and `espflash` then fails with `Timeout
 while running MemData command`, or simply cannot connect. Recovering from that
 costs a cold boot with J100 shorted, so the order is: enter download mode,
