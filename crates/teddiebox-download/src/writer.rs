@@ -97,9 +97,14 @@ mod tests {
 
     #[test]
     fn the_watermark_counts_every_byte_written() {
+        // Given
         let mut card = Recording::default();
         let mut w = Writer::resuming(0, 1024);
+
+        // When
         w.write(&mut card, b"0123456789").unwrap();
+
+        // Then
         assert_eq!(w.watermark(), Bytes(10));
     }
 
@@ -107,19 +112,30 @@ mod tests {
     /// or the reader would refuse pages that are already there.
     #[test]
     fn a_resumed_download_counts_from_what_is_already_there() {
+        // Given
         let mut card = Recording::default();
         let mut w = Writer::resuming(4096, 1024);
-        assert_eq!(w.watermark(), Bytes(4096));
+        let before = w.watermark();
+
+        // When
         w.write(&mut card, b"XYZ").unwrap();
+
+        // Then
+        assert_eq!(before, Bytes(4096));
         assert_eq!(w.watermark(), Bytes(4099));
     }
 
     #[test]
     fn the_bytes_reach_the_sink_unchanged_and_in_order() {
+        // Given
         let mut card = Recording::default();
         let mut w = Writer::resuming(0, 1024);
+
+        // When
         w.write(&mut card, b"abc").unwrap();
         w.write(&mut card, b"def").unwrap();
+
+        // Then
         assert_eq!(card.bytes, b"abcdef");
     }
 
@@ -128,29 +144,42 @@ mod tests {
     /// whole download on a power loss.
     #[test]
     fn a_flush_happens_once_the_interval_is_passed_and_not_before() {
+        // Given: a flush every 100 bytes
         let mut card = Recording::default();
         let mut w = Writer::resuming(0, 100);
+
+        // When
         w.write(&mut card, &[0u8; 60]).unwrap();
-        assert_eq!(card.flushes, 0, "60 bytes is not yet 100");
+        let flushes_after_60 = card.flushes;
         w.write(&mut card, &[0u8; 60]).unwrap();
+
+        // Then
+        assert_eq!(flushes_after_60, 0, "60 bytes is not yet 100");
         assert_eq!(card.flushes, 1);
     }
 
     #[test]
     fn the_flush_interval_restarts_after_each_flush() {
+        // Given: a flush every 100 bytes
         let mut card = Recording::default();
         let mut w = Writer::resuming(0, 100);
+
+        // When
         w.write(&mut card, &[0u8; 250]).unwrap();
+        let flushes_after_250 = card.flushes;
+        w.write(&mut card, &[0u8; 60]).unwrap();
+        let flushes_after_310 = card.flushes;
+        w.write(&mut card, &[0u8; 60]).unwrap();
+
+        // Then
         assert_eq!(
-            card.flushes, 1,
+            flushes_after_250, 1,
             "one write past the interval is one flush, not two"
         );
-        w.write(&mut card, &[0u8; 60]).unwrap();
         assert_eq!(
-            card.flushes, 1,
+            flushes_after_310, 1,
             "the 150-byte overshoot is discarded; after a flush the interval restarts from zero, so 60 is not yet 100"
         );
-        w.write(&mut card, &[0u8; 60]).unwrap();
         assert_eq!(card.flushes, 2);
     }
 
@@ -158,21 +187,32 @@ mod tests {
     /// length from the card.
     #[test]
     fn finishing_flushes_whatever_is_left() {
+        // Given
         let mut card = Recording::default();
         let mut w = Writer::resuming(0, 1024);
         w.write(&mut card, b"tail").unwrap();
+
+        // When
         w.finish(&mut card).unwrap();
+
+        // Then
         assert_eq!(card.flushes, 1);
     }
 
     /// Nothing new since the last flush, so no extra write.
     #[test]
     fn finishing_on_the_flush_boundary_writes_nothing_further() {
+        // Given
         let mut card = Recording::default();
         let mut w = Writer::resuming(0, 100);
         w.write(&mut card, &[0u8; 100]).unwrap();
-        assert_eq!(card.flushes, 1);
+        let flushes_before = card.flushes;
+
+        // When
         w.finish(&mut card).unwrap();
+
+        // Then
+        assert_eq!(flushes_before, 1);
         assert_eq!(card.flushes, 1);
     }
 
@@ -180,6 +220,7 @@ mod tests {
     /// decode bytes that never reached the card.
     #[test]
     fn a_failed_write_does_not_advance_the_watermark() {
+        // Given
         struct Broken;
         impl ContentSink for Broken {
             type Error = ();
@@ -191,7 +232,12 @@ mod tests {
             }
         }
         let mut w = Writer::resuming(0, 1024);
-        assert!(w.write(&mut Broken, b"abc").is_err());
+
+        // When
+        let result = w.write(&mut Broken, b"abc");
+
+        // Then
+        assert!(result.is_err());
         assert_eq!(w.watermark(), Bytes(0));
     }
 
@@ -200,6 +246,7 @@ mod tests {
     /// chunks and a megabyte interval, the flush would never happen.
     #[test]
     fn the_flush_interval_survives_a_sink_that_lives_for_one_call_only() {
+        // Given
         struct ForOneCall<'a>(&'a mut Recording);
 
         impl ContentSink for ForOneCall<'_> {
@@ -215,10 +262,13 @@ mod tests {
         let mut card = Recording::default();
         let mut w = Writer::resuming(0, 100);
 
+        // When
         w.write(&mut ForOneCall(&mut card), &[0u8; 60]).unwrap();
-        assert_eq!(card.flushes, 0, "60 bytes is not yet 100");
+        let flushes_after_first_call = card.flushes;
+        w.write(&mut ForOneCall(&mut card), &[0u8; 60]).unwrap();
 
-        w.write(&mut ForOneCall(&mut card), &[0u8; 60]).unwrap();
+        // Then
+        assert_eq!(flushes_after_first_call, 0, "60 bytes is not yet 100");
         assert_eq!(
             card.flushes, 1,
             "the second call continues the first call's interval"
@@ -230,6 +280,7 @@ mod tests {
     /// decoder on pages that are there.
     #[test]
     fn a_failed_flush_still_leaves_the_appended_bytes_on_the_watermark() {
+        // Given
         #[derive(Default)]
         struct AppendsButNeverFlushes {
             appends: usize,
@@ -251,20 +302,20 @@ mod tests {
         let mut card = AppendsButNeverFlushes::default();
         let mut w = Writer::resuming(0, 100);
 
-        // The append succeeds and reaches the interval, so a flush is tried
-        // and fails; write() reports that failure.
-        assert!(w.write(&mut card, &[0u8; 100]).is_err());
-        assert_eq!(card.appends, 1);
-        assert_eq!(card.flushes, 1);
-        assert_eq!(
-            w.watermark(),
-            Bytes(100),
-            "the appended bytes are on the card"
-        );
+        // When: the append reaches the interval, so a flush is tried and
+        // fails; then one more byte arrives
+        let first = w.write(&mut card, &[0u8; 100]);
+        let (appends, flushes, watermark) = (card.appends, card.flushes, w.watermark());
+        let second = w.write(&mut card, &[0u8; 1]);
 
+        // Then
+        assert!(first.is_err());
+        assert_eq!(appends, 1);
+        assert_eq!(flushes, 1);
+        assert_eq!(watermark, Bytes(100), "the appended bytes are on the card");
         // The failed flush did not reset the counter, so the next write
         // tries the flush again straight away.
-        assert!(w.write(&mut card, &[0u8; 1]).is_err());
+        assert!(second.is_err());
         assert_eq!(
             card.flushes, 2,
             "a failed flush must be retried on the next write"
