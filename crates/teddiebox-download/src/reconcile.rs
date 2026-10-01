@@ -160,14 +160,19 @@ mod tests {
 
     #[test]
     fn a_resume_answered_at_the_offset_it_asked_for_appends() {
+        // Given
+        let decision = Decision::Resume {
+            from: 100,
+            etag: etag("\"v1\""),
+        };
+        let begun = content(100, Some(5000), etag("\"v1\""));
+
+        // When
+        let action = reconcile(&decision, &begun);
+
+        // Then
         assert_eq!(
-            reconcile(
-                &Decision::Resume {
-                    from: 100,
-                    etag: etag("\"v1\""),
-                },
-                &content(100, Some(5000), etag("\"v1\"")),
-            ),
+            action,
             Action::Append {
                 resume_from: 100,
                 total: 5000,
@@ -179,14 +184,19 @@ mod tests {
     /// must not be mistaken for a server ignoring the range.
     #[test]
     fn resuming_from_zero_answered_at_zero_appends_rather_than_restarts() {
+        // Given
+        let decision = Decision::Resume {
+            from: 0,
+            etag: None,
+        };
+        let begun = content(0, Some(5000), None);
+
+        // When
+        let action = reconcile(&decision, &begun);
+
+        // Then
         assert_eq!(
-            reconcile(
-                &Decision::Resume {
-                    from: 0,
-                    etag: None
-                },
-                &content(0, Some(5000), None),
-            ),
+            action,
             Action::Append {
                 resume_from: 0,
                 total: 5000,
@@ -198,14 +208,19 @@ mod tests {
     /// the partial file is thrown away.
     #[test]
     fn a_resume_declined_and_answered_from_the_start_restarts() {
+        // Given
+        let decision = Decision::Resume {
+            from: 100,
+            etag: etag("\"v1\""),
+        };
+        let begun = content(0, Some(5000), etag("\"v2\""));
+
+        // When
+        let action = reconcile(&decision, &begun);
+
+        // Then
         assert_eq!(
-            reconcile(
-                &Decision::Resume {
-                    from: 100,
-                    etag: etag("\"v1\""),
-                },
-                &content(0, Some(5000), etag("\"v2\"")),
-            ),
+            action,
             Action::Restart {
                 total: 5000,
                 etag: etag("\"v2\""),
@@ -215,14 +230,19 @@ mod tests {
 
     #[test]
     fn a_resume_answered_at_an_unexpected_offset_is_refused() {
+        // Given
+        let decision = Decision::Resume {
+            from: 100,
+            etag: None,
+        };
+        let begun = content(50, Some(5000), None);
+
+        // When
+        let action = reconcile(&decision, &begun);
+
+        // Then
         assert_eq!(
-            reconcile(
-                &Decision::Resume {
-                    from: 100,
-                    etag: None
-                },
-                &content(50, Some(5000), None),
-            ),
+            action,
             Action::Refuse(Mismatch::WrongOffset {
                 asked: 100,
                 got: 50
@@ -234,14 +254,19 @@ mod tests {
     /// which is impossible.
     #[test]
     fn a_resume_answered_with_a_total_shorter_than_what_is_on_the_card_is_refused() {
+        // Given
+        let decision = Decision::Resume {
+            from: 100,
+            etag: None,
+        };
+        let begun = content(100, Some(50), None);
+
+        // When
+        let action = reconcile(&decision, &begun);
+
+        // Then
         assert_eq!(
-            reconcile(
-                &Decision::Resume {
-                    from: 100,
-                    etag: None
-                },
-                &content(100, Some(50), None),
-            ),
+            action,
             Action::Refuse(Mismatch::ShorterThanWhatIsOnTheCard {
                 total: 50,
                 on_card: 100,
@@ -275,8 +300,15 @@ mod tests {
 
     #[test]
     fn a_fetch_answered_from_the_start_restarts() {
+        // Given
+        let begun = content(0, Some(5000), etag("\"v1\""));
+
+        // When
+        let action = reconcile(&Decision::Fetch, &begun);
+
+        // Then
         assert_eq!(
-            reconcile(&Decision::Fetch, &content(0, Some(5000), etag("\"v1\""))),
+            action,
             Action::Restart {
                 total: 5000,
                 etag: etag("\"v1\""),
@@ -286,8 +318,15 @@ mod tests {
 
     #[test]
     fn a_fetch_answered_mid_file_is_refused() {
+        // Given
+        let begun = content(50, Some(5000), None);
+
+        // When
+        let action = reconcile(&Decision::Fetch, &begun);
+
+        // Then
         assert_eq!(
-            reconcile(&Decision::Fetch, &content(50, Some(5000), None)),
+            action,
             Action::Refuse(Mismatch::WrongOffset { asked: 0, got: 50 })
         );
     }
@@ -296,48 +335,59 @@ mod tests {
     /// before the offset.
     #[test]
     fn a_response_with_no_declared_length_is_refused_before_any_offset_check() {
-        assert_eq!(
-            reconcile(
-                &Decision::Resume {
-                    from: 100,
-                    etag: None
-                },
-                &content(100, None, None),
-            ),
-            Action::Refuse(Mismatch::LengthUnknown)
-        );
+        // Given
+        let decision = Decision::Resume {
+            from: 100,
+            etag: None,
+        };
+        let begun = content(100, None, None);
+
+        // When
+        let action = reconcile(&decision, &begun);
+
+        // Then
+        assert_eq!(action, Action::Refuse(Mismatch::LengthUnknown));
     }
 
     #[test]
     fn no_content_for_the_tag_is_reported_as_absent() {
-        assert_eq!(
-            reconcile(&Decision::Fetch, &Begun::NotFound),
-            Action::Absent
-        );
+        // Given
+        let begun = Begun::NotFound;
+
+        // When
+        let action = reconcile(&Decision::Fetch, &begun);
+
+        // Then
+        assert_eq!(action, Action::Absent);
     }
 
     #[test]
     fn a_304_is_refused_because_it_never_means_anything_for_a_download() {
-        assert_eq!(
-            reconcile(
-                &Decision::Resume {
-                    from: 100,
-                    etag: None
-                },
-                &Begun::Unchanged
-            ),
-            Action::Refuse(Mismatch::NotModified)
-        );
+        // Given
+        let decision = Decision::Resume {
+            from: 100,
+            etag: None,
+        };
+
+        // When
+        let action = reconcile(&decision, &Begun::Unchanged);
+
+        // Then
+        assert_eq!(action, Action::Refuse(Mismatch::NotModified));
     }
 
     /// With `Play`, the file on the card is already complete and no request
     /// should have been sent, so any response is refused.
     #[test]
     fn playing_what_is_on_the_card_refuses_any_response_regardless_of_its_content() {
-        assert_eq!(
-            reconcile(&Decision::Play, &content(0, Some(5000), etag("\"v1\""))),
-            Action::Refuse(Mismatch::NothingRequested)
-        );
+        // Given
+        let begun = content(0, Some(5000), etag("\"v1\""));
+
+        // When
+        let action = reconcile(&Decision::Play, &begun);
+
+        // Then
+        assert_eq!(action, Action::Refuse(Mismatch::NothingRequested));
     }
 
     /// With `If-Range`, this should not happen. The check catches a server
@@ -345,14 +395,19 @@ mod tests {
     /// file.
     #[test]
     fn an_append_whose_etag_disagrees_with_the_one_asked_for_restarts_instead() {
+        // Given
+        let decision = Decision::Resume {
+            from: 100,
+            etag: etag("\"v1\""),
+        };
+        let begun = content(100, Some(5000), etag("\"v2\""));
+
+        // When
+        let action = reconcile(&decision, &begun);
+
+        // Then
         assert_eq!(
-            reconcile(
-                &Decision::Resume {
-                    from: 100,
-                    etag: etag("\"v1\""),
-                },
-                &content(100, Some(5000), etag("\"v2\"")),
-            ),
+            action,
             Action::Restart {
                 total: 5000,
                 etag: etag("\"v2\""),
