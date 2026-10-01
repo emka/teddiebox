@@ -201,53 +201,100 @@ mod tests {
     /// on the card.
     #[test]
     fn a_length_that_matches_is_current() {
-        assert!(!is_stale(&sidecar(37_912_939), Probed::Length(37_912_939)));
+        // Given
+        let on_card = sidecar(37_912_939);
+
+        // When
+        let stale = is_stale(&on_card, Probed::Length(37_912_939));
+
+        // Then
+        assert!(!stale);
     }
 
     #[test]
     fn a_length_that_differs_is_stale_whichever_way_it_moved() {
-        assert!(is_stale(&sidecar(37_912_939), Probed::Length(37_912_940)));
-        assert!(is_stale(&sidecar(37_912_939), Probed::Length(1_024)));
+        // Given
+        let on_card = sidecar(37_912_939);
+
+        // When
+        let longer = is_stale(&on_card, Probed::Length(37_912_940));
+        let shorter = is_stale(&on_card, Probed::Length(1_024));
+
+        // Then
+        assert!(longer);
+        assert!(shorter);
     }
 
     /// The most important case: a figure the server has no story for keeps
     /// the story on the card.
     #[test]
     fn a_server_with_no_story_never_discards_the_one_on_the_card() {
-        assert!(!is_stale(&sidecar(37_912_939), Probed::NoContent));
+        // Given
+        let on_card = sidecar(37_912_939);
+
+        // When
+        let stale = is_stale(&on_card, Probed::NoContent);
+
+        // Then
+        assert!(!stale);
     }
 
     #[test]
     fn an_answer_without_a_length_changes_nothing() {
-        assert!(!is_stale(&sidecar(37_912_939), Probed::Unstated));
+        // Given
+        let on_card = sidecar(37_912_939);
+
+        // When
+        let stale = is_stale(&on_card, Probed::Unstated);
+
+        // Then
+        assert!(!stale);
     }
 
     /// An etag in the sidecar is ignored; only the length counts.
     #[test]
     fn the_recorded_etag_does_not_enter_into_it() {
+        // Given
         let with_etag = Sidecar {
             length: 4_096,
             etag: Some(ETag::try_from("\"v1\"").unwrap()),
         };
-        assert!(is_stale(&with_etag, Probed::Length(8_192)));
-        assert!(!is_stale(&with_etag, Probed::Length(4_096)));
+
+        // When
+        let longer = is_stale(&with_etag, Probed::Length(8_192));
+        let same = is_stale(&with_etag, Probed::Length(4_096));
+
+        // Then
+        assert!(longer);
+        assert!(!same);
     }
 
     #[test]
     fn a_figure_asked_about_once_is_not_asked_again() {
+        // Given
         let mut asked = Asked::new();
-        assert!(!asked.contains(0x1D2E_3F50_5003_04E0));
+        let before = asked.contains(0x1D2E_3F50_5003_04E0);
+
+        // When
         asked.remember(0x1D2E_3F50_5003_04E0);
+
+        // Then
+        assert!(!before);
         assert!(asked.contains(0x1D2E_3F50_5003_04E0));
     }
 
     #[test]
     fn remembering_the_same_figure_twice_costs_no_room() {
+        // Given
         let mut asked = Asked::new();
+
+        // When
         for _ in 0..REMEMBERED * 2 {
             asked.remember(1);
         }
         asked.remember(2);
+
+        // Then
         assert!(asked.contains(1), "one crowding itself out is the bug");
         assert!(asked.contains(2));
     }
@@ -256,11 +303,16 @@ mod tests {
     /// probably the one on the plate).
     #[test]
     fn a_ninth_figure_pushes_out_the_oldest() {
+        // Given
         let mut asked = Asked::new();
         for ruid in 0..REMEMBERED as u64 {
             asked.remember(ruid);
         }
+
+        // When
         asked.remember(99);
+
+        // Then
         assert!(!asked.contains(0));
         assert!(asked.contains(1));
         assert!(asked.contains(99));
@@ -270,9 +322,14 @@ mod tests {
     /// again without a power cycle.
     #[test]
     fn forgetting_makes_every_figure_ask_again() {
+        // Given
         let mut asked = Asked::new();
         asked.remember(7);
+
+        // When
         asked.forget_all();
+
+        // Then
         assert!(!asked.contains(7));
     }
 
@@ -281,10 +338,16 @@ mod tests {
 
     #[test]
     fn an_answer_to_the_open_question_settles_it() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
+
+        // When
+        let settled = r.answered(FIGURE, Answer::Length(37_912_939));
+
+        // Then
         assert_eq!(
-            r.answered(FIGURE, Answer::Length(37_912_939)),
+            settled,
             Some(Settled {
                 ruid: FIGURE,
                 answer: Answer::Length(37_912_939)
@@ -294,11 +357,18 @@ mod tests {
 
     #[test]
     fn a_question_nobody_answers_settles_as_nothing_when_patience_runs_out() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
-        assert_eq!(r.polled(9_999), None);
+
+        // When
+        let just_before = r.polled(9_999);
+        let at_the_limit = r.polled(10_000);
+
+        // Then
+        assert_eq!(just_before, None);
         assert_eq!(
-            r.polled(10_000),
+            at_the_limit,
             Some(Settled {
                 ruid: FIGURE,
                 answer: Answer::Nothing
@@ -310,29 +380,48 @@ mod tests {
     /// card copy stale, and the next download would truncate it.
     #[test]
     fn an_answer_after_patience_ran_out_is_ignored() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
         r.polled(10_000);
-        assert_eq!(r.answered(FIGURE, Answer::Length(1_024)), None);
+
+        // When
+        let settled = r.answered(FIGURE, Answer::Length(1_024));
+
+        // Then
+        assert_eq!(settled, None);
     }
 
     /// A figure lifted and put back during a question causes a second check.
     /// The first answer settles the question; the second is ignored.
     #[test]
     fn an_answer_after_the_question_settled_is_ignored() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
         r.answered(FIGURE, Answer::Length(37_912_939));
-        assert_eq!(r.answered(FIGURE, Answer::Length(1_024)), None);
+
+        // When
+        let settled = r.answered(FIGURE, Answer::Length(1_024));
+
+        // Then
+        assert_eq!(settled, None);
     }
 
     #[test]
     fn an_answer_about_another_figure_does_not_settle_the_question() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
-        assert_eq!(r.answered(OTHER, Answer::Nothing), None);
+
+        // When
+        let about_other = r.answered(OTHER, Answer::Nothing);
+        let about_figure = r.answered(FIGURE, Answer::Nothing);
+
+        // Then
+        assert_eq!(about_other, None);
         assert_eq!(
-            r.answered(FIGURE, Answer::Nothing),
+            about_figure,
             Some(Settled {
                 ruid: FIGURE,
                 answer: Answer::Nothing
@@ -342,20 +431,33 @@ mod tests {
 
     #[test]
     fn a_new_question_replaces_the_open_one() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
         r.asked(OTHER, 100);
-        assert_eq!(r.answered(FIGURE, Answer::Length(1_024)), None);
+
+        // When
+        let settled = r.answered(FIGURE, Answer::Length(1_024));
+
+        // Then
+        assert_eq!(settled, None);
     }
 
     #[test]
     fn patience_is_counted_from_the_latest_question() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
         r.asked(OTHER, 5_000);
-        assert_eq!(r.polled(10_000), None);
+
+        // When
+        let at_first_deadline = r.polled(10_000);
+        let at_second_deadline = r.polled(15_000);
+
+        // Then
+        assert_eq!(at_first_deadline, None);
         assert_eq!(
-            r.polled(15_000),
+            at_second_deadline,
             Some(Settled {
                 ruid: OTHER,
                 answer: Answer::Nothing
@@ -367,47 +469,77 @@ mod tests {
     /// the figure is put back before the answer arrives.
     #[test]
     fn an_answer_after_the_figure_was_lifted_is_ignored() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
         r.withdrawn();
-        assert_eq!(r.answered(FIGURE, Answer::Length(1_024)), None);
+
+        // When
+        let settled = r.answered(FIGURE, Answer::Length(1_024));
+
+        // Then
+        assert_eq!(settled, None);
     }
 
     /// Nobody waits for a lifted figure, so it does not time out.
     #[test]
     fn a_lifted_figure_never_runs_out_of_patience() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
         r.withdrawn();
-        assert_eq!(r.polled(10_000), None);
+
+        // When
+        let settled = r.polled(10_000);
+
+        // Then
+        assert_eq!(settled, None);
     }
 
     #[test]
     fn a_clock_reading_before_the_ask_does_not_expire_it() {
+        // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 20_000);
-        assert_eq!(r.polled(0), None);
+
+        // When
+        let settled = r.polled(0);
+
+        // Then
+        assert_eq!(settled, None);
     }
 
     #[test]
     fn polls_with_nothing_asked_do_nothing() {
+        // Given
         let mut r = Revalidation::new();
-        assert_eq!(r.polled(0), None);
-        assert_eq!(r.polled(1_000_000), None);
+
+        // When
+        let early = r.polled(0);
+        let late = r.polled(1_000_000);
+
+        // Then
+        assert_eq!(early, None);
+        assert_eq!(late, None);
     }
 
     /// The media loop polls this, and under a story its 10 ms timer fires
     /// only every ~106 ms (measured). The limit must be real time regardless.
     #[test]
     fn the_patience_is_wall_clock_however_slowly_the_caller_polls() {
+        // Given
         const GAP_MS: u64 = 106;
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
+
+        // When
         let mut now = 0;
         while r.polled(now).is_none() {
             now += GAP_MS;
             assert!(now <= 10_000 + GAP_MS, "still waiting at {now} ms");
         }
+
+        // Then
         assert!(now >= 10_000, "gave up early, at {now} ms");
     }
 }
