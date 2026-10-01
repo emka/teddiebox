@@ -30,22 +30,51 @@ mod tests {
 
     #[test]
     fn a_part_written_page_does_not_count() {
-        assert_eq!(Bytes(PAGE_SIZE as u32 - 1).whole_pages(), Pages(0));
+        // Given
+        let one_byte_short = Bytes(PAGE_SIZE as u32 - 1);
+
+        // When
+        let pages = one_byte_short.whole_pages();
+
+        // Then
+        assert_eq!(pages, Pages(0));
     }
 
     #[test]
     fn a_byte_past_a_whole_page_does_not_count_the_next_one() {
-        assert_eq!(Bytes(PAGE_SIZE as u32 + 1).whole_pages(), Pages(1));
+        // Given
+        let one_byte_over = Bytes(PAGE_SIZE as u32 + 1);
+
+        // When
+        let pages = one_byte_over.whole_pages();
+
+        // Then
+        assert_eq!(pages, Pages(1));
     }
 
     #[test]
     fn an_exact_multiple_converts_without_truncation() {
-        assert_eq!(Bytes(3 * PAGE_SIZE as u32).whole_pages(), Pages(3));
+        // Given
+        let three_pages = Bytes(3 * PAGE_SIZE as u32);
+
+        // When
+        let pages = three_pages.whole_pages();
+
+        // Then
+        assert_eq!(pages, Pages(3));
     }
 
     #[test]
     fn pages_order_the_same_way_the_bytes_behind_them_do() {
-        assert!(Pages(1) < Pages(2));
-        assert!(Bytes(1) < Bytes(PAGE_SIZE as u32));
+        // Given
+        let (fewer_pages, more_pages) = (Pages(1), Pages(2));
+        let (fewer_bytes, more_bytes) = (Bytes(1), Bytes(PAGE_SIZE as u32));
+
+        // When
+        let (pages_ordered, bytes_ordered) = (fewer_pages < more_pages, fewer_bytes < more_bytes);
+
+        // Then
+        assert!(pages_ordered);
+        assert!(bytes_ordered);
     }
 }
