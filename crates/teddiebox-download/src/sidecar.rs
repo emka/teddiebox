@@ -86,35 +86,51 @@ mod tests {
 
     #[test]
     fn a_rendered_sidecar_parses_back_to_what_it_held() {
+        // Given
         let etag = ETag::try_from("\"v1\"").unwrap();
         let original = Sidecar {
             length: 27841285,
             etag: Some(etag),
         };
         let text = original.render();
-        assert_eq!(Sidecar::parse(&text).unwrap(), original);
+
+        // When
+        let parsed = Sidecar::parse(&text).unwrap();
+
+        // Then
+        assert_eq!(parsed, original);
     }
 
     /// People read this file when debugging, so the exact bytes are tested,
     /// not just the round trip.
     #[test]
     fn the_rendered_form_is_the_dullest_thing_that_works() {
+        // Given
         let etag = ETag::try_from("\"v1\"").unwrap();
-        let text = Sidecar {
+        let sidecar = Sidecar {
             length: 27841285,
             etag: Some(etag),
-        }
-        .render();
+        };
+
+        // When
+        let text = sidecar.render();
+
+        // Then
         assert_eq!(text.as_str(), "length = 27841285\netag = \"v1\"\n");
     }
 
     #[test]
     fn a_server_that_sent_no_etag_leaves_the_line_out() {
-        let text = Sidecar {
+        // Given
+        let sidecar = Sidecar {
             length: 12,
             etag: None,
-        }
-        .render();
+        };
+
+        // When
+        let text = sidecar.render();
+
+        // Then
         assert_eq!(text.as_str(), "length = 12\n");
         assert_eq!(Sidecar::parse(&text).unwrap().etag, None);
     }
@@ -122,23 +138,37 @@ mod tests {
     /// Without a length, completeness cannot be checked.
     #[test]
     fn a_sidecar_without_a_length_is_malformed() {
-        assert_eq!(
-            Sidecar::parse("etag = \"v1\"\n"),
-            Err(DownloadError::MalformedSidecar)
-        );
+        // Given
+        let text = "etag = \"v1\"\n";
+
+        // When
+        let parsed = Sidecar::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(DownloadError::MalformedSidecar));
     }
 
     #[test]
     fn a_length_that_is_not_a_number_is_malformed() {
-        assert_eq!(
-            Sidecar::parse("length = banana\n"),
-            Err(DownloadError::MalformedSidecar)
-        );
+        // Given
+        let text = "length = banana\n";
+
+        // When
+        let parsed = Sidecar::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(DownloadError::MalformedSidecar));
     }
 
     #[test]
     fn unknown_keys_are_ignored_so_a_newer_box_does_not_break_an_older_one() {
-        let parsed = Sidecar::parse("length = 12\nfuture = 7\n").unwrap();
+        // Given
+        let text = "length = 12\nfuture = 7\n";
+
+        // When
+        let parsed = Sidecar::parse(text).unwrap();
+
+        // Then
         assert_eq!(parsed.length, 12);
     }
 
@@ -158,19 +188,30 @@ mod tests {
     /// splits the line.
     #[test]
     fn an_etag_keeps_everything_after_the_first_equals() {
-        let parsed = Sidecar::parse("length = 1\netag = \"a=b c\"\n").unwrap();
+        // Given
+        let text = "length = 1\netag = \"a=b c\"\n";
+
+        // When
+        let parsed = Sidecar::parse(text).unwrap();
+
+        // Then
         assert_eq!(parsed.etag.as_deref(), Some("\"a=b c\""));
     }
 
     /// A sidecar with a 64-character etag still fits the buffer.
     #[test]
     fn the_longest_possible_sidecar_still_fits() {
+        // Given
         let etag = ETag::try_from("x".repeat(MAX_ETAG).as_str()).unwrap();
-        let text = Sidecar {
+        let sidecar = Sidecar {
             length: u32::MAX,
             etag: Some(etag),
-        }
-        .render();
+        };
+
+        // When
+        let text = sidecar.render();
+
+        // Then
         assert!(text.len() <= MAX_SIDECAR, "rendered {} bytes", text.len());
     }
 }
