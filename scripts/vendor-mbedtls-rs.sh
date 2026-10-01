@@ -30,7 +30,9 @@
 #
 # Removing this: drop the `mbedtls-rs` line from `[patch.crates-io]` in
 # firmware/Cargo.toml, its line from the `vendor` recipe, and this script. Do
-# that the moment `mbedtls-rs` exposes the setting itself.
+# that once a release contains both the max-fragment-length setting
+# (https://github.com/esp-rs/mbedtls-rs/pull/145) and `PrivateKey::warm`
+# (https://github.com/esp-rs/mbedtls-rs/pull/185).
 
 set -euo pipefail
 

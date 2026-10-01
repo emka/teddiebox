@@ -29,7 +29,9 @@
 #
 # Removing this: drop the `mbedtls-rs-sys` line from `[patch.crates-io]`, the
 # `vendor` recipe from the justfile, the ignore rule from .gitignore, and this
-# script.
+# script. Do that once a release contains the `tls-sni` feature
+# (https://github.com/esp-rs/mbedtls-rs/pull/186), and add `tls-sni` to the
+# features in firmware/Cargo.toml only if the box should send SNI again.
 
 set -euo pipefail
 

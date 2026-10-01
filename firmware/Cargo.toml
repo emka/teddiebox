@@ -167,7 +167,8 @@ teddiebox-ota = { path = "../crates/teddiebox-ota" }
 # `firmware/vendor/` is gitignored, so a fresh clone needs `just vendor` (or
 # any `just` recipe that builds) before a plain `cargo build` works.
 #
-# Drop this line once mbedtls-rs-sys offers a switch for SNI.
+# Drop this line once a release has the `tls-sni` feature:
+# https://github.com/esp-rs/mbedtls-rs/pull/186
 mbedtls-rs-sys = { path = "vendor/mbedtls-rs-sys" }
 
 # `mbedtls-rs` 0.3.0 never calls `mbedtls_ssl_conf_max_frag_len` and keeps
@@ -177,8 +178,9 @@ mbedtls-rs-sys = { path = "vendor/mbedtls-rs-sys" }
 # heap. `scripts/vendor-mbedtls-rs.sh` adds the call and explains the
 # measurements.
 #
-# Drop this line once mbedtls-rs exposes the setting
-# (https://github.com/esp-rs/mbedtls-rs/pull/145) and `PrivateKey::warm`.
+# Drop this line once a release has the max-fragment-length setting
+# (https://github.com/esp-rs/mbedtls-rs/pull/145) and `PrivateKey::warm`
+# (https://github.com/esp-rs/mbedtls-rs/pull/185).
 mbedtls-rs = { path = "vendor/mbedtls-rs" }
 
 # smoltcp 0.13.1 pauses all ARP requests for a second after any ARP request,
