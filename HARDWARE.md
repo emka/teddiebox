@@ -23,6 +23,13 @@ the pads. The pads tear off easily, so heat them briefly.
 With the manufacturer's cable colours: white is GND, black is RxD (middle),
 red is TxD.
 
+## JTAG
+
+Not needed. The USB-Serial-JTAG peripheral is unavailable (see above). The
+ESP32-S3's pad JTAG (MTCK, MTDO, MTDI, MTMS) is routed to J102, just above
+J103, and nothing here uses it. Flashing and debugging both go over UART0 on
+J103.
+
 ## Getting in and out of download mode
 
 Download mode is where a flashing tool can talk to the box. Three ways in, in
