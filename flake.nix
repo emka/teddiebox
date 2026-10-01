@@ -120,12 +120,12 @@
           ];
         };
 
-        mkOpus = { pname, target ? "host", extraInputs ? [ ] }: pkgs.stdenv.mkDerivation {
+        mkOpus = { pname, device ? false, extraInputs ? [ ] }: pkgs.stdenv.mkDerivation {
           inherit pname;
           inherit (pkgs.libopus) version src;
           nativeBuildInputs = [ pkgs.cmake pkgs.ninja ] ++ extraInputs;
           dontUseCmakeConfigure = true;
-          buildPhase = "bash ${opusRecipe}/build-opus.sh \"$PWD\" \"$out\" ${target}";
+          buildPhase = "bash ${opusRecipe}/build-opus.sh \"$PWD\" \"$out\" ${pkgs.lib.optionalString device "--device"}";
           dontInstall = true;
           # Host binutils cannot touch xtensa objects, and there is nothing
           # to strip out of a static archive we link whole-program anyway.
@@ -135,7 +135,7 @@
         opusHost = mkOpus { pname = "libopus-fixed"; };
         opusDevice = mkOpus {
           pname = "libopus-fixed-xtensa-esp32s3";
-          target = "device";
+          device = true;
           extraInputs = [ xtensaGcc ];
         };
 

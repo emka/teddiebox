@@ -2,9 +2,9 @@
 # Builds the static libopus that teddiebox-opus-sys links, and installs it
 # under <out>/lib.
 #
-#   scripts/build-opus.sh <opus-source-dir> <out-dir> [device]
+#   scripts/build-opus.sh <opus-source-dir> <out-dir> [--device]
 #
-# Without `device` the library is built for the host; with it, for the
+# Without `--device` the library is built for the host; with it, for the
 # ESP32-S3, which needs the Xtensa GCC on PATH. The result is what
 # TEDDIEBOX_OPUS_LIB_DIR_<TARGET> names, with `<out-dir>/lib` as the value.
 #
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
-    echo "usage: $0 <opus-source-dir> <out-dir> [device]" >&2
+    echo "usage: $0 <opus-source-dir> <out-dir> [--device]" >&2
     exit 2
 fi
 
@@ -45,11 +45,11 @@ flags=(
     -DOPUS_STACK_PROTECTOR=OFF
 )
 
-case "${3:-host}" in
-host) ;;
-device) flags+=(-DCMAKE_TOOLCHAIN_FILE="$here/xtensa-esp32s3.cmake") ;;
+case "${3:-}" in
+"") ;;
+--device) flags+=(-DCMAKE_TOOLCHAIN_FILE="$here/xtensa-esp32s3.cmake") ;;
 *)
-    echo "unknown target '$3': expected 'device' or nothing" >&2
+    echo "unknown option '$3': expected --device or nothing" >&2
     exit 2
     ;;
 esac
