@@ -110,50 +110,23 @@
           then throw "no xtensa-esp-elf toolchain among esp-idf-xtensa's propagated inputs"
           else builtins.head matches;
 
-        xtensaToolchainFile = pkgs.writeText "xtensa-esp32s3.cmake" ''
-          set(CMAKE_SYSTEM_NAME Generic)
-          set(CMAKE_SYSTEM_PROCESSOR xtensa)
-          set(CMAKE_C_COMPILER ${xtensaGcc}/bin/xtensa-esp32s3-elf-gcc)
-          set(CMAKE_ASM_COMPILER ${xtensaGcc}/bin/xtensa-esp32s3-elf-gcc)
-          set(CMAKE_AR ${xtensaGcc}/bin/xtensa-esp32s3-elf-ar)
-          set(CMAKE_RANLIB ${xtensaGcc}/bin/xtensa-esp32s3-elf-ranlib)
-          # A freestanding compiler cannot link a hosted executable, so the
-          # compiler check has to stop at a static library. (Link tests are
-          # what break an autotools configure for this target.)
-          set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-          set(CMAKE_C_FLAGS_INIT "-mlongcalls -ffunction-sections -fdata-sections")
-        '';
+        # libopus is built by scripts/build-opus.sh, the recipe a contributor
+        # without Nix runs by hand, so both build it the same way.
+        opusRecipe = pkgs.lib.fileset.toSource {
+          root = ./scripts;
+          fileset = pkgs.lib.fileset.unions [
+            ./scripts/build-opus.sh
+            ./scripts/xtensa-esp32s3.cmake
+          ];
+        };
 
-        # Fixed point on both sides on purpose: the host build is the
-        # reference the device's decoded samples are compared against, and a
-        # float build would produce different samples. The neural extensions
-        # are float-only and megabytes of weights, so they stay off.
-        opusCmakeFlags = [
-          "-DCMAKE_BUILD_TYPE=Release"
-          "-DOPUS_BUILD_SHARED_LIBRARY=OFF"
-          "-DOPUS_BUILD_PROGRAMS=OFF"
-          "-DOPUS_BUILD_TESTING=OFF"
-          "-DBUILD_TESTING=OFF"
-          "-DOPUS_FIXED_POINT=ON"
-          "-DOPUS_ENABLE_DEEP_PLC=OFF"
-          "-DOPUS_DRED=OFF"
-          "-DOPUS_OSCE=OFF"
-          # The host build is a stand-in for the device, which has no SIMD,
-          # so timing it against hand-written NEON or SSE kernels would
-          # measure the wrong machine. It also keeps the build off the
-          # architecture-specific assembly paths, which is what makes one
-          # recipe work for every host CI might run on.
-          "-DOPUS_DISABLE_INTRINSICS=ON"
-          # Bare metal has nothing to initialise the stack guard, and a
-          # check that reads an uninitialised canary is worse than no check.
-          "-DOPUS_STACK_PROTECTOR=OFF"
-        ];
-
-        mkOpus = { pname, extraFlags ? [ ] }: pkgs.stdenv.mkDerivation {
+        mkOpus = { pname, target ? "host", extraInputs ? [ ] }: pkgs.stdenv.mkDerivation {
           inherit pname;
           inherit (pkgs.libopus) version src;
-          nativeBuildInputs = [ pkgs.cmake pkgs.ninja ];
-          cmakeFlags = opusCmakeFlags ++ extraFlags;
+          nativeBuildInputs = [ pkgs.cmake pkgs.ninja ] ++ extraInputs;
+          dontUseCmakeConfigure = true;
+          buildPhase = "bash ${opusRecipe}/build-opus.sh \"$PWD\" \"$out\" ${target}";
+          dontInstall = true;
           # Host binutils cannot touch xtensa objects, and there is nothing
           # to strip out of a static archive we link whole-program anyway.
           dontStrip = true;
@@ -162,7 +135,8 @@
         opusHost = mkOpus { pname = "libopus-fixed"; };
         opusDevice = mkOpus {
           pname = "libopus-fixed-xtensa-esp32s3";
-          extraFlags = [ "-DCMAKE_TOOLCHAIN_FILE=${xtensaToolchainFile}" ];
+          target = "device";
+          extraInputs = [ xtensaGcc ];
         };
 
         # teddiebox-opus-sys resolves the archive for whatever target cargo
