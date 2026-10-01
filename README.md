@@ -44,8 +44,7 @@ behaviour: volume changes on press, and slapping still skips.
 
 ### Setup mode
 
-If `config.txt` is wrong or missing, the box can be configured over WiFi
-without removing the card. See
+The box can be configured over WiFi without removing the card. See
 [Changing settings without a card reader](#changing-settings-without-a-card-reader).
 
 ### Status light
