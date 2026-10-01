@@ -146,8 +146,6 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
   `scripts/flash.sh` and `scripts/battery-run.py` do this themselves.
 - `espflash` must touch the port before `esptool` does. After a failed
   `espflash`, run no `esptool` command. A power cycle is the only recovery.
-- Do not `pkill -f` or `pgrep -f` on a pattern that contains the port. The
-  pattern matches its own shell.
 - Reproduce a network problem from the host with `curl` before debugging the
   box. teddyCloud here is TLS-only and needs legacy renegotiation.
 - Code that takes a large value by value in `main`'s frame can overflow the
@@ -157,7 +155,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 ## Pull requests
 
 - Branch from `main` and rebase onto it. History is linear: no merge commits,
-  and branches land by fast-forward.
+  and branches are rebased onto `main`.
 - `main` requires a pull request and a passing `all gates` check.
 - Keep the description short: why the change exists, and anything a reviewer
   would otherwise miss.
