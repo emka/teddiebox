@@ -228,12 +228,63 @@ port 8443. `update_url` then points at `teddiebox.txt`:
 
     update_url = https://teddycloud.local:8443/content/teddiebox/teddiebox.txt
 
+Uploads use teddyCloud's HTTP API, so curl has to authenticate the server.
+That takes a one-time setup, below, and then one command per update:
+
+    for f in teddiebox.bin teddiebox.txt; do
+      curl -k --pinnedpubkey "sha256//$PIN" -F "file=@target/ota/$f" \
+        "https://teddycloud.local:8443/api/fileUpload?path=/teddiebox&special=content"
+    done
+
+`-k` only switches off the host name check, which cannot pass: teddyCloud's
+certificate has no subject alternative name. The pin authenticates the server
+instead, and curl refuses any server whose key is not `PIN`. Check the result
+with
+`curl -k --pinnedpubkey "sha256//$PIN" https://teddycloud.local:8443/content/teddiebox/teddiebox.txt`.
+
+#### One-time upload setup
+
+1. Get teddyCloud's CA as `tcca.der`. It is the file the card carries as
+   `cert/tcca.der`. If you have no copy, download it once, over a network you
+   trust, since nothing authenticates this first download:
+
+       curl -k -o tcca.der https://teddycloud.local:8443/api/getFile/ca.der
+
+2. Derive the pin from the server's certificate, after checking that the CA
+   signed it:
+
+       openssl s_client -connect teddycloud.local:8443 </dev/null 2>/dev/null |
+         openssl x509 -out leaf.pem
+       openssl verify -CAfile <(openssl x509 -inform der -in tcca.der) leaf.pem
+       PIN=$(openssl x509 -in leaf.pem -pubkey -noout |
+         openssl pkey -pubin -outform der |
+         openssl dgst -sha256 -binary | openssl base64)
+
+   `verify` must print `leaf.pem: OK`. Keep the value of `PIN`. It changes
+   only when teddyCloud gets a new certificate key.
+
+3. Create the directory. The upload API refuses a directory that does not
+   exist:
+
+       curl -k --pinnedpubkey "sha256//$PIN" -X POST --data-raw teddiebox \
+         "https://teddycloud.local:8443/api/dirCreate?special=content"
+
+Alternatively, copy both files into the `teddiebox` folder of teddyCloud's
+`content` data directory.
+
 The box updates when the version differs, not only when it is newer, so
 publishing an older image rolls every box back to it.
 
 Updates are not signed. Anyone who can write to that directory decides what
 the box runs. The box only ever talks to the host in `update_url`, and
 verifies it against `cert/tcca.der` like every other request.
+
+teddyCloud has no authentication of its own, so anyone who can reach its web
+port (8443) can upload a different image and manifest, and every box that
+checks for updates will run it. Keep teddyCloud on a trusted network and do
+not expose port 8443 to the internet. To restrict it further, put a reverse
+proxy with basic auth or client certificates in front of that port, as the
+teddyCloud maintainers recommend.
 
 ## Development
 
