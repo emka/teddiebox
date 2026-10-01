@@ -12,7 +12,7 @@ pub const DIGITS: usize = 8;
 /// Parses exactly [`DIGITS`] hex digits. `None` for anything else at all.
 ///
 /// Strict on purpose: a tag answers a wrong password with silence, which
-/// looks the same as an empty plate or a broken antenna.
+/// looks the same as a box with no figure or a broken antenna.
 pub const fn u32_from_hex(text: &[u8]) -> Option<u32> {
     if text.len() != DIGITS {
         return None;

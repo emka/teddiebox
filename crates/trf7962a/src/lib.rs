@@ -52,7 +52,7 @@ const RESPONSE_ERROR_FLAG: u8 = 0x01;
 /// Returns the tag's error when `response` is an error response.
 ///
 /// Without this, a rejection would look like a malformed success, and a
-/// wrong password like an empty plate.
+/// wrong password like a box with no figure.
 fn tag_error<E>(response: &[u8]) -> Result<(), Error<E>> {
     if response
         .first()
@@ -118,7 +118,7 @@ const FIFO_COUNT_MASK: u8 = 0x0F;
 ///
 /// B7 means the reader's own transmit finished and B6 a reception. B4-B1 are
 /// reception errors: CRC, parity, byte framing or EOF, and collision. B0, the
-/// no-response timeout, is not an error: no answer just means an empty plate.
+/// no-response timeout, is not an error: no answer just means a box with no figure.
 const IRQ_TX: u8 = 0x80;
 const IRQ_RX_STARTED: u8 = 0x40;
 /// The FIFO wants servicing: emptying during a transmit, filling during a
@@ -130,14 +130,14 @@ const IRQ_ERRORS: u8 = 0x1E;
 ///
 /// An ISO 15693 exchange at high bit rate takes about 5–6 ms: transmit, then
 /// t1 of about 320 µs, then the tag's reply at 26.48 kbit/s. Too short a
-/// window makes a tag on the plate look like no tag, so it has headroom.
+/// window makes a tag on the box look like no tag, so it has headroom.
 pub const IRQ_POLL_INTERVAL_US: u32 = 200;
 /// Poll count, giving a 10 ms window at the interval above.
 ///
 /// **Measured:** the slowest reply from a real Tonie was **20 polls, about
 /// 4 ms** (see `slowest_reply_polls`). 50 leaves two and a half times that.
 ///
-/// Kept short because an empty plate waits the whole window on every poll,
+/// Kept short because a box with no figure waits the whole window on every poll,
 /// and the task blocks meanwhile: with 100 polls, playback had 49 audible
 /// glitches in 70 s. Measure again before lowering it further.
 pub const IRQ_POLL_ATTEMPTS: u32 = 50;
@@ -290,7 +290,7 @@ where
     /// Waits for the reader to raise its interrupt line.
     ///
     /// `Ok(false)` means the window passed without an interrupt: the normal
-    /// "nothing on the plate" case, not an error.
+    /// "nothing on the box" case, not an error.
     fn wait_for_response(&mut self) -> Result<bool, Error<E>> {
         for polled in 0..IRQ_POLL_ATTEMPTS {
             if self.irq.is_high().map_err(|_| Error::Pin)? {
@@ -310,7 +310,7 @@ where
     /// reply took. Use it to size `IRQ_POLL_ATTEMPTS`. Unanswered exchanges are
     /// not counted.
     ///
-    /// A window shorter than this makes a tag on the plate look like no tag,
+    /// A window shorter than this makes a tag on the box look like no tag,
     /// so leave plenty of headroom.
     pub fn slowest_reply_polls(&self) -> u32 {
         self.slowest_reply_polls
@@ -510,7 +510,7 @@ where
         tag_error(&buf[..n])
     }
 
-    /// Whether anything is on the plate, without unlocking it.
+    /// Whether anything is on the box, without unlocking it.
     ///
     /// SL2S5002 §1.3: a label in privacy mode "will not respond to any command
     /// except the command GET RANDOM NUMBER, until it next receives the correct
@@ -550,7 +550,7 @@ where
 
         for &password in passwords {
             // Privacy mode still answers this command, so silence here means
-            // an empty plate, not a wrong password.
+            // a box with no figure, not a wrong password.
             let random = match self.get_random_number() {
                 Ok(random) => random,
                 Err(Error::Timeout) => return Ok(None),

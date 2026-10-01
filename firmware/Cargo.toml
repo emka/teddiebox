@@ -42,7 +42,7 @@ esp-rtos = { version = "0.4", features = [
 # arena here breaks the build.
 embassy-executor = "0.10"
 embassy-time = "0.5"
-# `Signal`, to pass the latest plate reading to whichever task wants it,
+# `Signal`, to pass the latest box reading to whichever task wants it,
 # without a queue.
 embassy-sync = "0.8"
 # Protects the credentials typed at the console, shared between the console

@@ -448,7 +448,7 @@ impl Client {
 /// key (from flash), and the tag's 32-byte token goes in an
 /// `Authorization: BD …` header. So whatever answers at `server` gets a
 /// client-authenticated session it could relay to teddyCloud, plus a token
-/// for the figure on the plate. The private key never leaves the box. Chain
+/// for the figure on the box. The private key never leaves the box. Chain
 /// verification limits this to servers whose certificate the card's CA
 /// signed, but `server` comes from the card, so `CONFIG.TXT` must be correct.
 pub fn client_config<'a>(creds: Option<Credentials<'a>>) -> ClientSessionConfig<'a> {

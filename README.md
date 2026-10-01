@@ -204,8 +204,8 @@ change only that line of `config.txt` and restart the box.
 ### Updates over the air
 
 With `update_url` set, the box checks for an update once per boot, after the
-jingle, when the plate is empty and the battery is not low. A boot that starts
-with a figure on the plate, or on a low battery, does not check.
+jingle, when no figure is placed on the box and the battery is not low. A boot that starts
+with a figure on the box, or on a low battery, does not check.
 
 If the manifest's version differs from the running one, the box downloads the
 image into its spare firmware slot (the LED shows fetching, about 30 s) and

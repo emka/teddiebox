@@ -66,7 +66,7 @@ pub enum Command {
     ///
     /// Only on request, like the other playback commands.
     PlayTaf,
-    /// Bring the NFC reader up and report any tag on the plate.
+    /// Bring the NFC reader up and report any tag on the box.
     ///
     /// A plain ISO 15693 tag answers inventory; a Tonie in privacy mode does
     /// not, which looks the same as a wiring fault.
@@ -222,7 +222,7 @@ pub enum Command {
     /// one would leave a confusing mix. Also a manual fallback if detection
     /// fails.
     Headphones(bool),
-    /// Whether the reader polls the plate on its own.
+    /// Whether the reader polls the box on its own.
     ///
     /// **On at boot**, so the box reacts to figures without any command. A
     /// release image only accepts `dl`, so it could not turn it on.
@@ -592,7 +592,7 @@ fn parse_read_memory(line: &[u8]) -> Option<Command> {
 ///
 /// Exactly eight, because the password is a `u32` and a shorter value is a
 /// typo. A tag answers a wrong password with silence, which looks the same as
-/// an empty plate or a broken antenna.
+/// a box with no figure or a broken antenna.
 fn parse_password(line: &[u8]) -> Option<Command> {
     let digits = line.strip_prefix(b"pw ")?;
     // The same parser the build uses for a compiled-in password.

@@ -659,7 +659,7 @@ mod tests {
     }
 
     /// A story that reaches its end leaves the box idle, with the figure still
-    /// on the plate, so the LED updates and the idle timeout can fire.
+    /// on the box, so the LED updates and the idle timeout can fire.
     #[test]
     fn a_story_reaching_its_end_leaves_the_box_idle() {
         // Given

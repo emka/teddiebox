@@ -1,11 +1,11 @@
-//! Decides whether a figure is on the plate, from readings that are sometimes
+//! Decides whether a figure is on the box, from readings that are sometimes
 //! wrong.
 //!
 //! A tag can go unread even when nobody touched it, so one missed reading must
 //! not stop a story, and one stray reading must not start one.
 //!
 //! A reading can also be wrong rather than missing: while Wi-Fi is busy, the
-//! reader sometimes returns a UID that was never on the plate. So every change
+//! reader sometimes returns a UID that was never on the box. So every change
 //! needs several readings that agree — an arrival, a departure by absence, and
 //! a departure because another figure replaced it.
 
@@ -25,7 +25,7 @@ pub const ARRIVALS_TO_AGREE: u8 = 2;
 /// story that should keep playing is worse than starting one a little late.
 pub const MISSES_TO_LEAVE: u8 = 4;
 
-/// How often an empty plate is read.
+/// How often a box with no figure is read.
 ///
 /// This sets about half of how long a placement takes to be noticed. The
 /// reader's field is always on, so polling faster costs CPU time (about 12 ms
@@ -36,9 +36,9 @@ pub const MISSES_TO_LEAVE: u8 = 4;
 /// a tag.
 pub const EMPTY_POLL_MS: u32 = 200;
 
-/// How often a plate holding a figure is read.
+/// How often a box holding a figure is read.
 ///
-/// Slower than an empty plate, because a figure on the plate usually means a
+/// Slower than when no figure is placed, because a figure on the box usually means a
 /// story is playing, and each poll can disturb the audio. Polling every
 /// 200 ms caused 12 audible glitches in 49 s of playback; every 500 ms caused
 /// 4 in 47 s. How fast a lift is noticed is set by [`LEAVING_POLL_MS`].
@@ -46,7 +46,7 @@ pub const OCCUPIED_POLL_MS: u32 = 500;
 
 /// How soon a figure that missed a reading is read again.
 ///
-/// A lift always starts with a miss, so after a miss the plate is read
+/// A lift always starts with a miss, so after a miss the box is read
 /// quickly, and the audio is disturbed only then. A lift is noticed after one
 /// occupied poll plus three of these, instead of four occupied polls.
 ///
@@ -71,7 +71,7 @@ pub enum TagEvent {
 /// What the filter believes right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
-    /// Nothing has been on the plate, or the last thing left.
+    /// Nothing has been on the box, or the last thing left.
     Empty,
     /// Readings of this tag are accumulating but have not yet agreed.
     Arriving { tag: TagUid, seen: u8 },
@@ -79,7 +79,7 @@ enum State {
     Present { tag: TagUid, missed: u8 },
     /// A figure is present and something else has been read. Held here until
     /// the newcomer is seen often enough to be believed, because one reading
-    /// of a UID that was never on the plate is noise — and under radio traffic
+    /// of a UID that was never on the box is noise — and under radio traffic
     /// the reader produces it.
     Swapping {
         from: TagUid,
@@ -211,7 +211,7 @@ impl Presence {
 
     /// How long the reader should wait before its next reading.
     ///
-    /// A new figure on an empty plate is confirmed at once. A plate holding a
+    /// A new figure on a box with no figure is confirmed at once. A box holding a
     /// figure (even one that may be being swapped) is read slowly until a
     /// reading misses, then quickly until the figure answers or is gone.
     pub fn poll_again_in_ms(&self) -> u32 {
@@ -226,7 +226,7 @@ impl Presence {
     /// Reports the departure once the new figure has been seen often enough.
     ///
     /// The new figure then starts counting its arrival from zero, as it would
-    /// on an empty plate: the readings that proved the swap are used up on
+    /// on a box with no figure: the readings that proved the swap are used up on
     /// the departure.
     fn settle_swap(&mut self, to: TagUid, seen: u8) -> Option<TagEvent> {
         if seen >= self.arrivals_to_agree {
@@ -258,7 +258,7 @@ mod tests {
         Presence::new(2, 4)
     }
 
-    /// A plate on which `tag` has arrived.
+    /// A box on which `tag` has arrived.
     fn holding(tag: TagUid) -> Presence {
         let mut p = presence();
         p.feed(Some(tag));
@@ -267,7 +267,7 @@ mod tests {
     }
 
     /// One stray reading must not stop a story. While Wi-Fi is busy, the
-    /// reader sometimes returns a UID that was never on the plate.
+    /// reader sometimes returns a UID that was never on the box.
     #[test]
     fn a_single_stray_reading_of_another_tag_does_not_end_the_story() {
         // Given
@@ -367,7 +367,7 @@ mod tests {
     }
 
     /// The case that matters most: a tag that reads intermittently is still
-    /// on the plate, and stopping its story would be the visible failure.
+    /// on the box, and stopping its story would be the visible failure.
     #[test]
     fn a_tag_that_reads_three_times_in_five_stays_present() {
         // Given: the first two of the five readings, which made it arrive
@@ -437,7 +437,7 @@ mod tests {
         assert_eq!(events, [None; 5]);
     }
 
-    /// Every placement starts on an empty plate, so this sets about half of
+    /// Every placement starts on a box with no figure, so this sets about half of
     /// how long a placement takes to be noticed.
     #[test]
     fn an_empty_plate_is_looked_at_every_200_ms() {
@@ -466,7 +466,7 @@ mod tests {
         assert_eq!(p.poll_again_in_ms(), 20);
     }
 
-    /// A figure on the plate usually means a story is playing. Reading it
+    /// A figure on the box usually means a story is playing. Reading it
     /// every 200 ms caused 12 audible glitches in 49 s of playback; every
     /// 500 ms caused 4 in 47 s.
     #[test]
@@ -497,7 +497,7 @@ mod tests {
     }
 
     /// The readings that proved a swap are used up on the departure, so the
-    /// newcomer starts as if just placed on an empty plate. Nothing of it has
+    /// newcomer starts as if just placed on a box with no figure. Nothing of it has
     /// been read yet that a quick second reading could confirm.
     #[test]
     fn after_a_swap_the_newcomer_is_looked_at_like_an_empty_plate() {
@@ -534,7 +534,7 @@ mod tests {
         assert_eq!(silent_ms, 800);
     }
 
-    /// A lift always starts with a miss, so that is when the plate is read
+    /// A lift always starts with a miss, so that is when the box is read
     /// quickly. Reading quickly all through a story causes audible glitches.
     #[test]
     fn a_missed_figure_is_looked_at_again_after_100_ms() {
@@ -589,9 +589,9 @@ pub trait PlateReader {
     /// Re-reads an already-identified figure. Answers only while it is still
     /// there and still unlocked.
     fn identify(&mut self) -> Option<[u8; 8]>;
-    /// Whether anything at all answers the plate, unlocked or not.
+    /// Whether anything at all answers the box, unlocked or not.
     fn tag_present(&mut self) -> bool;
-    /// Identifies whatever is on the plate, unlocking it with `password`
+    /// Identifies whatever is on the box, unlocking it with `password`
     /// first. The one call that sends the password, so it is only made when
     /// [`Self::tag_present`] found something to unlock.
     fn inventory_unlocked(&mut self, password: u32) -> Option<[u8; 8]>;
@@ -600,7 +600,7 @@ pub trait PlateReader {
 /// What one call to [`PlatePoll::poll`] found, once it actually polled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Polled {
-    /// A change in what is on the plate, if the readings agree on one.
+    /// A change in what is on the box, if the readings agree on one.
     pub event: Option<TagEvent>,
     /// Set when this poll answered after a run of misses: how long the run
     /// was, worth telling the console. `None` on a poll that already
@@ -612,7 +612,7 @@ pub struct Polled {
     pub misses_now: u16,
 }
 
-/// Polls the plate on the schedule [`Presence`] sets, picking the cheapest
+/// Polls the box on the schedule [`Presence`] sets, picking the cheapest
 /// reader call each time.
 ///
 /// Owns everything the schedule depends on, so the caller only threads a
@@ -641,7 +641,7 @@ impl PlatePoll {
         }
     }
 
-    /// When the plate is next due to be read, in the same clock as
+    /// When the box is next due to be read, in the same clock as
     /// [`poll`](Self::poll)'s `now_ms`.
     ///
     /// Meaningless while polling is off: the caller decides how it schedules
@@ -655,7 +655,7 @@ impl PlatePoll {
     /// `None` when nothing was asked of `reader` this call: polling is off,
     /// or the next poll is not due yet at `now_ms`.
     ///
-    /// **Switching polling on forgets what the plate held.** [`Presence`]
+    /// **Switching polling on forgets what the box held.** [`Presence`]
     /// reports changes, not states, so a figure it already believed present
     /// would not be reported again — and while polling was off the figure
     /// may have left or been swapped. Turning polling on always starts
@@ -757,7 +757,7 @@ mod plate_poll_tests {
         )
     }
 
-    /// A plate nothing answers.
+    /// A box nothing answers.
     fn empty_plate() -> FakeReader {
         FakeReader::default()
     }
@@ -858,7 +858,7 @@ mod plate_poll_tests {
     }
 
     /// The documented reason polling has to reset on: without it, turning
-    /// polling back on with the same figure still on the plate would poll it
+    /// polling back on with the same figure still on the box would poll it
     /// as already-believed-present forever, when a swap or a lift while
     /// polling was off is exactly what the next poll needs to notice.
     #[test]
@@ -949,7 +949,7 @@ mod plate_poll_tests {
     }
 }
 
-/// What the reader last said about the plate.
+/// What the reader last said about the box.
 ///
 /// The token travels with the uid in one value, not in a separate message:
 /// two messages could be read in either order, and a figure could end up
@@ -963,10 +963,10 @@ pub enum Seen {
     Nothing,
 }
 
-/// Whether an answer that names a figure is about the one on the plate.
+/// Whether an answer that names a figure is about the one on the box.
 ///
 /// Three outcomes instead of an `Option`, because "a different figure is
-/// here" and "the plate is empty" are handled differently: the first is worth
+/// here" and "no figure is placed on the box" are handled differently: the first is worth
 /// telling the user about, the second is harmless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answering {
@@ -975,14 +975,14 @@ pub enum Answering {
     NoFigure,
 }
 
-/// The figure on the plate and the token that authorises fetching its story.
+/// The figure on the box and the token that authorises fetching its story.
 ///
 /// Kept together because a token that outlives its figure could authorise a
 /// fetch for the *next* figure. Every change goes through
 /// [`Placed::observe`], which always replaces both.
 ///
 /// Owned by the task that receives reader updates. Use [`Placed::answering`]
-/// to check whether a late answer still belongs to the figure on the plate.
+/// to check whether a late answer still belongs to the figure on the box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placed {
     figure: Option<TagUid>,
@@ -1032,7 +1032,7 @@ impl Placed {
         self.token
     }
 
-    /// Whether an answer naming `ruid` belongs to what is on the plate now.
+    /// Whether an answer naming `ruid` belongs to what is on the box now.
     ///
     /// The reducer checks the identity again before acting. This check decides
     /// whether the reducer is told at all, so one figure's answer is never
@@ -1046,13 +1046,13 @@ impl Placed {
     }
 }
 
-/// What answering the plate a certain way means for the reducer, once it is
+/// What answering the box a certain way means for the reducer, once it is
 /// known whether the answer is still about the figure it was asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settlement<T> {
-    /// The figure it was about is still on the plate.
+    /// The figure it was about is still on the box.
     ForTheFigure(T),
-    /// A different figure is on the plate now, for example after a console
+    /// A different figure is on the box now, for example after a console
     /// `get`. Worth telling the user about; not passed to the reducer.
     ForAnotherFigure,
     /// Nobody is waiting; nothing to do.
@@ -1061,7 +1061,7 @@ pub enum Settlement<T> {
 
 impl Answering {
     /// Calls `settle` with the figure an answer was about, but only when that
-    /// figure is still the one on the plate.
+    /// figure is still the one on the box.
     ///
     /// Shared by every place that turns a late answer into a reducer event —
     /// a finished download, a revalidation — so which of the three cases
@@ -1204,7 +1204,7 @@ mod placed_tests {
         assert_eq!(answering, Answering::TheFigure(A));
     }
 
-    /// A console `get` that finishes while another figure is on the plate
+    /// A console `get` that finishes while another figure is on the box
     /// must not be reported for that figure.
     #[test]
     fn an_answer_naming_a_different_figure_is_not_about_the_one_on_the_plate() {

@@ -1207,10 +1207,10 @@ fn a_reply_longer_than_the_fifo_warning_is_collected_in_full() {
     finish(r);
 }
 
-/// The plate's presence check. SL2S5002 §1.3: in privacy mode the label "will
+/// the box's presence check. SL2S5002 §1.3: in privacy mode the label "will
 /// not respond to any command except the command GET RANDOM NUMBER, until it
 /// next receives the correct Privacy password". So this command shows whether
-/// a Tonie is on the plate without unlocking it. `spi.done()` checks that no
+/// a Tonie is on the box without unlocking it. `spi.done()` checks that no
 /// SET PASSWORD follows.
 #[test]
 fn a_tag_is_noticed_without_being_unlocked() {
@@ -1231,7 +1231,7 @@ fn a_tag_is_noticed_without_being_unlocked() {
     finish(r);
 }
 
-/// An empty plate costs exactly one unanswered exchange. The box is in this
+/// A box with no figure costs exactly one unanswered exchange. The box is in this
 /// state most of the time.
 #[test]
 fn an_empty_plate_costs_one_unanswered_exchange() {

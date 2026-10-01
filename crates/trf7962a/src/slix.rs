@@ -116,8 +116,8 @@ mod tests {
 
     /// ISO 15693-3 §7.3.1: bit 6 of the request flags is the Address flag,
     /// which would require an eight-byte UID these three bytes do not carry.
-    /// A tag does not answer a malformed request, which looks like an empty
-    /// plate.
+    /// A tag does not answer a malformed request, which looks like a box with
+    /// no figure.
     #[test]
     fn the_random_number_request_is_not_addressed_to_a_uid() {
         // Given: nothing to address it to yet
@@ -175,8 +175,8 @@ mod tests {
     }
 
     /// The password is sent in written order (most significant byte first).
-    /// In the other order the tag does not answer, which looks like an empty
-    /// plate.
+    /// In the other order the tag does not answer, which looks like a box with
+    /// no figure.
     #[test]
     fn the_password_goes_on_the_air_most_significant_byte_first() {
         // Given: with no mask, the password shows through

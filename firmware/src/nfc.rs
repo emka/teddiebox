@@ -1,13 +1,13 @@
-//! The TRF7962A reader, and the tags on the plate.
+//! The TRF7962A reader, and the tags on the box.
 //!
 //! The driver is `trf7962a`, tested on the host. This file has the pins,
 //! the bus, the console commands, and the task that owns the reader: it
-//! polls the plate and runs the tag commands other tasks ask for.
+//! polls the box and runs the tag commands other tasks ask for.
 //!
 //! **A locked tag looks like a broken reader.** Tonie figures are in ICODE
 //! SLIX privacy mode and do not answer inventory until unlocked. So the
 //! reader's registers are read back at start-up: if they answer, "no tag"
-//! is about the plate, not the wiring.
+//! is about the box, not the wiring.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
@@ -135,7 +135,7 @@ impl Reader {
         Ok(Self { trf })
     }
 
-    /// Reads whatever is on the plate, if it answers without unlocking.
+    /// Reads whatever is on the box, if it answers without unlocking.
     pub fn inventory(&mut self) {
         match self.trf.inventory() {
             Ok(Some(uid)) => report_uid("tag", &uid),
@@ -238,8 +238,8 @@ impl Reader {
     /// Unlocks a Tonie's privacy mode, then reads it.
     ///
     /// GET RANDOM NUMBER is sent first on its own. A locked SLIX ignores
-    /// inventory but answers this, so it tells a locked tag from an empty
-    /// plate.
+    /// inventory but answers this, so it tells a locked tag from a box with
+    /// no figure.
     ///
     /// The unlock fetches its own random number; this one is not reused.
     pub fn unlock(&mut self, password: u32) {
@@ -286,10 +286,10 @@ impl Reader {
         (polls, polls * trf7962a::IRQ_POLL_INTERVAL_US)
     }
 
-    /// Whether anything is on the plate, without unlocking it.
+    /// Whether anything is on the box, without unlocking it.
     ///
-    /// The only command a locked Tonie answers (SL2S5002 §1.3). An empty
-    /// plate costs one unanswered exchange, and a locked figure is noticed
+    /// The only command a locked Tonie answers (SL2S5002 §1.3). A box with no
+    /// figure costs one unanswered exchange, and a locked figure is noticed
     /// without the password exchange.
     ///
     /// A bus error counts as "nothing there".
@@ -300,13 +300,13 @@ impl Reader {
     /// The UID of a tag that is already out of privacy mode, quietly.
     ///
     /// An unlocked figure stays unlocked until its field is turned off, so
-    /// while it is on the plate this needs no password. Reading the UID each
+    /// while it is on the box this needs no password. Reading the UID each
     /// time (rather than remembering it) notices a figure being swapped.
     pub fn identify(&mut self) -> Option<[u8; 8]> {
         self.trf.inventory().ok()?
     }
 
-    /// Whatever is on the plate, unlocked if needed, without printing.
+    /// Whatever is on the box, unlocked if needed, without printing.
     ///
     /// For the poll loop. Uses the same password list as `unlock`.
     pub fn inventory_unlocked(&mut self, password: u32) -> Option<[u8; 8]> {
@@ -568,7 +568,7 @@ pub(crate) const NFC_READ_TOKEN: u8 = 6;
 /// the figure.
 ///
 /// Written only by the console `token` command and read only by the console
-/// `get` command. A figure placed on the plate sends its own token inside
+/// `get` command. A figure placed on the box sends its own token inside
 /// [`crate::FETCH_REQUEST`], so a console `token` cannot be attached to it.
 pub(crate) static TAG_TOKEN: CsMutex<RefCell<Option<[u8; 32]>>> = CsMutex::new(RefCell::new(None));
 
@@ -581,7 +581,7 @@ pub(crate) static TAG_TOKEN: CsMutex<RefCell<Option<[u8; 32]>>> = CsMutex::new(R
 /// **This puts a credential in the image**: anyone with a built binary can
 /// read it. Accepted, because the alternative is typing it every session, and
 /// a box without it cannot read any figure. A tag with the wrong or missing
-/// password is *silent*, which looks just like an empty plate or a broken
+/// password is *silent*, which looks just like a box with no figure or a broken
 /// antenna.
 ///
 /// An unset or empty variable gives zero: nothing is unlocked until someone
@@ -615,22 +615,22 @@ pub(crate) static NFC_PASSWORD: AtomicU32 = AtomicU32::new(BUILT_IN_PASSWORD);
 /// one command with the count of the next.
 pub(crate) static NFC_MEM_RANGE: AtomicU32 = AtomicU32::new(0);
 
-/// Whether the reader polls the plate on its own. On at boot.
+/// Whether the reader polls the box on its own. On at boot.
 ///
 /// **On by default**, because a release image only accepts `dl` on the
 /// console, so it could never switch polling on. `plate off` switches it off
 /// for one session, to keep automatic tag unlocking out of a measurement.
 ///
-/// Polling an empty plate causes about 5 audio DMA restarts in 70 s, and none
+/// Polling a box with no figure causes about 5 audio DMA restarts in 70 s, and none
 /// with a figure present. Lifting the figure pauses the story
-/// (`Playback::on_tag_absent`), so nothing is playing while the plate is
-/// empty, and the restarts cannot be heard.
+/// (`Playback::on_tag_absent`), so nothing is playing while no figure is
+/// placed, and the restarts cannot be heard.
 pub(crate) static PLATE_POLLING: AtomicBool = AtomicBool::new(true);
 /// Asks the reader task to print the slowest reply it has seen. Set when
 /// polling is switched off, because that is when a run is over.
 pub(crate) static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
 
-/// What is on the plate right now — the current state, not a queue of edges.
+/// What is on the box right now — the current state, not a queue of edges.
 ///
 /// A `Signal` rather than a channel, because the media task can be busy for a
 /// long time and a queue would need an arbitrary depth. Keeping only the
@@ -669,12 +669,12 @@ async fn handle_console_request(reader: &mut Reader, request: u8) {
 /// Checks the antenna is connected. With our own field off, the RSSI
 /// register shows RF from outside, such as a phone, which proves the coil
 /// reaches the chip. Nothing else can tell a disconnected antenna from an
-/// empty plate.
+/// box with no figure.
 async fn probe_antenna(reader: &mut Reader) {
     reader.inventory();
     esp_println::println!(
         "teddiebox: nfc listening for an external field for 6 s — \
-         hold an NFC phone against the plate"
+         hold an NFC phone against the box"
     );
     reader.set_field(false);
     let mut peak = 0u8;
@@ -716,7 +716,7 @@ impl PlateReader for Reader {
     }
 }
 
-/// Polls the plate if it is due, and tells the media task about any change.
+/// Polls the box if it is due, and tells the media task about any change.
 ///
 /// The decision — which request is due, which request is cheapest, and what
 /// a run of misses means — is [`PlatePoll::poll`], host-tested in
@@ -740,7 +740,7 @@ fn poll_plate(reader: &mut Reader, poll: &mut PlatePoll) {
     let Some(event) = polled.event else {
         return;
     };
-    // Printed, so the plate's state is visible even when the reducer does
+    // Printed, so the box's state is visible even when the reducer does
     // nothing about it.
     match event {
         TagEvent::Arrived(tag) => {
@@ -754,7 +754,7 @@ fn poll_plate(reader: &mut Reader, poll: &mut PlatePoll) {
     match event {
         TagEvent::Arrived(tag) => {
             // Read the token now: it is only readable while the figure is
-            // on the plate and unlocked, and teddyCloud needs it to fetch
+            // on the box and unlocked, and teddyCloud needs it to fetch
             // the story from the cloud.
             let token = reader.read_token();
             PLATE_TAG.signal(Seen::Figure { uid: tag.0, token });
@@ -763,7 +763,7 @@ fn poll_plate(reader: &mut Reader, poll: &mut PlatePoll) {
     }
 }
 
-/// Brings the NFC reader up on first use, polls the plate, and serves the
+/// Brings the NFC reader up on first use, polls the box, and serves the
 /// console `nfc` commands.
 ///
 /// Waits for a request rather than starting at boot: the reader shares the
@@ -818,7 +818,7 @@ pub(crate) async fn nfc_reader(
 
         poll_plate(&mut reader, &mut poll);
 
-        // Console requests are still answered within 100 ms; the plate is
+        // Console requests are still answered within 100 ms; the box is
         // read when `poll` asked for it, which can be sooner.
         let console_due = Instant::now() + Duration::from_millis(100);
         Timer::at(if PLATE_POLLING.load(Ordering::Relaxed) {

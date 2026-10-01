@@ -300,7 +300,7 @@ mod tests {
     }
 
     /// The ninth figure pushes out the oldest, not the newest (which is
-    /// probably the one on the plate).
+    /// probably the one on the box).
     #[test]
     fn a_ninth_figure_pushes_out_the_oldest() {
         // Given

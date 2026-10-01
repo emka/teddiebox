@@ -226,7 +226,7 @@ impl Core {
     /// use, so the idle timeout does not park it in the middle of a job.
     ///
     /// Not an `Event`, for the same reason as [`Core::note_position`]. The
-    /// reducer only knows about figures on the plate. A console `play` or
+    /// reducer only knows about figures on the box. A console `play` or
     /// `taf` runs while the reducer is `Idle`, and a `batlog` run can last
     /// hours without making a sound.
     pub fn note_in_use(&mut self, in_use: bool) {
@@ -994,7 +994,7 @@ mod tests {
         assert!(!contains(&actions, Action::PowerOff(PowerOffReason::Idle)));
     }
 
-    /// A child walks away and leaves the figure on the plate. Once the story
+    /// A child walks away and leaves the figure on the box. Once the story
     /// ends, the idle timeout must still fire.
     #[test]
     fn a_finished_story_lets_the_idle_timeout_fire_with_the_figure_still_on() {
@@ -1038,7 +1038,7 @@ mod tests {
         );
     }
 
-    /// A child puts an unknown figure on the plate. At about 42.5 KB/s, a 37 MB
+    /// A child puts an unknown figure on the box. At about 42.5 KB/s, a 37 MB
     /// story takes about 15 minutes to download, longer than the idle timeout,
     /// and `ContentReady` only arrives at the end. Parking would cut power
     /// while the card is being written.

@@ -236,7 +236,7 @@ struct FetchRequest {
 
 /// The fetch about to be raised on [`NET_GET`], written whole in one go.
 ///
-/// Written by the console `get` command and by the plate's `RequestContent`
+/// Written by the console `get` command and by the box's `RequestContent`
 /// action, each as a whole [`FetchRequest`] just before raising the request.
 static FETCH_REQUEST: CsMutex<RefCell<Option<FetchRequest>>> = CsMutex::new(RefCell::new(None));
 
@@ -1107,7 +1107,7 @@ fn write_place(index: &CardIndex<'_>, tag: TagUid, page: u32, why: &str) {
 ///
 /// Most actions set the same statics as the matching console command.
 ///
-/// `token` is the credential of the figure currently on the plate, passed in
+/// `token` is the credential of the figure currently on the box, passed in
 /// rather than kept in a shared static; see [`FetchRequest`] for why.
 fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
     match action {
@@ -1274,7 +1274,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
 }
 
 /// Drains the reader's signal into what the media task believes is on the
-/// plate.
+/// box.
 ///
 /// The figure and its token are updated together by [`Placed::observe`],
 /// which has host tests; only the signal is handled here.
@@ -1285,7 +1285,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
 fn take_plate_event(placed: &mut Placed) -> Option<Event> {
     let event = placed.observe(nfc::PLATE_TAG.try_take()?);
     // A lift cancels any open question about the figure, as soon as it is
-    // seen. Later in the pass, the figure might already be back on the plate.
+    // seen. Later in the pass, the figure might already be back on the box.
     if event == Event::TagAbsent {
         critical_section::with(|cs| REVALIDATION.borrow_ref_mut(cs).withdrawn());
     }
@@ -1320,7 +1320,7 @@ fn apply(reducer: &mut Core, card: &storage::Mounted, event: Event, token: Optio
     }
 }
 
-/// Everything that happened to the plate this pass: a lift or place, a
+/// Everything that happened to the box this pass: a lift or place, a
 /// finished download or probe, and a settled revalidation question — each
 /// matched to the figure it was about, so a stale result cannot land on a
 /// different one.
@@ -1348,10 +1348,10 @@ fn gather_events(card: Option<&storage::Mounted>, placed: &mut Placed) -> [Optio
 fn gather_fetch_outcome(placed: &Placed) -> Option<Event> {
     let (outcome, outcome_ruid) = transfer(Transfer::take_outcome)?;
     match teddiebox_core::plate::settle_fetch_outcome(placed.answering(outcome_ruid), outcome) {
-        // The figure it was for is still on the plate. (The reducer checks
+        // The figure it was for is still on the box. (The reducer checks
         // the identity again before acting.)
         Settlement::ForTheFigure(event) => Some(event),
-        // A different figure is on the plate, for example after a console
+        // A different figure is on the box, for example after a console
         // `get`. Not passed to the reducer.
         Settlement::ForAnotherFigure => {
             esp_println::println!(
@@ -1435,7 +1435,7 @@ fn feed_tick(
     let now = Instant::now().as_millis();
     if now.saturating_sub(*last_fed) >= 1_000 {
         *last_fed = now;
-        // The reducer only knows about figures on the plate. Console
+        // The reducer only knows about figures on the box. Console
         // playback, a `batlog` run or `awake on` also count as use, or the
         // idle timeout would cut them short.
         reducer.note_in_use(
@@ -1670,8 +1670,8 @@ async fn play_taf_story(
     *quiet_since = Some(Instant::now());
 }
 
-/// Asks the net task to prime the connection once, the first time the plate
-/// is empty after the jingle. A figure already on the plate does this work
+/// Asks the net task to prime the connection once, the first time after the jingle that no figure is placed
+/// on the box. A figure already on the box does this work
 /// itself, and one placed during priming uses the same connection.
 fn maybe_prime_net(primed: &mut bool, configured: bool, placed: &Placed) {
     if *primed
@@ -1905,10 +1905,10 @@ async fn media(
 
     let mut download: Option<CacheWrite> = None;
 
-    // Decides what to do with a figure on the plate. It lives here because it
+    // Decides what to do with a figure on the box. It lives here because it
     // needs to know what is on the card, and this task owns the card.
     let mut reducer = Core::new(CoreConfig::default());
-    // The figure on the plate, if any, with its token. Used to match a
+    // The figure on the box, if any, with its token. Used to match a
     // finished download or probe to the figure it was for; with no figure, a
     // late result is ignored. The token is kept here rather than in a shared
     // static, so nothing typed at the console can be attached to this
@@ -1931,14 +1931,14 @@ async fn media(
         // here starts in the same pass.
         let events = gather_events(card.as_ref(), &mut placed);
 
-        // Once the jingle is over and the plate is empty, do the slow part of
-        // the first network request in advance. A figure already on the plate
+        // Once the jingle is over and no figure is placed on the box, do the slow part of
+        // the first network request in advance. A figure already on the box
         // does this work itself, and one placed during priming uses the same
         // connection.
         maybe_prime_net(&mut primed, configured, &placed);
 
         // Every pass, not only when a figure moved: ear presses are
-        // independent of the plate.
+        // independent of the box.
         if let Some(mounted) = card.as_ref() {
             apply_ear_events(&mut reducer, mounted, placed.token());
         }
@@ -2027,7 +2027,7 @@ async fn serve_get_while_connected(
     match tls {
         None => {
             esp_println::println!("teddiebox: tls context unavailable");
-            // Answer a waiting probe, or the figure on the plate would
+            // Answer a waiting probe, or the figure on the box would
             // stay silent.
             if let Some(FetchRequest {
                 ruid, probe: true, ..
@@ -2057,9 +2057,9 @@ async fn serve_get_while_connected(
 /// Primes the TLS connection, if there is one, then checks for an update if
 /// the card names where to look.
 ///
-/// The one network task of every boot that starts with an empty plate, so
+/// The one network task of every boot that starts with a box with no figure, so
 /// this is where the update check runs. A boot that starts with a figure on
-/// the plate goes straight to its story and does not check.
+/// the box goes straight to its story and does not check.
 async fn prime_while_connected(
     tls: Option<&tls::Client>,
     stack: &embassy_net::Stack<'_>,
@@ -2538,7 +2538,7 @@ async fn scan_and_report(radio: &mut net::Radio<'_>) {
 
 /// Comes up to fetch or probe a figure with the radio off.
 ///
-/// The radio is switched on for it and off again afterwards: the plate is
+/// The radio is switched on for it and off again afterwards: the box is
 /// read less reliably while the radio runs, and there is no other reason to
 /// stay connected.
 async fn serve_get(
