@@ -51,9 +51,15 @@ mod tests {
     /// A real Tonie, stored on a real card at `CONTENT/1C2D3E4F/500304E0`.
     #[test]
     fn a_real_tonie_uid_maps_to_its_observed_card_path() {
+        // Given
         let uid = [0xE0, 0x04, 0x03, 0x50, 0x4F, 0x3E, 0x2D, 0x1C];
+
+        // When
+        let path = content_path(uid);
+
+        // Then
         assert_eq!(
-            content_path(uid),
+            path,
             ContentPath {
                 directory: 0x1C2D3E4F,
                 file: 0x500304E0,
@@ -63,9 +69,15 @@ mod tests {
 
     #[test]
     fn each_byte_lands_in_the_reversed_position() {
+        // Given
         let uid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+        // When
+        let path = content_path(uid);
+
+        // Then
         assert_eq!(
-            content_path(uid),
+            path,
             ContentPath {
                 directory: 0x08070605,
                 file: 0x04030201,
@@ -76,9 +88,15 @@ mod tests {
     /// A zero byte in the reversed UID must not be lost.
     #[test]
     fn a_zero_byte_in_the_reversed_form_is_not_dropped() {
+        // Given
         let uid = [0xAA, 0xBB, 0xCC, 0xDD, 0x00, 0x11, 0x22, 0x33];
+
+        // When
+        let path = content_path(uid);
+
+        // Then
         assert_eq!(
-            content_path(uid),
+            path,
             ContentPath {
                 directory: 0x33221100,
                 file: 0xDDCCBBAA,
@@ -88,21 +106,49 @@ mod tests {
 
     #[test]
     fn hex8_renders_a_real_directory_name() {
-        assert_eq!(hex8(0x1C2D3E4F), *b"1C2D3E4F");
+        // Given
+        let directory = 0x1C2D3E4F;
+
+        // When
+        let name = hex8(directory);
+
+        // Then
+        assert_eq!(name, *b"1C2D3E4F");
     }
 
     #[test]
     fn hex8_pads_a_small_value_with_leading_zeros() {
-        assert_eq!(hex8(0x0000_00E0), *b"000000E0");
+        // Given
+        let small = 0x0000_00E0;
+
+        // When
+        let name = hex8(small);
+
+        // Then
+        assert_eq!(name, *b"000000E0");
     }
 
     #[test]
     fn hex8_uses_upper_case_digits() {
-        assert_eq!(hex8(0xABCDEF01), *b"ABCDEF01");
+        // Given
+        let letters = 0xABCDEF01;
+
+        // When
+        let name = hex8(letters);
+
+        // Then
+        assert_eq!(name, *b"ABCDEF01");
     }
 
     #[test]
     fn hex8_renders_the_maximum_value() {
-        assert_eq!(hex8(0xFFFF_FFFF), *b"FFFFFFFF");
+        // Given
+        let maximum = 0xFFFF_FFFF;
+
+        // When
+        let name = hex8(maximum);
+
+        // Then
+        assert_eq!(name, *b"FFFFFFFF");
     }
 }
