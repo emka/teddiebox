@@ -198,7 +198,8 @@ mbedtls-rs = { path = "vendor/mbedtls-rs" }
 # so looking up the gateway for DNS delayed looking up teddyCloud, adding
 # 1.03 s to every first connection. `scripts/vendor-smoltcp.sh` applies
 # `scripts/smoltcp-per-address-arp.patch`, which makes the pause per
-# address. Drop this line once upstream smoltcp does the same.
+# address. Drop this line once upstream smoltcp does the same:
+# https://github.com/smoltcp-rs/smoltcp/issues/1209
 smoltcp = { path = "vendor/smoltcp" }
 
 [profile.release]

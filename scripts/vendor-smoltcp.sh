@@ -10,7 +10,8 @@
 # every request (measured), against 0.01 s without the wait. The patch keeps
 # the one-second silence but applies it per address, which is what it is for:
 # not asking the same silent neighbor over and over. Upstream smoltcp still
-# applies it to the whole cache.
+# applies it to the whole cache:
+# https://github.com/smoltcp-rs/smoltcp/issues/1209
 #
 # Fetched and patched rather than committed, for the reasons
 # `scripts/vendor-mbedtls-rs-sys.sh` gives: the tarball is pinned by the
