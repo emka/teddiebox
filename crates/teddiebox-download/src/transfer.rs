@@ -464,36 +464,58 @@ mod tests {
 
     #[test]
     fn an_asked_transfer_asks_the_media_task_to_read_the_card() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.ask(PATH);
-        assert_eq!(transfer.next(false), Work::Plan(PATH));
+
+        // When
+        let work = transfer.next(false);
+
+        // Then
+        assert_eq!(work, Work::Plan(PATH));
     }
 
     #[test]
     fn the_card_answer_reaches_the_producer_once_planned() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.ask(PATH);
-        assert_eq!(transfer.card_answer(), None);
+        let before_planning = transfer.card_answer();
+
+        // When
         transfer.planned(half_cached());
+
+        // Then
+        assert_eq!(before_planning, None);
         assert_eq!(transfer.card_answer(), Some(CardSays::Holds(1_000)));
     }
 
     #[test]
     fn a_card_answer_after_the_producer_gave_up_leaves_the_transfer_idle() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.ask(PATH);
         transfer.gave_up();
+
+        // When
         transfer.planned(half_cached());
+
+        // Then
         assert_eq!(transfer.next(false), Work::Idle);
         assert_eq!(transfer.card_answer(), None);
     }
 
     #[test]
     fn giving_up_reports_unreachable() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.start(FIGURE);
         transfer.ask(PATH);
+
+        // When
         transfer.gave_up();
+
+        // Then
         assert_eq!(
             transfer.take_outcome(),
             Some((Outcome::Unreachable, FIGURE))
@@ -502,46 +524,75 @@ mod tests {
 
     #[test]
     fn a_card_that_holds_everything_reports_completed_without_a_request() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.start(FIGURE);
         transfer.ask(PATH);
+
+        // When
         transfer.holds_all();
+
+        // Then
         assert_eq!(transfer.next(false), Work::Idle);
         assert_eq!(transfer.take_outcome(), Some((Outcome::Completed, FIGURE)));
     }
 
     #[test]
     fn the_producer_waits_while_the_request_is_in_flight() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.ask(PATH);
         transfer.planned(nothing_cached());
-        assert_eq!(transfer.next(false), Work::Wait);
+
+        // When
+        let work = transfer.next(false);
+
+        // Then
+        assert_eq!(work, Work::Wait);
     }
 
     #[test]
     fn a_resume_is_sent_the_etag_the_sidecar_holds() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.ask(PATH);
+
+        // When
         transfer.planned(half_cached());
+
+        // Then
         assert_eq!(transfer.resume_etag(), etag());
     }
 
     #[test]
     fn a_request_that_ends_having_sent_nothing_is_discarded_not_opened() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.start(FIGURE);
         transfer.ask(PATH);
         transfer.planned(nothing_cached());
+
+        // When
         transfer.ended(Some(Outcome::Unreachable));
-        assert_eq!(transfer.next(false), Work::Discard);
-        assert_eq!(transfer.next(false), Work::Idle);
+        let first = transfer.next(false);
+        let second = transfer.next(false);
+
+        // Then
+        assert_eq!(first, Work::Discard);
+        assert_eq!(second, Work::Idle);
     }
 
     #[test]
     fn a_fresh_download_opens_from_the_start_with_the_servers_sidecar() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
+
+        // When
+        let work = transfer.next(false);
+
+        // Then
         assert_eq!(
-            transfer.next(false),
+            work,
             Work::Open {
                 path: PATH,
                 placement: Placement::Restart,
@@ -556,9 +607,15 @@ mod tests {
 
     #[test]
     fn a_fresh_download_with_no_length_writes_no_sidecar() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(None));
+
+        // When
+        let work = transfer.next(false);
+
+        // Then
         assert_eq!(
-            transfer.next(false),
+            work,
             Work::Open {
                 path: PATH,
                 placement: Placement::Restart,
@@ -570,18 +627,27 @@ mod tests {
 
     #[test]
     fn a_length_of_zero_counts_as_no_length() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(0)));
-        assert!(matches!(
-            transfer.next(false),
-            Work::Open { sidecar: None, .. }
-        ));
+
+        // When
+        let work = transfer.next(false);
+
+        // Then
+        assert!(matches!(work, Work::Open { sidecar: None, .. }));
     }
 
     #[test]
     fn a_resume_continues_the_file_and_keeps_its_sidecar() {
+        // Given
         let mut transfer = running(half_cached(), the_rest());
+
+        // When
+        let work = transfer.next(false);
+
+        // Then
         assert_eq!(
-            transfer.next(false),
+            work,
             Work::Open {
                 path: PATH,
                 placement: Placement::Continue,
@@ -593,14 +659,20 @@ mod tests {
 
     #[test]
     fn a_range_of_a_file_that_has_changed_is_refused() {
+        // Given
         let changed = Head {
             at: 1_000,
             total: Some(5_000),
             etag: etag(),
         };
         let mut transfer = running(half_cached(), changed);
+
+        // When
+        let work = transfer.next(false);
+
+        // Then
         assert!(matches!(
-            transfer.next(false),
+            work,
             Work::Open {
                 placement: Placement::Refuse,
                 ..
@@ -610,6 +682,7 @@ mod tests {
 
     #[test]
     fn a_sidecar_promising_zero_bytes_counts_as_no_sidecar() {
+        // Given
         let plan = Plan {
             expected: Some(0),
             ..half_cached()
@@ -620,8 +693,13 @@ mod tests {
             etag: etag(),
         };
         let mut transfer = running(plan, different_total);
+
+        // When
+        let work = transfer.next(false);
+
+        // Then
         assert!(matches!(
-            transfer.next(false),
+            work,
             Work::Open {
                 placement: Placement::Continue,
                 ..
@@ -631,34 +709,59 @@ mod tests {
 
     #[test]
     fn an_open_file_is_drained() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(512);
-        assert_eq!(transfer.next(true), Work::Drain);
+
+        // When
+        let work = transfer.next(true);
+
+        // Then
+        assert_eq!(work, Work::Drain);
     }
 
     #[test]
     fn a_download_is_not_finished_while_bytes_remain_in_the_pipe() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(4_000);
         transfer.ended(None);
-        assert_eq!(transfer.finish(3_488), None);
+
+        // When
+        let finished = transfer.finish(3_488);
+
+        // Then
+        assert_eq!(finished, None);
     }
 
     #[test]
     fn a_download_is_not_finished_while_the_producer_is_still_sending() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(2_000);
-        assert_eq!(transfer.finish(2_000), None);
+
+        // When
+        let finished = transfer.finish(2_000);
+
+        // Then
+        assert_eq!(finished, None);
     }
 
     #[test]
     fn a_whole_download_reports_completed_only_once_it_is_on_the_card() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(4_000);
         transfer.ended(None);
-        assert_eq!(transfer.take_outcome(), None);
+        let outcome_before_finish = transfer.take_outcome();
+
+        // When
+        let finished = transfer.finish(4_000);
+
+        // Then
+        assert_eq!(outcome_before_finish, None);
         assert_eq!(
-            transfer.finish(4_000),
+            finished,
             Some(Finished {
                 whole: true,
                 at: 0,
@@ -672,24 +775,30 @@ mod tests {
 
     #[test]
     fn a_resumed_download_is_whole_when_it_reaches_the_servers_length() {
+        // Given
         let mut transfer = running(half_cached(), the_rest());
         transfer.sent(3_000);
         transfer.ended(None);
-        assert!(matches!(
-            transfer.finish(3_000),
-            Some(Finished { whole: true, .. })
-        ));
+
+        // When
+        let finished = transfer.finish(3_000);
+
+        // Then
+        assert!(matches!(finished, Some(Finished { whole: true, .. })));
     }
 
     #[test]
     fn a_download_that_stopped_short_reports_unreachable() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(2_000);
         transfer.ended(None);
-        assert!(matches!(
-            transfer.finish(2_000),
-            Some(Finished { whole: false, .. })
-        ));
+
+        // When
+        let finished = transfer.finish(2_000);
+
+        // Then
+        assert!(matches!(finished, Some(Finished { whole: false, .. })));
         assert_eq!(
             transfer.take_outcome(),
             Some((Outcome::Unreachable, FIGURE))
@@ -698,51 +807,81 @@ mod tests {
 
     #[test]
     fn a_short_download_keeps_the_reason_the_producer_gave() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(2_000);
         transfer.ended(Some(Outcome::NoContent));
+
+        // When
         transfer.finish(2_000);
+
+        // Then
         assert_eq!(transfer.take_outcome(), Some((Outcome::NoContent, FIGURE)));
     }
 
     #[test]
     fn an_abandoned_download_reports_nothing() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(2_000);
+
+        // When
         transfer.abort();
         transfer.ended(None);
         transfer.finish(2_000);
+
+        // Then
         assert_eq!(transfer.take_outcome(), None);
     }
 
     #[test]
     fn a_lift_stops_the_producer() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
+
+        // When
         transfer.abort();
+
+        // Then
         assert!(transfer.should_stop());
     }
 
     #[test]
     fn a_new_fetch_forgets_an_earlier_abort() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.abort();
+
+        // When
         transfer.fetching();
+
+        // Then
         assert!(!transfer.should_stop());
     }
 
     #[test]
     fn a_finished_download_forgets_its_abort() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.abort();
         transfer.ended(None);
+
+        // When
         transfer.finish(0);
+
+        // Then
         assert!(!transfer.should_stop());
     }
 
     #[test]
     fn a_card_that_cannot_be_opened_stops_the_producer_and_reports_unreachable() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
+
+        // When
         transfer.open_failed();
+
+        // Then
         assert!(transfer.should_stop());
         assert_eq!(transfer.next(false), Work::Idle);
         assert_eq!(
@@ -753,17 +892,28 @@ mod tests {
 
     #[test]
     fn a_producer_that_ends_after_the_card_failed_is_opened_again_not_left_hanging() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(512);
         transfer.open_failed();
+
+        // When
         transfer.ended(None);
-        assert!(matches!(transfer.next(false), Work::Open { .. }));
+        let work = transfer.next(false);
+
+        // Then
+        assert!(matches!(work, Work::Open { .. }));
     }
 
     #[test]
     fn a_card_that_cannot_be_written_stops_the_producer_and_reports_unreachable() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
+
+        // When
         transfer.write_failed();
+
+        // Then
         assert!(transfer.should_stop());
         assert_eq!(
             transfer.take_outcome(),
@@ -773,16 +923,28 @@ mod tests {
 
     #[test]
     fn a_failure_to_connect_is_reported_while_nothing_is_in_flight() {
+        // Given
         let mut transfer = Transfer::new();
         transfer.start(FIGURE);
-        assert!(transfer.could_not_connect(Outcome::Refused));
+
+        // When
+        let reported = transfer.could_not_connect(Outcome::Refused);
+
+        // Then
+        assert!(reported);
         assert_eq!(transfer.take_outcome(), Some((Outcome::Refused, FIGURE)));
     }
 
     #[test]
     fn a_failure_to_connect_is_not_reported_while_a_download_is_in_flight() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
-        assert!(!transfer.could_not_connect(Outcome::Unreachable));
+
+        // When
+        let reported = transfer.could_not_connect(Outcome::Unreachable);
+
+        // Then
+        assert!(!reported);
         assert_eq!(transfer.take_outcome(), None);
     }
 
@@ -796,29 +958,44 @@ mod tests {
 
     #[test]
     fn a_whole_story_is_completed_even_if_the_producer_reported_a_failure() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(4_000);
         transfer.ended(Some(Outcome::Unreachable));
+
+        // When
         transfer.finish(4_000);
+
+        // Then
         assert_eq!(transfer.take_outcome(), Some((Outcome::Completed, FIGURE)));
     }
 
     #[test]
     fn the_producers_reason_replaces_an_unread_outcome() {
+        // Given
         let mut transfer = with_unread_refusal();
         transfer.ask(PATH);
         transfer.planned(nothing_cached());
+
+        // When
         transfer.ended(Some(Outcome::NoContent));
+
+        // Then
         assert_eq!(transfer.take_outcome(), Some((Outcome::NoContent, FIGURE)));
     }
 
     #[test]
     fn a_card_that_cannot_be_opened_replaces_an_unread_outcome() {
+        // Given
         let mut transfer = with_unread_refusal();
         transfer.ask(PATH);
         transfer.planned(nothing_cached());
         transfer.headers(whole_file(Some(4_000)));
+
+        // When
         transfer.open_failed();
+
+        // Then
         assert_eq!(
             transfer.take_outcome(),
             Some((Outcome::Unreachable, FIGURE))
@@ -827,11 +1004,16 @@ mod tests {
 
     #[test]
     fn a_card_that_cannot_be_written_replaces_an_unread_outcome() {
+        // Given
         let mut transfer = with_unread_refusal();
         transfer.ask(PATH);
         transfer.planned(nothing_cached());
         transfer.headers(whole_file(Some(4_000)));
+
+        // When
         transfer.write_failed();
+
+        // Then
         assert_eq!(
             transfer.take_outcome(),
             Some((Outcome::Unreachable, FIGURE))
@@ -840,48 +1022,75 @@ mod tests {
 
     #[test]
     fn a_card_that_holds_everything_replaces_an_unread_outcome() {
+        // Given
         let mut transfer = with_unread_refusal();
         transfer.ask(PATH);
+
+        // When
         transfer.holds_all();
+
+        // Then
         assert_eq!(transfer.take_outcome(), Some((Outcome::Completed, FIGURE)));
     }
 
     #[test]
     fn giving_up_leaves_an_unread_outcome_alone() {
+        // Given
         let mut transfer = with_unread_refusal();
         transfer.ask(PATH);
+
+        // When
         transfer.gave_up();
+
+        // Then
         assert_eq!(transfer.take_outcome(), Some((Outcome::Refused, FIGURE)));
     }
 
     #[test]
     fn a_failure_to_connect_leaves_an_unread_outcome_alone() {
+        // Given
         let mut transfer = with_unread_refusal();
-        assert!(!transfer.could_not_connect(Outcome::Unreachable));
+
+        // When
+        let reported = transfer.could_not_connect(Outcome::Unreachable);
+
+        // Then
+        assert!(!reported);
         assert_eq!(transfer.take_outcome(), Some((Outcome::Refused, FIGURE)));
     }
 
     #[test]
     fn a_new_ask_forgets_the_bytes_the_last_transfer_sent() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(512);
         transfer.ended(None);
         transfer.finish(512);
+
+        // When
         transfer.ask(PATH);
         transfer.planned(nothing_cached());
         transfer.ended(Some(Outcome::Unreachable));
+
+        // Then
         assert_eq!(transfer.next(false), Work::Discard);
     }
 
     #[test]
     fn a_failed_write_finishes_once_the_producer_stops_despite_the_bytes_it_lost() {
+        // Given: the second 512-byte chunk left the pipe but never reached
+        // the card
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(1_024);
-        // The second 512-byte chunk left the pipe but never reached the card.
         transfer.write_failed();
         transfer.ended(None);
+
+        // When
+        let finished = transfer.finish(512);
+
+        // Then
         assert_eq!(
-            transfer.finish(512),
+            finished,
             Some(Finished {
                 whole: false,
                 at: 0,
@@ -893,10 +1102,16 @@ mod tests {
 
     #[test]
     fn nothing_more_is_written_after_a_failed_write() {
+        // Given
         let mut transfer = running(nothing_cached(), whole_file(Some(4_000)));
         transfer.sent(1_024);
         transfer.write_failed();
-        assert_eq!(transfer.next(true), Work::Drop);
+
+        // When
+        let work = transfer.next(true);
+
+        // Then
+        assert_eq!(work, Work::Drop);
     }
 
     /// A transfer whose producer has stopped while its last bytes are still
@@ -910,48 +1125,74 @@ mod tests {
 
     #[test]
     fn a_new_fetch_waits_while_the_last_one_is_still_being_written() {
+        // Given
         let mut transfer = still_being_written();
+
+        // When
         transfer.ask(OTHER_PATH);
+
+        // Then
         assert_eq!(transfer.next(true), Work::Drain);
     }
 
     #[test]
     fn giving_up_on_a_new_fetch_leaves_the_last_one_being_written() {
+        // Given
         let mut transfer = still_being_written();
         transfer.ask(OTHER_PATH);
+
+        // When
         transfer.gave_up();
+
+        // Then
         assert_eq!(transfer.next(true), Work::Drain);
     }
 
     #[test]
     fn a_new_fetch_is_asked_once_the_last_one_has_finished() {
+        // Given
         let mut transfer = still_being_written();
         transfer.finish(4_000);
-        assert!(transfer.ask(OTHER_PATH));
+
+        // When
+        let accepted = transfer.ask(OTHER_PATH);
+
+        // Then
+        assert!(accepted);
         assert_eq!(transfer.next(false), Work::Plan(OTHER_PATH));
     }
 
     #[test]
     fn the_last_download_is_credited_to_its_own_figure_when_a_new_one_is_waiting() {
+        // Given
         let mut transfer = still_being_written();
         transfer.start(OTHER_FIGURE);
         transfer.ask(OTHER_PATH);
+
+        // When
         transfer.finish(4_000);
+
+        // Then
         assert_eq!(transfer.take_outcome(), Some((Outcome::Completed, FIGURE)));
     }
 
     #[test]
     fn an_unread_outcome_for_another_figure_does_not_silence_a_new_fetch() {
+        // Given: an unread outcome for the first figure
         let mut transfer = Transfer::new();
         transfer.start(FIGURE);
         transfer.ask(PATH);
         transfer.planned(nothing_cached());
         transfer.ended(Some(Outcome::NoContent));
-        assert_eq!(transfer.next(false), Work::Discard);
+        let first_work = transfer.next(false);
 
+        // When
         transfer.start(OTHER_FIGURE);
         transfer.ask(OTHER_PATH);
         transfer.gave_up();
+
+        // Then
+        assert_eq!(first_work, Work::Discard);
         assert_eq!(
             transfer.take_outcome(),
             Some((Outcome::Unreachable, OTHER_FIGURE))
