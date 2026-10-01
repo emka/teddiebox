@@ -154,99 +154,150 @@ mod tests {
 
     #[test]
     fn a_request_asks_the_card_first() {
+        // Given
         let mut h = Handshake::new();
-        assert_eq!(h.requested(0), Step::AskCard);
+
+        // When
+        let step = h.requested(0);
+
+        // Then
+        assert_eq!(step, Step::AskCard);
         assert!(h.is_asking());
     }
 
     #[test]
     fn an_answer_that_names_cached_bytes_resumes_after_them() {
+        // Given
         let mut h = Handshake::new();
         h.requested(0);
-        assert_eq!(
-            h.card_answered(CardSays::Holds(27_841_285)),
-            Step::Fetch { from: 27_841_285 }
-        );
+
+        // When
+        let step = h.card_answered(CardSays::Holds(27_841_285));
+
+        // Then
+        assert_eq!(step, Step::Fetch { from: 27_841_285 });
         assert!(!h.is_asking());
     }
 
     #[test]
     fn an_answer_of_nothing_cached_fetches_from_the_beginning() {
+        // Given
         let mut h = Handshake::new();
         h.requested(0);
-        assert_eq!(h.card_answered(CardSays::Nothing), Step::Fetch { from: 0 });
+
+        // When
+        let step = h.card_answered(CardSays::Nothing);
+
+        // Then
+        assert_eq!(step, Step::Fetch { from: 0 });
     }
 
     #[test]
     fn a_file_already_whole_plays_instead_of_fetching() {
+        // Given
         let mut h = Handshake::new();
         h.requested(0);
-        assert_eq!(h.card_answered(CardSays::HoldsAll), Step::Play);
+
+        // When
+        let step = h.card_answered(CardSays::HoldsAll);
+
+        // Then
+        assert_eq!(step, Step::Play);
     }
 
     /// The first ask can be missed while a prompt is playing, so it is
     /// repeated.
     #[test]
     fn a_silent_card_is_asked_again() {
+        // Given
         let mut h = Handshake::new();
         h.requested(0);
-        assert_eq!(h.polled(u64::from(RETRY_MS) - 1), Step::Wait);
-        assert_eq!(h.polled(u64::from(RETRY_MS)), Step::AskCard);
+
+        // When
+        let just_before = h.polled(u64::from(RETRY_MS) - 1);
+        let at_the_retry = h.polled(u64::from(RETRY_MS));
+
+        // Then
+        assert_eq!(just_before, Step::Wait);
+        assert_eq!(at_the_retry, Step::AskCard);
     }
 
     /// If the card is busy playing when a figure is placed, the download must
     /// not start from zero and truncate a partial file.
     #[test]
     fn a_card_that_never_answers_never_turns_into_a_fetch_from_zero() {
+        // Given
         let mut h = Handshake::new();
         h.requested(0);
 
-        assert_eq!(poll_until_it_gives_up(&mut h), Step::GiveUp);
+        // When
+        let step = poll_until_it_gives_up(&mut h);
+
+        // Then
+        assert_eq!(step, Step::GiveUp);
     }
 
     /// Polled in 100 ms steps, like the network loop. (A single jump to the
     /// deadline would only trigger a re-ask.)
     #[test]
     fn the_conversation_is_abandoned_at_the_deadline() {
+        // Given
         let mut h = Handshake::new();
         h.requested(0);
-        for tick in 1..(DEADLINE_MS / 100) {
-            assert_ne!(
-                h.polled(u64::from(tick) * 100),
-                Step::GiveUp,
-                "gave up early"
-            );
-        }
-        assert_eq!(h.polled(u64::from(DEADLINE_MS)), Step::GiveUp);
+
+        // When
+        let gave_up_early = (1..(DEADLINE_MS / 100))
+            .map(|tick| h.polled(u64::from(tick) * 100))
+            .any(|step| step == Step::GiveUp);
+        let at_the_deadline = h.polled(u64::from(DEADLINE_MS));
+
+        // Then
+        assert!(!gave_up_early, "gave up early");
+        assert_eq!(at_the_deadline, Step::GiveUp);
         assert!(!h.is_asking());
     }
 
     /// An answer just before the deadline is still in time.
     #[test]
     fn an_answer_just_before_the_deadline_still_fetches() {
+        // Given
         let mut h = Handshake::new();
         h.requested(0);
         h.polled(u64::from(DEADLINE_MS) - 1);
-        assert_eq!(
-            h.card_answered(CardSays::Holds(42)),
-            Step::Fetch { from: 42 }
-        );
+
+        // When
+        let step = h.card_answered(CardSays::Holds(42));
+
+        // Then
+        assert_eq!(step, Step::Fetch { from: 42 });
     }
 
     /// An answer can arrive after the handshake gave up. It must not start a
     /// download for a figure that may have been lifted.
     #[test]
     fn an_answer_after_giving_up_is_ignored() {
+        // Given
         let mut h = Handshake::new();
         h.requested(0);
-        assert_eq!(poll_until_it_gives_up(&mut h), Step::GiveUp);
-        assert_eq!(h.card_answered(CardSays::Holds(42)), Step::Wait);
+        poll_until_it_gives_up(&mut h);
+
+        // When
+        let step = h.card_answered(CardSays::Holds(42));
+
+        // Then
+        assert_eq!(step, Step::Wait);
     }
 
     #[test]
     fn polls_with_nothing_asked_do_nothing() {
+        // Given
         let mut h = Handshake::new();
-        assert_eq!(h.polled(u64::from(DEADLINE_MS) * 2), Step::Wait);
+
+        // When
+        let step = h.polled(u64::from(DEADLINE_MS) * 2);
+
+        // Then
+        assert_eq!(step, Step::Wait);
     }
 
     /// The deadline is fifteen seconds of real time, however slowly the
@@ -257,12 +308,12 @@ mod tests {
     /// box).
     #[test]
     fn the_deadline_is_wall_clock_however_slowly_the_caller_polls() {
+        // Given: a 10 ms timer that fires after 106 ms, as measured on the box
+        const GAP_MS: u64 = 106;
         let mut h = Handshake::new();
         h.requested(0);
 
-        // As measured on the box: a 10 ms timer that fires after 106 ms.
-        const GAP_MS: u64 = 106;
-
+        // When
         let mut now = 0;
         loop {
             let step = h.polled(now);
@@ -278,6 +329,8 @@ mod tests {
                 "still asking after {now} ms of wall clock"
             );
         }
+
+        // Then
         assert!(now >= u64::from(DEADLINE_MS), "gave up early, at {now} ms");
     }
 }
