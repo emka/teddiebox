@@ -131,7 +131,9 @@ impl<P: PageSource, const BATCH: usize> PageSource for Window<P, BATCH> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    use std::vec::Vec;
 
     /// Every byte of a page is the page's index, so a test can see which page
     /// it got.
@@ -161,10 +163,15 @@ mod tests {
 
     #[test]
     fn a_page_the_download_has_reached_is_served() {
+        // Given
         let mut w = window(16);
         w.set_watermark(Bytes(4 * PAGE_SIZE as u32));
         let mut buf = [0u8; PAGE_SIZE];
+
+        // When
         w.read_page(0, &mut buf).unwrap();
+
+        // Then
         assert_eq!(buf[0], 0);
         assert_eq!(buf[PAGE_SIZE - 1], 0);
     }
@@ -172,45 +179,71 @@ mod tests {
     /// A page that has not been downloaded must not be served.
     #[test]
     fn a_page_beyond_the_watermark_is_refused_rather_than_guessed() {
+        // Given
         let mut w = window(16);
         w.set_watermark(Bytes(2 * PAGE_SIZE as u32));
         let mut buf = [0u8; PAGE_SIZE];
-        assert_eq!(w.read_page(2, &mut buf), Err(WindowError::NotYetDownloaded));
+
+        // When
+        let result = w.read_page(2, &mut buf);
+
+        // Then
+        assert_eq!(result, Err(WindowError::NotYetDownloaded));
     }
 
     /// A page is only available once all of it is written.
     #[test]
     fn a_page_only_half_written_is_not_yet_available() {
+        // Given
         let mut w = window(16);
         w.set_watermark(Bytes(PAGE_SIZE as u32 + 1));
         let mut buf = [0u8; PAGE_SIZE];
-        assert!(w.read_page(0, &mut buf).is_ok());
-        assert_eq!(w.read_page(1, &mut buf), Err(WindowError::NotYetDownloaded));
+
+        // When
+        let whole_page = w.read_page(0, &mut buf);
+        let half_page = w.read_page(1, &mut buf);
+
+        // Then
+        assert!(whole_page.is_ok());
+        assert_eq!(half_page, Err(WindowError::NotYetDownloaded));
     }
 
     /// Eight pages in a row cost one batch, so one backward FAT walk covers
     /// about 2 s of audio.
     #[test]
     fn eight_sequential_pages_cost_one_trip_to_the_card() {
+        // Given
         let mut w = window(64);
         w.set_watermark(Bytes(64 * PAGE_SIZE as u32));
         let mut buf = [0u8; PAGE_SIZE];
-        for page in 0..8 {
-            w.read_page(page, &mut buf).unwrap();
-            assert_eq!(buf[0], page as u8, "page {page} served wrong content");
-        }
+
+        // When
+        let served: Vec<u8> = (0..8)
+            .map(|page| {
+                w.read_page(page, &mut buf).unwrap();
+                buf[0]
+            })
+            .collect();
+
+        // Then
+        assert_eq!(served, [0, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(w.reads(), 8, "a batch is filled with eight reads");
         assert_eq!(w.batches(), 1, "but only one seek back to fill it");
     }
 
     #[test]
     fn a_ninth_page_starts_a_new_batch() {
+        // Given
         let mut w = window(64);
         w.set_watermark(Bytes(64 * PAGE_SIZE as u32));
         let mut buf = [0u8; PAGE_SIZE];
+
+        // When
         for page in 0..9 {
             w.read_page(page, &mut buf).unwrap();
         }
+
+        // Then
         assert_eq!(w.batches(), 2);
     }
 
@@ -218,10 +251,15 @@ mod tests {
     /// the card.
     #[test]
     fn a_batch_stops_at_the_watermark() {
+        // Given
         let mut w = window(64);
         w.set_watermark(Bytes(3 * PAGE_SIZE as u32));
         let mut buf = [0u8; PAGE_SIZE];
+
+        // When
         w.read_page(0, &mut buf).unwrap();
+
+        // Then
         assert_eq!(w.reads(), 3, "three pages exist; the batch stops there");
     }
 
@@ -229,50 +267,69 @@ mod tests {
     /// then the watermark moves on and the next page can be served.
     #[test]
     fn a_batch_truncated_by_watermark_extends_as_watermark_advances() {
+        // Given: a first read that fills a batch truncated to three pages
         let mut w = window(64);
         w.set_watermark(Bytes(3 * PAGE_SIZE as u32));
         let mut buf = [0u8; PAGE_SIZE];
-        // First read fills a batch, truncated to three pages.
         w.read_page(0, &mut buf).unwrap();
-        assert_eq!(w.reads(), 3);
-        // Page 3 is not yet available.
-        assert_eq!(w.read_page(3, &mut buf), Err(WindowError::NotYetDownloaded));
-        // Watermark advances, page 3 and beyond now exist.
+        let reads_after_first = w.reads();
+        let before_advance = w.read_page(3, &mut buf);
+
+        // When: the watermark advances, so page 3 and beyond exist
         w.set_watermark(Bytes(8 * PAGE_SIZE as u32));
-        // Page 3 is fetched (and the batch refilled from page 3).
         w.read_page(3, &mut buf).unwrap();
+
+        // Then
+        assert_eq!(reads_after_first, 3);
+        assert_eq!(before_advance, Err(WindowError::NotYetDownloaded));
         assert_eq!(buf[0], 3, "page 3 content delivered");
     }
 
     #[test]
     fn a_page_already_in_the_batch_costs_no_trip_at_all() {
+        // Given
         let mut w = window(64);
         w.set_watermark(Bytes(64 * PAGE_SIZE as u32));
         let mut buf = [0u8; PAGE_SIZE];
         w.read_page(0, &mut buf).unwrap();
         let after_first = w.reads();
+
+        // When
         w.read_page(3, &mut buf).unwrap();
+
+        // Then
         assert_eq!(buf[0], 3);
         assert_eq!(w.reads(), after_first, "already cached");
     }
 
     #[test]
     fn a_page_before_the_batch_refills_from_there() {
+        // Given
         let mut w = window(64);
         w.set_watermark(Bytes(64 * PAGE_SIZE as u32));
         let mut buf = [0u8; PAGE_SIZE];
         w.read_page(10, &mut buf).unwrap();
+
+        // When
         w.read_page(2, &mut buf).unwrap();
+
+        // Then
         assert_eq!(buf[0], 2);
         assert_eq!(w.batches(), 2);
     }
 
     #[test]
     fn the_inner_sources_error_is_reported_as_its_own() {
+        // Given
         let mut w: Window<Numbered, 8> = Window::new(Numbered { pages: 0, reads: 0 });
         w.set_watermark(Bytes(PAGE_SIZE as u32));
         let mut buf = [0u8; PAGE_SIZE];
-        assert_eq!(w.read_page(0, &mut buf), Err(WindowError::Inner(())));
+
+        // When
+        let result = w.read_page(0, &mut buf);
+
+        // Then
+        assert_eq!(result, Err(WindowError::Inner(())));
     }
 
     #[test]
@@ -293,33 +350,57 @@ mod tests {
     /// four more), so the watermark must be 9.
     #[test]
     fn decoding_waits_until_the_margin_is_covered() {
-        assert!(
-            !may_decode(Pages(4), Pages(8), Pages(4), false),
-            "eight pages is one short"
-        );
-        assert!(may_decode(Pages(4), Pages(9), Pages(4), false));
+        // Given
+        let (page, margin) = (Pages(4), Pages(4));
+
+        // When
+        let one_short = may_decode(page, Pages(8), margin, false);
+        let covered = may_decode(page, Pages(9), margin, false);
+
+        // Then
+        assert!(!one_short, "eight pages is one short");
+        assert!(covered);
     }
 
     /// A complete file is never gated, or the last frames of every story
     /// would stall.
     #[test]
     fn a_complete_file_is_never_gated() {
-        assert!(may_decode(Pages(1000), Pages(0), Pages(4), true));
+        // Given
+        let nothing_written = Pages(0);
+
+        // When
+        let may = may_decode(Pages(1000), nothing_written, Pages(4), true);
+
+        // Then
+        assert!(may);
     }
 
     #[test]
     fn a_margin_of_zero_still_requires_the_page_itself() {
-        assert!(
-            !may_decode(Pages(4), Pages(4), Pages(0), false),
-            "page 4 needs 5 pages committed"
-        );
-        assert!(may_decode(Pages(4), Pages(5), Pages(0), false));
+        // Given
+        let (page, no_margin) = (Pages(4), Pages(0));
+
+        // When
+        let without_the_page = may_decode(page, Pages(4), no_margin, false);
+        let with_the_page = may_decode(page, Pages(5), no_margin, false);
+
+        // Then
+        assert!(!without_the_page, "page 4 needs 5 pages committed");
+        assert!(with_the_page);
     }
 
     /// A watermark near u32::MAX must not wrap the margin into a small number
     /// and let the decoder through.
     #[test]
     fn the_margin_does_not_overflow_near_the_end_of_the_range() {
-        assert!(!may_decode(Pages(u32::MAX), Pages(10), Pages(4), false));
+        // Given
+        let page = Pages(u32::MAX);
+
+        // When
+        let may = may_decode(page, Pages(10), Pages(4), false);
+
+        // Then
+        assert!(!may);
     }
 }
