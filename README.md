@@ -16,6 +16,7 @@ can be extended. It behaves like stock except where noted below.
 
 The firmware is configured by writing `config.txt` on the SD card.
 Editing this file is also possible by booting the box in setup mode (see its own section below).
+All options are listed under [Configuration](#configuration).
 
 ### Position per story
 
@@ -76,6 +77,51 @@ The light is steady and dim.
   `config.txt`.
 - **Updates over the air.** See [Updates over the air](#updates-over-the-air).
 
+## Configuration
+
+Settings are in `config.txt` in the card's root. Example:
+
+    ssid = home
+    password = correct horse battery
+    server = teddycloud.local:443
+    ears_skip = yes
+    # update_url = https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt
+    # setup_password = my own passphrase
+
+Format:
+
+- One `key = value` per line. `#` starts a comment. Blank lines are ignored.
+- Unknown keys are ignored, so newer cards work with older firmware.
+- A known key with an invalid value is reported as an error, not guessed at.
+- `password` and `setup_password` take everything after `=`, including `#`.
+  For the other keys, a `#` that starts a word begins a comment.
+
+Options:
+
+| key | default | |
+|---|---|---|
+| `ssid` | required | WiFi network, up to 32 characters |
+| `password` | empty | WiFi passphrase, up to 63 characters. Empty for an open network |
+| `server` | required | `host:port` of your teddyCloud, up to 64 characters. Only letters, digits, `.`, `-`, `_` and `:` |
+| `ears_skip` | `yes` | holding an ear skips a chapter. `yes`/`no`, `true`/`false` or `1`/`0`. `no` gives stock ear behaviour, see [Chapter skip](#chapter-skip) |
+| `update_url` | none | `https://` URL of an update manifest, up to 128 characters. Without it the box never checks for updates, see [Updates over the air](#updates-over-the-air). An empty value is an error |
+| `setup_password` | `teddiebox` | passphrase of the setup network, 8 to 63 characters, see [Setup mode](#changing-settings-without-a-card-reader) |
+
+A file without `ssid` or `server` is rejected.
+
+**Trust `server`.** The box verifies the server's certificate against
+`cert/tcca.der` on the card, and sends it its own certificate and the placed
+figure's token.
+
+**`update_url` is verified like `server`**, so its host must be teddyCloud
+itself. See [Updates over the air](#updates-over-the-air).
+
+**The WiFi key is stored in flash.** The box derives a key from `ssid` and
+`password` and keeps it in the `wifi` partition, which cuts joining from about
+2s to 0.1s. It is re-derived after changing either value. Anyone who can
+read the flash can join your network, but the passphrase is on the card in
+plain text anyway.
+
 ## Installation
 
 ### Requirements
@@ -119,33 +165,6 @@ stored in the `cert` flash partition, not on the card.
 This is needed once per box; flashing firmware does not touch the `cert`
 partition. Without it the box plays what is on the card but cannot fetch, and
 says so at boot.
-
-### Configuration
-
-Settings are in `config.txt` in the card's root:
-
-- One `key = value` per line. `#` starts a comment. Blank lines are ignored.
-- Unknown keys are ignored, so newer cards work with older firmware.
-- A known key with an invalid value is reported as an error, not guessed at.
-
-| key | default | |
-|---|---|---|
-| `ssid` | required | WiFi network |
-| `password` | empty | WiFi passphrase. Everything after `=` is used, including `#`. Empty for an open network |
-| `server` | required | `host:port` of your teddyCloud |
-| `ears_skip` | `yes` | holding an ear skips a chapter |
-| `update_url` | none | `https://` URL of an update manifest. Without it the box never checks for updates |
-| `setup_password` | `teddiebox` | passphrase of the setup network, 8 to 63 characters |
-
-**Trust `server`.** The box verifies the server's certificate against
-`tcca.der` on the card, and sends it its own certificate and the placed
-figure's token.
-
-**The WiFi key is stored in flash.** The box derives a key from `ssid` and
-`password` and keeps it in the `wifi` partition, which cuts joining from about
-2s to 0.1s. It is re-derived after changing either value. Anyone who can
-read the flash can join your network, but the passphrase is on the card in
-plain text anyway.
 
 ### Changing settings without a card reader
 
@@ -214,7 +233,7 @@ publishing an older image rolls every box back to it.
 
 Updates are not signed. Anyone who can write to that directory decides what
 the box runs. The box only ever talks to the host in `update_url`, and
-verifies it against `tcca.der` like every other request.
+verifies it against `cert/tcca.der` like every other request.
 
 ## Development
 
