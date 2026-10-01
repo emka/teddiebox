@@ -275,6 +275,18 @@ mod tests {
         assert_eq!(w.read_page(0, &mut buf), Err(WindowError::Inner(())));
     }
 
+    #[test]
+    fn the_window_has_as_many_pages_as_the_source_it_wraps() {
+        // Given
+        let w = window(16);
+
+        // When
+        let count = w.page_count();
+
+        // Then
+        assert_eq!(count, 16);
+    }
+
     // --- the gate ---
 
     /// Page 4 with a margin of 4 needs pages 0..=8 written (the page plus
