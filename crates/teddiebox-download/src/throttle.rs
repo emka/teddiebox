@@ -97,22 +97,50 @@ mod tests {
     /// it would wait forever.
     #[test]
     fn an_abandoned_transfer_stops_even_while_the_throttle_holds_it() {
-        assert_eq!(next_step(true, false), Continue::Abandon);
+        // Given
+        let (abandoned, throttle_open) = (true, false);
+
+        // When
+        let step = next_step(abandoned, throttle_open);
+
+        // Then
+        assert_eq!(step, Continue::Abandon);
     }
 
     #[test]
     fn an_abandoned_transfer_stops_rather_than_reading_on() {
-        assert_eq!(next_step(true, true), Continue::Abandon);
+        // Given
+        let (abandoned, throttle_open) = (true, true);
+
+        // When
+        let step = next_step(abandoned, throttle_open);
+
+        // Then
+        assert_eq!(step, Continue::Abandon);
     }
 
     #[test]
     fn a_throttled_transfer_waits() {
-        assert_eq!(next_step(false, false), Continue::Wait);
+        // Given
+        let (abandoned, throttle_open) = (false, false);
+
+        // When
+        let step = next_step(abandoned, throttle_open);
+
+        // Then
+        assert_eq!(step, Continue::Wait);
     }
 
     #[test]
     fn an_open_throttle_reads_now() {
-        assert_eq!(next_step(false, true), Continue::Now);
+        // Given
+        let (abandoned, throttle_open) = (false, true);
+
+        // When
+        let step = next_step(abandoned, throttle_open);
+
+        // Then
+        assert_eq!(step, Continue::Now);
     }
 
     const RESUME: Pages = Pages(8);
@@ -120,64 +148,97 @@ mod tests {
 
     #[test]
     fn nothing_playing_means_download_flat_out() {
+        // Given
         let mut throttle = Throttle::new();
-        assert!(throttle.update(false, Pages(0), RESUME, PAUSE));
-        assert!(throttle.update(false, Pages(1000), RESUME, PAUSE));
+
+        // When
+        let with_no_lead = throttle.update(false, Pages(0), RESUME, PAUSE);
+        let with_a_huge_lead = throttle.update(false, Pages(1000), RESUME, PAUSE);
+
+        // Then
+        assert!(with_no_lead);
+        assert!(with_a_huge_lead);
     }
 
     /// A story is playing and the decoder is close behind, so the download
     /// must run even if it causes glitches; otherwise the audio would stop.
     #[test]
     fn a_thin_lead_wins_over_a_quiet_radio() {
+        // Given
         let mut throttle = Throttle::new();
-        assert!(throttle.update(true, Pages(7), RESUME, PAUSE));
+
+        // When
+        let fetching = throttle.update(true, Pages(7), RESUME, PAUSE);
+
+        // Then
+        assert!(fetching);
     }
 
     #[test]
     fn a_comfortable_lead_pauses_the_download() {
+        // Given: a download that has started
         let mut throttle = Throttle::new();
         throttle.update(true, Pages(0), RESUME, PAUSE);
-        assert!(throttle.fetching(), "should have started");
-        assert!(!throttle.update(true, Pages(32), RESUME, PAUSE));
+        let started = throttle.fetching();
+
+        // When
+        let fetching = throttle.update(true, Pages(32), RESUME, PAUSE);
+
+        // Then
+        assert!(started, "should have started");
+        assert!(!fetching);
     }
 
     /// Between the two thresholds the last decision stays, so the download
     /// does not start and stop on every page.
     #[test]
     fn between_the_thresholds_the_last_decision_stands() {
+        // Given
         let mut throttle = Throttle::new();
 
-        // Fell behind, so it is downloading; a middle lead does not stop it.
+        // When: it fell behind, so it is downloading, and a middle lead
+        // follows; then it got far enough ahead to pause, and the same
+        // middle lead follows
         throttle.update(true, Pages(2), RESUME, PAUSE);
-        assert!(
-            throttle.update(true, Pages(20), RESUME, PAUSE),
-            "stopped too early"
-        );
-
-        // Far enough ahead, so it paused; the same middle lead does not
-        // restart it.
+        let middle_while_fetching = throttle.update(true, Pages(20), RESUME, PAUSE);
         throttle.update(true, Pages(40), RESUME, PAUSE);
-        assert!(
-            !throttle.update(true, Pages(20), RESUME, PAUSE),
-            "restarted too early"
-        );
+        let middle_while_paused = throttle.update(true, Pages(20), RESUME, PAUSE);
+
+        // Then
+        assert!(middle_while_fetching, "stopped too early");
+        assert!(!middle_while_paused, "restarted too early");
     }
 
     /// With no gap between the thresholds, the answer does not depend on
     /// the previous one.
     #[test]
     fn thresholds_with_no_gap_fall_back_to_one_decision() {
+        // Given
         let mut throttle = Throttle::new();
         let both = Pages(10);
-        assert!(throttle.update(true, Pages(9), both, both));
-        assert!(!throttle.update(true, Pages(10), both, both));
-        assert!(throttle.update(true, Pages(9), both, both));
+
+        // When
+        let below = throttle.update(true, Pages(9), both, both);
+        let at = throttle.update(true, Pages(10), both, both);
+        let below_again = throttle.update(true, Pages(9), both, both);
+
+        // Then
+        assert!(below);
+        assert!(!at);
+        assert!(below_again);
     }
 
     /// Starts paused, so a download begun during a story does not glitch the
     /// first frame.
     #[test]
     fn a_new_throttle_is_paused() {
-        assert!(!Throttle::new().fetching());
+        // Given
+        let throttle = Throttle::new();
+
+        // When
+        let fetching = throttle.fetching();
+
+        // Then
+        assert!(!fetching);
     }
 }
