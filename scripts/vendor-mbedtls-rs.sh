@@ -3,7 +3,7 @@
 # Materialises `firmware/vendor/mbedtls-rs`: the published crate, with one
 # call added and one method (`PrivateKey::warm`, at the end of this script).
 #
-# `mbedtls-rs` 0.2.0 never calls `mbedtls_ssl_conf_max_frag_len`, and keeps the
+# `mbedtls-rs` 0.3.0 never calls `mbedtls_ssl_conf_max_frag_len`, and keeps the
 # `mbedtls_ssl_config` it builds private, so a downstream crate cannot reach it
 # — not before the handshake, which is the only time the setting has any
 # effect. That leaves this box unable to say how large a TLS record it can
@@ -34,10 +34,10 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 # The checksum crates.io's index records for this exact tarball; it is the same
 # value `firmware/Cargo.lock` carries for the crate.
-CKSUM="7ffe70b1a677b6efabede0d8e762f6187e66bff5118814aee2dcbfefad187add"
+CKSUM="a34f68c0c7f08ef1279be80a23f454f66735de9324e4958aa5e90ff66de7d078"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="$root/firmware/vendor/mbedtls-rs"

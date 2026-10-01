@@ -99,7 +99,7 @@ embedded-sdmmc = { version = "0.10", default-features = false }
 # The default, 16384, does not fit: the handshake's RSA operation then runs
 # out of heap. 8192 cannot receive a 16 KB record, so the box asks the server
 # for smaller records; see `scripts/vendor-mbedtls-rs.sh`.
-mbedtls-rs = { version = "0.2", default-features = false, features = [
+mbedtls-rs = { version = "0.3", default-features = false, features = [
     # Build the C with the Xtensa GCC the Nix flake provides for libopus; the
     # default is clang, which the dev shell does not include.
     "use-gcc",
@@ -171,7 +171,7 @@ esp-radio = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f4
 esp-alloc = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
 esp-rom-sys = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553f435f29171f7ae5f37a41ad737a75a" }
 
-# `mbedtls-rs-sys` 0.2.0 requires `esp-hal = "~1.1.0"`, which excludes
+# `mbedtls-rs-sys` 0.3.1 requires `esp-hal = "~1.2.0"`, which excludes
 # 1.2.0-rc.0, so its `esp32s3` feature (hardware acceleration) cannot
 # resolve. The esp-hal APIs it uses are unchanged in 1.2, so the patch is the
 # published crate with that version bound widened. It is created by
@@ -181,17 +181,18 @@ esp-rom-sys = { git = "https://github.com/esp-rs/esp-hal.git", rev = "63e97be553
 # `firmware/vendor/` is gitignored, so a fresh clone needs `just vendor` (or
 # any `just` recipe that builds) before a plain `cargo build` works.
 #
-# Drop this line once mbedtls-rs-sys widens the bound upstream.
+# Drop this line once the firmware is on a stable esp-hal 1.2 release.
 mbedtls-rs-sys = { path = "vendor/mbedtls-rs-sys" }
 
-# `mbedtls-rs` 0.2.0 never calls `mbedtls_ssl_conf_max_frag_len` and keeps
+# `mbedtls-rs` 0.3.0 never calls `mbedtls_ssl_conf_max_frag_len` and keeps
 # `mbedtls_ssl_config` private, so the box cannot ask the server for smaller
 # records. It must: the input buffer above cannot hold teddyCloud's 16 KB
 # records, and cannot grow, because the handshake's RSA operation needs that
 # heap. `scripts/vendor-mbedtls-rs.sh` adds the call and explains the
 # measurements.
 #
-# Drop this line once mbedtls-rs exposes the setting.
+# Drop this line once mbedtls-rs exposes the setting
+# (https://github.com/esp-rs/mbedtls-rs/pull/145) and `PrivateKey::warm`.
 mbedtls-rs = { path = "vendor/mbedtls-rs" }
 
 # smoltcp 0.13.1 pauses all ARP requests for a second after any ARP request,

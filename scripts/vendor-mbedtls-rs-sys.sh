@@ -3,12 +3,12 @@
 # Materialises `firmware/vendor/mbedtls-rs-sys`: the published crate, with two
 # lines changed — one in its `Cargo.toml`, one in `gen/features.rs`.
 #
-# `mbedtls-rs-sys` 0.2.0 declares `esp-hal = "~1.1.0"`, and `~1.1.0` means
-# `>=1.1.0, <1.2.0`. This firmware is on `esp-hal 1.2.0-rc.0` (see the
-# `[patch.crates-io]` block in firmware/Cargo.toml for why), so enabling the
-# crate's `esp32s3` feature — the one that routes SHA, RSA and AES onto the
-# chip's accelerators — cannot resolve. Every one of the nine `esp-hal` APIs
-# those hooks use exists unchanged in 1.2, so the bound is the entire problem.
+# `mbedtls-rs-sys` 0.3.1 declares `esp-hal = "~1.2.0"`, and `~1.2.0` means
+# `>=1.2.0, <1.3.0`, which excludes a pre-release. This firmware is on
+# `esp-hal 1.2.0-rc.0` (see the `[patch.crates-io]` block in firmware/Cargo.toml
+# for why), so enabling the crate's `esp32s3` feature — the one that routes SHA,
+# RSA and AES onto the chip's accelerators — cannot resolve. The bound is the
+# entire problem.
 #
 # Why fetch-and-patch rather than committing the crate: it is 33 MB unpacked
 # and roughly 8.8 MB of git objects, nearly all of it upstream MbedTLS C, to
@@ -40,9 +40,9 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.1"
 # The `cksum` crates.io's index records for this exact tarball.
-CKSUM="d49d6c43db5aae2ef895972de7a9414cafb649fab288933e74bf7739c0fffe55"
+CKSUM="ed3d6fe75492994df511a63da8de669a0c59938ada3345e3d4756aec095d2ffb"
 
 # The bound as published, and what it has to become. A comma-separated
 # requirement is an AND, so there is no way to name both 1.1 and 1.2.0-rc.0:
@@ -50,7 +50,7 @@ CKSUM="d49d6c43db5aae2ef895972de7a9414cafb649fab288933e74bf7739c0fffe55"
 # that same version, which rules out `>=1.1, <1.3.0` and `>=1.1.0-rc.0, <1.3.0`
 # alike. This firmware only ever wants 1.2, so the narrow form is the honest
 # one to write here.
-BOUND_BEFORE='version = "~1.1.0"'
+BOUND_BEFORE='version = "~1.2.0"'
 BOUND_AFTER='version = ">=1.2.0-rc.0, <1.3.0"'
 
 # The `TLS_CORE` bundle's entry, matched with its indentation: the same
