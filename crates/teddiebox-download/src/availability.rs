@@ -27,57 +27,93 @@ mod tests {
 
     #[test]
     fn shipped_content_plays_without_a_sidecar() {
+        // Given
         let nothing_cached = Cached {
             sidecar: None,
             length_on_card: None,
         };
-        assert!(playable_now(true, &nothing_cached));
+
+        // When
+        let playable = playable_now(true, &nothing_cached);
+
+        // Then
+        assert!(playable);
     }
 
     #[test]
     fn a_complete_cached_file_plays() {
+        // Given
         let cached = Cached {
             sidecar: Some(sidecar(4096)),
             length_on_card: Some(4096),
         };
-        assert!(playable_now(false, &cached));
+
+        // When
+        let playable = playable_now(false, &cached);
+
+        // Then
+        assert!(playable);
     }
 
     /// A partial download is not playable, the same as a missing one. The
     /// download code decides whether to resume.
     #[test]
     fn a_partial_download_is_not_playable() {
+        // Given
         let cached = Cached {
             sidecar: Some(sidecar(4096)),
             length_on_card: Some(1024),
         };
-        assert!(!playable_now(false, &cached));
+
+        // When
+        let playable = playable_now(false, &cached);
+
+        // Then
+        assert!(!playable);
     }
 
     #[test]
     fn a_file_with_no_sidecar_is_not_playable() {
+        // Given
         let cached = Cached {
             sidecar: None,
             length_on_card: Some(4096),
         };
-        assert!(!playable_now(false, &cached));
+
+        // When
+        let playable = playable_now(false, &cached);
+
+        // Then
+        assert!(!playable);
     }
 
     #[test]
     fn nothing_anywhere_is_not_playable() {
+        // Given
         let cached = Cached {
             sidecar: None,
             length_on_card: None,
         };
-        assert!(!playable_now(false, &cached));
+
+        // When
+        let playable = playable_now(false, &cached);
+
+        // Then
+        assert!(!playable);
     }
 
     #[test]
     fn a_file_longer_than_promised_is_not_playable() {
+        // Given
         let cached = Cached {
             sidecar: Some(sidecar(4096)),
             length_on_card: Some(8192),
         };
-        assert!(!playable_now(false, &cached));
+
+        // When
+        let playable = playable_now(false, &cached);
+
+        // Then
+        assert!(!playable);
     }
 }
