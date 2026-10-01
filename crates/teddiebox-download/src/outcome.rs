@@ -67,48 +67,82 @@ mod tests {
 
     #[test]
     fn a_report_carries_the_figure_it_is_about() {
+        // Given
         let mut outcomes = Outcomes::new();
+
+        // When
         outcomes.report(Outcome::Completed, FIGURE);
+
+        // Then
         assert_eq!(outcomes.take(), Some((Outcome::Completed, FIGURE)));
     }
 
     #[test]
     fn a_report_replaces_an_unread_one() {
+        // Given
         let mut outcomes = Outcomes::new();
         outcomes.report(Outcome::Unreachable, FIGURE);
+
+        // When
         outcomes.report(Outcome::Refused, FIGURE);
+
+        // Then
         assert_eq!(outcomes.take(), Some((Outcome::Refused, FIGURE)));
     }
 
     #[test]
     fn a_report_if_silent_leaves_an_unread_report_alone() {
+        // Given
         let mut outcomes = Outcomes::new();
         outcomes.report(Outcome::NoContent, FIGURE);
-        assert!(!outcomes.report_if_silent(Outcome::Unreachable, FIGURE));
+
+        // When
+        let recorded = outcomes.report_if_silent(Outcome::Unreachable, FIGURE);
+
+        // Then
+        assert!(!recorded);
         assert_eq!(outcomes.take(), Some((Outcome::NoContent, FIGURE)));
     }
 
     #[test]
     fn a_report_if_silent_records_when_nothing_is_waiting() {
+        // Given
         let mut outcomes = Outcomes::new();
-        assert!(outcomes.report_if_silent(Outcome::Unreachable, FIGURE));
+
+        // When
+        let recorded = outcomes.report_if_silent(Outcome::Unreachable, FIGURE);
+
+        // Then
+        assert!(recorded);
         assert_eq!(outcomes.take(), Some((Outcome::Unreachable, FIGURE)));
     }
 
     #[test]
     fn taking_the_outcome_empties_the_slot() {
+        // Given
         let mut outcomes = Outcomes::new();
         outcomes.report(Outcome::Completed, FIGURE);
         outcomes.take();
-        assert_eq!(outcomes.take(), None);
+
+        // When
+        let second = outcomes.take();
+
+        // Then
+        assert_eq!(second, None);
     }
 
     #[test]
     fn a_report_if_silent_replaces_an_unread_report_about_another_figure() {
+        // Given
         const OTHER: u64 = 0xE0_04_03_50_99_88_77_66;
         let mut outcomes = Outcomes::new();
         outcomes.report(Outcome::NoContent, OTHER);
-        assert!(outcomes.report_if_silent(Outcome::Unreachable, FIGURE));
+
+        // When
+        let recorded = outcomes.report_if_silent(Outcome::Unreachable, FIGURE);
+
+        // Then
+        assert!(recorded);
         assert_eq!(outcomes.take(), Some((Outcome::Unreachable, FIGURE)));
     }
 }
