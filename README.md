@@ -293,4 +293,8 @@ teddyCloud maintainers recommend.
   command list at boot.
 - `just console` opens an interactive session. Only one program can use the
   port, so `just flash` refuses while a console is open.
+- `firmware/vendor/` holds patched copies of `mbedtls-rs`, `mbedtls-rs-sys` and
+  `smoltcp`. It is gitignored. `just vendor` fetches and patches them, and every
+  build recipe runs it. Plain `cargo` in `firmware/` needs it run once first.
+  The patches and the reasons for them are in `scripts/vendor-*.sh`.
 - `HARDWARE.md` covers the board, the wiring and download mode.
