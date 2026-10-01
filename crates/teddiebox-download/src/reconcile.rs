@@ -249,6 +249,30 @@ mod tests {
         );
     }
 
+    /// A total equal to what is on the card is a file that is already whole,
+    /// not an impossible one.
+    #[test]
+    fn a_resume_answered_with_a_total_equal_to_what_is_on_the_card_appends() {
+        // Given: 100 bytes on the card, and a server that says the file is 100
+        let decision = Decision::Resume {
+            from: 100,
+            etag: None,
+        };
+        let begun = content(100, Some(100), None);
+
+        // When
+        let action = reconcile(&decision, &begun);
+
+        // Then
+        assert_eq!(
+            action,
+            Action::Append {
+                resume_from: 100,
+                total: 100,
+            }
+        );
+    }
+
     #[test]
     fn a_fetch_answered_from_the_start_restarts() {
         assert_eq!(
