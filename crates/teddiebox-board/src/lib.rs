@@ -187,7 +187,7 @@ pub enum Colour {
     Red,
     Green,
     Blue,
-    /// Red and green together. Warns of a low pack, and is different from
+    /// Red and green together. Warns of a low battery, and is different from
     /// the red used for a fault.
     Orange,
     /// Green and blue together, for a box that is idle and on its charger.

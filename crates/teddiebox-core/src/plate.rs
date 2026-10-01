@@ -31,7 +31,7 @@ pub const MISSES_TO_LEAVE: u8 = 4;
 /// reader's field is always on, so polling faster costs CPU time (about 12 ms
 /// per empty poll), not extra field time.
 ///
-/// Still, do not lower it freely: every poll transmits, the battery pack has
+/// Still, do not lower it freely: every poll transmits, the battery has
 /// no protection circuit, and a brownout has been seen while transmitting to
 /// a tag.
 pub const EMPTY_POLL_MS: u32 = 200;

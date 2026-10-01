@@ -82,9 +82,9 @@ pub enum LedState {
     Playing,
     Fetching,
     Charging,
-    /// The pack is running low but the box still works. A warning, in orange.
+    /// The battery is running low but the box still works. A warning, in orange.
     BatteryLow,
-    /// The pack is nearly gone and the box is about to stop, in red.
+    /// The battery is nearly gone and the box is about to stop, in red.
     BatteryCritical,
     Error,
     /// The box is serving the setup page and will not play anything.
@@ -160,7 +160,7 @@ pub enum Prompt {
     /// one means check the card, that one means check the router.
     WrongPassword,
     BatteryLow,
-    /// The pack is nearly gone and the box is about to stop.
+    /// The battery is nearly gone and the box is about to stop.
     ///
     /// Unlike [`Prompt::BatteryLow`], which is only a warning, this announces
     /// that the box is shutting down.
@@ -173,7 +173,7 @@ pub enum Prompt {
 /// console, so the log names the right cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerOffReason {
-    /// The pack fell below the hard cutoff.
+    /// The battery fell below the hard cutoff.
     PackEmpty,
     /// Nothing has used the box for `idle_timeout_ms`.
     Idle,

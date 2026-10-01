@@ -57,7 +57,7 @@ pub enum Event {
     EarUp(Ear, Millis),
     TagPresent(TagUid),
     TagAbsent,
-    /// Pack voltage in millivolts, and whether the box was drawing playback
+    /// Battery voltage in millivolts, and whether the box was drawing playback
     /// current when it was sampled.
     Battery {
         pack_mv: u16,
@@ -453,7 +453,7 @@ impl Core {
     /// catches a fast drop that skips Low), then shuts down at the hard
     /// cutoff, not at Critical.
     ///
-    /// `must_shut_down` stays true once set (a pack whose voltage recovers
+    /// `must_shut_down` stays true once set (a battery whose voltage recovers
     /// without load is still empty), so only act on the first time it
     /// becomes true.
     fn handle_battery(&mut self, pack_mv: u16, under_load: bool, actions: &mut Actions) {
@@ -526,7 +526,7 @@ mod tests {
     /// A core with fixed battery thresholds, not the shipped calibration.
     ///
     /// These tests are about what the core does with a battery level, not
-    /// about the real pack's voltages, so recalibrating the pack must not
+    /// about the real battery's voltages, so recalibrating the battery must not
     /// change them.
     fn core() -> Core {
         Core::new(CoreConfig {
@@ -1242,7 +1242,7 @@ mod tests {
         assert_eq!(warnings, 1, "falling on into Critical warns again");
     }
 
-    /// A recovering pack makes no sound, but a later drop warns again.
+    /// A recovering battery makes no sound, but a later drop warns again.
     #[test]
     fn recovering_is_silent_but_arms_the_warning_again() {
         // Given

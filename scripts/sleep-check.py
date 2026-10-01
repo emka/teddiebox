@@ -26,7 +26,7 @@ import time
 
 # What the ROM prints on the first line after a reset. 0x5 is the wake this
 # measurement is trying to cause; 0x1 is a power-on — and on this board a
-# brownout reports as one too, so a low pack looks exactly like a clean boot.
+# brownout reports as one too, so a low battery looks exactly like a clean boot.
 RESET_REASONS = {
     "0x5": "a wake from deep sleep — what this measurement wants",
     "0x1": "a power-on, or a brownout: this board does not tell them apart",
@@ -189,7 +189,7 @@ def main():
     print(
         "\nBefore anything: the box must be flashed with a firmware that has "
         "`sleep`, the\nport must belong to nobody else, and the meter must be "
-        "in series with the pack."
+        "in series with the battery."
     )
 
     fd = open_port(args.port)

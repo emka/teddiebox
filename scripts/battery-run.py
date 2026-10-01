@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record one charge-to-cutoff run of the box's pack, unattended.
+"""Record one charge-to-cutoff run of the box's battery, unattended.
 
 Arms the firmware's own `batlog` and writes every line it prints to a CSV,
 across the whole run: charging, the rest after the charger comes off, and the
@@ -8,10 +8,10 @@ discharge down to the point the box stops talking. One file, one timeline.
 It is meant to be started and left. The only things it asks a person to do are
 plug the charger in and take it out again, and it says when.
 
-    scripts/battery-run.py --out pack-2026-09-09.csv
+    scripts/battery-run.py --out battery-2026-09-09.csv
 
 `--discharge-only` skips the charge: it records from the moment the charger
-comes off, for a pack you have already charged some other way.
+comes off, for a battery you have already charged some other way.
 
     scripts/battery-run.py --discharge-only --out drain-2026-09-09.csv
 
@@ -66,18 +66,18 @@ def parse_batlog(line):
 
 
 class FullCharge:
-    """Decides when a charging NiMH pack has had enough.
+    """Decides when a charging NiMH battery has had enough.
 
     Two signals, either of which ends the charge:
 
-    * **-dV.** A NiMH pack's voltage falls once it is full — a few millivolts
+    * **-dV.** A NiMH battery's voltage falls once it is full — a few millivolts
       per cell, so `drop_mv` across three. This is the real signal and the one
       every dedicated charger uses.
-    * **A plateau.** If the pack has not set a new peak for `plateau_s`, the
+    * **A plateau.** If the battery has not set a new peak for `plateau_s`, the
       charge has stopped going anywhere. This is the fallback for a charger
       that tapers instead of driving hard enough to produce a clear -dV.
 
-    `min_charge_s` guards both: a pack that is already near full still needs
+    `min_charge_s` guards both: a battery that is already near full still needs
     long enough for the readings to mean something, and the first minutes
     after a charger is connected are noise.
     """
@@ -92,7 +92,7 @@ class FullCharge:
         self.reason = None
 
     def update(self, t_s, mv):
-        """Feed one reading. True once the pack should be called full."""
+        """Feed one reading. True once the battery should be called full."""
         if self.started_at is None:
             self.started_at = t_s
         if self.peak_mv is None or mv > self.peak_mv:
@@ -119,7 +119,7 @@ def next_phase(phase, on_charge, full):
     """The phase after one sample, from the charger line and the full verdict.
 
     `waiting` -> `charge` -> `full` -> `discharge`, and back to `charge` if the
-    charger reappears. The charger line wins over `full`: a pack whose charger
+    charger reappears. The charger line wins over `full`: a battery whose charger
     came off is discharging whatever the detector just decided.
 
     A discharge-only run is this same machine entered at `charge` with `full`
@@ -170,7 +170,7 @@ def transition_message(old, new, reason, discharge_only):
             return "Charger detected. Charging — this will take hours."
         return "Charger is back on — the discharge is contaminated."
     if new == "full":
-        return f"Pack looks full ({reason}).\n    UNPLUG THE CHARGER NOW. Recording continues."
+        return f"Battery looks full ({reason}).\n    UNPLUG THE CHARGER NOW. Recording continues."
     if old == "full":
         return "Charger removed. Recording the discharge to cutoff."
     if discharge_only:
@@ -213,14 +213,14 @@ def self_test():
     assert d.update(800, 3884), "16 mV below the peak is -dV"
     assert "-dV" in d.reason, d.reason
 
-    # A pack that simply stops rising ends on the plateau instead.
+    # A battery that simply stops rising ends on the plateau instead.
     d = FullCharge(drop_mv=15, plateau_s=1800, min_charge_s=600)
     d.update(0, 3900)
     assert not d.update(1000, 3900), "still inside the plateau window"
     assert d.update(1801, 3900), "no new peak for the whole window"
     assert "plateau" in d.reason, d.reason
 
-    # A pack still climbing keeps the plateau window open.
+    # A battery still climbing keeps the plateau window open.
     d = FullCharge(drop_mv=15, plateau_s=1800, min_charge_s=600)
     d.update(0, 3800)
     for t in range(600, 5000, 300):
@@ -277,7 +277,7 @@ def self_test():
         == "Charger is back on — the discharge is contaminated."
     )
     assert transition_message("charge", "full", "-dV: 3884 mV", False) == (
-        "Pack looks full (-dV: 3884 mV).\n    UNPLUG THE CHARGER NOW. Recording continues."
+        "Battery looks full (-dV: 3884 mV).\n    UNPLUG THE CHARGER NOW. Recording continues."
     )
     assert (
         transition_message("full", "discharge", None, False)
@@ -285,7 +285,7 @@ def self_test():
     )
     assert transition_message("charge", "discharge", None, False) == (
         "Charger removed before I called it full — recording the discharge from here."
-    ), "a full run says the charge was cut short, because the pack may not be"
+    ), "a full run says the charge was cut short, because the battery may not be"
     assert (
         transition_message("charge", "discharge", None, True)
         == "Charger is off. Recording the discharge to cutoff."
@@ -328,7 +328,7 @@ class Console:
         Not left to whoever touched the port last: esptool leaves it at 9600,
         and a run that starts on a misconfigured line does not fail — it sits
         there silently for hours recording nothing, which is indistinguishable
-        from a flat pack.
+        from a flat battery.
         """
         attrs = termios.tcgetattr(self.fd)
         attrs[0] = 0  # No input translation, no flow control.
@@ -417,7 +417,7 @@ def main():
 
     con = Console(args.port)
     with open(args.out, "w", buffering=1) as out:
-        out.write("# teddiebox pack run\n")
+        out.write("# teddiebox battery run\n")
         out.write(f"# started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         out.write(f"# interval {args.every} s\n")
         if args.discharge_only:
@@ -460,7 +460,7 @@ def main():
                     got_line = True
 
                     # A reset loses `awake on` and the armed log, and a run that
-                    # quietly stopped recording looks exactly like a flat pack.
+                    # quietly stopped recording looks exactly like a flat battery.
                     if "painting the stack" in line:
                         say("The box reset. Re-arming.")
                         time.sleep(2)

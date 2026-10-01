@@ -18,11 +18,11 @@ pub const ADC_MAX: u16 = 4095;
 /// Millivolts at full scale.
 ///
 /// **Measured, not from the datasheet.** A multimeter read 3.82 V across the
-/// pack while the ADC reported 3111, which with the 100k/33k divider gives
+/// battery while the ADC reported 3111, which with the 100k/33k divider gives
 /// 1257 mV at full scale: `3820 x 4095 / (3111 x 4)`.
 ///
 /// The datasheet value for the requested attenuation is about 3100 mV, which
-/// put the pack at an impossible 9.4 V. 1257 mV is closer to the 6 dB range
+/// put the battery at an impossible 9.4 V. 1257 mV is closer to the 6 dB range
 /// than the 11 dB range requested, so the attenuation is probably not applied
 /// as requested.
 ///
@@ -36,7 +36,7 @@ const fn scaled_mv(raw: u16, divider: u32) -> u32 {
     (raw as u32 * FULL_SCALE_MV * divider) / ADC_MAX as u32
 }
 
-/// Pack voltage in millivolts.
+/// Battery voltage in millivolts.
 pub const fn battery_mv(raw: u16) -> u32 {
     scaled_mv(raw, BATTERY_DIVIDER)
 }
@@ -124,7 +124,7 @@ mod tests {
     }
 
     /// The calibration point: the ADC read 3111 while a multimeter read 3.82 V
-    /// across the pack.
+    /// across the battery.
     #[test]
     fn the_measured_calibration_point_reproduces_the_meter() {
         // Given

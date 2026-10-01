@@ -1,5 +1,5 @@
-//! The pack and charger voltages: the task that samples them, and the
-//! readings other tasks consult before doing something the pack may not
+//! The battery and charger voltages: the task that samples them, and the
+//! readings other tasks consult before doing something the battery may not
 //! survive.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
@@ -19,7 +19,7 @@ use crate::{park_task, BENCH, PARKED, PLAYING};
 /// mode nothing else uses its readings, so they only go to the console.
 pub(crate) static SETUP_MODE: AtomicBool = AtomicBool::new(false);
 
-/// Reports the pack and charger voltages.
+/// Reports the battery and charger voltages.
 ///
 /// The conversion is calibrated at one point only (see
 /// `teddiebox_core::power`), and the ESP32-S3's ADC is not linear, so treat
@@ -87,7 +87,7 @@ pub(crate) async fn sense(
                 // A full queue is somebody else's bug — this is the slowest
                 // producer on it, at one pair every two seconds.
                 if INPUT_EVENTS.try_send(event).is_err() {
-                    esp_println::println!("teddiebox: pack event dropped — the queue is full");
+                    esp_println::println!("teddiebox: battery event dropped — the queue is full");
                 }
             }
         }
@@ -96,7 +96,7 @@ pub(crate) async fn sense(
         if BENCH && since_printed >= PRINT_EVERY {
             since_printed = 0;
             esp_println::println!(
-                "teddiebox: pack {pack_mv} mV (raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
+                "teddiebox: battery {pack_mv} mV (raw {pack_raw}), charger {charger_mv} mV (raw {charger_raw})"
             );
         }
 
@@ -121,13 +121,13 @@ pub(crate) async fn sense(
     }
 }
 
-/// The most recent pack reading, in millivolts, and how many have been taken.
+/// The most recent battery reading, in millivolts, and how many have been taken.
 ///
-/// Zero samples means no reading yet, which is not the same as a flat pack.
+/// Zero samples means no reading yet, which is not the same as a flat battery.
 static PACK_MV: AtomicU32 = AtomicU32::new(0);
 static PACK_SAMPLES: AtomicU32 = AtomicU32::new(0);
 
-/// Whether the pack is too low to spend radio time nobody asked for.
+/// Whether the battery is too low to spend radio time nobody asked for.
 ///
 /// No reading yet counts as not low. The sense task samples every two seconds,
 /// so there is normally a reading long before the jingle ends.
@@ -136,7 +136,7 @@ pub(crate) fn pack_too_low_to_prime() -> bool {
         && PACK_MV.load(Ordering::Relaxed) < u32::from(BatteryConfig::default().low_mv)
 }
 
-/// Waits for fresh pack readings and answers whether they agree it is empty.
+/// Waits for fresh battery readings and answers whether they agree it is empty.
 ///
 /// **Two readings, not the four of `readings_to_agree`.** Agreement guards
 /// against one implausible sample (a reading of 9453 mV from three NiMH cells

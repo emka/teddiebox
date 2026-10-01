@@ -1252,7 +1252,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             esp_println::println!(
                 "teddiebox: plate powering off — {}",
                 match reason {
-                    PowerOffReason::PackEmpty => "the pack is below the cutoff",
+                    PowerOffReason::PackEmpty => "the battery is below the cutoff",
                     PowerOffReason::Idle => "nothing has used the box",
                 }
             );
@@ -1685,7 +1685,7 @@ fn maybe_prime_net(primed: &mut bool, configured: bool, placed: &Placed) {
     }
     *primed = true;
     if battery::pack_too_low_to_prime() {
-        esp_println::println!("teddiebox: net not priming — the pack is low");
+        esp_println::println!("teddiebox: net not priming — the battery is low");
     } else if NET_REQUEST
         .compare_exchange(
             REQUEST_NONE,
@@ -2739,12 +2739,12 @@ fn bring_up_media_and_nfc(
     }
 }
 
-/// On a wake with an empty pack, shows red and goes back to sleep before the
+/// On a wake with an empty battery, shows red and goes back to sleep before the
 /// codec, card, radio or jingle start. Speaking would draw near-full power
 /// for seconds on every ear press, draining the unprotected cells below the
 /// cutoff; red costs only milliamps.
 ///
-/// Only on a wake from deep sleep. A cold boot on a flat pack still starts
+/// Only on a wake from deep sleep. A cold boot on a flat battery still starts
 /// and announces the problem.
 async fn sleep_if_pack_empty_on_wake(
     board: &mut BoardPins<'_>,
@@ -2758,7 +2758,7 @@ async fn sleep_if_pack_empty_on_wake(
     let Some(mv) = battery::pack_says_empty().await else {
         return;
     };
-    esp_println::println!("teddiebox: pack {mv} mV on wake — below the cutoff, going back");
+    esp_println::println!("teddiebox: battery {mv} mV on wake — below the cutoff, going back");
     if let Some(rgb) = rgb {
         if let Ok(red) = gates.led(colour_for(LedState::BatteryCritical)) {
             rgb.apply(&red, board::LED_DUTY);
@@ -2794,7 +2794,7 @@ fn start_pending_sound(board: &mut BoardPins<'_>, gates: &mut Gates) {
 
 /// The box said it is turning off. Saves the position, dims the lights, asks
 /// for deep sleep, and — if that could not be armed — parks so nothing keeps
-/// draining the pack with no way to wake it.
+/// draining the battery with no way to wake it.
 async fn shut_down(
     board: &mut BoardPins<'_>,
     gates: &mut Gates,
@@ -2815,7 +2815,7 @@ async fn shut_down(
     esp_println::println!("teddiebox: going dark");
     go_dark(board, gates, rgb).await;
     // Deep sleep, because a park keeps the CPU and PLLs running (tens of
-    // milliamps) and would keep draining the pack. `autosleep off` parks
+    // milliamps) and would keep draining the battery. `autosleep off` parks
     // instead.
     if AUTO_SLEEP.load(Ordering::Relaxed) {
         if let Err(reason) = sleep_now(lpwr).await {

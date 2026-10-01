@@ -3,7 +3,7 @@
 //! NiMH voltage barely changes over most of a discharge, so a percentage would
 //! be meaningless. This reports coarse levels with hysteresis instead. The
 //! cells have no protection circuit, so the cutoff here is what stops the
-//! pack being over-discharged (which can reverse a cell).
+//! battery being over-discharged (which can reverse a cell).
 //!
 //! A measured discharge went from 3943 mV to 3680 mV over eight hours, then
 //! dropped 250 mV in the last two and a half. There are about 25 minutes
@@ -28,13 +28,13 @@ pub enum BatteryLevel {
 
 #[derive(Debug, Clone, Copy)]
 pub struct BatteryConfig {
-    /// Pack millivolts at or above which the level is Full.
+    /// Battery millivolts at or above which the level is Full.
     pub full_mv: u16,
-    /// Pack millivolts at or above which the level is Ok.
+    /// Battery millivolts at or above which the level is Ok.
     pub ok_mv: u16,
-    /// Pack millivolts at or above which the level is Low; below is Critical.
+    /// Battery millivolts at or above which the level is Low; below is Critical.
     pub low_mv: u16,
-    /// Hard cutoff. Below this the pack must stop being discharged.
+    /// Hard cutoff. Below this the battery must stop being discharged.
     pub cutoff_mv: u16,
     /// Millivolts added back to a reading taken while playing, to compensate
     /// for sag under load.
@@ -64,11 +64,11 @@ pub struct BatteryConfig {
 
 impl Default for BatteryConfig {
     fn default() -> Self {
-        // Measured on this box's pack over two full discharge runs (13.6 h,
+        // Measured on this box's battery over two full discharge runs (13.6 h,
         // 3943 mV down to 3407 mV).
         //
         // These are not the textbook NiMH values. A NiMH cell counts as empty
-        // at 1.0 V (3000 mV for the pack), but this box stops booting at about
+        // at 1.0 V (3000 mV for the battery), but this box stops booting at about
         // 3410 mV while the cells still hold charge. A cutoff below the
         // brownout voltage could never fire.
         Self {
@@ -95,7 +95,7 @@ pub struct BatteryModel {
     /// How many consecutive readings have been below the cutoff.
     ///
     /// Counted separately from `agreed`, which counts agreement on the level.
-    /// A pack already at Critical would also place a bogus 2500 mV reading in
+    /// A battery already at Critical would also place a bogus 2500 mV reading in
     /// Critical, so `agreed` would keep rising and one bad reading could
     /// trigger the shutdown.
     below_cutoff: u8,
@@ -117,8 +117,8 @@ impl BatteryModel {
         self.level
     }
 
-    /// True once the pack has fallen below the cutoff. Never clears, because a
-    /// pack whose voltage recovers once the load is removed is still empty.
+    /// True once the battery has fallen below the cutoff. Never clears, because a
+    /// battery whose voltage recovers once the load is removed is still empty.
     pub fn must_shut_down(&self) -> bool {
         self.shut_down
     }
@@ -195,7 +195,7 @@ mod tests {
     /// A model on fixed, deliberately round thresholds.
     ///
     /// Not `BatteryConfig::default()`: these tests are about the logic
-    /// (levels, hysteresis, agreement, the cutoff), not the real pack's
+    /// (levels, hysteresis, agreement, the cutoff), not the real battery's
     /// voltages, so recalibrating must not break them. The real values are
     /// tested in `calibration` below.
     fn model() -> BatteryModel {
@@ -340,7 +340,7 @@ mod tests {
         // Then
         assert!(
             b.must_shut_down(),
-            "a pack that rebounds once unloaded is still empty"
+            "a battery that rebounds once unloaded is still empty"
         );
     }
 
@@ -358,7 +358,7 @@ mod tests {
 
     /// Critical starts at `low_mv`; the cutoff is 200 mV lower. Reaching
     /// Critical is worth a warning. Only the cutoff turns the box off, since
-    /// the pack still has usable charge above it.
+    /// the battery still has usable charge above it.
     #[test]
     fn settling_at_critical_does_not_by_itself_arm_the_shutdown() {
         // Given
@@ -375,7 +375,7 @@ mod tests {
         );
     }
 
-    /// A pack already at Critical keeps falling; the shutdown must still
+    /// A battery already at Critical keeps falling; the shutdown must still
     /// trigger even though the level no longer changes.
     #[test]
     fn falling_past_the_cutoff_arms_the_shutdown_even_once_critical_is_settled() {
@@ -424,7 +424,7 @@ mod tests {
         assert!(!b.must_shut_down());
     }
 
-    /// A pack already at Critical would also place a bogus 2500 mV reading in
+    /// A battery already at Critical would also place a bogus 2500 mV reading in
     /// Critical. That single reading must not trigger the shutdown.
     #[test]
     fn one_implausible_reading_from_a_settled_critical_pack_does_not_arm_the_shutdown() {
@@ -440,7 +440,7 @@ mod tests {
         // Then
         assert!(
             !b.must_shut_down(),
-            "one sample below the cutoff is not a pack below the cutoff"
+            "one sample below the cutoff is not a battery below the cutoff"
         );
     }
 
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(reported, [None, None]);
     }
 
-    /// The shipped calibration, against the pack it was measured on.
+    /// The shipped calibration, against the battery it was measured on.
     ///
     /// Every millivolt value here is a real reading from two measured
     /// discharge runs, not derived from the config, so these tests can
@@ -504,7 +504,7 @@ mod tests {
             // Then
             assert!(
                 b.must_shut_down(),
-                "the pack browns out here; the cutoff has to be above it"
+                "the battery browns out here; the cutoff has to be above it"
             );
         }
 
@@ -534,7 +534,7 @@ mod tests {
             // Then
             assert!(
                 b.must_shut_down(),
-                "a pack at the floor is at the floor, story or no story"
+                "a battery at the floor is at the floor, story or no story"
             );
         }
 
@@ -565,7 +565,7 @@ mod tests {
             assert_eq!(b.level(), BatteryLevel::Full);
         }
 
-        /// The pack spends most of its life here; calling any of it Low would make the warning
+        /// The battery spends most of its life here; calling any of it Low would make the warning
         /// meaningless.
         #[test]
         fn the_eight_hour_plateau_reads_ok_throughout() {

@@ -21,12 +21,12 @@ pub fn led_for(playback: PlaybackKind, battery: BatteryLevel, charging: bool) ->
     if playback == PlaybackKind::Failed {
         return LedState::Error;
     }
-    // A nearly empty pack comes before playback, unless it is already
+    // A nearly empty battery comes before playback, unless it is already
     // charging.
     if battery == BatteryLevel::Critical && !charging {
         return LedState::BatteryCritical;
     }
-    // Before a low pack, because during a download the box is silent and
+    // Before a low battery, because during a download the box is silent and
     // looks idle; the LED is the only sign that something is happening.
     if playback == PlaybackKind::Fetching {
         return LedState::Fetching;
@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(state, None);
     }
 
-    /// The pack goes flat quickly at the end, so the warning must show even
+    /// The battery goes flat quickly at the end, so the warning must show even
     /// while a story plays.
     #[test]
     fn a_low_pack_warns_in_orange_while_a_story_plays() {
@@ -137,7 +137,7 @@ mod tests {
     }
 
     /// During a download the box is silent and looks idle, so the download is
-    /// shown instead of a low pack.
+    /// shown instead of a low battery.
     #[test]
     fn fetching_outranks_a_low_pack() {
         // Given
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(state, LedState::Error);
     }
 
-    /// A nearly empty pack is shown instead of playback, so somebody reaches
+    /// A nearly empty battery is shown instead of playback, so somebody reaches
     /// for the charger.
     #[test]
     fn a_critical_pack_outranks_playback() {

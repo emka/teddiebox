@@ -57,7 +57,7 @@ pub enum Command {
     /// Silent and as fast as the decoder can go, for comparing the samples
     /// with a reference decoder on the host.
     DumpPcm { frames: u8 },
-    /// Print one CSV line of pack telemetry every `seconds`, or stop if zero.
+    /// Print one CSV line of battery telemetry every `seconds`, or stop if zero.
     ///
     /// Raw readings only, with no levels or smoothing. Used to measure a
     /// discharge and calibrate `BatteryConfig`.
