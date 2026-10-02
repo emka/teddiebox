@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          # A pull request opened with the default GITHUB_TOKEN starts no
+          # workflow runs. The release pull request rewrites the firmware
+          # version in Cargo.toml and Cargo.lock, so leaving it ungated means
+          # the gates never run on the change most likely to break them, and
+          # the failure would surface only after merge, against a published
+          # tag.
+          token: ${{ secrets.GH_CI_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
