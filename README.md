@@ -298,3 +298,13 @@ teddyCloud maintainers recommend.
   build recipe runs it. Plain `cargo` in `firmware/` needs it run once first.
   The patches and the reasons for them are in `scripts/vendor-*.sh`.
 - `HARDWARE.md` covers the board, the wiring and download mode.
+
+### Use of LLMs
+
+This project is developed with LLM assistance.
+
+Contributors may use any tool, on these terms:
+
+- Read and understand the change before you submit it for others to review.
+- Say how a change was verified. For firmware behaviour, that means
+  on a real box.
