@@ -4,6 +4,13 @@ Replacement firmware for the Toniebox with the ESP32 rev 1.6.C
 board, written in Rust. It reads the same figures, and fetches audio from a local
 [teddyCloud](https://github.com/toniebox-reverse-engineering/teddycloud).
 
+> **Unofficial project.** Not affiliated with or endorsed by tonies or the
+> maker of the Toniebox. "Toniebox" and "tonies" are their trademarks, used
+> only to say what this firmware is compatible with.
+> Flashing replaces the stock firmware, can brick the box and may void the
+> warranty. Use is at your own risk. The firmware drives battery charging and
+> the volume path of a children's product, so you are responsible for safe use.
+
 ## Motivation
 
 teddyCloud replaces the manufacturer's cloud, but the box still runs closed
