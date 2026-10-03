@@ -682,8 +682,8 @@ mod tests {
         let mut buf = [0u8; 256];
 
         // When
-        let n =
-            build_path_request(&mut buf, "/teddiebox.bin", "teddycloud.local", Some(65536)).unwrap();
+        let n = build_path_request(&mut buf, "/teddiebox.bin", "teddycloud.local", Some(65536))
+            .unwrap();
 
         // Then
         assert_eq!(
