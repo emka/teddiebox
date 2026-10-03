@@ -1,0 +1,39 @@
+name: Bug report
+description: The box does something other than what the README says.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report security problems privately, see SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Firmware version or commit
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Board revision
+      description: For example ESP32 rev 1.6.C.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Serial console log
+      description: The output at 115200 baud around the problem. Remove your WiFi passphrase first.
+      render: text
