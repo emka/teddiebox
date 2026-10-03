@@ -140,9 +140,18 @@ jobs:
 
       # The password is baked in at build time (see firmware/src/nfc.rs), from
       # a secret rather than the repository, and only the `images` gate
-      # builds an image. A fork or a PR without the secret gets an empty value,
-      # which builds an image with no password: nothing is unlocked until
-      # somebody types `pw`. Never echo it; workflow logs are public.
+      # builds an image. A missing secret would build an image with no
+      # password, which unlocks nothing until somebody types `pw`, and the
+      # gate would pass: so it fails instead. A pull request from a fork
+      # cannot read secrets and builds that image. Never echo the password;
+      # workflow logs are public.
+      - name: Require the SLIX password secret
+        if: matrix.gate == 'images' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)
+        env:
+          PASSWORD: ${{ secrets.TEDDIEBOX_SLIX_PASSWORD }}
+        run: |
+          [ -n "$PASSWORD" ] || { echo "::error::The secret TEDDIEBOX_SLIX_PASSWORD is not set"; exit 1; }
+
       - name: just ${{ matrix.gate }}
         env:
           # Incremental state speeds up rebuilding the same crate while it

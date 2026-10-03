@@ -15,6 +15,12 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      - name: Require the release token secret
+        env:
+          TOKEN: ${{ secrets.GH_CI_TOKEN }}
+        run: |
+          [ -n "$TOKEN" ] || { echo "::error::The secret GH_CI_TOKEN is not set"; exit 1; }
+
       - uses: googleapis/release-please-action@v5
         with:
           # A pull request opened with the default GITHUB_TOKEN starts no
