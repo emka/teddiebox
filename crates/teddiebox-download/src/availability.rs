@@ -6,9 +6,25 @@
 
 use crate::cache::{decide, Cached, Decision};
 
-/// `on_stock_card` is whether the file exists under `CONTENT/`. Such files
-/// have no sidecar and are always treated as complete. They are checked
-/// before the cache.
+/// Whether the story at one path shipped with the card, as opposed to being
+/// downloaded.
+///
+/// Both kinds keep their audio under `CONTENT/<directory>/<file>`. A download
+/// also has a sidecar under `CACHE/`, which records how long the audio is
+/// meant to be. Stock audio has none and is always complete.
+///
+/// An empty file is never stock: a download creates its audio file before it
+/// writes its sidecar, and a power loss in between must not leave an empty
+/// story that counts as complete.
+///
+/// `audio_length` is the length of the file under `CONTENT/`, if there is
+/// one; `has_sidecar` is whether a `.MET` exists, readable or not.
+pub fn is_stock(audio_length: Option<u32>, has_sidecar: bool) -> bool {
+    !has_sidecar && audio_length.is_some_and(|length| length > 0)
+}
+
+/// `on_stock_card` is the result of [`is_stock`]. Stock stories are always
+/// complete, so they are checked before the sidecar.
 pub fn playable_now(on_stock_card: bool, cached: &Cached) -> bool {
     if on_stock_card {
         return true;
@@ -23,6 +39,63 @@ mod tests {
 
     fn sidecar(length: u32) -> Sidecar {
         Sidecar { length, etag: None }
+    }
+
+    #[test]
+    fn a_non_empty_file_without_a_sidecar_is_stock_content() {
+        // Given
+        let audio_length = Some(4096);
+        let has_sidecar = false;
+
+        // When
+        let stock = is_stock(audio_length, has_sidecar);
+
+        // Then
+        assert!(stock);
+    }
+
+    /// A download keeps its sidecar in `CACHE/` while its audio sits under
+    /// `CONTENT/`, so the sidecar is what tells it from shipped content.
+    #[test]
+    fn a_file_with_a_sidecar_is_a_download() {
+        // Given
+        let audio_length = Some(4096);
+        let has_sidecar = true;
+
+        // When
+        let stock = is_stock(audio_length, has_sidecar);
+
+        // Then
+        assert!(!stock);
+    }
+
+    /// A download creates its audio file before it writes its sidecar. A power
+    /// loss between the two leaves an empty file that must not read as a
+    /// complete story.
+    #[test]
+    fn an_empty_file_without_a_sidecar_is_an_interrupted_download() {
+        // Given
+        let audio_length = Some(0);
+        let has_sidecar = false;
+
+        // When
+        let stock = is_stock(audio_length, has_sidecar);
+
+        // Then
+        assert!(!stock);
+    }
+
+    #[test]
+    fn no_file_is_not_stock_content() {
+        // Given
+        let audio_length = None;
+        let has_sidecar = false;
+
+        // When
+        let stock = is_stock(audio_length, has_sidecar);
+
+        // Then
+        assert!(!stock);
     }
 
     #[test]

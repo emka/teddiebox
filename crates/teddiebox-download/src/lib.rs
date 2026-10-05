@@ -21,7 +21,7 @@ mod units;
 mod window;
 mod writer;
 
-pub use availability::playable_now;
+pub use availability::{is_stock, playable_now};
 pub use cache::{
     decide, is_whole, place, revalidate, Cached, Decision, Freshness, Landing, Placement,
 };
