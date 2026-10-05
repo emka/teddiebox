@@ -263,7 +263,7 @@ fn answer_waiting() -> bool {
     critical_section::with(|cs| PROBE_ANSWER.borrow_ref(cs).is_some())
 }
 
-/// The cached file the server has contradicted, as `CACHE/<dir>/<file>`, if any.
+/// The downloaded file the server has contradicted, as `<dir>/<file>`, if any.
 ///
 /// Set by a probe that finds the cached copy out of date, and taken by the
 /// download that replaces it. One value, so the path is always read and
@@ -509,7 +509,7 @@ fn plan_download(card: Option<&storage::Mounted>, path: ContentPath) -> Plan {
         return plan;
     };
 
-    let length_on_card = card.cache_length(dir, file);
+    let length_on_card = card.audio_length(dir, file);
     plan.on_card = length_on_card.unwrap_or(0);
 
     // **Ignore the sidecar of a file the server found out of date.** It
@@ -541,19 +541,20 @@ fn plan_download(card: Option<&storage::Mounted>, path: ContentPath) -> Plan {
     plan
 }
 
-/// Records how long the file beside it is meant to be.
+/// Records how long the audio beside it is meant to be.
 ///
-/// Best effort. A content file with no sidecar counts as incomplete, so a
-/// failure here only costs a refetch later, never a story that stops in the
-/// middle. When the server gave no length there is no sidecar to write.
-fn write_sidecar(card: &storage::Mounted, dir: u32, file: u32, sidecar: Option<Sidecar>) {
-    let Some(sidecar) = sidecar else {
-        esp_println::println!("teddiebox: get no length from the server — not vouching for it");
-        return;
-    };
-    if let Err(reason) = card.write_sidecar(dir, file, sidecar.render().as_bytes()) {
-        esp_println::println!("teddiebox: get sidecar not written — {reason}");
-    }
+/// Audio under `CONTENT/` with no sidecar counts as stock content and
+/// complete, so a download without one could play a story that stops in the
+/// middle. Hence a download goes on only if this succeeds, which needs the
+/// server to have said how long the story is.
+fn write_sidecar(
+    card: &storage::Mounted,
+    dir: u32,
+    file: u32,
+    sidecar: Option<Sidecar>,
+) -> Result<(), &'static str> {
+    let sidecar = sidecar.ok_or("the server did not say how long the story is")?;
+    card.write_sidecar(dir, file, sidecar.render().as_bytes())
 }
 
 /// Moves whatever the network has produced onto the card.
@@ -588,8 +589,8 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
             let (dir, file) = (path.directory, path.file);
             let opened = card.ok_or("the card is not mounted").and_then(|card| {
                 match placement {
-                    Placement::Restart => card.open_cache_for_write(dir, file),
-                    Placement::Continue => card.open_cache_for_append(dir, file),
+                    Placement::Restart => card.open_download_for_write(dir, file),
+                    Placement::Continue => card.open_download_for_append(dir, file),
                     Placement::Refuse => {
                         Err("the server answered with a range this file cannot take")
                     }
@@ -600,13 +601,20 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
                 Ok((card, handle)) => {
                     match placement {
                         Placement::Continue => esp_println::println!(
-                            "teddiebox: get resuming /CACHE/{dir:08X}/{file:08X} at {at}"
+                            "teddiebox: get resuming /CONTENT/{dir:08X}/{file:08X} at {at}"
                         ),
                         _ => {
                             esp_println::println!(
-                                "teddiebox: get writing /CACHE/{dir:08X}/{file:08X}"
+                                "teddiebox: get writing /CONTENT/{dir:08X}/{file:08X}"
                             );
-                            write_sidecar(card, dir, file, sidecar);
+                            if let Err(reason) = write_sidecar(card, dir, file, sidecar) {
+                                // The audio file is empty, which never counts
+                                // as stock content.
+                                card.close_file(handle);
+                                esp_println::println!("teddiebox: get cannot start — {reason}");
+                                transfer(Transfer::open_failed);
+                                return false;
+                            }
                         }
                     }
                     *write = Some(CacheWrite {
@@ -1113,9 +1121,8 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
     match action {
         Action::Play { tag, from } => {
             let path = teddiebox_download::content_path(tag.0);
-            // A story that came with the card is under `CONTENT/`, a
-            // downloaded one under `CACHE/`, and each request only looks in
-            // its own directory.
+            // Both kinds are under `CONTENT/`. The request says which, since a
+            // download's position is saved apart from stock content.
             let request = if index.on_stock_card(path.directory, path.file) {
                 REQUEST_CONTENT
             } else {
@@ -1127,7 +1134,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                 if request == REQUEST_CONTENT {
                     "CONTENT"
                 } else {
-                    "CACHE"
+                    "CONTENT (download)"
                 },
                 path.directory,
                 path.file
@@ -1589,11 +1596,7 @@ async fn play_taf_story(
     last_tick_fed: &mut u64,
 ) {
     let source = match request {
-        REQUEST_CONTENT => audio::Source::Content {
-            directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
-            file: CONTENT_FILE.load(Ordering::Relaxed),
-        },
-        REQUEST_CACHE => audio::Source::Cache {
+        REQUEST_CONTENT | REQUEST_CACHE => audio::Source::Content {
             directory: CONTENT_DIRECTORY.load(Ordering::Relaxed),
             file: CONTENT_FILE.load(Ordering::Relaxed),
         },
@@ -1842,18 +1845,18 @@ async fn dump_pcm_if_mounted(card: Option<&storage::Mounted>) {
     }
 }
 
-async fn checksum_cache_if_mounted(card: Option<&storage::Mounted>) {
+async fn checksum_audio_if_mounted(card: Option<&storage::Mounted>) {
     let Some(card) = card else {
         return;
     };
     let directory = CONTENT_DIRECTORY.load(Ordering::Relaxed);
     let file = CONTENT_FILE.load(Ordering::Relaxed);
-    match card.checksum_cache(directory, file).await {
+    match card.checksum_audio(directory, file).await {
         Ok((size, crc)) => esp_println::println!(
-            "teddiebox: crc /CACHE/{directory:08X}/{file:08X} {size} {crc:08X}"
+            "teddiebox: crc /CONTENT/{directory:08X}/{file:08X} {size} {crc:08X}"
         ),
         Err(reason) => esp_println::println!(
-            "teddiebox: crc /CACHE/{directory:08X}/{file:08X} failed — {reason}"
+            "teddiebox: crc /CONTENT/{directory:08X}/{file:08X} failed — {reason}"
         ),
     }
 }
@@ -1987,7 +1990,7 @@ async fn media(
             ),
 
             REQUEST_PCM => dump_pcm_if_mounted(card.as_ref()).await,
-            REQUEST_CRC => checksum_cache_if_mounted(card.as_ref()).await,
+            REQUEST_CRC => checksum_audio_if_mounted(card.as_ref()).await,
 
             REQUEST_WAV | REQUEST_TAF | REQUEST_CONTENT | REQUEST_CACHE => {
                 play_story(

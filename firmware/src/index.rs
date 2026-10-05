@@ -6,7 +6,7 @@
 
 use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::{ContentIndex, Position, TagUid};
-use teddiebox_download::{content_path, playable_now, Cached, Sidecar, MAX_SIDECAR};
+use teddiebox_download::{content_path, is_stock, playable_now, Cached, Sidecar, MAX_SIDECAR};
 
 use crate::storage;
 
@@ -19,21 +19,18 @@ impl<'a> CardIndex<'a> {
         Self { card }
     }
 
-    /// Whether the card ships this story under `CONTENT/`.
+    /// Whether the card ships this story, as opposed to it being downloaded.
     ///
-    /// Stock content is always complete and has no sidecar, so opening it is
-    /// the whole test. The file is closed again at once.
+    /// Both kinds are under `CONTENT/`. Stock content is always complete and
+    /// has no sidecar; see [`is_stock`].
     ///
-    /// Public because whoever handles `Action::Play` must choose between a
-    /// story under `CONTENT/` and a downloaded one under `CACHE/`.
+    /// Public because whoever handles `Action::Play` must know which kind it
+    /// plays, since a download's position is saved apart from stock content.
     pub fn on_stock_card(&self, directory: u32, file: u32) -> bool {
-        match self.card.open_content(directory, file) {
-            Ok((handle, _size)) => {
-                self.card.close_file(handle);
-                true
-            }
-            Err(_) => false,
-        }
+        is_stock(
+            self.card.audio_length(directory, file),
+            self.card.has_sidecar(directory, file),
+        )
     }
 
     /// Records where this story should resume.
@@ -70,7 +67,7 @@ impl<'a> CardIndex<'a> {
 
         Cached {
             sidecar,
-            length_on_card: self.card.cache_length(directory, file),
+            length_on_card: self.card.audio_length(directory, file),
         }
     }
 }
@@ -91,7 +88,7 @@ impl ContentIndex for CardIndex<'_> {
         // errors, so this is logged instead.
         if !available && cached.length_on_card.is_some() && cached.sidecar.is_none() {
             esp_println::println!(
-                "teddiebox: plate /CACHE/{:08X}/{:08X} has no readable sidecar — refetching",
+                "teddiebox: plate /CONTENT/{:08X}/{:08X} has no readable sidecar — refetching",
                 path.directory,
                 path.file
             );

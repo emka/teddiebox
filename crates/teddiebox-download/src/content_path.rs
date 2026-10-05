@@ -3,8 +3,8 @@
 //! teddyCloud (like the stock Toniebox) names a content file after the tag's
 //! UID, byte-reversed and split in half: `getContentPathFromCharRUID` in its
 //! `handler.c` does `osSprintf(filePath, "%.8s/%.8s", ruid, &ruid[8])`, where
-//! `ruid` is the 16 hex characters of the reversed UID. The `/CACHE/` tree
-//! uses the same layout.
+//! `ruid` is the 16 hex characters of the reversed UID. Downloads use the same
+//! layout under `/CONTENT/`, and their sidecars the same one under `/CACHE/`.
 //!
 //! The two halves are returned as `u32`s; the firmware formats them as hex
 //! when it opens the file.

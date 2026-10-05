@@ -171,13 +171,13 @@ pub enum Command {
     /// their length, because they are the credential for downloading this
     /// figure's audio.
     ReadToken,
-    /// Play a file a download put in `/CACHE/`.
+    /// Play a downloaded story, kept under `/CONTENT/` like stock ones.
     ///
     /// Named by the same sixteen digits used with `get`. Split into directory
     /// and file, as on the card.
     PlayCache { directory: u32, file: u32 },
-    /// Checksum one file a download put in `/CACHE/`, without walking the
-    /// rest of the card.
+    /// Checksum one story under `/CONTENT/`, without walking the rest of the
+    /// card.
     ///
     /// `sd` computes the same CRC32 but walks the whole card, which takes
     /// hours. Named by the same sixteen digits as `get` and `play`.
@@ -1737,8 +1737,8 @@ mod tests {
         // Then
         assert_eq!(parsed, Some(Command::StackReport));
     }
-    /// A download is stored in `/CACHE/` under the identifier `get` used, so
-    /// the same sixteen digits play it.
+    /// A download is stored under the identifier `get` used, so the same
+    /// sixteen digits play it.
     #[test]
     fn play_takes_a_ruid_to_mean_the_cache() {
         // Given

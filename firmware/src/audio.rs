@@ -572,10 +572,8 @@ pub enum Source {
     /// Whatever the card offers: a `.TAF` in the root if there is one, else
     /// the first Tonie under `CONTENT/`.
     First,
-    /// One named `CONTENT/<directory>/<file>`.
+    /// One named `CONTENT/<directory>/<file>`, stock or downloaded.
     Content { directory: u32, file: u32 },
-    /// One a download put in `CACHE/<directory>/<file>`.
-    Cache { directory: u32, file: u32 },
 }
 
 /// Plays one TAF, handing back the hardware it borrowed.
@@ -616,7 +614,6 @@ type Transfer = I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>;
 fn open_source(card: &Mounted, source: Source) -> Result<(RawFile, u32), &'static str> {
     match source {
         Source::Content { directory, file } => card.open_content(directory, file),
-        Source::Cache { directory, file } => card.open_cache(directory, file),
         Source::First => match card.find_by_extension(b"TAF") {
             Some((name, size)) => {
                 esp_println::println!("teddiebox: taf /{name}, {size} bytes");

@@ -1,8 +1,10 @@
 //! The SD card, in SPI mode.
 //!
-//! Reads stories under `CONTENT/` (never modifying them), and writes
-//! downloads under `CACHE/`, their sidecars, saved positions (`.POS`, next to
-//! the story) and `CONFIG.TXT`.
+//! Reads stories under `CONTENT/` and writes downloaded audio there too, in
+//! the same layout, so a story the stock firmware fetched is not fetched
+//! again. A download's sidecar and saved position live under `CACHE/`, and
+//! those of stock stories next to them under `CONTENT/` (`.POS`). Also writes
+//! `CONFIG.TXT`.
 //!
 //! The `sd` walk checksums every file on the card, to compare with the same
 //! files read on a laptop by `scripts/sd-checksums.py`, which prints the same
@@ -81,9 +83,11 @@ pub static PAGE_READ_MAX_US: AtomicU64 = AtomicU64::new(0);
 /// `CONTENT/<8 hex>/500304E0`.
 const TONIE_CONTENT_DIR: &str = "CONTENT";
 
-/// Where downloads are cached, laid out exactly like `CONTENT`.
+/// Where a download keeps everything but its audio: the sidecar that says how
+/// long the audio should be, and the saved position.
 ///
-/// The same `<8 hex>/<8 hex>` layout, so no conversion is needed.
+/// The same `<8 hex>/<8 hex>` layout as `CONTENT`. The stock firmware does not
+/// read it.
 const CACHE_DIR: &str = "CACHE";
 
 /// Where the card's copy of the certificate authority lives.
@@ -428,24 +432,17 @@ impl Mounted {
         self.open_audio_under(TONIE_CONTENT_DIR, directory, file)
     }
 
-    /// Opens `CACHE/<directory>/<file>`, where a download lands.
-    ///
-    /// The same layout as `CONTENT`.
-    pub fn open_cache(&self, directory: u32, file: u32) -> Result<(RawFile, u32), &'static str> {
-        self.open_audio_under(CACHE_DIR, directory, file)
-    }
-
-    /// Reads `CACHE/<directory>/<file>` end to end and returns its size and
+    /// Reads `CONTENT/<directory>/<file>` end to end and returns its size and
     /// CRC32, without walking the rest of the card.
     ///
     /// The same [`Crc32`] and loop as the walk uses, for one file, so a
     /// download can be checked without a walk that takes hours.
-    pub async fn checksum_cache(
+    pub async fn checksum_audio(
         &self,
         directory: u32,
         file: u32,
     ) -> Result<(u32, u32), &'static str> {
-        let (raw_file, size) = self.open_cache(directory, file)?;
+        let (raw_file, size) = self.open_content(directory, file)?;
 
         let mut crc = Crc32::new();
         let mut buffer = [0u8; 512];
@@ -641,17 +638,21 @@ impl Mounted {
         outcome
     }
 
-    /// Opens `/CACHE/<directory>/<file>` for writing, creating whatever is
+    /// Opens `/CONTENT/<directory>/<file>` for writing, creating whatever is
     /// missing, and **discards anything already there**.
     ///
     /// For a download that starts from the beginning. To continue one, use
-    /// [`Mounted::open_cache_for_append`].
+    /// [`Mounted::open_download_for_append`].
     ///
     /// **One handle, opened once.** The reader and writer share it (the
     /// library cannot open a file twice), so the offset moves between reads
     /// and appends; this is why [`Mounted::append`] seeks to the end itself.
-    pub fn open_cache_for_write(&self, directory: u32, file: u32) -> Result<RawFile, &'static str> {
-        self.open_cache_in_mode(directory, file, Mode::ReadWriteCreateOrTruncate)
+    pub fn open_download_for_write(
+        &self,
+        directory: u32,
+        file: u32,
+    ) -> Result<RawFile, &'static str> {
+        self.open_download_in_mode(directory, file, Mode::ReadWriteCreateOrTruncate)
     }
 
     /// Opens the same file **keeping what is already in it**, to continue an
@@ -661,15 +662,15 @@ impl Mounted {
     /// server agreed to continue from there; [`teddiebox_download::place`]
     /// decides that. Otherwise the start of a story would be appended to its
     /// middle, at the right length, so nothing later would notice.
-    pub fn open_cache_for_append(
+    pub fn open_download_for_append(
         &self,
         directory: u32,
         file: u32,
     ) -> Result<RawFile, &'static str> {
-        self.open_cache_in_mode(directory, file, Mode::ReadWriteCreateOrAppend)
+        self.open_download_in_mode(directory, file, Mode::ReadWriteCreateOrAppend)
     }
 
-    fn open_cache_in_mode(
+    fn open_download_in_mode(
         &self,
         directory: u32,
         file: u32,
@@ -686,24 +687,39 @@ impl Mounted {
         // MAX_DEPTH directory handles exist (shared with the walk), and
         // leaking them would make the next download fail as if the card were
         // unwritable.
-        let cache = self.open_or_make_dir(self.root, CACHE_DIR)?;
-        let folder = self.open_or_make_dir(cache, folder_name);
-        let _ = self.volumes.close_dir(cache);
+        let content = self.open_or_make_dir(self.root, TONIE_CONTENT_DIR)?;
+        let folder = self.open_or_make_dir(content, folder_name);
+        let _ = self.volumes.close_dir(content);
         let folder = folder?;
 
         let handle = self.volumes.open_file_in_dir(folder, file_name, mode);
         let _ = self.volumes.close_dir(folder);
-        handle.map_err(|_| "the cache file would not open")
+        handle.map_err(|_| "the download file would not open")
     }
 
-    /// How long the cached content file is, or `None` if there is not one.
+    /// How long the audio file under `CONTENT/` is, or `None` if there is
+    /// not one.
     ///
     /// Opens and closes the file here, because the library cannot open a file
     /// twice, so this must happen before the download opens it.
-    pub fn cache_length(&self, directory: u32, file: u32) -> Option<u32> {
-        let (handle, length) = self.open_cache(directory, file).ok()?;
+    pub fn audio_length(&self, directory: u32, file: u32) -> Option<u32> {
+        let (handle, length) = self.open_content(directory, file).ok()?;
         self.close_file(handle);
         Some(length)
+    }
+
+    /// Whether `/CACHE/<directory>/<file>.MET` exists, readable or not.
+    ///
+    /// A sidecar that exists but cannot be read still marks the story as a
+    /// download, so it is fetched again rather than taken for stock content.
+    pub fn has_sidecar(&self, directory: u32, file: u32) -> bool {
+        match self.open_sidecar(directory, file) {
+            Some(handle) => {
+                self.close_file(handle);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Reads `/CACHE/<directory>/<file>.MET` into `buffer`.
@@ -712,6 +728,14 @@ impl Mounted {
     /// that cannot be read proves nothing, so the content counts as
     /// incomplete.
     pub fn read_sidecar(&self, directory: u32, file: u32, buffer: &mut [u8]) -> Option<usize> {
+        let handle = self.open_sidecar(directory, file)?;
+        let filled = self.volumes.read(handle, buffer).ok();
+        self.close_file(handle);
+        filled
+    }
+
+    /// Opens `/CACHE/<directory>/<file>.MET` for reading.
+    fn open_sidecar(&self, directory: u32, file: u32) -> Option<RawFile> {
         let folder_name = teddiebox_download::hex8(directory);
         let stem = teddiebox_download::hex8(file);
         let folder_name = core::str::from_utf8(&folder_name).ok()?;
@@ -736,20 +760,16 @@ impl Mounted {
             .volumes
             .open_file_in_dir(folder, file_name, Mode::ReadOnly);
         let _ = self.volumes.close_dir(folder);
-        let handle = handle.ok()?;
-
-        let filled = self.volumes.read(handle, buffer).ok();
-        self.close_file(handle);
-        filled
+        handle.ok()
     }
 
     /// Writes `/CACHE/<directory>/<file>.MET`, the record that says how long
     /// the content beside it is meant to be.
     ///
     /// **Written before the first body byte, and closed before returning**,
-    /// so it survives a power loss during the download. A content file
-    /// without a sidecar counts as incomplete, so if this fails, the download
-    /// is simply fetched again.
+    /// so it survives a power loss during the download. Audio under `CONTENT/`
+    /// without a sidecar counts as stock content and complete, so a download
+    /// whose sidecar cannot be written must not go on.
     pub fn write_sidecar(
         &self,
         directory: u32,
