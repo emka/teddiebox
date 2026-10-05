@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/batched-writes",
     "crates/lis3dh",
     "crates/teddiebox-audio",
     "crates/teddiebox-board",
