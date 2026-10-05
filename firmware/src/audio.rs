@@ -23,7 +23,7 @@ use teddiebox_core::Position;
 
 use teddiebox_audio::{LibOpus, OpusState, Skip, TafBuffers, TafDecoder, MAX_FRAME_SAMPLES};
 
-use crate::storage::{CardPages, Mounted, PAGE_READ_MAX_US, PAGE_READ_US};
+use crate::storage::{page_read_times, CardPages, Mounted};
 use crate::BENCH;
 
 /// The DMA buffer between the card and the codec.
@@ -712,10 +712,11 @@ fn log_progress(
         dma_available,
         pending_len
     );
-    let card_us = PAGE_READ_US.load(Ordering::Relaxed);
+    let reads = page_read_times();
+    let card_us = reads.total_us;
     esp_println::println!(
         "teddiebox: taf   longest card read {} ms, longest loop gap {} ms",
-        PAGE_READ_MAX_US.load(Ordering::Relaxed) / 1000,
+        reads.longest_us / 1000,
         longest_gap_us / 1000
     );
     esp_println::println!(
@@ -801,7 +802,7 @@ fn log_taf_summary(
     // Decode time as a percentage of the audio's length. Under 100 means the
     // box decodes faster than it plays.
     let played_us = elapsed.as_micros().max(1);
-    let card_us = PAGE_READ_US.load(Ordering::Relaxed);
+    let card_us = page_read_times().total_us;
     esp_println::println!(
         "teddiebox: taf feeding the codec used {}% of real time — card reads {}%, decode {}%",
         decode_us * 100 / played_us,

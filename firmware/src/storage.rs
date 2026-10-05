@@ -22,9 +22,10 @@
 //! so the paths differ even though the bytes match. A Toniebox card has no
 //! long names.
 
+use core::cell::Cell;
 use core::fmt::Write as _;
 use core::ops::ControlFlow;
-use portable_atomic::{AtomicU64, Ordering};
+use critical_section::Mutex as CsMutex;
 
 use embassy_futures::yield_now;
 use embassy_time::Instant;
@@ -61,21 +62,48 @@ const YIELD_EVERY_BLOCKS: u32 = 16;
 
 /// Microseconds spent inside [`CardPages::read_page`].
 ///
+/// How long the card took to read pages, since boot.
+///
 /// Playback measures decode time including the card reads underneath
 /// `next_frame`. This counts the card reads separately, to see which one
 /// takes longer.
 ///
-/// 64-bit via `portable-atomic`, because Xtensa has no native 64-bit atomic
-/// and a `u32` of microseconds wraps after about 70 minutes, less than some
-/// Tonies.
-pub static PAGE_READ_US: AtomicU64 = AtomicU64::new(0);
+/// 64-bit, because a `u32` of microseconds wraps within a long story. Kept
+/// behind a critical section rather than in an `AtomicU64`: Xtensa has no
+/// native 64-bit atomic, and `portable-atomic`'s emulation brings a lock
+/// table far larger than the counters.
+#[derive(Clone, Copy)]
+pub struct PageReadTimes {
+    /// All page reads together, in microseconds.
+    pub total_us: u64,
+    /// The longest single page read, in microseconds.
+    ///
+    /// The total shows how much time the card takes overall; this shows
+    /// whether any *single* read was long enough to matter: one read longer
+    /// than the audio buffer holds starves the DMA.
+    pub longest_us: u64,
+}
 
-/// The longest single page read, in microseconds.
-///
-/// The total shows how much time the card takes overall; this shows whether
-/// any *single* read was long enough to matter. The audio buffer holds about
-/// 170 ms, so one read longer than that starves the DMA.
-pub static PAGE_READ_MAX_US: AtomicU64 = AtomicU64::new(0);
+static PAGE_READS: CsMutex<Cell<PageReadTimes>> = CsMutex::new(Cell::new(PageReadTimes {
+    total_us: 0,
+    longest_us: 0,
+}));
+
+/// The page read times so far.
+pub fn page_read_times() -> PageReadTimes {
+    critical_section::with(|cs| PAGE_READS.borrow(cs).get())
+}
+
+fn record_page_read(took_us: u64) {
+    critical_section::with(|cs| {
+        let cell = PAGE_READS.borrow(cs);
+        let times = cell.get();
+        cell.set(PageReadTimes {
+            total_us: times.total_us.saturating_add(took_us),
+            longest_us: times.longest_us.max(took_us),
+        });
+    });
+}
 
 /// Where a Toniebox keeps its audio, and what it calls it.
 ///
@@ -239,8 +267,7 @@ impl PageSource for CardPages<'_> {
         let began = Instant::now();
         let result = self.read_page_inner(index, buf);
         let took = began.elapsed().as_micros();
-        PAGE_READ_US.fetch_add(took, Ordering::Relaxed);
-        PAGE_READ_MAX_US.fetch_max(took, Ordering::Relaxed);
+        record_page_read(took);
         result
     }
 
