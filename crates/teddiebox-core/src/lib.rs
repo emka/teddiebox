@@ -273,8 +273,8 @@ impl Core {
 
     /// Whether the box is busy with anything.
     ///
-    /// A download counts: at about 42.5 KB/s, a 37 MB story takes about 15
-    /// minutes, longer than the 5-minute idle timeout.
+    /// A download counts: a whole story takes longer to download than the
+    /// idle timeout.
     ///
     /// Charging counts because the charger cannot wake the box, so a box
     /// parked while plugged in could not be woken by it.
@@ -1038,9 +1038,9 @@ mod tests {
         );
     }
 
-    /// A child puts an unknown figure on the box. At about 42.5 KB/s, a 37 MB
-    /// story takes about 15 minutes to download, longer than the idle timeout,
-    /// and `ContentReady` only arrives at the end. Parking would cut power
+    /// A child puts an unknown figure on the box. A whole story takes longer
+    /// to download than the idle timeout, and `ContentReady` only arrives at
+    /// the end. Parking would cut power
     /// while the card is being written.
     #[test]
     fn a_download_in_progress_holds_the_box_awake() {

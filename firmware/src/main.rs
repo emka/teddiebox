@@ -318,9 +318,9 @@ pub(crate) fn already_asked(tag: TagUid) -> bool {
 /// the media task would stop playing whenever the server paused, and the
 /// network task would stall the socket during a decode.
 ///
-/// Sized from the measured download rate: at ~47 KB/s about 4.7 KB arrive
-/// between the media task's reads, so 8 KiB leaves room when a read is late.
-/// A full pipe just slows the download; it is not an error.
+/// Sized from a measurement: the network finds it full now and then, which
+/// costs a download at most a twentieth of its time. A full pipe just slows
+/// the download; it is not an error.
 const DOWNLOAD_PIPE_BYTES: usize = 8192;
 static DOWNLOAD_PIPE: CsMutex<RefCell<Pipe<DOWNLOAD_PIPE_BYTES>>> =
     CsMutex::new(RefCell::new(Pipe::new()));
@@ -487,8 +487,8 @@ impl ContentSink for CardFile<'_> {
 /// only updates a file's recorded length at a flush, so bytes written since
 /// the last flush are invisible after a reboot.
 ///
-/// A megabyte is about 24 seconds of download: little to lose, and few enough
-/// flushes not to wear the card.
+/// A megabyte is little to lose on a resume, and few enough flushes not to
+/// wear the card.
 const FLUSH_EVERY: u32 = 1 << 20;
 
 /// Reads what the card already has of `path`, for the producer.
@@ -2186,8 +2186,8 @@ async fn bring_up(
     // setup runs during it, after the join request is sent (hence the yield).
     // See `tls::Client::warm`.
     //
-    // Not while audio plays: the setup blocks the executor for up to 3.5 s
-    // (measured), which would interrupt playback. Then the first handshake
+    // Not while audio plays: the setup blocks the executor long enough to
+    // interrupt playback. Then the first handshake
     // does it instead.
     let associate = async {
         let (connected, ()) = embassy_futures::join::join(session.connect(), async {
@@ -2894,7 +2894,11 @@ fn init_rgb<'a>(
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    let p = esp_hal::init(esp_hal::Config::default());
+    // esp-hal's default is its slowest clock. The fastest speeds up everything
+    // the CPU does: TLS decryption, the handshake, decoding and checksums.
+    // Only the CPU divider changes, so peripheral clocks and timers do not.
+    let p =
+        esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
 
     // Clear the ROM's force-download-boot request. It survives a reset (that
     // is how `dl` works), so leaving it set would send every later reset into

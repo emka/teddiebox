@@ -1,9 +1,8 @@
 //! When the download should pause to give the audio room.
 //!
-//! The box downloads at about 42 KB/s, and a Tonie's audio plays at about
-//! 8 KB/s, so a download is five times faster than playback. Receiving over
-//! Wi-Fi delays the media task, and then the audio DMA can run out and
-//! restart, which is an audible glitch.
+//! A download runs several times faster than a Tonie's audio plays.
+//! Receiving over Wi-Fi delays the media task, and then the audio DMA can run
+//! out and restart, which is an audible glitch.
 //!
 //! So while a story plays, the download only runs when it is not far enough
 //! ahead of the decoder, and pauses once it is. When nothing plays, it runs

@@ -325,9 +325,9 @@ pub fn init(sha: SHA<'static>, rsa: RSA<'static>, aes: AES<'static>) -> Option<C
 ///
 /// **Parsing the key once matters.** Parsing itself takes 2-3 ms, but the
 /// first RSA private operation on a newly parsed key sets up blinding in
-/// software, which took 1.36 s on the box without yielding. With the key
-/// parsed once, only the first handshake after boot pays this: 2.68 s,
-/// against 1.27-1.36 s afterwards. See also [`Client::warm`].
+/// software, which takes as long as a whole handshake, without yielding.
+/// With the key parsed once, only the first handshake after boot pays this.
+/// See also [`Client::warm`].
 ///
 /// Owned by the network task and lent to each connection, not a static: the
 /// parsed key's reference count is not atomic, so it must have one owner.
@@ -395,10 +395,10 @@ impl Client {
 
     /// Does the first private-key operation now, so no handshake has to.
     ///
-    /// The first operation sets up RSA blinding: 1.36 s of CPU (measured),
-    /// blocking this executor. The network task calls this while Wi-Fi
-    /// connects, which it waits for anyway. Once per boot; without an identity
-    /// it does nothing and tries again next time.
+    /// The first operation sets up RSA blinding, which blocks this executor
+    /// for as long as a whole handshake takes. The network task calls this
+    /// while Wi-Fi connects, which it waits for anyway. Once per boot; without
+    /// an identity it does nothing and tries again next time.
     pub fn warm(&self) {
         if self.warmed.get() {
             return;
