@@ -23,7 +23,7 @@ use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use teddiebox_console::MAX_MEMORY_BLOCKS;
 use teddiebox_core::plate::{
-    PlatePoll, PlateReader, Seen, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEAVE,
+    Departure, PlatePoll, PlateReader, Seen, TagEvent, ARRIVALS_TO_AGREE, MISSES_TO_LEAVE,
 };
 use trf7962a::{Trf7962a, INIT_SEQUENCE};
 
@@ -746,10 +746,13 @@ fn poll_plate(reader: &mut Reader, poll: &mut PlatePoll) {
         TagEvent::Arrived(tag) => {
             esp_println::println!("teddiebox: plate tag arrived {:016X}", tag.ruid())
         }
-        TagEvent::Left => esp_println::println!(
+        TagEvent::Left(Departure::Lifted) => esp_println::println!(
             "teddiebox: plate tag left after {} missed polls",
             polled.misses_now
         ),
+        TagEvent::Left(Departure::Replaced { by }) => {
+            esp_println::println!("teddiebox: plate tag replaced by {:016X}", by.ruid())
+        }
     }
     match event {
         TagEvent::Arrived(tag) => {
@@ -759,7 +762,7 @@ fn poll_plate(reader: &mut Reader, poll: &mut PlatePoll) {
             let token = reader.read_token();
             PLATE_TAG.signal(Seen::Figure { uid: tag.0, token });
         }
-        TagEvent::Left => PLATE_TAG.signal(Seen::Nothing),
+        TagEvent::Left(_) => PLATE_TAG.signal(Seen::Nothing),
     }
 }
 

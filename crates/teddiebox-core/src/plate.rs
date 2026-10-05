@@ -65,7 +65,20 @@ pub const CONFIRM_POLL_MS: u32 = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagEvent {
     Arrived(TagUid),
-    Left,
+    Left(Departure),
+}
+
+/// Why the box stopped holding a figure.
+///
+/// The two are told apart because they fail differently: a lift is a run of
+/// empty readings, a replacement is another UID read often enough to be
+/// believed, which radio noise can also produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Departure {
+    /// Enough consecutive readings found nothing.
+    Lifted,
+    /// Enough readings agreed on `by`, a different UID.
+    Replaced { by: TagUid },
 }
 
 /// What the filter believes right now.
@@ -139,7 +152,7 @@ impl Presence {
                 let missed = missed.saturating_add(1);
                 if missed >= self.misses_to_leave {
                     self.state = State::Empty;
-                    Some(TagEvent::Left)
+                    Some(TagEvent::Left(Departure::Lifted))
                 } else {
                     self.state = State::Present { tag, missed };
                     None
@@ -200,7 +213,7 @@ impl Presence {
                 let missed = missed.saturating_add(1);
                 if missed >= self.misses_to_leave {
                     self.state = State::Empty;
-                    Some(TagEvent::Left)
+                    Some(TagEvent::Left(Departure::Lifted))
                 } else {
                     self.state = State::Present { tag: from, missed };
                     None
@@ -231,7 +244,7 @@ impl Presence {
     fn settle_swap(&mut self, to: TagUid, seen: u8) -> Option<TagEvent> {
         if seen >= self.arrivals_to_agree {
             self.state = State::Arriving { tag: to, seen: 0 };
-            Some(TagEvent::Left)
+            Some(TagEvent::Left(Departure::Replaced { by: to }))
         } else {
             None
         }
@@ -311,7 +324,29 @@ mod tests {
         let events = [Some(B), Some(C), Some(C)].map(|seen| p.feed(seen));
 
         // Then
-        assert_eq!(events, [None, None, Some(TagEvent::Left)]);
+        assert_eq!(
+            events,
+            [
+                None,
+                None,
+                Some(TagEvent::Left(Departure::Replaced { by: C }))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_swap_names_the_figure_that_replaced_the_old_one() {
+        // Given
+        let mut p = holding(A);
+
+        // When
+        let events = [Some(B), Some(B)].map(|seen| p.feed(seen));
+
+        // Then
+        assert_eq!(
+            events,
+            [None, Some(TagEvent::Left(Departure::Replaced { by: B }))]
+        );
     }
 
     /// A figure lifted while a stray reading is pending still departs on the
@@ -325,7 +360,16 @@ mod tests {
         let events = [Some(B), None, None, None, None].map(|seen| p.feed(seen));
 
         // Then
-        assert_eq!(events, [None, None, None, None, Some(TagEvent::Left)]);
+        assert_eq!(
+            events,
+            [
+                None,
+                None,
+                None,
+                None,
+                Some(TagEvent::Left(Departure::Lifted))
+            ]
+        );
     }
 
     /// Two agreeing readings, and not one before them.
@@ -389,7 +433,10 @@ mod tests {
         let events = [None; 4].map(|seen| p.feed(seen));
 
         // Then
-        assert_eq!(events, [None, None, None, Some(TagEvent::Left)]);
+        assert_eq!(
+            events,
+            [None, None, None, Some(TagEvent::Left(Departure::Lifted))]
+        );
     }
 
     #[test]
@@ -421,7 +468,12 @@ mod tests {
         // Then
         assert_eq!(
             events,
-            [None, Some(TagEvent::Left), None, Some(TagEvent::Arrived(B))]
+            [
+                None,
+                Some(TagEvent::Left(Departure::Replaced { by: B })),
+                None,
+                Some(TagEvent::Arrived(B))
+            ]
         );
     }
 
@@ -504,7 +556,10 @@ mod tests {
         // Given: A replaced by B
         let mut p = holding(A);
         p.feed(Some(B));
-        assert_eq!(p.feed(Some(B)), Some(TagEvent::Left));
+        assert_eq!(
+            p.feed(Some(B)),
+            Some(TagEvent::Left(Departure::Replaced { by: B }))
+        );
 
         // When
         let wait = p.poll_again_in_ms();
@@ -525,7 +580,7 @@ mod tests {
         let mut silent_ms = 0;
         loop {
             silent_ms += p.poll_again_in_ms();
-            if p.feed(None) == Some(TagEvent::Left) {
+            if p.feed(None) == Some(TagEvent::Left(Departure::Lifted)) {
                 break;
             }
         }
@@ -607,8 +662,8 @@ pub struct Polled {
     /// answered last time, so nothing interrupted.
     pub resumed_after_misses: Option<u16>,
     /// Consecutive polls that have found nothing, including this one.
-    /// Zero whenever this poll answered; meaningful alongside
-    /// `event == Some(TagEvent::Left)`, which only fires on a miss.
+    /// Zero whenever this poll answered, so it is zero for a
+    /// [`Departure::Replaced`] and meaningful for a [`Departure::Lifted`].
     pub misses_now: u16,
 }
 
@@ -944,7 +999,7 @@ mod plate_poll_tests {
 
         // Then
         let last = polls[3];
-        assert_eq!(last.event, Some(TagEvent::Left));
+        assert_eq!(last.event, Some(TagEvent::Left(Departure::Lifted)));
         assert_eq!(last.misses_now, 4);
     }
 }
