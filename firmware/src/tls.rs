@@ -55,6 +55,15 @@ const THROTTLE_WAIT: Duration = Duration::from_millis(50);
 /// `ssl-in-content-len-*` features and come out of the heap.
 const TCP_BUFFER: usize = 2048;
 
+/// Receive buffer for a story download, which is also the TCP window the box
+/// advertises.
+///
+/// The server can only send this much before waiting for the box's
+/// acknowledgement, so it bounds the rate. Measured: this size downloads half
+/// again as fast as [`TCP_BUFFER`]; doubling it added little and does not fit
+/// the stack budget.
+const CONTENT_RX_BUFFER: usize = 8192;
+
 /// Longest `host:port` this will take, plus room for the NUL.
 ///
 /// `mbedtls` wants the server name as a C string, and there is no allocator.
@@ -740,7 +749,7 @@ pub async fn fetch(
 
     // Created here: the socket borrows them and the session borrows the
     // socket.
-    let mut rx = [0u8; TCP_BUFFER];
+    let mut rx = [0u8; CONTENT_RX_BUFFER];
     let mut tx = [0u8; TCP_BUFFER];
     let mut socket = connect(stack, address, port, &mut rx, &mut tx).await?;
     // Connected; now use the idle timeout.
