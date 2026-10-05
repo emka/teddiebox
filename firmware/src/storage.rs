@@ -32,14 +32,16 @@ use embassy_time::Instant;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use teddiebox_config::{Config, ConfigError};
 
+use batched_writes::BatchedWrites;
 use embedded_sdmmc::{
-    Mode, RawDirectory, RawFile, SdCard, ShortFileName, TimeSource, Timestamp, VolumeIdx,
+    Block, Mode, RawDirectory, RawFile, SdCard, ShortFileName, TimeSource, Timestamp, VolumeIdx,
     VolumeManager,
 };
 use esp_hal::delay::Delay;
 use esp_hal::gpio::Output;
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
+use static_cell::ConstStaticCell;
 use teddiebox_core::checksum::Crc32;
 use teddiebox_core::walk::{Action, Cursor, Found, MAX_DEPTH};
 use teddiebox_taf::{PageSource, PAGE_SIZE};
@@ -327,7 +329,27 @@ type Card = SdCard<ExclusiveDevice<Spi<'static, esp_hal::Blocking>, Output<'stat
 /// `embedded-sdmmc` cannot open one file twice.
 ///
 /// One volume.
-type Volumes = VolumeManager<Card, NoClock, MAX_DEPTH, 2, 1>;
+///
+/// The card sits behind [`BatchedWrites`], so a download's consecutive
+/// blocks reach it as one multi-block write. Only [`Mounted::append`] starts
+/// a batch, and every path that leaves the card finishes it.
+type Volumes = VolumeManager<BatchedWrites<'static, Card>, NoClock, MAX_DEPTH, 2, 1>;
+
+/// The most blocks one batched card write carries.
+///
+/// Larger runs program faster but cost RAM that the stack budget
+/// (`scripts/check-budget.sh`) has to allow.
+const RUN_BLOCKS: usize = 4;
+
+/// Where a batch's blocks wait. A static, handed over once, so mounting
+/// never builds it on the stack.
+static RUN: ConstStaticCell<[Block; RUN_BLOCKS]> = ConstStaticCell::new(
+    [const {
+        Block {
+            contents: [0; Block::LEN],
+        }
+    }; RUN_BLOCKS],
+);
 
 /// A mounted card, and the handles that keep it open.
 ///
@@ -369,7 +391,11 @@ impl Mounted {
             }
         });
 
-        let volumes: Volumes = VolumeManager::new_with_limits(card, NoClock, 5000);
+        let run = RUN
+            .try_take()
+            .ok_or("the card's write buffer is already in use")?;
+        let volumes: Volumes =
+            VolumeManager::new_with_limits(BatchedWrites::new(card, run), NoClock, 5000);
         let volume = volumes
             .open_raw_volume(VolumeIdx(0))
             .map_err(|_| "no FAT volume in partition 0")?;
@@ -971,17 +997,35 @@ impl Mounted {
     ///
     /// The handle is shared with the reader, so the offset may be wherever
     /// the decoder left it; writing there would overwrite part of the story.
+    ///
+    /// Starts a batch: consecutive blocks may wait until
+    /// [`Mounted::finish_appends`], a flush or a close.
     pub fn append(&self, file: RawFile, bytes: &[u8]) -> Result<(), &'static str> {
         self.volumes
             .file_seek_from_end(file, 0)
             .map_err(|_| "could not seek to the end")?;
+        self.volumes.device(|card| card.start_batch());
         self.volumes
             .write(file, bytes)
             .map_err(|_| "the write failed")
     }
 
+    /// Writes whatever appended blocks are still waiting.
+    ///
+    /// The media task calls this when it stops writing, so nothing waits
+    /// while the card does anything else.
+    pub fn finish_appends(&self) -> Result<(), &'static str> {
+        self.volumes
+            .device(|card| card.finish_batch())
+            .map_err(|_| "the write failed")
+    }
+
     /// Saves what has been written and updates the file's recorded length.
+    ///
+    /// Waiting appended blocks are written first, so the recorded length
+    /// never covers blocks that are not on the card.
     pub fn flush(&self, file: RawFile) -> Result<(), &'static str> {
+        self.finish_appends()?;
         self.volumes
             .flush_file(file)
             .map_err(|_| "the flush failed")
@@ -1062,6 +1106,7 @@ impl Mounted {
     }
 
     pub fn close_file(&self, file: RawFile) {
+        let _ = self.finish_appends();
         let _ = self.volumes.close_file(file);
     }
 }

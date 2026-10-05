@@ -91,8 +91,8 @@ pub(crate) async fn enter(
 
     // Taken before the card is mounted, because the failure path below
     // parks, which is an `await`: anything alive across it becomes part
-    // of this task's future, in `.bss`. Doing this first keeps the
-    // 812-byte `Mounted` out of the future.
+    // of this task's future, in `.bss`. Doing this first keeps the large
+    // `Mounted` out of the future.
     let Some(scratch) = audio::take_scratch_bytes() else {
         esp_println::println!("teddiebox: portal cannot have the decode scratch — it is in use");
         paint(LedState::Error);

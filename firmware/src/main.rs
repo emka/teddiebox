@@ -646,6 +646,7 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         file: active.file,
     };
     let mut buf = [0u8; 512];
+    let mut failed = None;
     loop {
         let taken = critical_section::with(|cs| DOWNLOAD_PIPE.borrow_ref_mut(cs).read(&mut buf));
         if taken == 0 {
@@ -655,11 +656,16 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
             continue;
         }
         if let Err(reason) = active.writer.write(&mut sink, &buf[..taken]) {
-            esp_println::println!("teddiebox: get write failed — {reason}");
-            transfer(Transfer::write_failed);
+            failed = Some(reason);
             break;
         }
         active.crc.update(&buf[..taken]);
+    }
+    // Nothing may wait in a batch once this pass stops writing.
+    let finished = card.finish_appends();
+    if let Some(reason) = failed.or(finished.err()) {
+        esp_println::println!("teddiebox: get write failed — {reason}");
+        transfer(Transfer::write_failed);
     }
 
     let written = active.writer.watermark().0;

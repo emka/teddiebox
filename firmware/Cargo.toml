@@ -132,6 +132,7 @@ embedded-hal-bus = { version = "0.3", default-features = false }
 embassy-futures = "0.1"
 teddiebox-audio = { version = "0.1.0", path = "../crates/teddiebox-audio" }
 teddiebox-taf = { version = "0.1.0", path = "../crates/teddiebox-taf" }
+batched-writes = { version = "0.1.0", path = "../crates/batched-writes" }
 portable-atomic = "1.15.0"
 trf7962a = { version = "0.1.0", path = "../crates/trf7962a" }
 # "unstable": needed for `AccessPointConfig::with_max_connections` in
