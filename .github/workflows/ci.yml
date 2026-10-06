@@ -28,15 +28,37 @@ jobs:
   # be added to one without the other. Plain text parsing rather than `just
   # --dump`: this job would otherwise spend three minutes entering the Nix
   # shell to produce a list.
+  #
+  # A change that touches nothing but documents and the other workflows needs
+  # only the `quick` gate, which includes the workflow lint; select-gates.sh
+  # decides, and falls back to every gate whenever the change cannot be
+  # compared with its base. The branch rules name `all gates`, which still
+  # runs, so a skipped gate never leaves a required check pending.
   gates:
     runs-on: ubuntu-latest
     outputs:
       gates: ${{ steps.read.outputs.gates }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - id: read
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          gates="$(sed -n 's/^check: *//p' justfile | jq -Rce 'split(" ") | map(select(length > 0)) | select(length > 0)')"
+          all="$(sed -n 's/^check: *//p' justfile | jq -Rce 'split(" ") | map(select(length > 0)) | select(length > 0)')"
+          case "$EVENT" in
+            pull_request) base="$PR_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+            *) base="" ;;
+          esac
+          changed=""
+          if [ -n "$base" ]; then
+            changed="$(git diff --name-only "$base" HEAD)" || changed=""
+          fi
+          gates="$(printf '%s\n' "$changed" | scripts/select-gates.sh "$all")"
           echo "gates=$gates" >> "$GITHUB_OUTPUT"
 
   # One job per gate, so a red build names the gate that failed and a slow gate
