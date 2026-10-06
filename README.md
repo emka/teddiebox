@@ -156,7 +156,6 @@ plain text anyway.
 - A USB serial adapter connected to the box's console.
 - A [teddyCloud](https://github.com/toniebox-reverse-engineering/teddycloud)
   server on your network.
-- The box's certificate files `client.der` and `private.der` on the host.
 - A full flash dump of the box before it is flashed, kept safe. `just flash`
   cuts the stock bootloader from it, and it is how to get back to stock. Set
   `TEDDIEBOX_STOCK_DUMP` in `.envrc.local` to its path.
@@ -184,19 +183,16 @@ The flash layout is the stock one, so a dump of a stock box and
 `partitions.csv` agree. The firmware goes in `ota_0`; updates alternate with
 `ota_1`; `ota_2` keeps a stock image and is never written.
 
-### Flashing identity once
+### The box's identity
 
-The box authenticates to teddyCloud with its own certificate and key. They are
-stored in the `cert` flash partition, not on the SD card.
+The box authenticates to teddyCloud with the certificate and key stock put in
+the `assets` flash partition (`CERT/client.der` and `CERT/private.der`). The
+firmware only reads them: neither `just flash` nor an update writes `assets`.
 
-1. Set `TEDDIEBOX_IDENTITY_DIR` in `.envrc.local` to the directory holding
-   `client.der` and `private.der`.
-2. Run `just identity`.
-3. Check that the box reports its identity from flash at boot.
-
-This is needed once per box; flashing firmware does not touch the `cert`
-partition. Without it the box plays what is on the SD card but cannot fetch, and
-says so at boot.
+If `assets` was overwritten, the box plays what is on the SD card but cannot
+fetch, and says so at boot. Put it back from the dump with `BIN_FILE=<file>
+BIN_ADDR=0xf000 ./scripts/flash.sh`, where the file is the dump's bytes from
+`0xf000` to `0x16f000`.
 
 ### Changing settings without an SD card reader
 

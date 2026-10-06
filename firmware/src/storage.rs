@@ -122,8 +122,8 @@ const CACHE_DIR: &str = "CACHE";
 
 /// Where the card's copy of the certificate authority lives.
 ///
-/// Holds only `TCCA.DER`; the box's own certificate and key are in the
-/// `cert` flash partition. Already an 8.3 name.
+/// Holds only `TCCA.DER`; the box's own certificate and key are in stock's
+/// `assets` flash partition. Already an 8.3 name.
 const CERT_DIR: &str = "CERT";
 
 /// Why a certificate could not be read off the card.

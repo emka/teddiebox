@@ -1,8 +1,0 @@
-[package]
-name = "identity-image"
-version = "0.1.0"
-edition.workspace = true
-publish = false
-
-[dependencies]
-teddiebox-identity = { path = "../../crates/teddiebox-identity" }

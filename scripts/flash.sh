@@ -42,7 +42,7 @@ STOCK_DUMP="${TEDDIEBOX_STOCK_DUMP:-}"
 
 # Writing a binary at an offset instead of the firmware: same port rules, same
 # download-mode entry, same "esptool only after espflash succeeded" ordering.
-# `just identity` is the only caller.
+# For putting a partition back from a dump of a stock box.
 BIN_FILE="${BIN_FILE:-}"
 BIN_ADDR="${BIN_ADDR:-}"
 

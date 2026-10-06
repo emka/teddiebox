@@ -11,7 +11,6 @@ members = [
     "crates/teddiebox-console",
     "crates/teddiebox-core",
     "crates/teddiebox-download",
-    "crates/teddiebox-identity",
     "crates/teddiebox-opus-sys",
     "crates/teddiebox-ota",
     "crates/teddiebox-portal",
@@ -20,7 +19,6 @@ members = [
     "crates/tlv320dac3100",
     "crates/trf7962a",
     "tools/fat-assumptions",
-    "tools/identity-image",
     "tools/taf2wav",
 ]
 # Device-only, and its own workspace: see its Cargo.toml.

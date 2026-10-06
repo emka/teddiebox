@@ -1,7 +1,7 @@
 # The flash layout: the stock Toniebox table, with `coredump` given over to
-# `cert` and `wifi`. A dump of a stock box and this table agree on every other
-# partition, so a stock box can be restored from its own dump and teddyCloud's
-# flash tooling finds what it looks for.
+# `wifi`. A dump of a stock box and this table agree on every other partition,
+# so a stock box can be restored from its own dump and teddyCloud's flash
+# tooling finds what it looks for.
 #
 # The table sits at 0x9000, not espflash's default 0x8000, because the stock
 # bootloader is built for that offset. `scripts/flash.sh` passes it to espflash
@@ -12,33 +12,28 @@
 #
 # Three app slots, as stock ships them. The firmware is written to `ota_0` by a
 # flash and to `ota_1` by an update. `ota_2` is never written and keeps a stock
-# image, so there is a way back to stock that needs no dump. The count matters
-# to the code: the bootloader picks the boot slot from `otadata` modulo the
+# image. The count matters to the code: the bootloader picks the boot slot from `otadata` modulo the
 # number of app partitions, and `firmware/src/ota.rs` must use the same number.
 #
 # `assets` is stock's FAT volume with wear levelling: its sounds and the box's
-# own certificate and key. Nothing here writes it. A raw write would corrupt it,
-# because wear levelling moves sectors around.
+# own certificate and private key, which the firmware reads from there. Nothing
+# here writes it. A raw write would corrupt it, because wear levelling moves
+# sectors around.
 #
-# `coredump` is where stock keeps crash dumps. The firmware writes none, so its
-# 128 KB is used for the two partitions below instead.
-#
-# `cert` holds the box's own TLS certificate and private key. An app write never
-# touches a data partition, so the identity survives every firmware flash and is
-# written once per box with `just identity`.
+# `coredump` is where stock keeps crash dumps. The firmware writes none, so the
+# start of its 128 KB is used for `wifi`.
 #
 # `wifi` holds the WPA2 key derived from the card's SSID and passphrase, so a
 # join skips the 1.75 s the driver spends deriving it (measured: 1.81 s to
-# join with the passphrase, 64-72 ms with the key). Unlike `cert`, the firmware
-# writes this one, once per change of credentials.
+# join with the passphrase, 64-72 ms with the key). The firmware writes it, once
+# per change of credentials.
 #
-# The subtype of `cert` and `wifi` is spelled `undefined` because espflash
-# refuses an empty one. There is deliberately no flags column: espflash writes
-# `readonly` as flags bit 1, `esp-bootloader-esp-idf` 0.6.0 reads bit 0 for
-# read-only and bit 1 for encrypted, so the flag would buy no write protection
-# and would, the day flash encryption is ever enabled, send every read of these
-# partitions through `flash_read_encrypted`. The firmware not writing to `cert`
-# is a property of the firmware, not of this line.
+# The subtype of `wifi` is spelled `undefined` because espflash refuses an
+# empty one. There is deliberately no flags column: espflash writes `readonly`
+# as flags bit 1, `esp-bootloader-esp-idf` 0.6.0 reads bit 0 for read-only and
+# bit 1 for encrypted, so the flag would buy no write protection and would, the
+# day flash encryption is ever enabled, send every read of this partition
+# through `flash_read_encrypted`.
 #
 # The chip is 8 MB, as reported by espflash's connection banner and the
 # second-stage bootloader (`SPI Flash Size : 8MB`). An image that outgrows its
@@ -52,5 +47,4 @@ otadata,    data, ota,       0x16f000, 0x2000
 ota_0,      app,  ota_0,     0x180000, 0x220000
 ota_1,      app,  ota_1,     0x3a0000, 0x220000
 ota_2,      app,  ota_2,     0x5c0000, 0x220000
-cert,       data, undefined, 0x7e0000, 0x4000
-wifi,       data, undefined, 0x7e4000, 0x1000
+wifi,       data, undefined, 0x7e0000, 0x1000

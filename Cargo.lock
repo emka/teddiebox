@@ -445,13 +445,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "identity-image"
-version = "0.1.0"
-dependencies = [
- "teddiebox-identity",
-]
-
-[[package]]
 name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -871,13 +864,6 @@ dependencies = [
  "heapless",
  "teddiebox-cloud",
  "teddiebox-taf",
-]
-
-[[package]]
-name = "teddiebox-identity"
-version = "0.1.0"
-dependencies = [
- "teddiebox-core",
 ]
 
 [[package]]

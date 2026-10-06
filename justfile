@@ -105,7 +105,7 @@ cross:
     #!/usr/bin/env bash
     set -euo pipefail
     for crate in teddiebox-taf teddiebox-assets teddiebox-core teddiebox-config teddiebox-cloud \
-                 teddiebox-download teddiebox-identity teddiebox-ota teddiebox-portal \
+                 teddiebox-download teddiebox-ota teddiebox-portal \
                  teddiebox-board teddiebox-console teddiebox-wifikey \
                  tlv320dac3100 trf7962a lis3dh batched-writes; do
         echo "--- $crate"
@@ -169,28 +169,6 @@ flash: firmware
 # is read out of the image, so the two always agree.
 ota-image: firmware
     ./scripts/ota-image.sh
-
-# writes the box's TLS identity into the `cert` partition
-#
-# Separate from `just flash` deliberately: an app write never touches a data
-# partition, so this is run once per box and survives every later firmware
-# flash. So a fresh box can play its card but cannot download until this is
-# run, which it reports at boot.
-#
-# Needs TEDDIEBOX_IDENTITY_DIR, set in .envrc.local. The offset must match
-# `cert` in partitions.csv.
-identity:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    out="$(mktemp -d)"
-    trap 'rm -rf "$out"' EXIT
-    cargo run -q -p identity-image -- "$out/identity.bin"
-    # Read from the table rather than repeated here, so moving the partition
-    # cannot leave this writing the private key to the old address.
-    addr="$(awk -F', *' '/^cert,/ { print $4 }' partitions.csv)"
-    [ -n "$addr" ] || { echo "just identity: no cert partition in partitions.csv" >&2; exit 1; }
-    echo "identity: writing to $addr, per partitions.csv"
-    BIN_FILE="$out/identity.bin" BIN_ADDR="$addr" ./scripts/flash.sh
 
 # `scripts/bench-console.py` sends one line and captures until a marker, for
 # scripts. This is for interactive use, such as plugging in headphones between
