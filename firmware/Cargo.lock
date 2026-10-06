@@ -2784,6 +2784,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-assets"
+version = "0.1.0"
+
+[[package]]
 name = "teddiebox-audio"
 version = "0.1.0"
 dependencies = [
@@ -2863,6 +2867,7 @@ dependencies = [
  "portable-atomic",
  "rand_core 0.10.1",
  "static_cell",
+ "teddiebox-assets",
  "teddiebox-audio",
  "teddiebox-board",
  "teddiebox-cloud",
@@ -2870,20 +2875,12 @@ dependencies = [
  "teddiebox-console",
  "teddiebox-core",
  "teddiebox-download",
- "teddiebox-identity",
  "teddiebox-ota",
  "teddiebox-portal",
  "teddiebox-taf",
  "teddiebox-wifikey",
  "tlv320dac3100",
  "trf7962a",
-]
-
-[[package]]
-name = "teddiebox-identity"
-version = "0.1.0"
-dependencies = [
- "teddiebox-core",
 ]
 
 [[package]]
