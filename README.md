@@ -32,13 +32,13 @@ Playing a different figure in between resets it.
 
 teddiebox remembers the position of every story, also across power-off.
 
-- The position is written to the card when the figure's memory is needed for
+- The position is written to the SD card when the figure's memory is needed for
   another figure, and at shutdown.
 - A story played to its end starts from the beginning next time.
-- The position is stored in `<story>.pos` next to the story on the card. Delete
-  it to start that story from the beginning.
+- The position is stored in `<story>.pos` next to the story on the SD card.
+  Delete it to start that story from the beginning.
 - A flat battery or a reset loses the position since the last write. Writing
-  more often would wear the card.
+  more often would wear the SD card.
 
 ### Chapter skip
 
@@ -50,10 +50,28 @@ Because a press could be a hold, volume changes when the ear is released rather
 than when it is pressed. Set `ears_skip = no` in `config.txt` to get stock ear
 behaviour: volume changes on press, and slapping still skips.
 
+### Trusted CA on the SD card
+
+Stock keeps the CA it trusts in flash, in the `assets` partition as
+`CERT/CA.DER`. It is the manufacturer's CA. Pointing a stock box at teddyCloud
+means patching that file in a flash dump and writing the partition back.
+
+teddiebox reads the CA from the SD card instead.
+
+- The file is `cert/tcca.der`, the teddyCloud CA. See
+  [Requirements](#requirements).
+- To change the CA, replace the file, or upload it in setup mode. No reflash.
+- The `assets` partition is left as stock. teddiebox does not read the
+  manufacturer's CA from it.
+- Without the file the box plays what is on the SD card but cannot fetch, and
+  says so at boot.
+- Anyone who can write to the SD card can change which CA the box trusts. Stock
+  needs access to the flash for that.
+
 ### Setup mode
 
-The box can be configured over WiFi without removing the card. See
-[Changing settings without a card reader](#changing-settings-without-a-card-reader).
+The box can be configured over WiFi without removing the SD card. See
+[Changing settings without an SD card reader](#changing-settings-without-an-sd-card-reader).
 
 ### Status light
 
@@ -86,7 +104,7 @@ The light is steady and dim.
 
 ## Configuration
 
-Settings are in `config.txt` in the card's root. Example:
+Settings are in `config.txt` in the SD card's root. Example:
 
     ssid = home
     password = correct horse battery
@@ -112,12 +130,12 @@ Options:
 | `server` | required | `host:port` of your teddyCloud, up to 64 characters. Only letters, digits, `.`, `-`, `_` and `:` |
 | `ears_skip` | `yes` | holding an ear skips a chapter. `yes`/`no`, `true`/`false` or `1`/`0`. `no` gives stock ear behaviour, see [Chapter skip](#chapter-skip) |
 | `update_url` | none | `https://` URL of an update manifest, up to 128 characters. Without it the box never checks for updates, see [Updates over the air](#updates-over-the-air). An empty value is an error |
-| `setup_password` | `teddiebox` | passphrase of the setup network, 8 to 63 characters, see [Setup mode](#changing-settings-without-a-card-reader) |
+| `setup_password` | `teddiebox` | passphrase of the setup network, 8 to 63 characters, see [Setup mode](#changing-settings-without-an-sd-card-reader) |
 
 A file without `ssid` or `server` is rejected.
 
 **Trust `server`.** The box verifies the server's certificate against
-`cert/tcca.der` on the card, and sends it its own certificate and the placed
+`cert/tcca.der` on the SD card, and sends it its own certificate and the placed
 figure's token.
 
 **`update_url` is verified like `server`**, so its host must be teddyCloud
@@ -126,7 +144,7 @@ itself. See [Updates over the air](#updates-over-the-air).
 **The WiFi key is stored in flash.** The box derives a key from `ssid` and
 `password` and keeps it in the `wifi` partition, which cuts joining from about
 2s to 0.1s. It is re-derived after changing either value. Anyone who can
-read the flash can join your network, but the passphrase is on the card in
+read the flash can join your network, but the passphrase is on the SD card in
 plain text anyway.
 
 ## Installation
@@ -162,7 +180,7 @@ same.
 ### Flashing identity once
 
 The box authenticates to teddyCloud with its own certificate and key. They are
-stored in the `cert` flash partition, not on the card.
+stored in the `cert` flash partition, not on the SD card.
 
 1. Set `TEDDIEBOX_IDENTITY_DIR` in `.envrc.local` to the directory holding
    `client.der` and `private.der`.
@@ -170,10 +188,10 @@ stored in the `cert` flash partition, not on the card.
 3. Check that the box reports its identity from flash at boot.
 
 This is needed once per box; flashing firmware does not touch the `cert`
-partition. Without it the box plays what is on the card but cannot fetch, and
+partition. Without it the box plays what is on the SD card but cannot fetch, and
 says so at boot.
 
-### Changing settings without a card reader
+### Changing settings without an SD card reader
 
 1. Hold both ears while switching the box on, until the light turns on. The box
    starts a WiFi network instead of playing. A bench image also enters setup
@@ -184,7 +202,7 @@ says so at boot.
    the page and nothing is written.
 5. Press **Restart** to leave setup mode with the new settings.
 
-To put teddyCloud's CA on the card, choose `ca.der` under **certificate** and
+To put teddyCloud's CA on the SD card, choose `ca.der` under **certificate** and
 press **Write certificate**. The page then shows its size. It is used from the
 next restart.
 
@@ -202,7 +220,8 @@ Security:
   is acceptable.
 
 Set `setup_password` in `config.txt` to use your own passphrase. A box with no
-card, an unreadable card or an unparseable `config.txt` still uses the default.
+SD card, an unreadable SD card or an unparseable `config.txt` still uses the
+default.
 
 To reset a forgotten setup passphrase, use the serial console in setup mode:
 `setup pw off` restores the default, `setup pw <new>` sets a new one. Both
@@ -216,7 +235,7 @@ with a figure on the box, or on a low battery, does not check.
 
 If the manifest's version differs from the running one, the box downloads the
 image into its spare firmware slot (the LED shows fetching, about 30 s) and
-reboots into it. The new image is kept only after the card mounts and the
+reboots into it. The new image is kept only after the SD card mounts and the
 codec responds; otherwise the box goes back to the old one at the next boot.
 
 The download stops, and the box keeps its current firmware, if:
@@ -251,7 +270,7 @@ with
 
 #### One-time upload setup
 
-1. Get teddyCloud's CA as `tcca.der`. It is the file the card carries as
+1. Get teddyCloud's CA as `tcca.der`. It is the file the SD card carries as
    `cert/tcca.der`. If you have no copy, download it once, over a network you
    trust, since nothing authenticates this first download:
 
