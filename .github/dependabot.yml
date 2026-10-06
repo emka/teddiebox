@@ -65,11 +65,14 @@ updates:
   # flake.lock: the toolchain and every tool the gates run. Grouped because
   # any change to it misses the Nix store cache, and one combined bump is one
   # cold run instead of one per input. Flake inputs are commits, not semver
-  # versions, so there are no update types to group by.
+  # versions, so there are no update types to group by. Monthly, because the
+  # tracked branches gain commits every day and each bump is a cold run; a
+  # bump in between is requested from the repository's Dependabot page with
+  # "Check for updates".
   - package-ecosystem: nix
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     cooldown:
       default-days: 3
     open-pull-requests-limit: 3
