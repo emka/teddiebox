@@ -1,0 +1,13 @@
+[package]
+name = "teddiebox-assets"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Formats the volumes the tests read, so the fixtures come from an
+# independent FAT implementation rather than from this crate's own idea of one.
+fatfs = { version = "0.3", default-features = false, features = ["std", "alloc"] }

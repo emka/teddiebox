@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/batched-writes",
     "crates/lis3dh",
+    "crates/teddiebox-assets",
     "crates/teddiebox-audio",
     "crates/teddiebox-board",
     "crates/teddiebox-cloud",

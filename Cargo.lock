@@ -812,6 +812,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "teddiebox-assets"
+version = "0.1.0"
+dependencies = [
+ "fatfs",
+]
+
+[[package]]
 name = "teddiebox-audio"
 version = "0.1.0"
 dependencies = [
