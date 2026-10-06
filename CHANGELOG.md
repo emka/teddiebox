@@ -2,141 +2,23 @@
 
 ## 0.1.0 (2026-10-06)
 
+Replacement firmware for the Toniebox (ESP32 rev 1.6.C), written in Rust. It reads the same figures and fetches audio from a local teddyCloud.
 
-### ⚠ BREAKING CHANGES
+### Different to stock
 
-* **identity:** checksum the bodies so a torn write cannot look like success
-* **identity:** take the box's key off the card entirely
-* **config:** drop the insecure setting
+* Position per story, kept across power-off
+* Chapter skip: hold an ear, or slap the side of the box
+* Trusted CA read from the SD card
+* Setup mode: configure over WiFi without removing the card
+* Status light
+* Settings in `config.txt` on the SD card
+* Updates over the air with `update_url`
 
-### Features
+### Missing compared to stock
 
-* **assets:** read files out of the stock assets partition ([5140351](https://github.com/emka/teddiebox/commit/51403515ac7dd569a4a09aca4e6df2af32df6456))
-* **batched-writes:** hold consecutive writes until the batch finishes ([b7ddc2c](https://github.com/emka/teddiebox/commit/b7ddc2c8ba3caab41e128f579bbd23fe17afbfa6))
-* **batched-writes:** refuse writes once a held run is lost ([bfd5061](https://github.com/emka/teddiebox/commit/bfd50615301e8ab39cd2e3759b9690bea16789a8))
-* **batched-writes:** wrap a block device without changing it ([a2fca40](https://github.com/emka/teddiebox/commit/a2fca405691e179082cfb064aac26d33c6cc5937))
-* **bench:** tell an empty jack apart from detection that never came up ([1da931f](https://github.com/emka/teddiebox/commit/1da931f76effc63251ce11d02bd7425d5de04252))
-* **config:** drop the insecure setting ([c27ad61](https://github.com/emka/teddiebox/commit/c27ad61b5e2d1efb44dc4195ecda5f94975eb579))
-* **core:** ask for a cue on every volume press ([a1af3c2](https://github.com/emka/teddiebox/commit/a1af3c21ee0146548b01c97e8fcf5a89a315b2f2))
-* **core:** generate the stock skip and volume cues ([ebce93d](https://github.com/emka/teddiebox/commit/ebce93d731b31f5d06c4badc1ff6fe894306dad3))
-* **download:** add the revalidation conversation as a state machine ([58231fe](https://github.com/emka/teddiebox/commit/58231fe72c8178c8348fe13d508d87f634e37b35))
-* **download:** give the card's answer a representation it can travel in ([18c0f41](https://github.com/emka/teddiebox/commit/18c0f416eef1b84a3af7997a7f49b0c3d376c403))
-* **download:** model a download's handoff between the two tasks ([f137dea](https://github.com/emka/teddiebox/commit/f137dead829f14b0dea35b84ca115a1ad5a1420e))
-* **download:** tell stock content from a download by its sidecar ([60f853e](https://github.com/emka/teddiebox/commit/60f853e64466f813c83695c1a5225b7e27788a9f))
-* **firmware:** download audio into CONTENT/ beside the stock stories ([bde6a43](https://github.com/emka/teddiebox/commit/bde6a43cb66a0426d69181ac1d286d467b03a4a7))
-* **firmware:** enter download mode automatically after a panic ([1ee1f7c](https://github.com/emka/teddiebox/commit/1ee1f7c7ca2858b53b41dd5e0c40af15953ee8d5))
-* **firmware:** enter setup mode from the console ([129e792](https://github.com/emka/teddiebox/commit/129e7921647ea673bb9cd316d81acb8eb4815031))
-* **firmware:** install the update the card's update_url offers ([67a9f3e](https://github.com/emka/teddiebox/commit/67a9f3e9bf4e36484535bf676e41a310b9188d74))
-* **firmware:** keep the wifi key a passphrase join proved ([d1caf2c](https://github.com/emka/teddiebox/commit/d1caf2ca47c19e628dceb1c70f1c9a6cfb5969df))
-* **firmware:** mix volume cues into a playing story ([5e76d93](https://github.com/emka/teddiebox/commit/5e76d931db1e7c9cdf10b4435172dd9e017be02b))
-* **firmware:** play cues when no story is playing ([9e397b5](https://github.com/emka/teddiebox/commit/9e397b53478f7fb35c58cd21e1c87a0626272950))
-* **firmware:** play the skip cues between chapters ([3b01c97](https://github.com/emka/teddiebox/commit/3b01c97c397f683131542e78d2db27b0e21d832c))
-* **firmware:** print the firmware version at boot ([6ea68e1](https://github.com/emka/teddiebox/commit/6ea68e1a1f81445bfcf14a39cdb2634dde0758be))
-* **firmware:** read a stored wifi key at boot ([ff71fbd](https://github.com/emka/teddiebox/commit/ff71fbd417f8e72a31c52d7e7f9cbe06c85c43b1))
-* **firmware:** stop a slow card costing a download its partial file ([b06fa6d](https://github.com/emka/teddiebox/commit/b06fa6dfde9fafbadafd691415f96d87edc93cc2))
-* **flash:** use the stock partition table and bootloader ([c46e8ed](https://github.com/emka/teddiebox/commit/c46e8edcd7cc509060437f084b2546b558d318d1))
-* **identity:** build the cert partition's image on the host ([b392d5f](https://github.com/emka/teddiebox/commit/b392d5f95bfe1c48e68d450b2b313f1db25c6739))
-* **identity:** checksum the bodies so a torn write cannot look like success ([70f0434](https://github.com/emka/teddiebox/commit/70f04345d9f567a96f3aa36d62435c9e34bf54fe))
-* **identity:** give the cert partition a format both sides share ([303a0b8](https://github.com/emka/teddiebox/commit/303a0b831d132ce2082bc820031294ddb202a874))
-* **identity:** make room in flash for the box's own certificate ([0bc9cf9](https://github.com/emka/teddiebox/commit/0bc9cf995b8623650ac8f2c30037a3ffded2f3bb))
-* **identity:** read the box's certificate and key from flash ([148ae3b](https://github.com/emka/teddiebox/commit/148ae3b4f1b2285a18b63da73723d55b410073c1))
-* **identity:** read the box's certificate and key from stock's assets ([1ff1de4](https://github.com/emka/teddiebox/commit/1ff1de49fead89de70f6ff24ccab3567fb55aff3))
-* **identity:** take the box's key off the card entirely ([d77117a](https://github.com/emka/teddiebox/commit/d77117aee7c2ff201c294d341d9489487683a969))
-* **ota:** gate activation on the length, digest and version together ([b07577d](https://github.com/emka/teddiebox/commit/b07577d28c2d59b0f3f8afc019e8f86e7f1f419b))
-* **ota:** stage download chunks into writes flash accepts ([4306685](https://github.com/emka/teddiebox/commit/4306685ddbc086ca7f2c13b4b4d220a485838e2b))
-* **plate:** say why a figure left ([961a3df](https://github.com/emka/teddiebox/commit/961a3df961ca8bc18f40f0f2038e5fbc98c226db))
-* **portal:** accept the CA certificate in setup mode ([cf8c8f8](https://github.com/emka/teddiebox/commit/cf8c8f8acf9283ba94a9dcb1c106fc0b84a2d83f))
-* **portal:** read the request's content type ([f056316](https://github.com/emka/teddiebox/commit/f056316f54a41f3427fd791d66c3bda9617e02e0))
-* **portal:** take a file out of a multipart upload ([f27e953](https://github.com/emka/teddiebox/commit/f27e953d2a4a216fa4988dd0b1b09884dd3dd5a0))
-* **portal:** write config.txt without restarting ([d15da86](https://github.com/emka/teddiebox/commit/d15da865b6d522886e77dc4b5e114d8617877a31))
-* **scripts:** write an update image and a manifest that agrees with it ([1f6caee](https://github.com/emka/teddiebox/commit/1f6caee330e5f08a7d577637cb5bd434128eb8bb))
-* **wifikey:** derive the WPA2 key in slices ([f88ed5d](https://github.com/emka/teddiebox/commit/f88ed5d35d6e1339fc375d79f1aa8ee4a9544840))
-* **wifikey:** the record that keeps a derived key ([e93e105](https://github.com/emka/teddiebox/commit/e93e105094a6015bdc84671cdd3a3629c9cc06a0))
-* **wifikey:** tie a derivation to the credentials a join proved ([fb2f371](https://github.com/emka/teddiebox/commit/fb2f3715d8792ad8b4550e353f6b5f5bd1aeb752))
+* Rewind and fast-forward by tilting
+* Telemetry to teddyCloud
+* Settings from teddyCloud
 
+Unofficial project. Flashing replaces the stock firmware and can brick the box. See the README before you start.
 
-### Bug Fixes
-
-* **audio:** lend the TAF decoder its blocks instead of holding them ([d8d01fe](https://github.com/emka/teddiebox/commit/d8d01fe9b6feea6655382a7555c49d1fe2e15cde))
-* **ci:** keep the runner's disk from filling up ([e4aa0ec](https://github.com/emka/teddiebox/commit/e4aa0ec43ab50797782d1ce92a1ae177a922a808))
-* **ci:** keep what evaluating the flake needs through garbage collection ([e62fc92](https://github.com/emka/teddiebox/commit/e62fc92656c1a08356f3ceafb05b798519ecae5e))
-* **cloud:** keep the connection open on a path request ([11ae344](https://github.com/emka/teddiebox/commit/11ae344227a882850cd4a939c9e9fba2c77d1d1b))
-* **codec:** hold the detection bias up against an empty jack too ([e3428a3](https://github.com/emka/teddiebox/commit/e3428a3fdb17b003b97098a317e8711752ef6e9e))
-* **codec:** let the speaker come back when a story began with headphones in ([bbc3a53](https://github.com/emka/teddiebox/commit/bbc3a53c68aeefb91eb311a1b60f47311066df3b))
-* **codec:** power the bias the headset detector senses against ([10f6e7a](https://github.com/emka/teddiebox/commit/10f6e7a3e2ebc38da9a1a88dfb89b75866545039))
-* **codec:** power the speaker's amplifier at the unplug, not at the start ([925e253](https://github.com/emka/teddiebox/commit/925e253028e76303d10d35cfc9d031fbcd01d6a0))
-* **codec:** read the jack from the live status flag, not the last headset seen ([624b920](https://github.com/emka/teddiebox/commit/624b920b23f3397400799bd7f879e20992246908))
-* **core:** give a WAV below one kilohertz no duration instead of a panic ([2f31d0f](https://github.com/emka/teddiebox/commit/2f31d0f4f7a1a4ff2e93605575cd715119955e25))
-* **download:** end a download whose card write failed ([8f6d32d](https://github.com/emka/teddiebox/commit/8f6d32d419f87d36be3721a09cddfc323304e90d))
-* **download:** let a download finish before the next one starts ([4f7d319](https://github.com/emka/teddiebox/commit/4f7d31918d1a7d820ad5316fd604ea6a95bba8b9))
-* **download:** let a new fetch report past an old unread outcome ([14c802b](https://github.com/emka/teddiebox/commit/14c802b1dc2199c38a4e2fa025e4ff829be861f5))
-* **download:** make the handshake's deadline fifteen seconds of wall clock ([36ea3a7](https://github.com/emka/teddiebox/commit/36ea3a7f8adf197b6b37178f9cedbf2a400b7ab9))
-* **firmware:** build the portal future outside main's stack frame ([a8f62c8](https://github.com/emka/teddiebox/commit/a8f62c872634f3bc474db6d6b90409ae9cda6dcf))
-* **firmware:** checksum decoded audio only when the bench asks ([1162fab](https://github.com/emka/teddiebox/commit/1162fabd5e70d0ae88e83ef57665b5aae9ffeabc))
-* **firmware:** claim the output before every idle cue ([007da95](https://github.com/emka/teddiebox/commit/007da9500c272e2f44fbe306879dbbd9c949a390))
-* **firmware:** count a failed output change as down ([efaed7b](https://github.com/emka/teddiebox/commit/efaed7b3b53f0234eda007d5ecf477410b3b1db8))
-* **firmware:** derive only the credentials a join proved ([4d7b119](https://github.com/emka/teddiebox/commit/4d7b119466f9e3bdabf76b80b6e4ae42a9e1de1b))
-* **firmware:** do not aim the passphrase retry at a hint already disproved ([e1e2349](https://github.com/emka/teddiebox/commit/e1e234988d6fe04d62b9575af94d6afe4ea8989a))
-* **firmware:** do not derive a key there is nowhere to keep ([fb2661e](https://github.com/emka/teddiebox/commit/fb2661eec7a14ba2c579271c44782a9c54b008ac))
-* **firmware:** drop a probe answer that arrives after its question is over ([b90bf4e](https://github.com/emka/teddiebox/commit/b90bf4e378134f448111d102e572f322b68fdc46))
-* **firmware:** drop the stray gap in the periodic TAF log line ([f14759e](https://github.com/emka/teddiebox/commit/f14759eb93de5a8aad60dd0979ee4079bf619eca))
-* **firmware:** end a figure's question when it is lifted ([ca60f88](https://github.com/emka/teddiebox/commit/ca60f884eed9c2b85b8313019e9f816cb06c723d))
-* **firmware:** explain an unrecognised cert partition in prose ([e7f5703](https://github.com/emka/teddiebox/commit/e7f5703ae3e2f500dc1e2dad22a8a1d576048d02))
-* **firmware:** fall back to the passphrase when the stored key is refused ([9291c8a](https://github.com/emka/teddiebox/commit/9291c8a2c885fb0a4198e700aac6ca925b3c17a5))
-* **firmware:** keep every recently asked neighbor silent ([b4f7c14](https://github.com/emka/teddiebox/commit/b4f7c1473ff756ff9601f490a2110635f11cd17a))
-* **firmware:** keep the console tone powered through cues and linger ([0d089f4](https://github.com/emka/teddiebox/commit/0d089f4bf90bfeab0f62ab2f86f11a3d2061c427))
-* **firmware:** leave an identical key record unwritten ([c9ed6d5](https://github.com/emka/teddiebox/commit/c9ed6d5a00315bf4d8945a6aef5e067114bd1855))
-* **firmware:** let the console drain before UART0 is reconfigured ([09ae1da](https://github.com/emka/teddiebox/commit/09ae1da627276c48a039a701cd6716dfb17571b3))
-* **firmware:** play an idle cue from an empty stream buffer ([e0f5c7e](https://github.com/emka/teddiebox/commit/e0f5c7e8839e592878979671e3bfae0f444dca8c))
-* **firmware:** print pack readings on bench images only ([38ceec2](https://github.com/emka/teddiebox/commit/38ceec244078e9d9a18713f87e5d5ae8acaa6303))
-* **firmware:** print playback telemetry only in bench images ([643c23c](https://github.com/emka/teddiebox/commit/643c23c6953095ec813d14c62a2568fa9bd81b35))
-* **firmware:** refuse a CA that does not parse at boot ([abded6e](https://github.com/emka/teddiebox/commit/abded6e1b58cc20b43cec06fb314d460f36432c3))
-* **firmware:** say a sound stopped the update, not a story ([3d302f8](https://github.com/emka/teddiebox/commit/3d302f80f2c5c48734bd85c7842eec61cf256932))
-* **firmware:** say why a hinted join failed ([c0db29c](https://github.com/emka/teddiebox/commit/c0db29cb10a6a51a8d1fc5249cf89c2a08316be1))
-* **firmware:** start every transfer with an empty stream buffer ([fa46df8](https://github.com/emka/teddiebox/commit/fa46df8b0f37442097b73f86cc38922f2ce6a398))
-* **firmware:** stop printing a heartbeat ([a40acfb](https://github.com/emka/teddiebox/commit/a40acfbae2a37bfa03a7092624a346ad2e8e4706))
-* **firmware:** stop printing accelerometer readings ([184e8e5](https://github.com/emka/teddiebox/commit/184e8e5b8dcfce9cd0b8fb5e796b82e35f3f9852))
-* **firmware:** try the passphrase whenever the stored key fails to join ([df1da9e](https://github.com/emka/teddiebox/commit/df1da9e323e3947720dae2e752ca052c3b53413a))
-* **identity-image:** accept the filename case a vfat mount produces ([e1d3590](https://github.com/emka/teddiebox/commit/e1d359003a73af3cf8751a8aa1e0f149f92a1b98))
-* **identity-image:** refuse anything that is not DER ([2da68be](https://github.com/emka/teddiebox/commit/2da68be162c4fbef4303d897c5276cc8b3d2c755))
-* **identity:** move the flash read past the stack paint ([ddbee0d](https://github.com/emka/teddiebox/commit/ddbee0d88d80c234f87870652c0e329b62f189b7))
-* **input:** retry a jack change the reducer never heard ([319f542](https://github.com/emka/teddiebox/commit/319f542a51d55721f7428c07f1e348cc3231046e))
-* **justfile:** let `just fix` reach the workspace `just fmt` checks ([29aaa97](https://github.com/emka/teddiebox/commit/29aaa97371373ecf4a85318964c44cd3e1403781))
-* **justfile:** take the cert partition's address from the table ([810ea04](https://github.com/emka/teddiebox/commit/810ea047fe39b5373ae195a2957f2a9e890ea0dc))
-* **portal:** answer a write by sending the browser back to the page ([30b0873](https://github.com/emka/teddiebox/commit/30b087301c68737787a2b92f38773dd9a56404e8))
-* **portal:** keep the card's config on a refused request ([fe3aeb9](https://github.com/emka/teddiebox/commit/fe3aeb9dbd719627312e896d3f1510d4a4e79764))
-* **portal:** listen on two sockets so a quick next request is not refused ([9171758](https://github.com/emka/teddiebox/commit/917175825f108e0df52cd731798c5449403cbd49))
-* **portal:** say how large the written certificate is ([d968c4e](https://github.com/emka/teddiebox/commit/d968c4e5fe65fbde7d065d67a1f75a92e3978814))
-* **portal:** say why the card's CA cannot be used ([cdefbb3](https://github.com/emka/teddiebox/commit/cdefbb317627d519f5223a669e28945af65de6de))
-* **portal:** show a card problem next to the message it would hide ([c859192](https://github.com/emka/teddiebox/commit/c859192321ac5ea91e9d1ab436df178bd3249ef7))
-* **scripts:** boot the flashed image even after an update ([c91b802](https://github.com/emka/teddiebox/commit/c91b802cf2d8de67f05cdc401c9aa8d224999b11))
-* **scripts:** close the record and log files when setup fails ([0ccefaf](https://github.com/emka/teddiebox/commit/0ccefaf91b0850a07fc8c77d1cb2000be911ffb6))
-* **scripts:** say what to do on a milliamp sleep reading ([db1321a](https://github.com/emka/teddiebox/commit/db1321a53f26c86d8fe3d96de3693e29a8bc534d))
-* **scripts:** set the console port's speed in bench-console ([4624db8](https://github.com/emka/teddiebox/commit/4624db83eb6607f34c2d2cd7658292c272bc1d23))
-* **storage:** keep a download's length off blocks the card lost ([6463bea](https://github.com/emka/teddiebox/commit/6463bea0004e5038c7ffd6529f021d00395f2d4a))
-* **taf:** drop load_page's page-preserving retry guarantee for stack ([bb5575b](https://github.com/emka/teddiebox/commit/bb5575b792020dac0195e35569432b88e85bbc79))
-* **taf:** stop TafReader::open from doubling its 4096-byte page buffer ([eaa7aff](https://github.com/emka/teddiebox/commit/eaa7affb3a01be8bc84e04951b44d176aa0f18e3))
-
-
-### Performance Improvements
-
-* **ci:** make room on the runner without waiting for it ([b85ba9a](https://github.com/emka/teddiebox/commit/b85ba9a01d90ea84c4268c77c01ad7a43851053d))
-* **firmware:** confirm a newly read figure at once ([f2f97f6](https://github.com/emka/teddiebox/commit/f2f97f65a689fedcbb59b0b11576221829d88bf2))
-* **firmware:** join the last access point without scanning ([d9682ac](https://github.com/emka/teddiebox/commit/d9682acb837a0489b67165f4f3809da4560d9cbf))
-* **firmware:** join with the stored wifi key ([a4755fb](https://github.com/emka/teddiebox/commit/a4755fb405cf9df05eba01d337132a2547bc6f01))
-* **firmware:** parse the box's key once per boot ([f2e8608](https://github.com/emka/teddiebox/commit/f2e86084272af3281bfb708f02d1aec455519659))
-* **firmware:** prime the connection once per boot ([fc60a5d](https://github.com/emka/teddiebox/commit/fc60a5d2c88844f7a98448d5e88f2597be02eec9))
-* **firmware:** read a figure again soon after it misses ([b437462](https://github.com/emka/teddiebox/commit/b437462201e17defd6afac39371cdd2753fc1bc3))
-* **firmware:** read an occupied plate every 500 ms again ([66e6be5](https://github.com/emka/teddiebox/commit/66e6be522278cba77c0bb31accbf606cd87e4c22))
-* **firmware:** read the plate every 200 ms ([3481615](https://github.com/emka/teddiebox/commit/348161571a9c445680cc44aadb7b9d0e99b14ea9))
-* **firmware:** resume the last TLS session ([314e815](https://github.com/emka/teddiebox/commit/314e815780035122fe990fb1153ccff13409a168))
-* **firmware:** run the CPU at 240 MHz ([7dbee08](https://github.com/emka/teddiebox/commit/7dbee0800e22c0f428aacf39e55a8526ff1b861b))
-* **firmware:** set up the key's RSA blinding while the radio associates ([f32eeed](https://github.com/emka/teddiebox/commit/f32eeedea6a7af682cd75c563de88b740218e4e7))
-* **firmware:** wake the codec task when output is asked for ([244c1da](https://github.com/emka/teddiebox/commit/244c1da86a5dbe8112a9e6f7899e4af254250d23))
-* **storage:** write a download's blocks as one multi-block write ([ab263b9](https://github.com/emka/teddiebox/commit/ab263b9596159ed810985eb1c4377c314ebc5d80))
-* **tls:** give a story download an 8 KB receive window ([1fed38f](https://github.com/emka/teddiebox/commit/1fed38fdccd378d1b4aaf9302f2d0145422e2ab3))
-
-
-### Continuous Integration
-
-* **release:** cut releases with release-please ([59d72e5](https://github.com/emka/teddiebox/commit/59d72e5b433465128d27562ac6e18ae63910bb55))
