@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # Only for espflash: the stable branch's release sends the stub's
+    # flash-finish command malformed, which leaves this board, whose reset
+    # lines are not wired, unresponsive after every flash.
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     # Packages the ESP-IDF toolchain releases, which is where the only
     # xtensa C compiler comes from. Deliberately *not* following our nixpkgs:
@@ -10,7 +14,7 @@
     nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
   };
 
-  outputs = { self, nixpkgs, flake-utils, nixpkgs-esp-dev }:
+  outputs = { self, nixpkgs, nixpkgs-unstable, flake-utils, nixpkgs-esp-dev }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -159,6 +163,7 @@
           # or every job fetches esp-idf with its submodules again, 85 s.
           ci-gc-roots = pkgs.linkFarm "ci-gc-roots" [
             { name = "nixpkgs"; path = nixpkgs; }
+            { name = "nixpkgs-unstable"; path = nixpkgs-unstable; }
             { name = "flake-utils"; path = flake-utils; }
             { name = "systems"; path = flake-utils.inputs.systems; }
             { name = "nixpkgs-esp-dev"; path = nixpkgs-esp-dev; }
@@ -204,7 +209,7 @@
             # Flashing. Both are pinned in the shell rather than fetched when
             # needed: `just flash` runs them in a fixed order with fixed
             # flags, and needs the same versions every time.
-            pkgs.espflash
+            nixpkgs-unstable.legacyPackages.${system}.espflash
             pkgs.esptool
             # `just complexity`: size, per-file complexity, and per-function
             # cyclomatic/cognitive complexity, so the accidental-complexity
