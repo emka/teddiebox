@@ -2,7 +2,7 @@
   description = "teddiebox — embassy-rs firmware for the ESP32 Toniebox";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
     # Packages the ESP-IDF toolchain releases, which is where the only
     # xtensa C compiler comes from. Deliberately *not* following our nixpkgs:

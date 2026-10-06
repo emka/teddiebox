@@ -39,9 +39,9 @@ fmt:
 
 # dependencies against the advisory database and the licence policy
 deny: vendor
-    cargo deny --manifest-path Cargo.toml --config deny.toml check
-    cargo deny --manifest-path firmware/Cargo.toml --config deny.toml check
-    cargo deny --manifest-path fuzz/Cargo.toml --config deny.toml check
+    cargo deny --manifest-path Cargo.toml check --config deny.toml
+    cargo deny --manifest-path firmware/Cargo.toml check --config deny.toml
+    cargo deny --manifest-path fuzz/Cargo.toml check --config deny.toml
 
 # The bench scripts flash the box, record hours-long runs and parse the
 # firmware's output, and no compiler checks them.
