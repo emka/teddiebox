@@ -1109,6 +1109,16 @@ impl Mounted {
         let _ = self.finish_appends();
         let _ = self.volumes.close_file(file);
     }
+
+    /// Closes a file that was appended to, and lets writes through again.
+    ///
+    /// If appended blocks were lost, the card refuses writes until this call,
+    /// so the close cannot record a length that covers them. The file keeps
+    /// the length of its last good flush, which is where a resume continues.
+    pub fn close_appended(&self, file: RawFile) {
+        self.close_file(file);
+        self.volumes.device(|card| card.resume_writes());
+    }
 }
 
 /// Checksums every file under `root`, depth first.

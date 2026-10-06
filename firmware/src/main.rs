@@ -471,9 +471,10 @@ impl ContentSink for CardFile<'_> {
     }
 
     fn flush(&mut self) -> Result<(), &'static str> {
-        // Printed, not returned. The bytes are on the card and only the
-        // recorded length is behind, so a failed flush just means a longer
-        // resume later. Returning it would stop a download that can continue.
+        // Printed, not returned: a failed flush leaves the recorded length
+        // behind, which only means a longer resume. If appended blocks were
+        // lost, the card refuses every later write, so the next append stops
+        // the download.
         if let Err(reason) = self.card.flush(self.file) {
             esp_println::println!("teddiebox: get flush failed — {reason}");
         }
@@ -680,7 +681,7 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         finished.written,
         active.crc.finish()
     );
-    card.close_file(active.file);
+    card.close_appended(active.file);
     *write = None;
     if !finished.whole {
         esp_println::println!(
