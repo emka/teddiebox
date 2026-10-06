@@ -4,11 +4,12 @@
 # tooling finds what it looks for.
 #
 # The table sits at 0x9000, not espflash's default 0x8000, because the stock
-# bootloader is built for that offset. `scripts/flash.sh` passes it to espflash
-# and writes the bootloader from the box's own dump, since espflash's bundled
-# one is built for 0x8000 and would not find this table. The firmware reads the
-# table at the same offset: ESP_BOOTLOADER_ESP_IDF_CONFIG_PARTITION_TABLE_OFFSET
-# in firmware/.cargo/config.toml.
+# bootloader is built for that offset. `scripts/flash.sh` leaves the box's
+# bootloader and table alone and writes only `ota_0`, since espflash's bundled
+# bootloader is built for 0x8000 and would not find this table. The firmware
+# reads the table at the same offset:
+# ESP_BOOTLOADER_ESP_IDF_CONFIG_PARTITION_TABLE_OFFSET in
+# firmware/.cargo/config.toml.
 #
 # Three app slots, as stock ships them. The firmware is written to `ota_0` by a
 # flash and to `ota_1` by an update. `ota_2` is never written and keeps a stock

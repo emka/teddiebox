@@ -158,9 +158,9 @@ plain text anyway.
   server on your network.
 - A full flash dump of the box before it is flashed, kept safe and read-only.
   [Follow the instructions](https://tonies-wiki.revvox.de/docs/tools/teddycloud/setup/dump-certs/esp32/)
-  to make one. `just flash` gets the stock bootloader from it, and you need it
-  to restore the stock firmware. Set `TEDDIEBOX_STOCK_DUMP` in `.envrc.local`
-  to its path.
+  to make one. `just flash` writes only the application and relies on the
+  stock bootloader being on the box, and you need the dump to restore the stock
+  firmware. Set `TEDDIEBOX_STOCK_DUMP` in `.envrc.local` to its path.
 - The teddyCloud CA at `cert/tcca.der` on the SD card. Copy it there, or
   upload it in setup mode (below). teddyCloud serves it at
   `https://<host>:8443/api/getFile/ca.der`.
