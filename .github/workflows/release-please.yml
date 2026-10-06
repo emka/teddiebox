@@ -1,8 +1,9 @@
 name: Release
 
+# Run by hand from the Actions tab: a push to main must not open or update a
+# release pull request until a release is wanted.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
