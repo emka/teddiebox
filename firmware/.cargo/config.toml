@@ -11,3 +11,8 @@ rustflags = [
 
 [unstable]
 build-std = ["core", "alloc"]
+
+# Where `esp-bootloader-esp-idf` reads the partition table. The stock
+# bootloader is built for 0x9000, and partitions.csv puts the table there.
+[env]
+ESP_BOOTLOADER_ESP_IDF_CONFIG_PARTITION_TABLE_OFFSET = "0x9000"

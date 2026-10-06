@@ -157,6 +157,9 @@ plain text anyway.
 - A [teddyCloud](https://github.com/toniebox-reverse-engineering/teddycloud)
   server on your network.
 - The box's certificate files `client.der` and `private.der` on the host.
+- A full flash dump of the box before it is flashed, kept safe. `just flash`
+  cuts the stock bootloader from it, and it is how to get back to stock. Set
+  `TEDDIEBOX_STOCK_DUMP` in `.envrc.local` to its path.
 - The teddyCloud CA at `cert/tcca.der` on the SD card. Copy it there, or
   upload it in setup mode (below). teddyCloud serves it at
   `https://<host>:8443/api/getFile/ca.der`.
@@ -176,6 +179,10 @@ For a box in daily use, build the release image:
 The release image drops the debug console commands. It answers only `dl`
 (reboot for flashing). Playback and controls are the
 same.
+
+The flash layout is the stock one, so a dump of a stock box and
+`partitions.csv` agree. The firmware goes in `ota_0`; updates alternate with
+`ota_1`; `ota_2` keeps a stock image and is never written.
 
 ### Flashing identity once
 

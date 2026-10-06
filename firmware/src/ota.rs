@@ -3,9 +3,8 @@
 //! The decisions are made in `teddiebox-ota`, where they are tested on the
 //! host. This file:
 //!
-//! - confirms a new image or rolls it back at boot
-//!   ([`confirm_boot_or_revert`], [`mark_valid`]). This box's bootloader does
-//!   not roll back by itself, so the app does it;
+//! - confirms a new image at boot ([`confirm_boot_or_revert`], [`mark_valid`]).
+//!   The bootloader rolls back an image that resets before it is confirmed;
 //! - provides console commands to inspect and test OTA on the box:
 //!   [`status`] shows the booted slot and its state, [`write_probe`] tests a
 //!   flash write into the spare slot (for example while Wi-Fi is connected),
@@ -27,6 +26,13 @@ use teddiebox_ota::{FlashRegionLike, Sectors, SECTOR};
 /// length is not word-aligned, and uses a 4 KB *stack* buffer for slices that
 /// are unaligned in memory.
 const CHUNK: usize = 512;
+
+/// The number of app partitions in `partitions.csv`, including `ota_2`, which
+/// holds a stock image the firmware never writes.
+///
+/// The bootloader boots the slot `otadata` names modulo this count, so a
+/// different number selects a different slot from the one asked for.
+const APP_SLOTS: usize = 3;
 
 /// The byte this probe expects at `offset` in the slot.
 ///
@@ -63,7 +69,7 @@ fn current_state() -> Option<(AppPartitionSubType, OtaImageState)> {
     let otadata = table
         .find_partition(PartitionType::Data(DataPartitionSubType::Ota))
         .ok()??;
-    let mut ota = Ota::new(otadata.as_flash_region(&mut flash), 2).ok()?;
+    let mut ota = Ota::new(otadata.as_flash_region(&mut flash), APP_SLOTS).ok()?;
 
     let current = match ota.current_app_partition().ok()? {
         slot @ (AppPartitionSubType::Ota0 | AppPartitionSubType::Ota1) => slot,
@@ -104,7 +110,7 @@ fn open_otadata_verbose<'f>(
             return None;
         }
     };
-    match Ota::new(otadata.as_flash_region(flash), 2) {
+    match Ota::new(otadata.as_flash_region(flash), APP_SLOTS) {
         Ok(ota) => Some(ota),
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
@@ -115,11 +121,10 @@ fn open_otadata_verbose<'f>(
 
 /// The first thing `main` calls, before anything that could itself crash.
 ///
-/// This box's bootloader never changes the OTA state: a slot set to `New`
-/// stays `New`. So this either moves `New` to `PendingVerify`, or, if it
-/// finds `PendingVerify` left by a boot that never reached `mark_valid`,
-/// switches back to the other slot and reboots. A box that has never updated
-/// does neither.
+/// The bootloader marks a new slot `PendingVerify` itself and rolls it back if
+/// the app resets before `mark_valid`, so a slot found `PendingVerify` here is
+/// carried on with. A slot still `New` is marked `PendingVerify` here. A box
+/// that has never updated does neither.
 pub fn confirm_boot_or_revert() {
     let Some((current, state)) = current_state() else {
         return;
@@ -157,7 +162,7 @@ pub fn confirm_boot_or_revert() {
             else {
                 return;
             };
-            let Ok(mut ota) = Ota::new(otadata.as_flash_region(&mut flash), 2) else {
+            let Ok(mut ota) = Ota::new(otadata.as_flash_region(&mut flash), APP_SLOTS) else {
                 return;
             };
             if ota.set_current_app_partition(other).is_err() {
@@ -272,7 +277,7 @@ pub fn status() {
         }
     };
 
-    let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), 2) {
+    let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), APP_SLOTS) {
         Ok(ota) => ota,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
@@ -418,7 +423,7 @@ pub fn arm_boot(slot: u8) {
     if select_next_boot(target) {
         esp_println::println!(
             "teddiebox: ota armed {target:?} as New — reboot, then `otas`. \
-             PendingVerify means this bootloader rolls back; New means it does not."
+             The bootloader marks it PendingVerify, and `mark_valid` makes it Valid."
         );
     }
 }
@@ -446,7 +451,7 @@ pub fn select_next_boot(target: AppPartitionSubType) -> bool {
         }
     };
 
-    let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), 2) {
+    let mut ota = match Ota::new(otadata.as_flash_region(&mut flash), APP_SLOTS) {
         Ok(ota) => ota,
         Err(trouble) => {
             esp_println::println!("teddiebox: ota cannot open otadata — {trouble:?}");
@@ -454,10 +459,9 @@ pub fn select_next_boot(target: AppPartitionSubType) -> bool {
         }
     };
 
-    // On a box with the stock partition layout, `otadata` (at 0xd000) lies
-    // inside the old `nvs` partition (0x9000..0xf000), and espflash does not
-    // erase it, so it holds old Wi-Fi calibration data. Every call here then
-    // fails with `Invalid` until it is cleared.
+    // `otadata` can hold anything but valid entries: a box that never selected
+    // a slot has it blank, and one flashed over another layout can have other
+    // data there. Every call here then fails with `Invalid` until it is cleared.
     //
     // Resetting to `Factory` means "no slot selected": it erases and rewrites
     // both entries. Done here, visibly, rather than silently at boot, because

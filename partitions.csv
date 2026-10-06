@@ -1,60 +1,56 @@
-# The flash layout, and the reason it is committed rather than left to espflash.
+# The flash layout: the stock Toniebox table, with `coredump` given over to
+# `cert` and `wifi`. A dump of a stock box and this table agree on every other
+# partition, so a stock box can be restored from its own dump and teddyCloud's
+# flash tooling finds what it looks for.
 #
-# espflash's default table has one `factory` app slot and no `otadata`, which
-# is enough to run the box and not enough to update it: OTA needs somewhere to
-# write the next image while the current one is still running, and somewhere to
-# record which of the two the bootloader should pick.
+# The table sits at 0x9000, not espflash's default 0x8000, because the stock
+# bootloader is built for that offset. `scripts/flash.sh` passes it to espflash
+# and writes the bootloader from the box's own dump, since espflash's bundled
+# one is built for 0x8000 and would not find this table. The firmware reads the
+# table at the same offset: ESP_BOOTLOADER_ESP_IDF_CONFIG_PARTITION_TABLE_OFFSET
+# in firmware/.cargo/config.toml.
 #
-# This is the stock layout with the smallest change that makes room for
-# `otadata`. `phy_init` keeps its offset and the app still starts at 0x10000,
-# so the only partition that moves at all is `nvs`, which gives up 8 KB. That
-# is the standard ESP-IDF OTA table — 0x4000 of `nvs`, `otadata` at 0xd000 —
-# and it is standard precisely because `otadata` has to come out of the 0x7000
-# bytes between the partition table and the app, which stock fills completely.
-# `nvs` here holds Wi-Fi calibration and nothing of ours; 16 KB is what every
-# ESP-IDF OTA project ships with.
+# Three app slots, as stock ships them. The firmware is written to `ota_0` by a
+# flash and to `ota_1` by an update. `ota_2` is never written and keeps a stock
+# image, so there is a way back to stock that needs no dump. The count matters
+# to the code: the bootloader picks the boot slot from `otadata` modulo the
+# number of app partitions, and `firmware/src/ota.rs` must use the same number.
 #
-# The chip is 8 MB, as reported by espflash's connection banner and the
-# second-stage bootloader (`SPI Flash Size : 8MB`). That leaves plenty of
-# room: 3 MB per slot against an image of about 1.1 MB. An image that
-# outgrows its slot fails at build time (espflash refuses it), not at run
-# time.
+# `assets` is stock's FAT volume with wear levelling: its sounds and the box's
+# own certificate and key. Nothing here writes it. A raw write would corrupt it,
+# because wear levelling moves sectors around.
 #
-# There is deliberately no `factory` slot. espflash writes `ota_0` directly, a
-# third copy would cost space for recovery value that shorting J100 already
-# covers, and its presence changes which partition the bootloader prefers.
+# `coredump` is where stock keeps crash dumps. The firmware writes none, so its
+# 128 KB is used for the two partitions below instead.
 #
-# `otadata` could instead have gone above `ota_1`, leaving even `nvs` alone.
-# It is not there because every reference table in ESP-IDF puts it at 0xd000,
-# and the boot path is the wrong place to be the first to try something else.
-#
-# `cert` holds the box's own TLS certificate and private key. It sits above
-# both app slots, so adding it moved nothing: every offset above was already
-# what it is. 16 KB is four sectors for about 2.2 KB of identity, and the 8 MB
-# chip has ~1.9 MB spare beyond it.
-#
-# An app write never touches a data partition, so the identity survives every
-# firmware flash and is written once per box with `just identity`.
-#
-# The subtype is spelled `undefined` because espflash refuses an empty one.
-# There is deliberately no flags column: espflash writes `readonly` as flags
-# bit 1, `esp-bootloader-esp-idf` 0.6.0 reads bit 0 for read-only and bit 1 for
-# encrypted, so the flag would buy no write protection and would, the day flash
-# encryption is ever enabled, send every read of this partition through
-# `flash_read_encrypted`. The firmware not writing here is a property of the
-# firmware, not of this line.
+# `cert` holds the box's own TLS certificate and private key. An app write never
+# touches a data partition, so the identity survives every firmware flash and is
+# written once per box with `just identity`.
 #
 # `wifi` holds the WPA2 key derived from the card's SSID and passphrase, so a
 # join skips the 1.75 s the driver spends deriving it (measured: 1.81 s to
-# join with the passphrase, 64-72 ms with the key). Unlike `cert`,
-# the firmware writes this one, once per change of credentials. One sector,
-# above `cert`, so again nothing moved.
+# join with the passphrase, 64-72 ms with the key). Unlike `cert`, the firmware
+# writes this one, once per change of credentials.
 #
-# Name,     Type, SubType, Offset,   Size
-nvs,        data, nvs,     0x9000,   0x4000
-otadata,    data, ota,     0xd000,   0x2000
-phy_init,   data, phy,     0xf000,   0x1000
-ota_0,      app,  ota_0,   0x10000,  0x300000
-ota_1,      app,  ota_1,   0x310000, 0x300000
-cert,       data, undefined, 0x610000, 0x4000
-wifi,       data, undefined, 0x614000, 0x1000
+# The subtype of `cert` and `wifi` is spelled `undefined` because espflash
+# refuses an empty one. There is deliberately no flags column: espflash writes
+# `readonly` as flags bit 1, `esp-bootloader-esp-idf` 0.6.0 reads bit 0 for
+# read-only and bit 1 for encrypted, so the flag would buy no write protection
+# and would, the day flash encryption is ever enabled, send every read of these
+# partitions through `flash_read_encrypted`. The firmware not writing to `cert`
+# is a property of the firmware, not of this line.
+#
+# The chip is 8 MB, as reported by espflash's connection banner and the
+# second-stage bootloader (`SPI Flash Size : 8MB`). An image that outgrows its
+# slot fails at build time (espflash refuses it), not at run time.
+#
+# Name,     Type, SubType,   Offset,   Size
+phy_init,   data, phy,       0xa000,   0x1000
+nvs,        data, nvs,       0xb000,   0x4000
+assets,     data, 0x81,      0xf000,   0x160000
+otadata,    data, ota,       0x16f000, 0x2000
+ota_0,      app,  ota_0,     0x180000, 0x220000
+ota_1,      app,  ota_1,     0x3a0000, 0x220000
+ota_2,      app,  ota_2,     0x5c0000, 0x220000
+cert,       data, undefined, 0x7e0000, 0x4000
+wifi,       data, undefined, 0x7e4000, 0x1000
