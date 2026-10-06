@@ -7,7 +7,7 @@ use std::vec::Vec;
 
 use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx};
 
-use crate::BatchedWrites;
+use crate::{BatchedWrites, Error};
 
 /// What the device was asked to do. A write records the tag of each block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,7 +312,7 @@ fn a_failed_run_write_is_reported() {
     let finished = batched.finish_batch();
 
     // Then
-    assert_eq!(finished, Err(Fault));
+    assert_eq!(finished, Err(Error::Device(Fault)));
 }
 
 #[test]
@@ -439,5 +439,78 @@ fn a_read_that_needs_a_failed_run_write_returns_the_error_without_reading() {
     let result = batched.read(&mut read, BlockIdx(5));
 
     // Then
-    assert_eq!((result, device.calls.borrow().len()), (Err(Fault), 0));
+    assert_eq!(
+        (result, device.calls.borrow().len()),
+        (Err(Error::Device(Fault)), 0)
+    );
+}
+
+#[test]
+fn a_write_after_a_lost_run_is_refused() {
+    // Given
+    let device = Recorder::default();
+    let mut run = buffer(4);
+    let batched = BatchedWrites::new(&device, &mut run);
+    batched.start_batch();
+    batched.write(&[tagged(1)], BlockIdx(5)).unwrap();
+    device.fail_writes.set(true);
+    let _ = batched.finish_batch();
+    device.fail_writes.set(false);
+
+    // When
+    let result = batched.write(&[tagged(2)], BlockIdx(90));
+
+    // Then
+    assert_eq!(
+        (result, device.calls.borrow().len()),
+        (Err(Error::RunLost), 0)
+    );
+}
+
+#[test]
+fn writes_reach_the_device_again_once_resumed_after_a_lost_run() {
+    // Given
+    let device = Recorder::default();
+    let mut run = buffer(4);
+    let batched = BatchedWrites::new(&device, &mut run);
+    batched.start_batch();
+    batched.write(&[tagged(1)], BlockIdx(5)).unwrap();
+    device.fail_writes.set(true);
+    let _ = batched.finish_batch();
+    device.fail_writes.set(false);
+
+    // When
+    batched.resume_writes();
+    batched.write(&[tagged(2)], BlockIdx(90)).unwrap();
+
+    // Then
+    assert_eq!(
+        *device.calls.borrow(),
+        [Call::Write {
+            start: 90,
+            tags: vec![2]
+        }]
+    );
+}
+
+#[test]
+fn a_run_lost_while_writing_elsewhere_refuses_later_writes() {
+    // Given
+    let device = Recorder::default();
+    let mut run = buffer(4);
+    let batched = BatchedWrites::new(&device, &mut run);
+    batched.start_batch();
+    batched.write(&[tagged(1)], BlockIdx(5)).unwrap();
+    device.fail_writes.set(true);
+    let _ = batched.write(&[tagged(2)], BlockIdx(40));
+    device.fail_writes.set(false);
+
+    // When
+    let result = batched.write(&[tagged(3)], BlockIdx(41));
+
+    // Then
+    assert_eq!(
+        (result, device.calls.borrow().len()),
+        (Err(Error::RunLost), 0)
+    );
 }
