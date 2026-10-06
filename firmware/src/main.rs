@@ -2917,11 +2917,6 @@ async fn main(spawner: Spawner) {
         .option1()
         .modify(|_, w| w.force_download_boot().clear_bit());
 
-    // Before anything else, including the stack paint below: this catches an
-    // image that crashed on its *previous* boot before reaching `mark_valid`,
-    // and nothing above this line can have been the cause.
-    ota::confirm_boot_or_revert();
-
     // Paint the stack before anything uses it deeply, so the `stack` command
     // can measure how much was used.
     //
@@ -3043,9 +3038,8 @@ async fn main(spawner: Spawner) {
         "teddiebox: dl rb setup | t wav taf play <id>[/<id>|<16hex>] stop (loud) | sd | nfc pw slix slixp lock mem <2hex> <2hex> token | net scan ssid <name> pw <pass> up down tls status | get <16hex> | crc <16hex> | stack | cinit cdown cset cclr out spk | pcm <2hex> | batlog <seconds> | slap <2hex> slapt <2hex> | plate on|off | pcmcrc on|off | awake on|off | sleep | autosleep on|off | reval"
     );
 
-    // Here rather than next to `ota::confirm_boot_or_revert()`: loaded before
-    // `stack::paint()`, its console output was overwritten by the paint and
-    // came out garbled. `flash::flash()` lends one handle at a time; each call
+    // After `stack::paint()`: loaded before it, its console output was
+    // overwritten by the paint and came out garbled. `flash::flash()` lends one handle at a time; each call
     // takes it and gives it back.
     //
     // Setup mode never reaches this line, so it never loads the identity.

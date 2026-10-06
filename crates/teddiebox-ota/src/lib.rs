@@ -8,7 +8,6 @@
 //! from ours, whether the digest matched, which sector a write lands in — so
 //! that all of them can be tested without a box.
 
-mod boot;
 mod decide;
 mod digest;
 mod image;
@@ -18,7 +17,6 @@ mod stage;
 mod url;
 mod verify;
 
-pub use boot::{boot_action, BootAction, SlotState};
 pub use decide::{decide, Decision, Refusal};
 pub use image::{image_version, may_activate};
 pub use manifest::{Manifest, FILENAME, MAX_IMAGE_PATH, MAX_MANIFEST, MAX_VERSION};

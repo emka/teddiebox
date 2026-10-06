@@ -45,9 +45,8 @@ impl core::ops::DerefMut for Flash {
 
 /// Hands out the one flash handle.
 ///
-/// Callers: the start of `main` ([`crate::ota::confirm_boot_or_revert`]), the
-/// main loop's check ([`crate::ota::mark_valid`]), the console's OTA commands
-/// ([`crate::ota::status`], [`crate::ota::write_probe`],
+/// Callers: the main loop's check ([`crate::ota::mark_valid`]), the console's
+/// OTA commands ([`crate::ota::status`], [`crate::ota::write_probe`],
 /// [`crate::ota::arm_boot`]), [`crate::identity::load`] and
 /// [`crate::wifikey::load`] at boot, and [`crate::wifikey`]'s store from the
 /// network task. All are synchronous, so each is done with the handle before
