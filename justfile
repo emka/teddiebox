@@ -96,6 +96,7 @@ scripts:
     python3 scripts/sleep-check.py --self-test
     python3 scripts/console.py --self-test
     python3 scripts/bench-console.py --self-test
+    bash scripts/select-gates-test.sh
 
 # Proves the library crates are genuinely no_std, against the target the
 # firmware actually runs on. rustc ships no prebuilt core for xtensa.
