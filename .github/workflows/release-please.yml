@@ -1,8 +1,11 @@
 name: Release
 
-# Run by hand from the Actions tab: a push to main must not open or update a
-# release pull request until a release is wanted.
+# A release pull request is opened or updated only when this workflow is run by
+# hand from the Actions tab. A push to main only publishes the tag and the
+# GitHub release of a release pull request that has just been merged.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -31,5 +34,6 @@ jobs:
           # the failure would surface only after merge, against a published
           # tag.
           token: ${{ secrets.GH_CI_TOKEN }}
+          skip-github-pull-request: ${{ github.event_name == 'push' }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
