@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Require the release token secret
+        if: github.event_name == 'workflow_dispatch'
         env:
           TOKEN: ${{ secrets.GH_CI_TOKEN }}
         run: |
@@ -27,13 +28,14 @@ jobs:
 
       - uses: googleapis/release-please-action@v5
         with:
-          # A pull request opened with the default GITHUB_TOKEN starts no
-          # workflow runs. The release pull request rewrites the firmware
-          # version in Cargo.toml and Cargo.lock, so leaving it ungated means
-          # the gates never run on the change most likely to break them, and
-          # the failure would surface only after merge, against a published
-          # tag.
-          token: ${{ secrets.GH_CI_TOKEN }}
+          # The release pull request is opened with the personal token: one
+          # opened with the default GITHUB_TOKEN starts no workflow runs. The
+          # pull request rewrites the firmware version in Cargo.toml and
+          # Cargo.lock, so leaving it ungated means the gates never run on the
+          # change most likely to break them, and the failure would surface
+          # only after merge, against a published tag. Publishing the release
+          # needs no workflow runs, so it uses the default token.
+          token: ${{ github.event_name == 'push' && secrets.GITHUB_TOKEN || secrets.GH_CI_TOKEN }}
           skip-github-pull-request: ${{ github.event_name == 'push' }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
