@@ -156,9 +156,11 @@ plain text anyway.
 - A USB serial adapter connected to the box's console.
 - A [teddyCloud](https://github.com/toniebox-reverse-engineering/teddycloud)
   server on your network.
-- A full flash dump of the box before it is flashed, kept safe. `just flash`
-  cuts the stock bootloader from it, and it is how to get back to stock. Set
-  `TEDDIEBOX_STOCK_DUMP` in `.envrc.local` to its path.
+- A full flash dump of the box before it is flashed, kept safe and read-only.
+  [Follow the instructions](https://tonies-wiki.revvox.de/docs/tools/teddycloud/setup/dump-certs/esp32/)
+  to make one. `just flash` gets the stock bootloader from it, and you need it
+  to restore the stock firmware. Set `TEDDIEBOX_STOCK_DUMP` in `.envrc.local`
+  to its path.
 - The teddyCloud CA at `cert/tcca.der` on the SD card. Copy it there, or
   upload it in setup mode (below). teddyCloud serves it at
   `https://<host>:8443/api/getFile/ca.der`.
