@@ -35,10 +35,9 @@ const DERIVE_SLICE: u32 = 24;
 
 /// Whether a key derived now could be kept.
 ///
-/// False until [`load`] has read the partition, and after a write fails. A
-/// box updated over the air keeps its old partition table (which may lack
-/// this partition), and without this would derive a key after every join,
-/// about 20 s of work, only to fail to write it.
+/// False until [`load`] has found the partition, and after a write fails.
+/// Without it a box would derive a key after every join, about 20 s of work,
+/// only to fail to write it.
 static WRITABLE: AtomicBool = AtomicBool::new(false);
 
 /// What the partition held at boot. `None` once [`forget`] has been called.
@@ -63,10 +62,7 @@ fn with_region<R>(f: impl FnOnce(&mut FlashRegion<'_, '_>) -> R) -> Option<R> {
         }
     };
     let Some(entry) = table.iter().find(|entry| entry.label_as_str() == LABEL) else {
-        esp_println::println!(
-            "teddiebox: wifikey no `{LABEL}` partition — this box was flashed with an older \
-             partition table; `just flash` writes the current one"
-        );
+        esp_println::println!("teddiebox: wifikey the partition table has no `{LABEL}` partition");
         return None;
     };
     Some(f(&mut entry.as_flash_region(&mut flash)))

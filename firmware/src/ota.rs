@@ -372,9 +372,8 @@ pub fn select_next_boot(target: AppPartitionSubType) -> bool {
         }
     };
 
-    // `otadata` can hold anything but valid entries: a box that never selected
-    // a slot has it blank, and one flashed over another layout can have other
-    // data there. Every call here then fails with `Invalid` until it is cleared.
+    // A box that never selected a slot has `otadata` blank. Every call here
+    // then fails with `Invalid` until it is cleared.
     //
     // Resetting to `Factory` means "no slot selected": it erases and rewrites
     // both entries. Done here, visibly, rather than silently at boot, because

@@ -51,10 +51,7 @@ pub fn load() {
     };
 
     let Some(entry) = table.iter().find(|entry| entry.label_as_str() == LABEL) else {
-        esp_println::println!(
-            "teddiebox: identity no `{LABEL}` partition — this box was flashed with a \
-             different partition table; `just flash` writes the current one"
-        );
+        esp_println::println!("teddiebox: identity the partition table has no `{LABEL}` partition");
         return;
     };
 
