@@ -12,6 +12,9 @@ unused-ignored-advisory = "allow"
 ignore = [
     # A proc-macro, so it runs only at compile time. esp-hal depends on it.
     { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained; compile-time macro used by esp-hal" },
+    # Reached only through esp-config's `build` feature, which the esp-hal
+    # crates' build scripts use to read their configuration.
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml: unmaintained; build-time YAML parsing in esp-config" },
 ]
 
 [licenses]
